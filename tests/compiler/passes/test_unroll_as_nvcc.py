@@ -99,14 +99,27 @@ def test_a_short_static_loop_is_written_out_in_full() -> None:
     assert not _loops(op) and sum(isinstance(stmt, Load) for stmt in op.body.iter()) == 16
 
 
+@pytest.mark.parametrize(("extent", "step"), [(1024, "64"), (96, "32")])
+def test_a_lane_s_loop_over_a_static_extent_steps_sixteen_trips(extent: int, step: str) -> None:
+    """A loop from each lane's own start, 256 or 24 trips on every lane: 16 copies a trip where 16 divides the
+    trips, else the largest power of two that does, as cicc copied a lane's loop it could bound. Every lane visits
+    what the loop did."""
+    op = _unrolled(f"for j in i..{extent} step 4:\n    f32 a = load A[0, j]\n    f32 acc <- add(acc, a) over j\nf32 O[i] = acc")
+    [loop] = _loops(op)
+    assert (str(loop.start), str(loop.step), loop.unrolled) == ("i", step, True)
+    for lane in range(4):
+        assert _visits(op.body[0].body, {"i": lane}) == list(range(lane, extent, 4)), lane
+
+
 @pytest.mark.parametrize(
     "body",
     [
         _SUM.replace("0..n", "0..1023"),
-        "for j in i..1024 step 4:\n    f32 a = load A[0, j]\n    f32 acc <- add(acc, a) over j\nf32 O[i] = acc",
+        "for j in i..64 step 4:\n    f32 a = load A[0, j]\n    f32 acc <- add(acc, a) over j\nf32 O[i] = acc",
+        "for j in i..1023 step 4:\n    f32 a = load A[0, j]\n    f32 acc <- add(acc, a) over j\nf32 O[i] = acc",
         "for j in 0..n:\n    f32 a = load A[i, j]\n    Sync()\n    f32 acc <- add(acc, a) over j\nf32 O[i] = acc",
     ],
-    ids=["odd-trips", "lane-start", "barrier"],
+    ids=["odd-trips", "lane-start-short", "lane-start-ragged", "barrier"],
 )
 def test_a_loop_cicc_left_to_ptxas_stays(body: str) -> None:
     with pytest.raises(RuleSkipped):
