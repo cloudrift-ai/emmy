@@ -5,6 +5,7 @@ import argparse
 from importlib.metadata import PackageNotFoundError, version
 
 from emmy.commands.bench import register_bench_command
+from emmy.commands.candidates import register_candidates_command
 from emmy.commands.compare import register_compare_command
 from emmy.commands.compile import register_compile_command
 from emmy.commands.db import register_db_command
@@ -73,6 +74,7 @@ def main():
     register_eval_command(subparsers)
     register_db_command(subparsers)
     register_golden_command(subparsers)
+    register_candidates_command(subparsers)
     register_fit_command(subparsers)
     register_compare_command(subparsers)
 
