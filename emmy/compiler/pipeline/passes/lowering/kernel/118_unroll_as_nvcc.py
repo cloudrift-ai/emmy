@@ -11,7 +11,9 @@ does not change across trips cicc computed once ahead of the loop, so it counts 
 - **A serial ``Loop`` over a static extent** of ``N`` trips is written out in full when ``N·(size + 2) ≤ 480``. Else
   it steps ``C`` trips at a time, ``C`` the largest power of two that divides ``N`` with ``C·(size + 2) ≤ 199``. It
   stays as it is when ``N`` is odd: cicc then copies the body four times with the exit test between the third copy
-  and the fourth, which this does not write.
+  and the fourth, which this does not write. Where the rule gives two copies, ptxas copied cicc's loop four times
+  again (the f32 register-tile matmuls' 128-trip ``_ki`` loop: 128 FFMA from cicc's PTX on ``sm_90``), so such a
+  loop steps eight trips where eight divide ``N``.
 - **A loop whose trips only the launch knows** (a symbolic extent, :func:`_unroll.runtime_bound`) takes ``C`` copies,
   the largest of 16, 8, 4 and 2 with ``C·(size + 7) ≤ 228``, none past a size of 89, in cicc's shape: a loop stepping
   ``C`` trips while that many are left, then the trips left in blocks of half as many copies down to one, four and a
@@ -94,6 +96,8 @@ _COST = {
 _STATIC_TRIP, _WHOLE, _PARTIAL = 2, 480, 199
 #: A runtime-bound loop: the overhead of a trip, the size of the stepping loop, its most copies, the largest body.
 _RUNTIME_TRIP, _RUNTIME, _RUNTIME_COPIES, _RUNTIME_LARGEST = 7, 228, 16, 89
+#: The copies ptxas made of each trip of a static loop cicc copied twice.
+_PTXAS_AGAIN = 4
 #: A strided loop from a start that differs between threads: the fewest trips it is copied from.
 _THREAD_START_LEAST = 24
 
@@ -123,7 +127,8 @@ def _copies(loop: Statement, trips: tuple[int, int] | None, forms: dict[str, str
         return None
     if trips[1] * (size + _STATIC_TRIP) <= _WHOLE:
         return trips[1]
-    return next((n for n in _powers(trips[1] & -trips[1]) if n * (size + _STATIC_TRIP) <= _PARTIAL), None)
+    copies = next((n for n in _powers(trips[1] & -trips[1]) if n * (size + _STATIC_TRIP) <= _PARTIAL), None)
+    return _PTXAS_AGAIN * copies if copies == 2 and trips[1] % (_PTXAS_AGAIN * copies) == 0 else copies
 
 
 def _powers(most: int) -> list[int]:

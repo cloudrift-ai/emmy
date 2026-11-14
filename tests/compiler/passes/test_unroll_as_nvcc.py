@@ -85,11 +85,13 @@ def test_a_strided_loop_whose_extent_the_launch_decides_keeps_its_start_and_step
         (_SUM.replace("0..n", "0..1024"), "32"),
         (_SUM.replace("0..n", "0..1024").replace("a * a", "exp(a)"), "8"),
         (_SUM.replace("0..n", "0..96"), "32"),
+        (_SUM.replace("0..n", "0..128").replace("a * a", "exp(exp(exp(exp(a))))"), "8"),
     ],
 )
 def test_a_static_loop_steps_by_the_largest_power_of_two_that_fits_and_divides(body: str, step: str) -> None:
     """Sized 4 a trip (a load at a changing address, a product, a fold), 32 copies fit and divide 1024 and 96; the
-    exponential costs what cicc writes for it, 14, so 8 copies fit."""
+    exponential costs what cicc writes for it, 14, so 8 copies fit. Four exponentials fit two copies, which ptxas
+    copied four times again: eight."""
     [loop] = _loops(_unrolled(body))
     assert (str(loop.step), loop.unrolled) == (step, True)
 
