@@ -26,13 +26,12 @@ use super::value::SM_ADA;
 use super::{Lowerer, Needs, SM_LAST, VTy, Val};
 use crate::inst::{Bank, Base, Inst, Opcode, Operand, Reg, Round, Shuffle, Space, Ty};
 
+/// An element's `(row, column)` for each of the 32 lanes.
+type LanePlaces = [(i64, i64); 32];
+
 /// One register of a paired slab read: the register, the slab index of each element with no guard, and per element
 /// each lane's place in the slab.
-type SlabRegister = (
-    Reg,
-    Vec<(Expression, Option<Expression>)>,
-    Vec<[(i64, i64); 32]>,
-);
+type SlabRegister = (Reg, Vec<(Expression, Option<Expression>)>, Vec<LanePlaces>);
 
 /// The names a `FragmentApply`'s coordinate and gathered operands read the element's own row and column by, and
 /// the names a `RegStore`'s epilogue reads the element's offset in its fragment by.
@@ -605,7 +604,8 @@ impl Lowerer {
             let table = paired_operand_table(&node.role, b_row, cell)?;
             let lanes = Lanes::of(&table);
             let regs = self.tensor_fragment(frag, lanes.registers.len(), VTy::U32)?;
-            let places = Self::lane_places(&table, swapped);
+            let places = Self::lane_places(&table, swapped)
+                .ok_or_else(|| self.refuse("a paired table's coordinates are the lane's alone"))?;
             for ((reg, register), places) in regs.iter().zip(&lanes.registers).zip(places) {
                 let mut elements = Vec::with_capacity(register.len());
                 for (r, c) in register {
@@ -650,36 +650,33 @@ impl Lowerer {
 
     /// Per register of `table` and per element, the element's `(row, column)` in the slab for each of the 32 lanes,
     /// swapped for a transposed B.
-    fn lane_places(table: &FragmentTable, swapped: bool) -> Vec<Vec<[(i64, i64); 32]>> {
-        let lanes: Vec<HashMap<Name, Num>> = (0..32)
-            .map(|lane| {
-                let mut env = HashMap::from([(Name::new(LANE), Num::Int(lane))]);
-                for (name, value) in &table.coordinates {
-                    let value = value.eval(&env).expect("a lane coordinate has a value");
-                    env.insert(*name, value);
-                }
-                env
-            })
-            .collect();
-        let at = |value: &Expression, env: &HashMap<Name, Num>| match value.eval(env) {
-            Ok(Num::Int(value)) => value,
-            other => panic!("{other:?} as a lane's element"),
+    fn lane_places(table: &FragmentTable, swapped: bool) -> Option<Vec<Vec<LanePlaces>>> {
+        let int = |value: &Expression, env: &HashMap<Name, Num>| match value.eval(env) {
+            Ok(Num::Int(value)) => Some(value),
+            _ => None,
         };
-        table
-            .registers
-            .iter()
-            .map(|register| {
-                register
-                    .iter()
-                    .map(|(r, c)| {
-                        std::array::from_fn(|lane| {
-                            let place = (at(r, &lanes[lane]), at(c, &lanes[lane]));
-                            if swapped { (place.1, place.0) } else { place }
-                        })
-                    })
-                    .collect()
-            })
-            .collect()
+        let mut lanes = Vec::with_capacity(32);
+        for lane in 0..32 {
+            let mut env = HashMap::from([(Name::new(LANE), Num::Int(lane))]);
+            for (name, value) in &table.coordinates {
+                env.insert(*name, Num::Int(int(value, &env)?));
+            }
+            lanes.push(env);
+        }
+        let mut registers = Vec::with_capacity(table.registers.len());
+        for register in &table.registers {
+            let mut elements = Vec::with_capacity(register.len());
+            for (r, c) in register {
+                let mut places = [(0, 0); 32];
+                for (place, env) in places.iter_mut().zip(&lanes) {
+                    let (r, c) = (int(r, env)?, int(c, env)?);
+                    *place = if swapped { (c, r) } else { (r, c) };
+                }
+                elements.push(places);
+            }
+            registers.push(elements);
+        }
+        Some(registers)
     }
 
     /// The runs of registers of a paired slab read that stand side by side in it, each one vector load: four
@@ -907,8 +904,21 @@ impl Lowerer {
     /// nothing; a guard the ranges decide is no branch, and an element it always turns away is not written at
     /// all. Two elements next to each other in memory, under one guard and proven aligned, are one store.
     fn store_cell(&mut self, node: &RegStore, ctx: &SimplifyCtx) -> Result<()> {
-        let lanes = Lanes::of(&self.store_table(node)?);
+        let table = self.store_table(node)?;
+        let lanes = Lanes::of(&table);
         let count = lanes.registers.len();
+        // The rows and columns each register's element takes over the 32 lanes, the least and the most.
+        let spans: Vec<[(i64, i64); 2]> = Self::lane_places(&table, false)
+            .unwrap_or_default()
+            .iter()
+            .map(|register| {
+                let span = |at: fn(&(i64, i64)) -> i64| {
+                    let values = register[0].iter().map(at);
+                    (values.clone().min().unwrap_or(0), values.max().unwrap_or(0))
+                };
+                [span(|place| place.0), span(|place| place.1)]
+            })
+            .collect();
         let mut frags = Vec::with_capacity(1 + node.extra_frags.len());
         for name in std::iter::once(&node.frag).chain(node.extra_frags.iter()) {
             frags.push(self.tensor_fragment(*name, count, VTy::F32)?);
@@ -940,17 +950,37 @@ impl Lowerer {
             (0, None) => Expression::int(1),
             (ldn, _) => Expression::int(ldn),
         };
-        let within = |guard: &Option<(Expression, Expression)>, offset: &Expression| {
-            guard.as_ref().map(|(base, bound)| {
-                binary(
-                    Operation::Less,
-                    plus(base.clone(), offset.clone()),
-                    bound.clone(),
-                )
-            })
+        // A guard of one side, or `None` where it holds for every lane: decided by the side's range over the lanes,
+        // which the lane table gives exactly, else by the ranges of the expressions. `Some(None)` is a guard no
+        // lane passes.
+        let within = |guard: &Option<(Expression, Expression)>,
+                      offset: &Expression,
+                      (least, most): (i64, i64)| {
+            let (base, bound) = guard.as_ref()?;
+            let ranges = (arithmetic(base).range(ctx), bound.range(ctx));
+            if let (Some(base), Some(bound)) = ranges {
+                if base.hi + i128::from(most) < bound.lo {
+                    return None;
+                }
+                if base.lo + i128::from(least) >= bound.hi {
+                    return Some(None);
+                }
+            }
+            let guard = binary(
+                Operation::Less,
+                plus(base.clone(), offset.clone()),
+                bound.clone(),
+            );
+            match decided(&guard, ctx) {
+                Some(true) => None,
+                Some(false) => Some(None),
+                None => Some(Some(guard)),
+            }
         };
         let mut elements = Vec::with_capacity(count);
-        for register in &lanes.registers {
+        let unknown = [(i64::MIN / 4, i64::MAX / 4); 2];
+        for (at, register) in lanes.registers.iter().enumerate() {
+            let [rows, columns] = spans.get(at).unwrap_or(&unknown);
             let (row, column) = &register[0];
             let index = plus(
                 plus(base.clone(), times(row.clone(), row_stride.clone())),
@@ -960,15 +990,16 @@ impl Lowerer {
                 Some(exchange) => swizzled(index, exchange),
                 None => index,
             };
-            let guard = match (within(&node.m_guard, row), within(&node.n_guard, column)) {
-                (Some(m), Some(n)) => Some(binary(Operation::LogicalAnd, m, n)),
-                (m, n) => m.or(n),
-            };
             // A guard the ranges decide is no branch: an element always past its bound is not stored at all.
-            match guard.as_ref().and_then(|guard| decided(guard, ctx)) {
-                Some(false) => elements.push((index, None, false)),
-                Some(true) => elements.push((index, None, true)),
-                None => elements.push((index, guard, true)),
+            match (
+                within(&node.m_guard, row, *rows),
+                within(&node.n_guard, column, *columns),
+            ) {
+                (Some(None), _) | (_, Some(None)) => elements.push((index, None, false)),
+                (Some(Some(m)), Some(Some(n))) => {
+                    elements.push((index, Some(binary(Operation::LogicalAnd, m, n)), true));
+                }
+                (m, n) => elements.push((index, m.flatten().or(n.flatten()), true)),
             }
         }
         let pairs = !node.atomic && (half || elem.dtype == DType::F32);

@@ -125,6 +125,31 @@ fn a_fragment_of_halves_from_floats_rounds_each_element() {
     assert_eq!(count(&module, "cvt.rn.f16.f32"), 8);
 }
 
+/// A guard of Volta's interleaved accumulator is decided by the rows the lane table gives each register over the
+/// 32 lanes: a 16-row tile at row 16 of an 8-row output stores nothing and tests nothing; at row 0 a register's
+/// rows fall on both sides of the bound over the lanes, so each store keeps its guard.
+#[test]
+fn a_volta_store_past_its_rows_is_not_written() {
+    let store = |row: i64| {
+        kernel(
+            &format!(
+                "
+        RegFragment(name=fv, role=c, dtype=f32, fragment_layout=m8n8k4)
+        RegStore(dst_buffer=o, dst_index=({row} * 16), frag=fv, shape=(16, 16, 4), ldm=16, ldn=1, m_guard=({row}, 8), fragment_layout=m8n8k4, volta_interleaved=true)
+        "
+            ),
+            HALVES,
+            80,
+        )
+        .unwrap()
+    };
+    let past = store(16);
+    assert_eq!(count(&past, "st.global"), 0, "{:#?}", listing(&past));
+    assert_eq!(count(&past, "setp"), 0);
+    let first = store(0);
+    assert_eq!(count(&first, "st.global"), 4, "{:#?}", listing(&first));
+}
+
 /// Two e4m3 elements side by side along K are one 16-bit load and one packed conversion into halves, for a
 /// fragment of halves and of bfloat16 alike: every e4m3 value is a bfloat16, so the halves widened and packed
 /// again are exact.
