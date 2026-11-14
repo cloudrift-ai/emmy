@@ -56,7 +56,7 @@ def _body(n=40, *, masked=True, extra_reader=False):
 def _graph(dtype=F32, *, masked=True, n=40):
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("seed", (2, n, n), dtype), node_id="seed")
-    graph.add_node(LoopOp(body=_body(n, masked=masked)[0], name="k_step"), ["seed"], Tensor("out", (3, 2, n, n), dtype), node_id="out")
+    graph.add_node(LoopOp(body=_body(n, masked=masked)[0]), ["seed"], Tensor("out", (3, 2, n, n), dtype), node_id="out")
     graph.inputs, graph.outputs = ["seed"], ["out"]
     return graph
 

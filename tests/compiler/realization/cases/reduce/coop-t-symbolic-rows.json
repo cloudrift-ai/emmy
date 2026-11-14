@@ -3,8 +3,8 @@
   {"inputs":["x"],"outputs":["sum_1"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[{"sym":"rows","hint":512},256]]]},{"id":"sum_1","op":"tensor.reduce","attrs":{"axis":1},"inputs":["x"],"outputs":[["sum_1","f32",[{"sym":"rows","hint":512},1]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["x"],"outputs":["sum_1"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[{"sym":"rows","hint":512},256]]]},{"id":"sum_1","op":"loop","attrs":{"body":"for a0 in 0..rows:\n    for a1 in 0..256:\n        in0 = load x[a0, a1]\n        acc0 <- add(acc0, in0) over a1\n    sum_1[a0, 0] = acc0","name":"k_sum_1_reduce"},"inputs":["x"],"outputs":[["sum_1","f32",[{"sym":"rows","hint":512},1]]]}]},"name":"k_sum_1_reduce","formed":true,"traced":0,"origins":["sum_1"]}
+  {"loop_ir":{"inputs":["x"],"outputs":["sum_1"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[{"sym":"rows","hint":512},256]]]},{"id":"sum_1","op":"loop","attrs":{"body":"for a0 in 0..rows:\n    for a1 in 0..256:\n        in0 = load x[a0, a1]\n        acc0 <- add(acc0, in0) over a1\n    sum_1[a0, 0] = acc0"},"inputs":["x"],"outputs":[["sum_1","f32",[{"sym":"rows","hint":512},1]]]}]},"formed":true,"traced":0,"origins":["sum_1"]}
  ],
  "rows": [
-  {"name":"k_sum_1_reduce","kernel":"k_sum_1_reduce","bindings":{"rows":512},"pins":{"FAST_MATH":false},"knobs":{"WORK":"t128","REDUCE":"coop-t"},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":4.5054840825801525,"tcompile_us":2.050385924807766,"kernels":["k_sum_1_reduce"]}}}
+  {"name":"k_sum_1_reduce","kernel":0,"bindings":{"rows":512},"pins":{"FAST_MATH":false},"knobs":{"WORK":"t128","REDUCE":"coop-t"},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":4.5054840825801525,"tcompile_us":2.050385924807766,"kernels":[0]}}}
  ]}

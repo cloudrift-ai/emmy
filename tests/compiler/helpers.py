@@ -119,8 +119,6 @@ def literal_classic_context(tile, target, *, kernel, nodes, edges, row=None, ord
 def case_target_tile(case: str):
     """Lift the target of a realization corpus case, named by its path under ``realization/cases``: the one kernel
     its traced program lowers to, as the cut pass is offered it."""
-    from dataclasses import replace
-
     from emmy.compiler.context import Context
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import Pipeline
@@ -130,8 +128,7 @@ def case_target_tile(case: str):
     [target] = document.targets()
     lifted = Pipeline.build(["tile/lift"]).run(target.program({}), ctx=Context.from_target(tuple(document.compute_cap)), db=None)
     [node] = [node for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
-    tile = node.op.with_io(lifted, node)
-    return replace(tile, name=next(iter(tile.outputs)))  # addressed by its primary output, as a graph node is
+    return node.op.with_io(lifted, node)
 
 
 def has_cuda_gpu() -> bool:

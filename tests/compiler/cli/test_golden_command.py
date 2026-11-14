@@ -83,7 +83,7 @@ def test_check_passes_a_current_golden_and_names_what_a_restamp_changes(golden, 
     with caplog.at_level("ERROR"):
         assert _check(golden) == 1
     assert "not the fresh lowering" in caplog.text
-    assert "re-keyed k_matmul" in caplog.text and "no fresh kernel writes its outputs" in caplog.text
+    assert "re-keyed k_" in caplog.text and "no fresh kernel writes its outputs" in caplog.text
     assert "demoted to a proposal matmul.square.512" in caplog.text
 
 
@@ -95,10 +95,10 @@ def test_check_fails_a_kernel_re_keyed_under_its_own_body(golden, caplog, monkey
     from emmy.compiler.pipeline.search.golden.restamp import Report
 
     document = GoldenFile.load(golden)
-    monkeypatch.setattr(package, "restamp", lambda _document: (document, Report(kernels=1, rekeyed=["k_matmul 0b5141a6 -> 7b1db291"])))
+    monkeypatch.setattr(package, "restamp", lambda _document: (document, Report(kernels=1, rekeyed=["k_0b5141a6aaaa -> k_7b1db291aaaa"])))
     with caplog.at_level("ERROR"):
         assert _check(golden) == 1
-    assert "re-keyed k_matmul" in caplog.text
+    assert "re-keyed k_" in caplog.text
 
 
 def _realize(path, json_out=None, drop=False) -> int:
@@ -122,8 +122,9 @@ def test_realize_names_the_rows_the_compiler_no_longer_realizes_and_drops_them_o
     with caplog.at_level("ERROR"):
         assert _realize(golden, report) == 1
     (failed,) = json.loads(report.read_text())[0]["failed"]
-    assert (failed["row"], failed["kernel"]) == ("matmul.square.512", "k_matmul_2967be") and "does not resolve" in failed["reason"]
-    assert "1 of 9 rows do not realize" in caplog.text and "matmul.square.512 (k_matmul_2967be)" in caplog.text
+    name = document.kernel(next(row.kernel for row in document.rows if row.name == "matmul.square.512")).name
+    assert (failed["row"], failed["kernel"]) == ("matmul.square.512", name) and "does not resolve" in failed["reason"]
+    assert "1 of 9 rows do not realize" in caplog.text and f"matmul.square.512 ({name})" in caplog.text
     assert len(GoldenFile.load(golden).rows) == 9  # a report writes nothing
 
     assert _realize(golden, report, drop=True) == 0
@@ -199,18 +200,22 @@ def test_restamp_takes_a_decision_again_on_the_re_keyed_parent(tmp_path, caplog)
     assert len(fresh.rows) == len(document.rows)
 
 
+#: What a kernel's ref in the copy at half sizes is offset by (``_beside_its_half``).
+HALF = 1000
+
+
 def _beside_its_half(document: GoldenFile) -> GoldenFile:
     """``document``'s one program, and as traced program 1 the same program at half its sizes (``_shrink``): both
-    current, the second's kernels, decisions and rows those of a restamp of the shrunk copy, each ref and row name
-    suffixed ``@half``."""
+    current, the second's kernels, decisions and rows those of a restamp of the shrunk copy, each ref offset by
+    :data:`HALF` and each row name suffixed ``@half``."""
     half, _ = restamp(_shrink(document, 0))
 
-    def ref(name: str) -> str:
-        return f"{name}@half"
+    def ref(kernel: int) -> int:
+        return kernel + HALF
 
-    kernels = [replace(kernel, key=ref(kernel.ref), traced=None if kernel.traced is None else 1) for kernel in half.kernels]
+    kernels = [replace(kernel, ref=ref(kernel.ref), traced=None if kernel.traced is None else 1) for kernel in half.kernels]
     routing = [RoutingRow(ref(route.parent), route.arm, tuple(ref(child) for child in route.children)) for route in half.routing]
-    rows = [replace(row, name=ref(row.name), kernel=ref(row.kernel)) for row in half.rows]
+    rows = [replace(row, name=f"{row.name}@half", kernel=ref(row.kernel)) for row in half.rows]
     return replace(
         document,
         programs=[*document.programs, *half.programs],
@@ -233,26 +238,27 @@ def test_restamp_keeps_a_shared_piece_with_the_decision_that_still_mints_it(half
     measured = next(row for row in one.rows if row.kernel == route.parent and row.measured)
     current = _beside_its_half(replace(one, rows=[*one.rows, replace(measured, name="piece", kernel=piece)]))
     assert restamp(current)[0] == current
-    assert current.kernel(f"{piece}@half").exact_identity != current.kernel(piece).exact_identity
+    assert current.kernel(piece + HALF).exact_identity != current.kernel(piece).exact_identity
 
     # The file a lowering that minted one kernel for both programs' piece wrote: program 1's decision names program 0's.
-    halved = next(stored for stored in current.routing if stored.parent == f"{route.parent}@half")
-    shared = replace(halved, children=tuple(piece if child == f"{piece}@half" else child for child in halved.children))
+    halved = next(stored for stored in current.routing if stored.parent == route.parent + HALF)
+    shared = replace(halved, children=tuple(piece if child == piece + HALF else child for child in halved.children))
     routing = [stored for stored in current.routing if stored != halved]
     stale = replace(
         current,
-        kernels=[kernel for kernel in current.kernels if kernel.ref != f"{piece}@half"],
+        kernels=[kernel for kernel in current.kernels if kernel.ref != piece + HALF],
         routing=[shared, *routing] if half_first else [*routing, shared],
-        rows=[row for row in current.rows if row.kernel != f"{piece}@half"],
+        rows=[row for row in current.rows if row.kernel != piece + HALF],
     )
 
     fresh, report = restamp(stale)
     [split] = {kernel.ref for kernel in fresh.kernels} - {kernel.ref for kernel in stale.kernels}
-    assert report.repointed == [f"{route.parent}@half {piece} -> {split}: this decision mints another kernel now"], report.lines()
-    assert fresh.kernel(split).exact_identity == current.kernel(f"{piece}@half").exact_identity
+    names = (stale.kernel(route.parent + HALF).name, stale.kernel(piece).name, fresh.kernel(split).name)
+    assert report.repointed == ["{} {} -> {}: this decision mints another kernel now".format(*names)], report.lines()
+    assert fresh.kernel(split).exact_identity == current.kernel(piece + HALF).exact_identity
     assert fresh.kernel(piece) == stale.kernel(piece), "the decision that still mints the stored kernel keeps it"
     children = {stored.parent: stored.children for stored in fresh.routing}
-    assert piece in children[route.parent] and split in children[f"{route.parent}@half"]
+    assert piece in children[route.parent] and split in children[route.parent + HALF]
     # The piece sat in both programs' kernel sets, one of which changed; its whole-target latency names program 0's
     # set, every kernel of which is current, so it stays beside the piece's own measurement.
     stored_row = next(row for row in stale.rows if row.name == "piece")
@@ -271,7 +277,7 @@ def test_restamp_drops_a_decision_the_fresh_parent_does_not_take(golden, caplog)
 
     document = GoldenFile.load(golden)
     parent = document.kernels[0]
-    orphan = replace(document.kernels[1], key="orphan", traced=None, origins=(), bindings={})
+    orphan = replace(document.kernels[1], ref=len(document.kernels), traced=None, origins=(), bindings={})
     document.kernels.append(orphan)
     document.routing.append(RoutingRow(parent.ref, {"PLACE@missing": "cut"}, (orphan.ref,)))
     document.rows.append(Row(name="orphan", kernel=orphan.ref, pins={"FAST_MATH": False}, knobs={"WORK": "t16x8"}))

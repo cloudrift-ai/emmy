@@ -1712,7 +1712,7 @@ class KernelOp(BodyOp):
     """One ``__global__`` GPU kernel as a Kernel IR program.
 
     :class:`BodyOp` subclass parallel to ``TileOp`` / ``LoopOp``: lives as
-    a graph node, carries a body of Kernel IR stmts plus a kernel name.
+    a graph node, carries a body of Kernel IR stmts.
 
     Buffer shapes are *not* baked in — the surrounding graph supplies
     them at render time, same as ``TileOp``. Kernel signature is derived

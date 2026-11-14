@@ -69,7 +69,7 @@ def test_ilp_merge_keeps_the_streaming_accumulator_dtype(op, dtype, masked):
     step = ["a = load x[k]", f"acc <- {op}(acc, a)", "b = load x[k + 2]", *tail, f"acc__r1 <- {op}(acc__r1, {'b__m' if masked else 'b'})"]
     loop = parse_body("\n".join(["for k in 0..2:", *(f"    {line}" for line in step)]))
     body = Body((*loop, *combine_tail(fold, reg=2, coop=1, lane=None)))
-    kernel = KernelOp(name="ilp_merge", body=body, inputs={"x": Tensor("x", (4,), F16)})
+    kernel = KernelOp(body=body, inputs={"x": Tensor("x", (4,), F16)})
     stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(
         Node(id="out", op=kernel, inputs=["x"], outputs=())
     )

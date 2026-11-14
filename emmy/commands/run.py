@@ -450,9 +450,7 @@ def _handle_run_cpu(args) -> None:
                 variance=statistics.pvariance(us),
                 n_samples=len(us),
             )
-            persist_kernel_perf(
-                db, program.ctx, tile, stats=stats, status="ok", knobs=decisions[nid], name=tile.name, sizes=program.native.executor.env()
-            )
+            persist_kernel_perf(db, program.ctx, tile, stats=stats, status="ok", knobs=decisions[nid], sizes=program.native.executor.env())
     finally:
         db.close()
 
@@ -1396,7 +1394,7 @@ def _nonfinite_mismatch(actual, expected) -> bool:
 def env_pin_refusal(
     kernel_knobs: list[dict],
     placement_knobs: list[dict] | None = None,
-    kernel_names: list[tuple[str, ...]] | None = None,
+    kernel_names: list[str] | None = None,
     applied_place_pins: dict[str, str] | None = None,
 ) -> str | None:
     """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
@@ -1431,7 +1429,7 @@ def env_pin_refusal(
 
 
 def record_refusal(
-    kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[tuple[str, ...]] | None = None, *, benches=()
+    kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[str] | None = None, *, benches=()
 ) -> str | None:
     """A flagged comparison, rejected answer, or unrealized env pin cannot become recorded evidence."""
     flags = [flag for row in benches if row is not None for flag in row.flags or []]
@@ -1942,9 +1940,9 @@ def _cuda_knob_dicts(graph) -> list[dict]:
     return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
 
 
-def _cuda_kernel_names(graph) -> list[tuple[str, str]]:
-    """The kernel name and node id of each ``CudaOp`` beside :func:`_cuda_knob_dicts` — what a kernel pin names."""
-    return [(n.op.kernel_name, n.id) for n in _launch_order_cuda_nodes(graph)]
+def _cuda_kernel_names(graph) -> list[str]:
+    """Each launched kernel's name, in launch order beside ``_cuda_knob_dicts``."""
+    return [n.op.kernel_name for n in _launch_order_cuda_nodes(graph)]
 
 
 def _placement_knob_dicts(graph) -> list[dict]:

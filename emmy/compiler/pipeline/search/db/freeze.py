@@ -258,11 +258,9 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
                             wanted.add(named)
                             queue.append(named)
         document = GoldenFile(gpu_name=gpu_name, compute_cap=cap)
-        # The file names each kernel by a ref of its own; the DB's rows name it by identity.
+        # The file points at each kernel by a ref of its own; the DB's rows name it by identity.
         ref = {
-            identity: document.add_kernel(
-                Kernel(loop_ir=kernels[identity].loop_ir, name=kernels[identity].name, formed=kernels[identity].formed).keyed(identity)
-            ).ref
+            identity: document.add_kernel(Kernel(loop_ir=kernels[identity].loop_ir, formed=kernels[identity].formed).keyed(identity)).ref
             for identity in sorted(wanted)
         }
         document.routing.extend(
@@ -270,7 +268,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
         )
         document.rows.extend(
             Row(
-                name=f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
+                name=f"{kernels[row.kernel].name}.{n}",
                 kernel=ref[row.kernel],
                 bindings=dict(row.bindings),
                 pins=dict(REGIME_PINS[regime_of(row.cold_cache, row.precision)]),

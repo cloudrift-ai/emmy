@@ -330,7 +330,6 @@ class TileOp(Op):
     (``identity_key(with_io=True, with_knobs=True)``) is untouched."""
 
     op: object = None
-    name: str = ""
     place: Placement = field(default_factory=Placement)
     # The kernel's AXIS TABLE — the extent and window of every axis the term binds or reads: the
     # free axes, each reduce axis, a split's slice and partition, a sweep. The term itself carries
@@ -348,13 +347,8 @@ class TileOp(Op):
     # the effectful stmt stream via ``apply_output_specs`` — never read a ``Write`` out of the term.
     output_specs: tuple[OutputSpec, ...] = ()
     # Whether the graph-level Fold-edge placement decision is consumed. Unpinned cut pieces keep
-    # the default ``False`` and may expose their own smaller seam set; a pinned cut can close
-    # a piece once the pins addressing it have been consumed.
+    # the default ``False`` and may expose their own smaller seam set.
     placement_decided: bool = False
-    # Scoped placement pins already consumed on this kernel's same-name remainder.
-    placement_consumed: frozenset[str] = field(default=frozenset(), compare=False, repr=False)
-    # Number of placement cuts taken by this kernel's same-name remainder.
-    placement_step: int = field(default=0, compare=False, repr=False)
     # Folded constant inputs whose layout choice this kernel already declined. The source arm
     # replaces its input with a new constant, so only the folded arm needs this receipt.
     layout_decided: tuple[str, ...] = field(default=(), compare=False, repr=False)
@@ -366,6 +360,13 @@ class TileOp(Op):
     # flag past "declined" is safe because the partition receipt is an explicit pool-key term of
     # the schedule memo — a receipt-bearing twin can never serve a receipt-free one.
     split_consumed: bool = False
+
+    @cached_property
+    def name(self) -> str:
+        """The kernel's name, computed from its exact identity (:func:`~emmy.compiler.wire.kernel_name`)."""
+        from emmy.compiler.wire import kernel_name  # noqa: PLC0415 — the wire module imports the IR
+
+        return kernel_name(self)
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)

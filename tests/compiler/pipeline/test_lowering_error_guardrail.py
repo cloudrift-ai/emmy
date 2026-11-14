@@ -59,7 +59,7 @@ def _graph_with_tile() -> Graph:
     for the body the featurizer would read."""
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), "f32"), node_id="x")
-    g.add_node(op=TileOp(name="k_test", knobs=_STAMP), inputs=["x"], output=Tensor("y", (4,), "f32"), node_id="y")
+    g.add_node(op=TileOp(knobs=_STAMP), inputs=["x"], output=Tensor("y", (4,), "f32"), node_id="y")
     g.inputs = ["x"]
     g.outputs = ["y"]
     return g
@@ -67,7 +67,7 @@ def _graph_with_tile() -> Graph:
 
 def _over_budget_kernel() -> KernelOp:
     """A ``KernelOp`` whose 16 KiB smem slab exceeds the 2 KiB test cap."""
-    return KernelOp(body=[Smem(name="buf", extents=(4096,), dtype="float")], name="k_test")
+    return KernelOp(body=[Smem(name="buf", extents=(4096,), dtype="float")])
 
 
 def _build_pipeline() -> Pipeline:
@@ -221,7 +221,7 @@ def _two_pass_tile_pipeline(
     from emmy.compiler.pipeline.fork import DeferredFork
 
     def _tile_leaf(bn: int) -> TileOp:
-        return TileOp(name="k_test", knobs={"BN": bn})
+        return TileOp(knobs={"BN": bn})
 
     def emit_tiles(root):
         if "BN" in root.op.knobs:  # already tiled (our own output) → don't re-fork
@@ -238,7 +238,7 @@ def _two_pass_tile_pipeline(
             raise RuleSkipped(f"nothing lowers BN={bn}")
         fits = bn <= 8 or overflowing not in (None, root.id)
         extents = (64,) if fits else (4096,)  # 256 B fits the 2 KiB cap; 16 KiB overflows
-        return KernelOp(body=[Smem(name="buf", extents=extents, dtype="float")], name="k_test", knobs={"BN": bn})
+        return KernelOp(body=[Smem(name="buf", extents=extents, dtype="float")], knobs={"BN": bn})
 
     emit_rule = Rule(
         name="__emit_tiles__",
@@ -281,7 +281,7 @@ def test_emission_order_fallback_keeps_the_prior_at_every_other_node(monkeypatch
 
     monkeypatch.setattr(greedy_mod, "_load_prior_safe", lambda: _BiggestBNFirstPrior())
     graph = _graph_with_tile()
-    graph.add_node(op=TileOp(name="k_test", knobs=_STAMP), inputs=["x"], output=Tensor("z", (4,), "f32"), node_id="z")
+    graph.add_node(op=TileOp(knobs=_STAMP), inputs=["x"], output=Tensor("z", (4,), "f32"), node_id="z")
     graph.outputs = ["y", "z"]
     terminal = _two_pass_tile_pipeline(n_over_budget=12, overflowing="y").run(graph, ctx=_small_smem_ctx())
     assert terminal.nodes["y"].op.knobs.get("BN") == 8, "the stuck node takes the emission-order leaf"
@@ -495,14 +495,22 @@ def test_greedy_run_raises_when_the_projection_tail_is_mis_sliced():
 def _composed_fragment(input_id: str, suffix: str) -> Graph:
     """The composed route ``input -> y_ws (k_ws) -> y__cut (k_residual)`` replacing the kernel it is
     offered on; the splice hands that kernel's id to the residual root, so the terminal tells the
-    routes apart by op name."""
+    routes apart by what each kernel reads (:func:`_label`)."""
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor(input_id, (4,), "f32"), node_id=input_id)
     ws, cut = f"y_ws{suffix}", f"y__cut{suffix}"
-    g.add_node(op=TileOp(name=f"k_ws{suffix}", knobs=_STAMP), inputs=[input_id], output=Tensor(ws, (4,), "f32"), node_id=ws)
-    g.add_node(op=TileOp(name=f"k_residual{suffix}", knobs=_STAMP), inputs=[ws], output=Tensor(cut, (4,), "f32"), node_id=cut)
+    g.add_node(op=TileOp(knobs=_STAMP), inputs=[input_id], output=Tensor(ws, (4,), "f32"), node_id=ws)
+    g.add_node(op=TileOp(knobs=_STAMP), inputs=[ws], output=Tensor(cut, (4,), "f32"), node_id=cut)
     g.outputs = [cut]
     return g
+
+
+def _label(node) -> str:
+    """A placeholder kernel of the composed route, by where it sits: a workspace producer by its node, the kernel
+    the route is offered on and each residual by the buffer it reads."""
+    if node.id.startswith("y_ws"):
+        return f"k_ws{node.id.removeprefix('y_ws')}"
+    return {"x": "k_test", "y_ws": "k_residual", "y_ws2": "k_residual2"}[node.inputs[0]]
 
 
 def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, ...] = (8, 16), cut_residual: bool = False) -> Pipeline:
@@ -520,25 +528,25 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
     def cut(root):
         if "BN" in root.op.knobs or "PLACE" in root.op.knobs:
             raise RuleSkipped("already decided")
-        if root.op.name == "k_test":
+        if _label(root) == "k_test":
             fragment, seam = _composed_fragment("x", ""), "PLACE@seam"
-        elif root.op.name == "k_residual" and cut_residual:
+        elif _label(root) == "k_residual" and cut_residual:
             fragment, seam = _composed_fragment("y_ws", "2"), "PLACE@seam.1"
         else:
             raise RuleSkipped("not a kernel-set fork")
-        fused = DeferredFork(lambda: TileOp(name=root.op.name, knobs={"PLACE": "fuse"}), {"PLACE": "fuse"})
+        fused = DeferredFork(lambda: TileOp(knobs={"PLACE": "fuse"}), {"PLACE": "fuse"})
         return [fused, DeferredFork(lambda: fragment, {seam: "cut"}, structural=True)]
 
     def schedule(root):
         if "BN" in root.op.knobs:
             raise RuleSkipped("already scheduled")
-        return [DeferredFork(lambda bn=bn: TileOp(name=root.op.name, knobs={"BN": bn}), {"BN": bn}) for bn in rows]
+        return [DeferredFork(lambda bn=bn: TileOp(knobs={"BN": bn}), {"BN": bn}) for bn in rows]
 
     def materialize(root):
         bn = root.op.knobs["BN"]
-        if bn in refused.get(root.op.name, ()):
+        if bn in refused.get(_label(root), ()):
             raise RuleSkipped("kernel binder refuses this row's projection ownership", reject=True)
-        return KernelOp(body=[Smem(name="buf", extents=(64,), dtype="float")], name=root.op.name, knobs={"BN": bn})
+        return KernelOp(body=[Smem(name="buf", extents=(64,), dtype="float")], knobs={"BN": bn})
 
     def stamp(root):
         if "LOOPIFY" in root.op.knobs:
@@ -563,7 +571,7 @@ def _elect_composed_route(monkeypatch) -> None:
 
 
 def _kernels(terminal: Graph) -> dict[str, tuple[str, int]]:
-    return {nid: (n.op.name, n.op.knobs["BN"]) for nid, n in terminal.nodes.items() if isinstance(n.op, KernelOp)}
+    return {nid: (_label(n), n.op.knobs["BN"]) for nid, n in terminal.nodes.items() if isinstance(n.op, KernelOp)}
 
 
 def test_refused_piece_rows_rerank_within_the_composed_route(monkeypatch):

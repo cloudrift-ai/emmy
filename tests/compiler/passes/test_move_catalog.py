@@ -250,7 +250,7 @@ def _rows_of(tile, ctx=None) -> list[dict]:
     from importlib import import_module
 
     classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
-    out = classic_forks(tile, "k", {}, ctx or Context.from_target((12, 0)))
+    out = classic_forks(tile, {}, ctx or Context.from_target((12, 0)))
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 
 
@@ -414,20 +414,19 @@ def _gemv_tile(ctx):
 
 
 def test_a_kernel_pin_with_no_split_keeps_its_piece_unsplit(monkeypatch):
-    """``REDUCE@place_<token>=coop-t`` names the piece by the token its name carries: the split fork
+    """``REDUCE@<name>=coop-t`` names the piece by its name: the split fork
     reads it like a bare pin with no ``g`` half and offers the unsplit tree alone, where it used to miss
     the pin and offer every split."""
-    from dataclasses import replace
     from types import SimpleNamespace
 
     from emmy.compiler.pipeline.passes.tile._split import split_forks
 
     for var in ("EMMY_REDUCE", "EMMY_WORK"):
         monkeypatch.delenv(var, raising=False)
-    root = SimpleNamespace(op=replace(_gemv_tile(Context.from_target((9, 0))), name="k_x__place_ab12"), id="add_7__place_ab12_0")
+    root = SimpleNamespace(op=_gemv_tile(Context.from_target((9, 0))), id="add_7__place_ab12_0")
     assert len(split_forks(None, root)) > 1, "unpinned, the GEMV offers its splits"
-    monkeypatch.setenv("EMMY_WORK@place_ab12", "t128")
-    monkeypatch.setenv("EMMY_REDUCE@place_ab12", "coop-t")
+    monkeypatch.setenv(f"EMMY_WORK@{root.op.name}", "t128")
+    monkeypatch.setenv(f"EMMY_REDUCE@{root.op.name}", "coop-t")
     assert len(split_forks(None, root)) == 1
 
 

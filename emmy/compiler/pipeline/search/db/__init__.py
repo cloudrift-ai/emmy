@@ -11,7 +11,7 @@ Tables (the DDL is the reference):
   with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape),
   holding the kernel's Loop IR wire (``wire.kernel_wire``: the body it was formed from, which the tile lift
   takes back to the kernel — ``formed`` — or, for a piece carved from a twisted tree, its derived body, which
-  only its parent's program reaches) and its C name. A piece a cut or a split minted is a row like any other,
+  only its parent's program reaches). A piece a cut or a split minted is a row like any other,
   so the same kernel reached from two parents has one definition. The key is the one computed value the DB
   holds: a cache key, computed from the wire by whoever writes the row (a bench off its live kernel, an import
   off a golden's stored one) and valid under :data:`_VERSION`. Nothing else derived from a kernel is stored —
@@ -152,11 +152,11 @@ class PerfRow:
 class RoutingRow(Wire):
     """One kernel-set decision on one parent: the arm's knobs (``PLACE@seam: cut`` keys, or a cross-CTA
     ``REDUCE`` half) and the pieces it minted, in the fragment's order. The DB names the parent and the pieces by
-    exact identity; a golden file stores the same row with each kernel named by its ``ref`` in the file."""
+    exact identity; a golden file stores the same row with each kernel pointed at by its ``ref`` in the file."""
 
-    parent: str
+    parent: str | int
     arm: dict
-    children: tuple[str, ...]
+    children: tuple[str | int, ...]
 
 
 # Each table's DDL and the column set a file must have for this module to read it.
@@ -169,7 +169,6 @@ _DDL = {
         CREATE TABLE kernel (
             exact_identity       TEXT PRIMARY KEY,
             loop_ir              TEXT NOT NULL,
-            kernel_name          TEXT NOT NULL,
             formed               INTEGER NOT NULL
         )""",
     "context": """
@@ -257,7 +256,7 @@ _DDL = {
 _INDEXES = ("CREATE INDEX routing_child ON routing (child)",)
 _COLS = {
     "source": ("name",),
-    "kernel": ("exact_identity", "loop_ir", "kernel_name", "formed"),
+    "kernel": ("exact_identity", "loop_ir", "formed"),
     "context": ("id", "backend", "gpu_name", "arch", "opt", "flags", "cold_cache", "precision"),
     "schedule": ("id", "digest"),
     "schedule_knob": ("schedule", "name", "value"),
@@ -289,7 +288,7 @@ _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "k
 #: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key, and
 #: what a context's regime measures. A file holding another is re-created; bump when any changes. The DB tests pin
 #: kernel and context identities.
-_VERSION = 14  # A context's precision decisions spell the division, square root, flush and contraction knobs too.
+_VERSION = 15  # A kernel row stores no name: its name is computed from its identity.
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",
@@ -496,26 +495,22 @@ class SearchDB:
 
     def record_kernel(self, row: KernelDef) -> None:
         """Store a kernel's definition under its exact identity. A kernel already stored keeps its row (the
-        definition is the same; the name only serves the per-kernel views)."""
+        definition is the same)."""
         self._conn.execute(
-            "INSERT OR IGNORE INTO kernel (exact_identity, loop_ir, kernel_name, formed) VALUES (?, ?, ?, ?)",
-            (row.exact_identity, _wire_json(row.loop_ir), row.name, int(row.formed)),
+            "INSERT OR IGNORE INTO kernel (exact_identity, loop_ir, formed) VALUES (?, ?, ?)",
+            (row.exact_identity, _wire_json(row.loop_ir), int(row.formed)),
         )
-
-    def kernel_names(self) -> dict[str, str]:
-        """Every stored kernel's C name by exact identity — the per-kernel views' grouping key."""
-        return dict(self._conn.execute("SELECT exact_identity, kernel_name FROM kernel"))
 
     def kernel(self, exact_identity: str) -> KernelDef | None:
         """The stored definition of the kernel ``exact_identity`` names, or ``None``."""
-        found = self._conn.execute("SELECT loop_ir, kernel_name, formed FROM kernel WHERE exact_identity = ?", (exact_identity,)).fetchone()
-        return None if found is None else KernelDef(json.loads(found[0]), found[1], formed=bool(found[2])).keyed(exact_identity)
+        found = self._conn.execute("SELECT loop_ir, formed FROM kernel WHERE exact_identity = ?", (exact_identity,)).fetchone()
+        return None if found is None else KernelDef(json.loads(found[0]), formed=bool(found[1])).keyed(exact_identity)
 
     def iter_kernels(self) -> Iterator[KernelDef]:
-        for exact, loop_ir, name, formed in self._conn.execute(
-            "SELECT exact_identity, loop_ir, kernel_name, formed FROM kernel ORDER BY exact_identity"
+        for exact, loop_ir, formed in self._conn.execute(
+            "SELECT exact_identity, loop_ir, formed FROM kernel ORDER BY exact_identity"
         ).fetchall():
-            yield KernelDef(json.loads(loop_ir), name, formed=bool(formed)).keyed(exact)
+            yield KernelDef(json.loads(loop_ir), formed=bool(formed)).keyed(exact)
 
     # ------------------------------------------------------------------
     # Routing

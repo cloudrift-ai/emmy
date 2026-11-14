@@ -25,14 +25,15 @@ from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.path import resolve
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
+from emmy.compiler.pipeline.knob import kernel_scoped, pinned_kernel
 from emmy.compiler.pipeline.passes.tile._cut import (
+    PIECE,
     CutSite,
     _fuse_sibling_producers,
     _producer_order,
     _workspace_axes,
     cuttable_seams,
     output_map,
-    place_token,
     realize,
 )
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option, _structural_domain
@@ -101,7 +102,7 @@ def _computed_operand_graph(side: str) -> Graph:
     )
     direct = slab("direct", "direct", *(("k", "n") if side == "a" else ("m", "k")))
     a, b = (computed, direct) if side == "a" else (direct, computed)
-    tile = TileOp(op=contraction(k, a, (b, "acc")), name="out", place=Placement(free=(m, n)), axes=(m, n, k))
+    tile = TileOp(op=contraction(k, a, (b, "acc")), place=Placement(free=(m, n)), axes=(m, n, k))
     graph = Graph()
     _input(graph, "computed", (8, 16))
     _input(graph, "direct", (16, 8) if side == "a" else (8, 16))
@@ -143,7 +144,6 @@ def _mimo_graph() -> Graph:
     first, second = matmul("a", "b", "first"), matmul("c", "d", "second")
     tile = TileOp(
         op=projection((first, second), results=("first", "second")),
-        name="out0",
         place=Placement(free=(m, n)),
         axes=(m, n, k),
         output_specs=(
@@ -190,7 +190,7 @@ def _projection_consumer_graph(nest: tuple[str, str]) -> Graph:
     loops = tuple({"t": t, "n": n}[name] for name in nest)
     matmul = contraction(k, slab("act", "act", "t", "k"), (slab("w", "w", "n", "k"), "acc"))
     squared = projection((matmul,), "sq = multiply(acc, acc)", ("sq",))
-    tile = TileOp(op=squared, name="out", place=Placement(free=loops), axes=(*loops, k))
+    tile = TileOp(op=squared, place=Placement(free=loops), axes=(*loops, k))
     graph = Graph()
     _input(graph, "act", (8, 16))
     _input(graph, "w", (32, 16))
@@ -254,8 +254,9 @@ def _case_match(case: str) -> tuple[Match, Graph]:
     graph = Graph()
     for name, tensor in tile.inputs.items():
         graph.add_node(InputOp(), [], tensor, node_id=name)
-    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
-    return Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[])), graph
+    primary = next(iter(tile.outputs))  # addressed by its primary output, as a graph node is
+    graph.add_node(tile, list(tile.inputs), tile.outputs[primary], node_id=primary)
+    return Match(graph=graph, root_node_id=primary, rule=Rule(name="test", pattern=[])), graph
 
 
 def _nested_attention_cut(pins: dict[str, str]) -> Graph:
@@ -368,7 +369,6 @@ def test_sibling_producer_fusion_prunes_unused_later_group(live_dependents: int)
         fold = projection((), f"value = load {source}[i]")
         tile = TileOp(
             op=fold,
-            name=name,
             place=Placement(free=(axis,)),
             axes=(axis,),
             output_specs=(OutputSpec(_stmt(f"{name}[i] = value")),),
@@ -400,7 +400,7 @@ def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> Non
 
     def piece(name: str, source: str | None):
         produced = projection((), f"{name}_value = load {source or 'input'}[]", results=(f"{name}_value",))
-        return (None, produced, (), (), name, (f"{name}_value",), (name,))
+        return (None, produced, (), (), (f"{name}_value",), (name,))
 
     pieces = [piece("a", "c"), piece("c", "b"), piece("b", None)]
 
@@ -419,7 +419,6 @@ def test_cut_does_not_rematerialize_load_only_bundles(channels: int, computed: b
     outputs = tuple(f"out{channel}" for channel in range(channels))
     tile = TileOp(
         op=projection((bundle,), "\n".join(f"{out} = negative({value})" for out, value in zip(outputs, values, strict=True)), outputs),
-        name="out",
         place=Placement(free=(axis,)),
         axes=(axis,),
         output_specs=tuple(OutputSpec(_stmt(f"{out}[i] = {out}")) for out in outputs),
@@ -486,18 +485,15 @@ def _routed(document, arm: dict, *, measured: bool = True, target=None):
     return document, route
 
 
-def test_a_piece_carries_the_token_of_its_seam_on_its_parent() -> None:
-    """A cut piece's name token is one rule: its parent's structural identity and the seam's canonical key, digested
-    (``seam_token``), and ``place_token`` reads it back off the name — what a ``place_<token>`` pin and a recorded
-    route address the piece by. The target itself carries no token."""
-    from emmy.compiler.pipeline.passes.tile._cut import place_token, seam_token
-
+def test_every_kernel_of_a_cut_is_named_by_its_own_identity() -> None:
+    """Every piece of a cut is a kernel of its own: each is named by its exact identity, never by its
+    parent's name, so a pin or a recorded route addresses each of them alone."""
     document, route = _routed(_sdpa_document(), {"PLACE@map.1/twist.1/inner": "cut"})
     assert route is not None
     [target] = document.targets()
-    tokens = {place_token(document.kernel(ref).name) for ref in route.children}
-    assert seam_token(target.op(), "PLACE@map.1/twist.1/inner") in tokens
-    assert place_token(target.name) is None and None in tokens, "the same-name remainder carries no token"
+    names = [document.kernel(ref).name for ref in route.children]
+    assert all(name == f"k_{document.kernel(ref).exact_identity[:12]}" for name, ref in zip(names, route.children, strict=True))
+    assert len({target.name, *names}) == 1 + len(names)
 
 
 def test_a_recorded_cut_is_taken_again_and_a_stale_route_mints_nothing() -> None:
@@ -530,7 +526,7 @@ def test_a_moved_seam_is_re_spelled_by_the_pieces_it_minted() -> None:
     moved = replace(document, routing=[replace(route, arm={"PLACE@map.1/twist.9/inner": "cut"})])
     fresh, report = restamp(moved)
     assert fresh == document
-    assert report.respelled == [f"{route.parent} PLACE@map.1/twist.9/inner -> PLACE@map.1/twist.1/inner"]
+    assert report.respelled == [f"{document.kernel(route.parent).name} PLACE@map.1/twist.9/inner -> PLACE@map.1/twist.1/inner"]
     assert not report.dropped_routes and not report.rekeyed and not report.demoted
 
 
@@ -547,7 +543,7 @@ def test_a_joined_key_whose_two_sites_moved_is_re_spelled_as_a_joined_key() -> N
     assert route.arm == {"PLACE@map.4/map.1/map+map.5/map": "cut"}
     moved = replace(document, routing=[replace(route, arm={"PLACE@map.2/map.1/map+map.3/map": "cut"})])
     fresh, report = restamp(moved)
-    assert report.respelled == [f"{route.parent} PLACE@map.2/map.1/map+map.3/map -> PLACE@map.4/map.1/map+map.5/map"]
+    assert report.respelled == [f"{document.kernel(route.parent).name} PLACE@map.2/map.1/map+map.3/map -> PLACE@map.4/map.1/map+map.5/map"]
     assert not report.dropped_routes and fresh.routing == document.routing
 
 
@@ -568,7 +564,7 @@ def test_a_moved_seam_over_a_re_keyed_piece_is_re_spelled_by_what_its_pieces_rea
         routing=[replace(route, arm={"PLACE@map.1/twist.9/inner": "cut"})],
     )
     fresh, report = restamp(moved)
-    assert report.respelled == [f"{route.parent} PLACE@map.1/twist.9/inner -> PLACE@map.1/twist.1/inner"]
+    assert report.respelled == [f"{document.kernel(route.parent).name} PLACE@map.1/twist.9/inner -> PLACE@map.1/twist.1/inner"]
     assert not report.dropped_routes and fresh.routing == document.routing
     assert fresh.kernel(reader.ref).exact_identity == reader.exact_identity
     assert any(row.kernel == reader.ref and row.measurements is None for row in fresh.rows)
@@ -593,7 +589,7 @@ def test_a_moved_seam_over_a_re_keyed_piece_keeps_the_cut_whose_other_pieces_it_
         routing=[replace(route, arm={"PLACE@map.1/reduce.3/map": "cut"})],
     )
     fresh, report = restamp(moved)
-    assert report.respelled == [f"{route.parent} PLACE@map.1/reduce.3/map -> PLACE@map.1/reduce.1/map"]
+    assert report.respelled == [f"{document.kernel(route.parent).name} PLACE@map.1/reduce.3/map -> PLACE@map.1/reduce.1/map"]
     assert fresh.routing == document.routing
     assert fresh.kernel(producer.ref).exact_identity == producer.exact_identity
     assert all(row.measured for row in fresh.rows if row.kernel == producer.ref)
@@ -626,7 +622,7 @@ def test_a_moved_seam_whose_candidates_mint_one_kernel_set_is_re_spelled_at_the_
         routing=[replace(route, arm={"PLACE@map.9/inner": "cut"})],
     )
     fresh, report = restamp(moved)
-    assert report.respelled == [f"{route.parent} PLACE@map.9/inner -> PLACE@map.1/inner"]
+    assert report.respelled == [f"{document.kernel(route.parent).name} PLACE@map.9/inner -> PLACE@map.1/inner"]
     assert not report.dropped_routes and fresh.routing == document.routing
     assert sorted(report.demoted) == sorted(row.name for row in document.rows if row.kernel in stale)
     assert {row.kernel for row in fresh.rows} == {row.kernel for row in document.rows}
@@ -661,7 +657,7 @@ def test_a_seam_the_re_keyed_parent_still_offers_but_that_cuts_other_pieces_is_r
         routing=[replace(route, arm={other: "cut"})],
     )
     fresh, report = restamp(moved)
-    assert report.respelled == [f"{route.parent} {other} -> {recorded}"]
+    assert report.respelled == [f"{document.kernel(route.parent).name} {other} -> {recorded}"]
     assert not report.dropped_routes and fresh.routing == document.routing
     assert {fresh.kernel(ref).exact_identity for ref in route.children} == {document.kernel(ref).exact_identity for ref in route.children}
 
@@ -1653,7 +1649,9 @@ def test_re_keyed_pieces_pair_with_the_stored_pieces_that_read_the_same_inputs()
 
     fresh, report = restamp(changed)
 
-    assert fresh.routing == [reordered] and set(route.children) <= {line.split()[0] for line in report.rekeyed}
+    assert fresh.routing == [reordered] and {document.kernel(ref).name for ref in route.children} <= {
+        line.split()[0] for line in report.rekeyed
+    }
     assert {ref: reads(fresh.kernel(ref)) for ref in route.children} == {ref: reads(document.kernel(ref)) for ref in route.children}
 
 
@@ -1862,7 +1860,6 @@ def test_a_scalar_operand_is_no_seam() -> None:
     )
     tile = TileOp(
         op=root,
-        name="k_scores",
         place=Placement(free=(Axis("m", 8), Axis("n", 8))),
         axes=(Axis("m", 8), Axis("n", 8), Axis("k", 8)),
         output_specs=(OutputSpec(write=_stmt("out[m, n] = v1")),),
@@ -1896,14 +1893,9 @@ def _mimo_case(case: str) -> tuple[Graph, object]:
     graph = Graph()
     for name, tensor in tile.inputs.items():
         graph.add_node(InputOp(), [], tensor, node_id=name)
-    others = [name for name in tile.outputs if name != tile.name]
-    graph.add_node(
-        tile,
-        list(tile.inputs),
-        outputs=(tile.outputs[tile.name], *(tile.outputs[name] for name in others)),
-        node_id=tile.name,
-    )
-    return graph, graph.nodes[tile.name]
+    primary, *others = tile.outputs
+    graph.add_node(tile, list(tile.inputs), outputs=tuple(tile.outputs[name] for name in (primary, *others)), node_id=primary)
+    return graph, graph.nodes[primary]
 
 
 def _realized(case: str, spelling: str) -> Graph:
@@ -1957,7 +1949,6 @@ def test_peeling_all_but_one_output_leaves_every_piece_single_output() -> None:
     )
     tile = TileOp(
         op=projection(edges, results=tuple(widths)),
-        name="wide",
         place=Placement(free=(m,)),
         axes=(m, k, *widths.values()),
         output_specs=tuple(OutputSpec(_stmt(f"{out}[m, {axis.name}] = {out}"), sweep=(axis,)) for out, axis in widths.items()),
@@ -2005,7 +1996,6 @@ def _epilogue_kernel(shared: bool) -> tuple[Graph, object]:
     """
     tile = TileOp(
         op=projection((first, second), body=body, results=("wide_out", "narrow_out")),
-        name="wide",
         place=Placement(free=(m,)),
         axes=(m, wide, narrow, k),
         output_specs=(
@@ -2114,46 +2104,51 @@ def _piece_ops(fragment: Graph) -> list[TileOp]:
     return [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
 
-def _named(tile: TileOp, pins: dict[str, str]) -> bool:
-    """Whether ``pins`` address ``tile``: a kernel at its first step, a remainder a ``step.<n>`` pin names at its
-    step, a cut piece a ``place_<token>`` pin names."""
-    token = place_token(tile.name)
-    if tile.placement_step == 0:
-        return token is None or any(key.startswith(f"PLACE@place_{token}") for key in pins)
-    if token is None and "PLACE" in pins:
-        return True  # the bare pin cuts the whole remainder chain
-    staged = f"PLACE@step.{tile.placement_step}" if token is None else f"PLACE@place_{token}/step.{tile.placement_step}"
-    return any(key.startswith(staged) for key in pins)
+def _named(fork, pins: dict[str, str]) -> bool:
+    """Whether ``pins`` address the fork's kernel: a kernel pin naming it, else, for a kernel no cut minted, a pin
+    every kernel reads; a piece of a cut is past those."""
+    if any(pinned_kernel(key) == fork.root_op.name for key in pins):
+        return True
+    return not fork.match.root.hints.has(PIECE) and any(not kernel_scoped(key) for key in pins)
 
 
 def _pieces_open(pieces) -> bool:
-    """A pinned cut decides one fork: its remainder — the piece that keeps the root's name — and each piece it mints
-    are left to their own fork."""
+    """A pinned cut decides one fork: each piece it mints is left to its own fork."""
     return not any(piece.placement_decided for piece in pieces)
 
 
 def _pinned_requant_cut(pins: dict[str, str], *, allow_unpinned: bool = False):
+    result, trace, unmatched = _pinned_requant_graph(pins, allow_unpinned=allow_unpinned)
+    return _piece_ops(result), trace, unmatched
+
+
+def _pinned_requant_graph(pins: dict[str, str], *, allow_unpinned: bool = False):
     graph, root = _mimo_case(_REQUANT)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
 
     def decide(fork):
-        if _structural_domain(fork.options) == ("PLACE",) and not allow_unpinned and _named(fork.root_op, pins):
+        if _structural_domain(fork.options) == ("PLACE",) and not allow_unpinned and _named(fork, pins):
             assert len(fork.options) == 1, f"{fork.node_id} still offers an unpinned placement choice"
         return fork.options[0]  # a piece no pin names takes its own fork: its first arm keeps it whole
 
     with pinned_knobs(pins), tracking_place_keys() as resolved:
         result, trace = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, decide)
         unmatched = unmatched_place_pins(resolved)
-    pieces = [node.op for node in result.nodes.values() if isinstance(node.op, TileOp)]
-    return pieces, trace, unmatched
+    return result, trace, unmatched
+
+
+def _piece_on(pins: dict[str, str], node_id: str) -> TileOp:
+    """The piece the requant cut under ``pins`` leaves on node ``node_id``."""
+    result, _, _ = _pinned_requant_graph(pins)
+    return result.nodes[node_id].op
 
 
 def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
     """A named child can cut one of its nested contractions after the parent cut; its sibling stays put."""
-    parent, producer, token = _two_site_child()
+    parent, producer = _two_site_child()
     before, parent_trace, unmatched = _pinned_requant_cut(parent)
     assert _contraction_spellings(producer) == ["PLACE@map.1/reduce.1/inner", "PLACE@map.2/inner"]
-    child = {f"PLACE@place_{token}/map.2/inner": "cut"}
+    child = {f"PLACE@{producer.name}/map.2/inner": "cut"}
 
     after, trace, unmatched_with_child = _pinned_requant_cut({**parent, **child})
 
@@ -2168,7 +2163,7 @@ def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
     ]
     assert len([decision for decision in parent_trace if "cut" in decision.knob_delta.values()]) == 1
     assert all(len(_contraction_spellings(piece)) <= 1 for piece in after)
-    siblings = {piece.name: piece for piece in before if piece is not producer}
+    siblings = {piece.name: piece for piece in before if piece.name != producer.name}
     assert {piece.name for piece in after if piece.name in siblings} == set(siblings)
     assert all(
         {spec.write.output for spec in next(piece for piece in after if piece.name == name).output_specs}
@@ -2178,10 +2173,10 @@ def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
 
 
 def test_a_piece_a_pinned_cut_mints_takes_its_own_fork() -> None:
-    """Pins name the kernel they cut and its same-name remainder; a piece the cut mints is a new kernel no pin names,
+    """Pins name the kernel they cut; a piece the cut mints is a new kernel no pin names,
     so it takes the fork an unpinned compile's piece takes, and evidence or the prior decides it. The recorded GDN
     routes compiled every piece whole under their own pins, so no piece's own seam was ever measured."""
-    parent, producer, _ = _two_site_child()
+    parent, producer = _two_site_child()
     graph, root = _mimo_case(_REQUANT)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
     offered: list[str] = []
@@ -2198,68 +2193,68 @@ def test_a_piece_a_pinned_cut_mints_takes_its_own_fork() -> None:
     assert len(_piece_ops(result)) > 2
 
 
-def test_a_pinned_cuts_remainder_takes_its_own_fork() -> None:
-    """A scoped pin decides one fork. The remainder it leaves — the piece that keeps the kernel's name — is offered
-    its own fork at the next step, as a piece is, and the decider's arm is taken there. The pin once decided the
-    remainder fused, silently, so a record under it stored the remainder whole with no fork ever asked."""
+def test_the_piece_left_on_the_cut_kernels_node_takes_its_own_fork() -> None:
+    """A scoped pin decides one fork. The piece that takes over the cut kernel's node is a kernel of its own name,
+    offered its own fork as every piece is, and the decider's arm is taken there. The pin once decided that piece
+    fused, silently, so a record under it stored the piece whole with no fork ever asked."""
     graph, root = _mimo_case(_REQUANT)
+    piece = _piece_on({"PLACE@map.1/map": "cut"}, root.id)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
-    offered: list[tuple[int, int]] = []
+    offered: list[tuple[str, int]] = []
 
-    def cut_the_remainder_once(fork):
-        if _structural_domain(fork.options) == ("PLACE",) and fork.root_op.name == root.op.name:
-            offered.append((fork.root_op.placement_step, len(fork.options)))
-            if fork.root_op.placement_step == 1:
+    def cut_the_piece(fork):
+        if _structural_domain(fork.options) == ("PLACE",):
+            offered.append((fork.root_op.name, len(fork.options)))
+            if fork.root_op.name == piece.name:
                 return next(option for option in fork.options if _is_structural_option(option))
         return fork.options[0]
 
     with pinned_knobs({"PLACE@map.1/map": "cut"}):
-        result, trace = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, cut_the_remainder_once)
+        _, trace = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, cut_the_piece)
 
-    assert offered[0] == (0, 1), "the pin leaves the kernel one arm"
-    assert offered[1][0] == 1 and offered[1][1] > 1, "the remainder takes its own fork"
+    assert offered[0] == (root.op.name, 1), "the pin leaves the kernel one arm"
+    assert any(name == piece.name and options > 1 for name, options in offered), "the piece takes its own fork"
     cuts = [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()]
     assert len(cuts) == 2 and cuts[0] == {"PLACE@map.1/map": "cut"}
-    remainder = next(piece for piece in _piece_ops(result) if piece.name == root.op.name)
-    assert remainder.placement_step == 2 and remainder.placement_decided
 
 
-def test_a_bare_cut_pin_cuts_the_whole_remainder_chain() -> None:
-    """A bare ``PLACE=cut`` names no site, so it addresses the kernel at every step: the root-most seam is cut, then
-    the remainder's, until no seam is left; the pieces take their own fork. ``PLACE@step.0=cut`` names the first
-    step alone and leaves the remainder to its own fork, which is how a recorded root-most cut replays. The tiny
-    Gated DeltaNet programs' remainders were once decided fused by the bare pin that cut them, one thread block
-    recomputing the whole cone per cell."""
-    chained, trace, unmatched = _pinned_requant_cut({"PLACE": "cut"})
-    once, trace_once, _ = _pinned_requant_cut({"PLACE@step.0": "cut"})
+def test_a_bare_cut_pin_cuts_each_kernel_no_cut_minted_once() -> None:
+    """A bare ``PLACE=cut`` names no site: it cuts the root-most seam of each kernel no cut minted, once, as
+    ``PLACE@<name>=cut`` does for the one kernel of that name. Every piece is a new kernel and takes its own fork."""
+    graph, root = _mimo_case(_REQUANT)
+    bare, trace, unmatched = _pinned_requant_cut({"PLACE": "cut"})
+    named, trace_named, _ = _pinned_requant_cut({f"PLACE@{root.op.name}": "cut"})
 
     assert not unmatched
     cuts = [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()]
-    assert len(cuts) > 1 and all(len(cut) == 1 for cut in cuts)
-    remainder = next(piece for piece in chained if place_token(piece.name) is None)
-    assert remainder.placement_step == len(cuts) and not cuttable_seams(remainder)
-    assert [decision.knob_delta for decision in trace_once if "cut" in decision.knob_delta.values()] == cuts[:1]
-    assert len(once) < len(chained)
+    assert len(cuts) == 1 and [decision.knob_delta for decision in trace_named if "cut" in decision.knob_delta.values()] == cuts
+    assert sorted(piece.name for piece in bare) == sorted(piece.name for piece in named)
 
 
-def _two_site_child() -> tuple[dict[str, str], TileOp, str]:
-    """The parent cut that leaves one child with two contraction sites, the child and its placement token. The full
-    projection cut shares one gate/up producer, so it leaves no such child; the single ``map.1/map`` seam does."""
+def _two_site_child() -> tuple[dict[str, str], TileOp]:
+    """The parent cut that leaves one child with two contraction sites, and the child. The full projection cut shares
+    one gate/up producer, so it leaves no such child; the single ``map.1/map`` seam does."""
     parent = {"PLACE@map.1/map": "cut"}
     before, _, _ = _pinned_requant_cut(parent)
     child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
-    return parent, child, child.name.rsplit("__place_", 1)[1]
+    return parent, child
+
+
+def _child_piece(parent: dict[str, str], child: TileOp) -> tuple[dict[str, str], TileOp]:
+    """The pin that cuts ``child``'s statistic, and the piece that cut leaves on the child's node."""
+    first = {f"PLACE@{child.name}/map.1/reduce": "cut"}
+    before, _, _ = _pinned_requant_graph(parent)
+    [node_id] = [node.id for node in before.nodes.values() if isinstance(node.op, TileOp) and node.op.name == child.name]
+    return first, _piece_on({**parent, **first}, node_id)
 
 
 @pytest.mark.parametrize("suffix", ("/map.1/inner", ""))
-def test_child_site_pins_cut_the_same_remainder_in_two_stages(suffix: str) -> None:
-    # Peeling one output leaves its statistic and contraction available for successive child cuts.
-    parent, child, token = _two_site_child()
-    pins = {
-        **parent,
-        f"PLACE@place_{token}/map.1/reduce": "cut",
-        f"PLACE@place_{token}/step.1{suffix}": "cut",
-    }
+def test_each_piece_down_a_chain_of_cuts_takes_a_pin_of_its_own(suffix: str) -> None:
+    """Every piece is a kernel of its own name, so a pin names one piece of a chain of cuts alone: here the child's
+    statistic is cut, then a piece that cut leaves."""
+    parent, child = _two_site_child()
+    first, piece = _child_piece(parent, child)
+    pins = {**parent, **first, f"PLACE@{piece.name}{suffix}": "cut"}
 
     pieces, trace, unmatched = _pinned_requant_cut(pins)
 
@@ -2271,73 +2266,37 @@ def test_child_site_pins_cut_the_same_remainder_in_two_stages(suffix: str) -> No
         {"PLACE@map.1/reduce": "cut"},
         {"PLACE@map.1/inner": "cut"},
     ]
-    assert next(piece for piece in pieces if piece.name == child.name).placement_step == 2
     assert all(piece.placement_decided for piece in pieces if cuttable_seams(piece))
-    assert not any(piece.name == child.name and cuttable_seams(piece) for piece in pieces)
-
-
-def test_child_pin_replays_after_an_unstaged_site_is_exposed() -> None:
-    graph, root = _mimo_case(_REQUANT)
-    graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
-    root.op = replace(root.op, name=f"{root.op.name}__place_deadbeef00")
-    pins = {
-        "PLACE@place_deadbeef00/map.1/map": "cut",
-        "PLACE@place_deadbeef00/map.1/reduce": "cut",
-    }
-
-    with pinned_knobs(pins), tracking_place_keys() as resolved:
-        result, trace = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, lambda fork: fork.options[0])
-        unmatched = unmatched_place_pins(resolved)
-
-    pieces = _piece_ops(result)
-    assert not unmatched
-    assert len(pieces) == 3
-    assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
-        {"PLACE@map.1/map": "cut"},
-        {"PLACE@map.1/reduce": "cut"},
-    ]
 
 
 @requires_cuda
 def test_staged_child_cut_preserves_both_requant_outputs() -> None:
     graph, root = _mimo_case(_REQUANT)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
-    parent, child, token = _two_site_child()
-    first = f"PLACE@place_{token}/map.1/reduce"
-    second = f"PLACE@place_{token}/step.1/map.1/inner"
+    parent, child = _two_site_child()
+    first, piece = _child_piece(parent, child)
+    second = {f"PLACE@{piece.name}/map.1/inner": "cut"}
     inputs = {
         name: np.full(tuple(dim.as_static() for dim in tensor.shape), 1, dtype=tensor.dtype.np) for name, tensor in root.op.inputs.items()
     }
     inputs["mul_static_fp4_shift"][:] = 0
     backend = CudaBackend()
-    single = backend.run(_lower(graph.copy(), {**parent, first: "cut"}), input_data=inputs)[0].outputs
-    staged = backend.run(_lower(graph.copy(), {**parent, first: "cut", second: "cut"}), input_data=inputs)[0].outputs
+    single = backend.run(_lower(graph.copy(), {**parent, **first}), input_data=inputs)[0].outputs
+    staged = backend.run(_lower(graph.copy(), {**parent, **first, **second}), input_data=inputs)[0].outputs
 
     for name in graph.outputs:
         np.testing.assert_array_equal(staged[name], single[name])
 
 
-def test_unknown_later_child_pin_stays_unmatched_and_terminates() -> None:
-    parent, child, token = _two_site_child()
-    stale = f"PLACE@place_{token}/step.1/map.9/inner"
+def test_unknown_child_site_pin_stays_unmatched_and_terminates() -> None:
+    parent, child = _two_site_child()
+    stale = f"PLACE@{child.name}/map.9/inner"
 
-    pieces, trace, unmatched = _pinned_requant_cut({**parent, f"PLACE@place_{token}/map.1/reduce": "cut", stale: "cut"})
+    pieces, trace, unmatched = _pinned_requant_cut({**parent, f"PLACE@{child.name}/map.1/reduce": "cut", stale: "cut"})
 
     assert unmatched == [stale]
     assert len(trace) < 20
     assert len(pieces) == 3
-
-
-def test_staged_child_pin_cannot_alias_an_ordinary_pin() -> None:
-    parent, child, token = _two_site_child()
-    pins = {
-        **parent,
-        f"PLACE@place_{token}/map.1/reduce": "cut",
-        f"PLACE@place_{token}/step.0/map.1/reduce": "cut",
-    }
-
-    with pytest.raises(ValueError, match="address the same site"):
-        _pinned_requant_cut(pins)
 
 
 @pytest.mark.parametrize("suffix", ("/map.1/inner", ""))
@@ -2346,7 +2305,7 @@ def test_stale_child_site_pin_is_reported_unmatched(suffix: str) -> None:
 
     graph, root = _mimo_case(_REQUANT)
     _, parent = _composed_arm(graph, root)
-    stale = f"PLACE@place_deadbeef00{suffix}"
+    stale = f"PLACE@k_deadbeef0000{suffix}"
 
     pieces, trace, unmatched = _pinned_requant_cut({**parent, stale: "cut"})
 
@@ -2362,8 +2321,8 @@ def test_a_guessed_child_site_pin_is_answered_with_the_seams_the_piece_offers() 
     from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
     from emmy.compiler.pipeline.search.strategy.greedy import piece_seams
 
-    parent, child, token = _two_site_child()
-    guessed = f"PLACE@place_{token}/map.1/map.1/reduce"
+    parent, child = _two_site_child()
+    guessed = f"PLACE@{child.name}/map.1/map.1/reduce"
     graph, root = _mimo_case(_REQUANT)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
     with pinned_knobs({**parent, guessed: "cut"}), tracking_place_keys() as resolved:
@@ -2371,13 +2330,13 @@ def test_a_guessed_child_site_pin_is_answered_with_the_seams_the_piece_offers() 
         assert unmatched_place_pins(resolved) == [guessed]
 
     offered = sorted({seam.spelling for seam in cuttable_seams(child)})
-    assert offered and piece_seams(result, guessed) == f"; that piece offers {', '.join(offered)}"
-    assert piece_seams(result, "PLACE@place_deadbeef00") == "; no kernel of the compile is the piece place_deadbeef00"
+    assert offered and piece_seams(result, guessed) == f"; that kernel offers {', '.join(offered)}"
+    assert piece_seams(result, "PLACE@k_deadbeef0000") == "; no kernel of the compile is k_deadbeef0000"
     assert piece_seams(result, next(iter(parent))) == ""
 
 
-def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
-    """A child pin opens its named piece, without cutting the parent's remaining matmul again."""
+def test_a_pin_on_a_piece_cuts_that_piece_alone() -> None:
+    """A pin on a child opens that piece, without cutting the parent's remaining matmul again."""
     from emmy.compiler.ir.tile.path import sites
 
     graph = _computed_operand_graph("a")
@@ -2385,37 +2344,42 @@ def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
     second = contraction(root.op.axes[2], slab("b_x", "computed", "m", "k"), (slab("b_w", "direct", "k", "n"), "acc2"))
     root.op = replace(root.op, op=projection((root.op.op, second), "sum = add(acc, acc2)", ("sum",)))
     pipeline = Pipeline.build(["tile/cut"])
-    with pinned_knobs({"PLACE@step.0": "cut"}):
+    parent = {f"PLACE@{root.op.with_io(graph, root).name}": "cut"}
+    with pinned_knobs(parent):
         before, _ = Run(pipeline, _CTX).resolve(graph.copy(), lambda fork: fork.options[0])
-    child = next(piece for piece in _piece_ops(before) if "__place_" in piece.name)
+    child = next(node.op for node in before.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.id)
     (seam,) = cuttable_seams(child)
     path = next(site.path for site in sites(child.op) if site.node is seam.node)
-    token = child.name.rsplit("__place_", 1)[1]
-    with pinned_knobs({"PLACE@step.0": "cut", f"PLACE@place_{token}/{path}": "cut"}):
+    with pinned_knobs({**parent, f"PLACE@{child.name}/{path}": "cut"}):
         after, trace = Run(pipeline, _CTX).resolve(graph.copy(), lambda fork: fork.options[0])
 
     pieces = _piece_ops(after)
-    assert len(pieces) == 3, "the parent remainder keeps its matmul and epilogue together"
-    remainder = next(piece for piece in pieces if piece.name == root.op.name)
-    assert remainder.placement_decided and len(_contraction_spellings(remainder)) == 1
+    assert len(pieces) == 3, "the piece on the parent's node keeps its matmul and epilogue together"
+    kept = after.nodes["out"].op
+    assert kept.placement_decided and len(_contraction_spellings(kept)) == 1
     assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 2
 
 
 @pytest.mark.parametrize("suffix", ("/map.1/reduce", ""))
-def test_scoped_pins_cut_the_same_remainder_in_two_stages(suffix: str) -> None:
-    pins = {"PLACE@map.1/map": "cut", f"PLACE@step.1{suffix}": "cut"}
-    pieces, trace, unmatched = _pinned_requant_cut(pins)
+def test_the_piece_on_the_cut_kernels_node_takes_a_pin_of_its_own(suffix: str) -> None:
+    _, root = _mimo_case(_REQUANT)
+    pins = {"PLACE@map.1/map": "cut", f"PLACE@{_piece_on({'PLACE@map.1/map': 'cut'}, root.id).name}{suffix}": "cut"}
+    result, trace, unmatched = _pinned_requant_graph(pins)
 
     assert not unmatched
     assert len(trace) < 20
     assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 2
-    assert len(pieces) == 3
-    assert any(piece.name == "mul_static_fp4_scale_bits" for piece in pieces)
+    assert len(_piece_ops(result)) == 3
+    assert "mul_static_fp4_scale_bits" in result.nodes
 
 
 @requires_cuda
 def test_two_staged_cuts_preserve_norm_residual_values() -> None:
-    pins = {"PLACE@map.1/map.1/reduce.1/inner": "cut", "PLACE@step.1/map.1/map": "cut"}
+    first = {"PLACE@map.1/map.1/reduce.1/inner": "cut"}
+    with pinned_knobs(first):
+        once, _ = Run(Pipeline.build([*TILE_PASSES[:-1]]), _CTX).resolve(_norm_residual_graph(1), lambda fork: fork.options[0])
+    [piece] = [once.nodes[output].op for output in once.outputs]
+    pins = {**first, f"PLACE@{piece.name}/map.1/map": "cut"}
     cut = _lower(_norm_residual_graph(1), pins)
     assert sum(isinstance(node.op, CudaOp) for node in cut.nodes.values()) == 3
 
@@ -2426,31 +2390,6 @@ def test_two_staged_cuts_preserve_norm_residual_values() -> None:
     y = x.astype(np.float32) @ w.astype(np.float32)
     expected = y / np.sqrt((y * y).mean(-1, keepdims=True) + 1e-6) + y
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
-
-
-@pytest.mark.parametrize(
-    "pins",
-    [
-        {"PLACE@map.1/map": "cut", "PLACE@step.0/map.1/map": "cut"},
-        {
-            "PLACE@map.1/map": "cut",
-            "PLACE@map.1/reduce": "cut",
-            "PLACE@step.1/map.1/reduce": "cut",
-        },
-    ],
-)
-def test_staged_and_ordinary_pins_cannot_alias_one_site(pins: dict[str, str]) -> None:
-    with pytest.raises(ValueError, match="address the same site"):
-        _pinned_requant_cut(pins)
-
-
-def test_future_stage_without_a_preceding_cut_stays_unmatched() -> None:
-    stale = "PLACE@step.9/map.1/reduce"
-    pieces, trace, unmatched = _pinned_requant_cut({"PLACE@map.1/map": "cut", stale: "cut"})
-
-    assert unmatched == [stale]
-    assert len(trace) < 20
-    assert len(pieces) == 2
 
 
 def test_unknown_later_root_pin_stays_unmatched_and_terminates() -> None:
@@ -2489,12 +2428,12 @@ def test_output_cut_and_its_complement_label_the_same_exact_kernel_set() -> None
         leaves = _CUT.rewrite(match, node, _CTX)
     rows = [dict(leaf.knobs) for leaf in leaves]
     cuts = [i for i, row in enumerate(rows) if "cut" in row.values()]
-    assert len(cuts) == 3  # Either output alone, or both: the other output is already the remainder.
+    assert len(cuts) == 3  # Either output alone, or both: the other output's piece is the same kernel.
     identities = [sorted(op.identity_key(structural=False, with_io=True) for op, _ in kernel_pieces(leaves[i].expand()[0])) for i in cuts]
     assert identities[0] == identities[1] == identities[2]
 
     identity = node.op.identity_key(structural=False, with_io=True)
-    positives, _, _ = _place_ballot(leaves, rows, identity, node.op.name, Counter(identities[0]), frozenset())
+    positives, _, _ = _place_ballot(leaves, rows, identity, Counter(identities[0]), frozenset())
 
     assert sorted(positives) == cuts
 
@@ -2557,7 +2496,6 @@ def _one_root_kernel() -> tuple[Graph, object]:
     second = contraction(k, slab("c_v", "c", "m", "k"), (slab("d_v", "d", "k", "n2"), "narrow_out"))
     tile = TileOp(
         op=projection((first, second), results=("wide_out", "narrow_out")),
-        name="wide",
         place=Placement(free=(m,)),
         axes=(m, wide, narrow, k, r, q),
         output_specs=(
@@ -2781,7 +2719,6 @@ def _row_statistic_graph() -> Graph:
     cone = projection((statistic, slab("w", "w", "n")), "scaled = multiply(acc, w)")
     tile = TileOp(
         op=projection((cone,), "out_v = multiply(scaled, scaled)"),
-        name="out",
         place=Placement(free=(m, n)),
         axes=(m, n, k),
     )
@@ -2836,7 +2773,9 @@ def _mlp_down() -> TileOp:
     (down,) = [
         node.op
         for node in cut.nodes.values()
-        if isinstance(node.op, TileOp) and "__place_" in node.op.name and any(t.shape[0] == 256 for t in node.op.inputs.values())
+        if isinstance(node.op, TileOp)
+        and any("__place_" in buffer for buffer in node.op.inputs)
+        and any(t.shape[0] == 256 for t in node.op.inputs.values())
     ]
     return down
 
@@ -2855,47 +2794,41 @@ def test_a_computed_input_is_a_formed_gemv_pieces_a_operand() -> None:
     assert _warp_atoms(down, _CTX, site.node), "the tensor-core tier is offered"
 
 
-def test_split_projection_sibling_keeps_its_child_place_address() -> None:
-    """An unsplit projection sibling keeps a distinct PLACE scope when its twin splits K."""
+def test_a_split_projection_sibling_takes_a_pin_by_its_own_name() -> None:
+    """An unsplit projection sibling is a kernel of its own name when its twin splits K, so a pin names it alone."""
     graph = _mimo_graph()
     with pinned_knobs({"REDUCE": "g2k"}):
         result, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, lambda fork: fork.options[0])
 
     sibling = result.producer("out1").op
     assert isinstance(sibling, TileOp)
-    assert sibling.name.startswith("out0__place_")
     assert sibling.name != result.producer("out0").op.name
-    token = sibling.name.rsplit("__place_", 1)[1]
-    with pinned_knobs({f"PLACE@place_{token}/inner": "cut"}):
-        scoped, sources = _CUT._placement_pins(sibling)
+    with pinned_knobs({f"PLACE@{sibling.name}/inner": "cut"}):
+        scoped, sources = _CUT._placement_pins(sibling, True)
     assert scoped == (("PLACE@inner", "cut"),)
-    assert sources == {"PLACE@inner": f"PLACE@place_{token}/inner"}
+    assert sources == {"PLACE@inner": f"PLACE@{sibling.name}/inner"}
 
 
-def test_a_split_keeps_the_name_of_the_piece_it_splits() -> None:
-    """A split piece's partial and finalize launch under the piece's own name, so a kernel pin naming
-    the piece (its ordinal included) names both halves; they used to take the name of the workspace
-    buffer, whose ordinal counts components, not pieces."""
-    import re
-
-    down = _mlp_down()
-    token = re.search(r"__place_(\w+)$", down.name).group(1)
+def test_a_splits_partial_and_finalize_are_kernels_of_their_own_names() -> None:
+    """A pin naming a piece splits that piece; its partial and finalize are two new kernels, each named by its own
+    identity and launched under it."""
     from emmy.compiler.pipeline.fork import iter_leaves
 
-    with pinned_knobs({**_mlp_cuts(), f"REDUCE@place_{token}": "g4k"}):
+    down = _mlp_down()
+    with pinned_knobs({**_mlp_cuts(), f"REDUCE@{down.name}": "g4k"}):
         lowered, _ = Run(Pipeline.build(CUDA_PASSES), _CTX).resolve(_mlp_graph(), lambda fork: next(iter_leaves(fork.options)))
-    names = {node.op.kernel_name for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"}
-    assert {down.name, f"{down.name}__partial"} <= names, names
+    cuda = [node for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"]
+    [partial] = [node for node in cuda if node.id.endswith("__partial")]
+    [finalize] = [node for node in cuda if partial.id in node.inputs]
+    assert down.name not in {node.op.kernel_name for node in cuda}
+    assert partial.op.kernel_name != finalize.op.kernel_name
 
 
 def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
     """A kernel-scoped pin the named piece cannot take fails the compile with the pins that did it,
     instead of leaving the piece unscheduled and the pin realized by nothing."""
-    import re
-
-    token = re.search(r"__place_([0-9a-f]+)", _mlp_down().name).group(1)
     with pytest.raises(ValueError, match="leave no schedule row"):
-        _lower(_mlp_graph(), {**_mlp_cuts(), f"TILE@place_{token}": "mma_m16n8k16_f16_f32/f64x64"})
+        _lower(_mlp_graph(), {**_mlp_cuts(), f"TILE@{_mlp_down().name}": "mma_m16n8k16_f16_f32/f64x64"})
 
 
 @pytest.mark.parametrize("rows", [1, 2])
@@ -2917,7 +2850,6 @@ def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
     product = contraction(k, operand, (slab("wv", "w", "k", "n"), "acc"))
     tile = TileOp(
         op=projection((product,), "f8e4m3 encoded = to_f8e4m3(acc)", ("encoded",)),
-        name="out",
         place=Placement(free=(m, n)),
         axes=(m, n, k),
         output_specs=(OutputSpec(_stmt("out[m, n] = encoded")),),
@@ -2969,7 +2901,6 @@ def test_parallel_split_preserves_every_output_buffer() -> None:
     n, k = Axis("n", 4), Axis("k", 256)
     tile = TileOp(
         op=contraction(k, slab("xv", "x", "k"), (slab("av", "a", "k", "n"), "first"), (slab("bv", "b", "k", "n"), "second")),
-        name="out0",
         place=Placement(free=(n,)),
         axes=(n, k),
         output_specs=tuple(OutputSpec(_stmt(f"{name}[n] = {value}")) for name, value in (("out0", "first"), ("out1", "second"))),

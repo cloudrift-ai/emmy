@@ -217,14 +217,14 @@ def complete(
         with evidence_scope([_measured(document)]), pinned_knobs({**regime, **cuts}), settled_layouts(layouts):
             graph = Pipeline.build(CUDA_PASSES).with_strategies(watcher).run(target.program({}), ctx=ctx, db=None)
         for parent, arm, pieces in taken:
-            stored = document.add_kernel(definition(parent, parent.name))
-            children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+            stored = document.add_kernel(definition(parent))
+            children = [document.add_kernel(definition(piece)) for piece in pieces]
             arm = {str(k): str(v) for k, v in arm.items()}
             document.add_routing(RoutingRow(stored.ref, arm, tuple(c.ref for c in children)))
         for node in graph.nodes.values():
             if not isinstance(node.op, CudaOp) or (tile := kernel_tile(node.op)) is None:
                 continue
-            stored = document.add_kernel(definition(tile, node.op.kernel_name))
+            stored = document.add_kernel(definition(tile))
             ran.add(stored.ref)
             realized = dict(schedule_row_key(dict(node.op.knobs or {})))
             existing = [index for index, row in enumerate(document.rows) if row.kernel == stored.ref and row.pins == regime]
@@ -233,7 +233,7 @@ def complete(
             if existing:
                 document.rows[existing[0]] = replace(document.rows[existing[0]], knobs=realized)
                 continue
-            name = seed.name if seed.kernel == stored.ref else f"{seed.name}.{stored.exact_identity[:12]}"
+            name = seed.name if seed.kernel == stored.ref else f"{seed.name}.{stored.name}"
             document.rows.append(Row(name=name, kernel=stored.ref, bindings=kernel_bindings(tile), pins=dict(regime), knobs=realized))
     document.rows[:] = [row for row in document.rows if row.kernel in ran]
     return document

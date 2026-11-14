@@ -23,10 +23,10 @@ def test_a_kernel_row_is_keyed_by_the_identity_its_wire_computes() -> None:
     graph, _taken = corpus.lowered(case, case.context())
     [cuda] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
     tile = kernel_tile(cuda)
-    row = kernel_row(tile, cuda.kernel_name)
+    row = kernel_row(tile)
 
     assert tile.schedule is None, "the kernel is the tile its schedule fork was offered"
-    stored = KernelDef(loop_ir=row.loop_ir, name=row.name, formed=row.formed)  # as a file holds it: nothing known
+    stored = KernelDef(loop_ir=row.loop_ir, formed=row.formed)  # as a file holds it: nothing known
     assert row.formed and stored.exact_identity == row.exact_identity == tile.identity_key(structural=False, with_io=True)
     assert stamps(stored.op()) == stamps(tile) == stamps(cuda), "one kernel, one S_* row, wherever it is read"
     assert stamps(tile)["S_n_load"] > 0 and not any(key.endswith("_?") for key in stamps(tile)), "the dtypes are the kernel's io"

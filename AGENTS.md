@@ -40,8 +40,8 @@ relevant `ARCHITECTURE.md` before answering.
 - `HF_TOKEN` environment variable for HuggingFace model downloads
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, compiler stages dump intermediate debug artifacts
   (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `run --bench` stay
-  in memory; stable Torch IR is persisted only inside golden files. Kernels are named after the operations they realize
-  (`k_rms_norm`, `k_sdpa_reduce`).
+  in memory; stable Torch IR is persisted only inside golden files. A kernel's name is `k_` and the first 12 hex digits
+  of its exact identity (`k_3f2a1b9c04de`), so it says nothing about the operations the kernel realizes.
 - `EMMY_FREEZE_DIR` environment variable (optional) — the directory a `run --bench --tune N` freezes its rows into as
   a file beside the card's: the repository freeze of an editable checkout when unset, none when set empty (the test
   suite), else that directory. README "Keep what a tune measured".
@@ -105,15 +105,15 @@ points and the `ir/` → pipeline import boundary.
 ## Compiler Invariant: Kernel Facts Are Computed, Never Stored
 
 A source of truth — an op, a golden file, a corpus case — holds inputs only: the body, the io, the decisions, the
-measurements. Anything computed from them — a kernel's exact identity, its `S_*` structural features, whether its
-schedule space holds a warp plan — is computed where it is read. A stored copy has to be kept in agreement with the
-computation, and one that drifts fails silently: its row stops deciding its fork. A cache — the tune DB's kernel key, a
-dataset, the weights, a memo — may hold computed values under a version, and is re-created when stale.
+measurements. Anything computed from them — a kernel's exact identity, its name, its `S_*` structural features,
+whether its schedule space holds a warp plan — is computed where it is read. A stored copy has to be kept in agreement
+with the computation, and one that drifts fails silently: its row stops deciding its fork. A cache — the tune DB's
+kernel key, a dataset, the weights, a memo — may hold computed values under a version, and is re-created when stale.
 
 - **Never write a fact onto `op.knobs`.** An op's knobs are the decisions taken on it, every one a registered knob. A
   fact about the body or the card is a function to call, never a value to carry.
-- **Never add a computed field to the golden format.** A stored kernel is its Loop IR, its name and where it came
-  from; rows and decisions name it by its `ref` in the file. A new field is an input, or it does not go in the file.
+- **Never add a computed field to the golden format.** A stored kernel is its Loop IR and where it came from; rows
+  and decisions point at it by its position in the file. A new field is an input, or it does not go in the file.
 - **Evidence joins on the kernel's exact identity and the context, nothing else.** No feature takes part in the join.
 - **A new computed value in a cache needs a version.** A change to the computation bumps it and the cache is
   re-created; nothing migrates.

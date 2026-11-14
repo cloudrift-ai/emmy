@@ -29,10 +29,10 @@ _BODY = """
 
 def _typed(body: str, dtype) -> tuple[KernelOp, dict[str, Tensor]]:
     """``body`` over one grid axis ``a``, its buffers of ``dtype``, typed in full as ``120_explicit_conversions`` does."""
-    tiled = KernelOp(body=Body((Tile(axes=(Axis("a", 4),), body=parse_body(body)),)), name="k")
+    tiled = KernelOp(body=Body((Tile(axes=(Axis("a", 4),), body=parse_body(body)),)))
     tensors = {name: Tensor(name, (4,), dtype) for name in (*tiled.inputs, *tiled.outputs)}
     typed = explicit_conversions(tiled.body, {name: dtype for name in tensors}, native_f16_ops())
-    return KernelOp(body=typed, name="k"), tensors
+    return KernelOp(body=typed), tensors
 
 
 def _composites(op: KernelOp) -> set[str]:

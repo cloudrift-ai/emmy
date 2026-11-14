@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from functools import cached_property, lru_cache
 from types import MappingProxyType
 
-from emmy.compiler.wire import Wire
+from emmy.compiler.wire import Wire, name_of
 
 
 @lru_cache(maxsize=1)
@@ -20,13 +20,12 @@ def _lift():
 
 @dataclass(frozen=True)
 class KernelDef(Wire):
-    """The Loop IR wire, the C name, and whether the wire is the body the kernel was formed from (``formed``: the
-    tile lift takes it back to the kernel) or the derived body of a kernel formed from no loop op, which only its
-    parent's program reaches. Inputs only: the kernel's identity and its stamps are computed from the wire
-    (:attr:`exact_identity`, ``features.stamps`` of :meth:`op`), never stored beside it."""
+    """The Loop IR wire and whether it is the body the kernel was formed from (``formed``: the tile lift takes it
+    back to the kernel) or the derived body of a kernel formed from no loop op, which only its parent's program
+    reaches. Inputs only: the kernel's identity, its name and its stamps are computed from the wire
+    (:attr:`exact_identity`, :attr:`name`, ``features.stamps`` of :meth:`op`), never stored beside it."""
 
     loop_ir: dict
-    name: str
     formed: bool
 
     def program(self, bindings: Mapping[str, int]):
@@ -57,6 +56,11 @@ class KernelDef(Wire):
         """The kernel's exact identity (``identity_key(structural=False, with_io=True)``), computed from the wire;
         the sizes are no part of it."""
         return self.op().identity_key(structural=False, with_io=True)
+
+    @property
+    def name(self) -> str:
+        """The kernel's name, computed from its exact identity (:func:`~emmy.compiler.wire.name_of`)."""
+        return name_of(self.exact_identity)
 
     def keyed(self, identity: str) -> KernelDef:
         """This definition with its identity already known — the key the DB row holding it is stored under, or the
