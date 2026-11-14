@@ -6,7 +6,9 @@ import os
 import sys
 
 from emmy.deploy import DEFAULT_STRATEGY, STRATEGIES, replica_services, run_deploy, run_teardown
+from emmy.deploy.compose import check_protectable
 from emmy.deploy.local import make_run_cmd, make_write_file
+from emmy.deploy.serving_key import add_serving_api_key_argument
 from emmy.detect import detect_local_gpus
 from emmy.provisioning.host import LocalHost
 from emmy.provisioning.remote import provision_remote
@@ -67,6 +69,11 @@ async def _handle_local(args):
 
     timer = PhaseTimer()
     services, load_balancer = replica_services(recipe)
+    try:
+        check_protectable(services, args.serving_api_key)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
     success = await run_deploy(
         run_cmd=run_cmd,
         write_file=write_file,
@@ -77,6 +84,7 @@ async def _handle_local(args):
         dry_run=dry_run,
         load_balancer=load_balancer,
         timer=timer,
+        api_key=args.serving_api_key or "",
     )
 
     if not success:
@@ -92,6 +100,7 @@ def register_local_target(subparsers):
     parser = subparsers.add_parser("local", help="Deploy locally via docker compose")
     parser.add_argument("--recipe", required=True, help="Path to recipe directory")
     parser.add_argument("--hf-token", default=None, help="HuggingFace token (default: $HF_TOKEN)")
+    add_serving_api_key_argument(parser)
     parser.add_argument("--model-dir", default="/mnt/models", help="Model cache directory")
     parser.add_argument("--teardown", action="store_true", help="Stop containers instead of deploying")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")

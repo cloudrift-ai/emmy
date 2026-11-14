@@ -54,7 +54,13 @@ def replica_services(recipe: Recipe, gpu_device_ids: list[int] | None = None) ->
     return [Service(recipe, list(range(i * per_instance, (i + 1) * per_instance)), 8000 + i) for i in range(count)], True
 
 
-def generate_compose(services: list[Service], model_dir, hf_token, load_balancer=False, baked_images=frozenset(), proxy=None):
+def check_protectable(services: list[Service], api_key: str) -> None:
+    """Raise ValueError when ``api_key`` is set and a service's engine cannot require it."""
+    if api_key and any(service.recipe.engine.llm.engine_name == "native" for service in services):
+        raise ValueError("The native engine has no API key option: a protected deployment needs vLLM or SGLang")
+
+
+def generate_compose(services: list[Service], model_dir, hf_token, load_balancer=False, baked_images=frozenset(), proxy=None, api_key=""):
     """Build docker-compose.yaml string from the services of one deployment.
 
     One engine service per entry, named ``{engine}_{i}``, pinned to its device ids (``count: all``
@@ -72,7 +78,12 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
 
     ``proxy``: an HTTP proxy URL; every engine service gets it in its environment, in both spellings, so
     the weight download inside the container goes through it. nginx only talks to the services.
+
+    ``api_key``: the serving API key of a protected deployment; every engine then rejects a ``/v1`` request
+    without it. vLLM takes it from its environment, because it logs its command-line arguments at start-up;
+    SGLang has only the flag, and prints it in its own container log.
     """
+    check_protectable(services, api_key)
     compose = "services:\n"
     proxy_lines = "".join(f"\n      - {name}={value}" for name, value in proxy_env(proxy).items()) if proxy else ""
 
@@ -81,8 +92,12 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
         llm = recipe.engine.llm
         model_name = recipe.model_name
         engine_args = build_engine_args(llm, model_name, recipe.model.revision, model_dir=model_dir)
+        if api_key and llm.engine_name == "sglang":
+            engine_args.append(f"--api-key {api_key}")
         command_str = "\n      ".join(engine_args)
         extra_env_lines = "".join(f"\n      - {k}={v}" for k, v in _env_items(llm.extra_env))
+        if api_key and llm.engine_name == "vllm":
+            extra_env_lines += f"\n      - VLLM_API_KEY={api_key}"
         needs_extra_model = any("--speculative-config" in a for a in engine_args)
         hf_home_line = "" if llm.image in baked_images and not needs_extra_model else f"\n      - HF_HOME={model_dir}"
         docker_options_lines = _render_docker_options(llm.docker_options)

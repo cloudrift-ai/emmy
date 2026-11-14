@@ -291,6 +291,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Provisioning** — Obtaining and preparing a machine. This may include creating a cloud VM, installing software,
   and returning connection details.
 - **Deployment** — Placing and starting the application on a machine that is already available.
+- **Protected deployment** — A deployment whose model endpoints reject a request that does not carry the serving
+  API key (`Authorization: Bearer KEY`). The caller supplies the key at deploy time (`--serving-api-key`); without
+  one the deployment is open and answers anyone who can reach its port.
 - **Docker container** — An isolated package containing an application and its dependencies.
 - **Docker Compose** — A configuration format and tool for defining and starting several related containers.
 - **Smoke test** — A quick check that the deployed service starts and can answer a basic request before expensive

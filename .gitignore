@@ -29,6 +29,11 @@ build/
 # Docker Compose generated files
 docker-compose.vllm.yml
 nginx.vllm.conf
+# A local deploy writes these into its recipe directory; they hold the HF token and the serving API key
+recipes/**/docker-compose.yaml
+recipes/**/nginx.conf
+experiments/**/docker-compose.yaml
+experiments/**/nginx.conf
 
 # PyCharm
 .idea

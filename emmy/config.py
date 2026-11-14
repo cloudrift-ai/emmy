@@ -64,6 +64,7 @@ GEN_VISION_GPU = "EMMY_GEN_VISION_GPU"
 GEN_EXPERTS_GPU = "EMMY_GEN_EXPERTS_GPU"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
+SERVING_API_KEY = "EMMY_SERVING_API_KEY"
 WORKERS = "EMMY_WORKERS"
 POOL_DRAW = "EMMY_POOL_DRAW"
 
@@ -149,6 +150,12 @@ def _str(name: str, default: str = "") -> str:
 
 
 # --- Typed getters (read os.environ live) ----------------------------------
+
+
+def serving_api_key() -> str:
+    """The serving API key a deploy protects its endpoints with when ``--serving-api-key`` is not given:
+    ``EMMY_SERVING_API_KEY`` → none (an open deployment)."""
+    return _str(SERVING_API_KEY)
 
 
 def rental_tags() -> list[str]:
