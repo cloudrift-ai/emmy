@@ -207,7 +207,7 @@ def test_packed_channels_read_their_own_result_of_a_shared_producer():
         body=tuple(stmt for edge in weights for stmt in edge.lower(axes=())),
         results=tuple(edge.exposes[0] for edge in weights),
     )
-    node = replace(node, operands=(node.operands[0], producer))
+    node = node.replace(operands=(node.operands[0], producer))
     assert len(node.operands) == 2 and len(node.channel_operands()) == 2
     packed = _packed(node, inputs)[0]
     assert packed is not None

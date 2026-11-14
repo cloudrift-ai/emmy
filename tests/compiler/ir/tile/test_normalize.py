@@ -558,7 +558,6 @@ def test_unread_planar_state_drops_its_independent_coordinate(stored_second) -> 
 
 
 def test_planar_state_pruning_does_not_depend_on_operand_object_sharing() -> None:
-    from dataclasses import replace
 
     stat = reduction(
         K32,
@@ -578,7 +577,7 @@ def test_planar_state_pruning_does_not_depend_on_operand_object_sharing() -> Non
         root = projection((left, right), parse_body("out = add(left, right)"), ("out",))
         return _tile(root, K32, free=(M8,)).op
 
-    assert normalized(stat) == normalized(replace(stat))
+    assert normalized(stat) == normalized(stat.replace())
 
 
 def test_readers_of_independent_shared_statistics_keep_only_their_own_coordinates() -> None:

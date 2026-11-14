@@ -80,8 +80,7 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
     (carrying,) = (site.node for site in tile.sites if site.node.carries)
     lift = carrying.lift
-    changed = replace(
-        carrying,
+    changed = carrying.replace(
         lift=lift.replace(
             body=Body(
                 (
@@ -98,7 +97,7 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
     )
 
     def substitute(term):
-        return changed if term is carrying else replace(term, operands=tuple(substitute(edge) for edge in term.operands))
+        return changed if term is carrying else term.replace(operands=tuple(substitute(edge) for edge in term.operands))
 
     program = replace(tile, op=substitute(tile.op)).register_program
     assert program is not None

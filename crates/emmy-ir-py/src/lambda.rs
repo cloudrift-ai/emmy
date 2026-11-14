@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 
 use emmy_ir::Name;
 use emmy_ir::elementwise::ElementwiseOp;
-use emmy_pure::Lambda;
 use emmy_ir::text::body_lines;
+use emmy_pure::Lambda;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple, PyType};

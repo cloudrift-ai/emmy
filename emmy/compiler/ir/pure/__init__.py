@@ -20,5 +20,6 @@ The invariant these modules exist to state lives in ``ir/ARCHITECTURE.md`` ("Pur
 
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.pure.twist import Channel, Recipe, Twist
 
-__all__ = ["Fold", "Lambda"]
+__all__ = ["Channel", "Fold", "Lambda", "Recipe", "Twist"]

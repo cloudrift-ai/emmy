@@ -7,6 +7,7 @@ use pyo3::types::{PyDict, PyFrozenSet};
 mod body;
 mod convert;
 mod expression;
+mod fold;
 mod fragment;
 mod lambda;
 mod ptx;
@@ -71,6 +72,7 @@ fn emmy_ir_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     body::register(m)?;
     fragment::register(m)?;
     lambda::register(m)?;
+    fold::register(m)?;
     ptx::register(m)?;
     elementwise_tables(m)?;
     Ok(())

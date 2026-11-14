@@ -38,8 +38,7 @@ def _edit(term: Fold, names: dict[str, str]) -> Fold:
             return stmt.replace(input=names[stmt.input], index=tuple(reversed(stmt.index)))
         return stmt
 
-    return replace(
-        term,
+    return term.replace(
         operands=tuple(_edit(operand, names) for operand in term.operands),
         lift=term.lift.replace(body=term.lift.body.map(load)),
     )

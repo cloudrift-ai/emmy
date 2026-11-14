@@ -7,7 +7,6 @@ out of an additive fold, which is what exposes an expectation channel's pattern 
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 
 from emmy.compiler.ir.expression import Expression, Literal, Var, affine_node, affine_sum, affine_terms, apply
 from emmy.compiler.ir.pure import Fold, Lambda
@@ -64,7 +63,7 @@ def _replace(term: Fold, mapping: dict[int, tuple[Fold, dict[int, int]]]) -> Fol
     lead = term.lift.params[:1] if term.axis is not None else ()
     bound = [param or f"_unread{index}" for index, param in enumerate(param for edge in order for param in slots[id(edge)])]
     params = (*lead, *bound, *term.lift.params[len(lead) + len(term.bindings) :])
-    return replace(term, operands=operands, lift=term.lift.rename(aliases).replace(params=params))
+    return term.replace(operands=operands, lift=term.lift.rename(aliases).replace(params=params))
 
 
 def _varies(fold: Fold, name: str, bound: dict[str, Fold]) -> bool:
@@ -122,7 +121,7 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
         body=Body((*kept, Assign(result, product))),
         results=(result,),
     )
-    inner = replace(fold, operands=operands, lift=lift, base=fold.base.rename({state: inner_state}))
+    inner = fold.replace(operands=operands, lift=lift, base=fold.base.rename({state: inner_state}))
     epilogue: list[Statement] = []
     current: Expression = Var(inner_state)
     for index, leaf in enumerate(invariant):
@@ -155,7 +154,7 @@ def _inline(term: Fold, edge: Fold) -> Fold:
             params.extend(p for p, e, _ in term.bindings if e is operand)
             operands.append(operand)
     body = Body((*(stmt for stmt in applied.body if not isinstance(stmt, Load)), *reader.body))
-    return replace(term, operands=tuple(operands), lift=Lambda.closing(tuple(params), body, reader.results))
+    return term.replace(operands=tuple(operands), lift=Lambda.closing(tuple(params), body, reader.results))
 
 
 def _factored(term: Fold, param: str) -> Fold | None:
@@ -183,7 +182,7 @@ def _factored(term: Fold, param: str) -> Fold | None:
             against = affine_sum([(1.0, Var(score.name)), own[0]], 0.0, False)
             split = stmt.replace(value=stmt.value.rebuild(lambda e, sum_=sum_, against=against: against if e == sum_ else e))
             body = Body((*lift.body[:index], score, split, *lift.body[index + 1 :]))
-            return replace(term, lift=Lambda(lift.params, body, lift.results))
+            return term.replace(lift=Lambda(lift.params, body, lift.results))
     return None
 
 

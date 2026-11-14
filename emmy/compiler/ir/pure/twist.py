@@ -29,145 +29,41 @@ not.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
+import emmy.emmy_ir as _ir
 from emmy.compiler.ir.expression import Var, apply
+from emmy.compiler.ir.pure._fields import MISSING, declare
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Let, Statement
 
-
-@dataclass(frozen=True)
-class Channel:
-    """One state of the fused carrier beyond the pivot's.
-
-    ``injection`` is what the state is at the injected singleton, over ``(score, *extras)`` — the
-    pivot IS the score there, and the recipe's author has already simplified the map at that point
-    (``exp(s − s)`` is ``1``). With a ``pattern``, the state is a dependent fold's own, fused: the
-    per-element map that fold's lift must spell, over the roles ``(score, pivot, *extras)`` — the
-    extras operand-bound values, a streamed row or a scalar read from a buffer (Welford's ``1/N``)
-    alike. Without one, the state is one the two-pass form never had (Welford's count and running
-    mean): ``name`` suffixes the fused channel's state name, ``init`` seeds it."""
-
-    injection: Lambda
-    pattern: Lambda | None = None
-    name: str = ""
-    init: float = 0.0
-
-
-@dataclass(frozen=True)
-class Twist:
-    """One :class:`Recipe` INSTANTIATED on a term — the schema, plus which channel each of the
-    term's carried states is.
-
-    A recipe states its algebra over ROLE names: ``lift``'s params are ``(score, *extras)``, and
-    every channel's ``pattern`` and ``injection`` binds those same roles. What a TERM calls each of
-    them is read off the term (``Fold.roles``), never stored, so this holds no name and renames
-    with nothing. ``channels`` says which recipe channel each carried state past the pivot is — the
-    carrier grows one state per fusion, so its order is the order the tree was fused in and not the
-    recipe's — and it is what lets a fold DERIVE both halves it does not store: the stable ⊕
-    (:meth:`program`) and the ψ-image of its own lift (:meth:`inject`).
-
-    EMPTY ``channels`` says the term folds no per-element contribution at all: a cross-CTA split's
-    partial merge reads finished carrier states out of a workspace, so ψ has already been applied to
-    every one of them and it names the recipe only to reach the same ⊕ they were produced under.
-    """
-
-    recipe: Recipe
-    channels: tuple[int, ...]
-
-    @property
-    def name(self) -> str:
-        return self.recipe.name
-
-    def program(self, states: tuple[str, ...]) -> Lambda:
-        """``combine`` over these state names — ``psi(psi_inv(x) base psi_inv(y))``, in the stable
-        spelling the recipe authored (:meth:`Recipe.program`)."""
-        return self.recipe.program(states)
-
-    def inject(self, roles: tuple[str, ...], states: tuple[str, ...]) -> Lambda:
-        """``psi ∘ lift`` at the singleton — the score, then one channel injection per carried state
-        past the pivot — over ``roles``, this term's spelling of ``Recipe.lift``'s params in order.
-        A role the term never bound is simply absent from the tail, and an injection that reads one
-        raises rather than guessing.
-
-        Written out by the recipe's AUTHORED injections rather than by evaluating ``psi`` on the
-        base contribution: at the singleton the pivot IS the score, so ``psi`` divides each channel
-        by a factor the contribution already carries (softmax's ``exp(s)·v ↦ v``), and evaluating
-        the two apart denotes ``exp(s)`` and overflows. That simplification is exactly what a
-        channel's ``injection`` states, so lowering reads it instead of computing it.
-        """
-        spelled = dict(zip(self.recipe.lift.params, roles, strict=False))  # a role the term never bound stays absent
-        body: list[Statement] = []
-        results = [roles[0]]
-        for state, index in zip(states[1:], self.channels, strict=True):
-            injection = self.recipe.channels[index].injection
-            names = {param: spelled[param] for param in injection.params}
-            names.update((stmt.name, f"{state}__{stmt.name}") for stmt in injection.body)
-            instance = injection.rename(names)
-            body.extend(instance.body)
-            results.extend(instance.results)
-        return Lambda(params=roles, body=Body(tuple(body)), results=tuple(results))
-
-
-@dataclass(frozen=True)
-class Recipe:
-    """A twisted monoid as data. ``base`` names the componentwise ⊕ of every carrier state — the
-    pivot's first, then one per channel in recipe order — and ``lift`` is the base's per-element
-    contribution over ``(score, *extras)``; ``psi`` / ``psi_inv`` conjugate it onto the carrier.
-    The ``channels`` are every state beyond the pivot's, matched to a dependent fold or kept by the
-    recipe, and the fused ⊕ program takes one of two spellings. ``advance`` / ``scale`` serve any
-    channel count: ``advance`` takes the pivot pair ``(g, g′)`` to the advanced pivot and the
-    factor each side takes for the move, ``scale`` takes one channel's value and its factor
-    ``(s, factor)`` to the value at the advanced pivot, and a channel merges as the base ⊕ of the
-    two scaled sides — the ONE ⊕ every channel of that spelling shares, since the program is built
-    at an open channel count. A side already AT the advanced pivot takes the identity factor and needs
-    no scaling — which is what lets a chunk tier fold a chunk's contribution straight into the
-    carrier once the carrier is scaled. ``combine`` is one lambda over every state pair in role
-    order — pivot, then the channels, then the same with ``__o`` — for a carrier of fixed arity.
-    Applied by the one generic algorithm, :meth:`Fold.fuse`."""
-
-    name: str
-    base: tuple[str, ...]
-    lift: Lambda
-    psi: Lambda
-    psi_inv: Lambda
-    channels: tuple[Channel, ...]
-    advance: Lambda | None = None
-    scale: Lambda | None = None
-    combine: Lambda | None = None
-
-    @property
-    def pivot(self) -> str:
-        """The pivot's ⊕ — the base monoid's first component."""
-        return self.base[0]
-
-    def program(self, states: tuple[str, ...]) -> Lambda:
-        """The fused ⊕ over these state names — ``S × S → S``, the second operand ``<n>__o``. Temps
-        are namespaced on the second pivot's name, so two merges into one state never collide. The
-        advance/scale spelling: the advance over the pivot pair, each channel's two sides scaled by
-        their factors and joined by the channel's base ⊕, the pivot written last (the channels
-        read the old pivot through the factors)."""
-        other = tuple(f"{name}__o" for name in states)
-        key = other[0]
-        if self.combine is not None:
-            roles = self.combine.results
-            names = dict(zip((*roles, *(f"{role}__o" for role in roles)), (*states, *other), strict=True))
-            return self.combine.rename(lambda name: names.get(name, f"{key}__{name}"))
-        roles = dict(zip(self.advance.params, (states[0], key), strict=True))
-        advance = self.advance.rename(lambda name: roles.get(name, f"{key}__{name}"))
-        pivot, *factors = advance.results
-        body = list(advance.body)
-        (op,) = set(self.base[1:])  # one channel ⊕ for the open-count spelling
-        for state, second in zip(states[1:], other[1:], strict=True):
-            sides = []
-            for side, factor, tag in ((state, factors[0], "sa"), (second, factors[1], "sb")):
-                names = dict(zip(self.scale.params, (side, factor), strict=True))
-                names[self.scale.results[0]] = f"{key}__{state}_{tag}"
-                body.extend(self.scale.rename(lambda name, names=names, state=state: names.get(name, f"{key}__{state}_{name}")).body)
-                sides.append(names[self.scale.results[0]])
-            body.append(Assign(state, apply(op, *sides)))
-        body.append(Assign(states[0], Var(pivot)))
-        return Lambda(params=states + other, body=Body(body), results=states)
+# The types are the ``emmy-pure`` crate's: a ``Channel`` is one state of the fused carrier beyond the pivot's (its
+# ``injection`` at the singleton over ``(score, *extras)``; with a ``pattern`` the per-element map over
+# ``(score, pivot, *extras)`` a dependent fold's lift must spell, without one a state the two-pass form never had,
+# suffixed ``name`` and seeded ``init``). A ``Recipe`` is the twisted monoid as data — ``base`` the componentwise ⊕ of
+# every state, ``lift`` its per-element contribution over ``(score, *extras)``, ``psi`` / ``psi_inv`` the conjugation,
+# the fused ⊕ as ``advance`` / ``scale`` at an open channel count or one ``combine`` — and ``program(states)`` the
+# fused ⊕ over a carrier's state names. A ``Twist`` is a recipe instantiated on a term: ``channels`` says which recipe
+# channel each carried state past the pivot is; ``program`` and ``inject`` derive the two halves a fold does not store.
+# The recipes themselves are defined here, in Python.
+Channel = _ir.Channel
+Recipe = _ir.Recipe
+Twist = _ir.Twist
+_LAMBDA_OR_NONE = Lambda | None
+declare(Channel, (("injection", Lambda, MISSING), ("pattern", _LAMBDA_OR_NONE, None), ("name", str, ""), ("init", float, 0.0)))
+declare(
+    Recipe,
+    (
+        ("name", str, MISSING),
+        ("base", tuple[str, ...], MISSING),
+        ("lift", Lambda, MISSING),
+        ("psi", Lambda, MISSING),
+        ("psi_inv", Lambda, MISSING),
+        ("channels", tuple[Channel, ...], MISSING),
+        ("advance", _LAMBDA_OR_NONE, None),
+        ("scale", _LAMBDA_OR_NONE, None),
+        ("combine", _LAMBDA_OR_NONE, None),
+    ),
+)
+declare(Twist, (("recipe", Recipe, MISSING), ("channels", tuple[int, ...], MISSING)))
 
 
 def _lam(params: tuple[str, ...], body: tuple[Statement, ...], *results: str) -> Lambda:

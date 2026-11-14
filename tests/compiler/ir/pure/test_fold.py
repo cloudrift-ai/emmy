@@ -16,8 +16,6 @@ serial step is the instance at the injected singleton.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from emmy.compiler.dim import Dim
@@ -366,9 +364,8 @@ def test_fusing_a_shared_dependent_reuses_only_an_equal_carried_state(name, conf
     axes = {axis.name: axis for axis in SCOPE}
     pivot = denominator.fuse(SOFTMAX, axes)
     if conflict == "injection":
-        pivot = replace(pivot, lift=pivot.lift.replace(body=parse_body("let one = 2.0")))
-    dependent = replace(
-        denominator,
+        pivot = pivot.replace(lift=pivot.lift.replace(body=parse_body("let one = 2.0")))
+    dependent = denominator.replace(
         operands=(score, pivot),
         init=(1.0,) if conflict == "seed" else (0.0,),
         base=Lambda.componentwise(("add",), (name,)),
@@ -403,8 +400,7 @@ def test_shared_twisted_state_equality_compares_bound_operand_values(parameter, 
     )
     axes = {axis.name: axis for axis in SCOPE}
     pivot = expectation.fuse(SOFTMAX, axes)
-    dependent = replace(
-        expectation,
+    dependent = expectation.replace(
         operands=(score, pivot, slab(parameter, buffer, "k", "n")),
         lift=expectation.lift.rename({"v": parameter}).replace(params=("k", "score", "maximum", "unused", parameter)),
     )
@@ -541,7 +537,7 @@ def test_a_consumer_names_what_it_binds_and_rendering_spells_the_operand() -> No
     assert fold.bindings == (("value", y, 0),) and fold.applied.params == ("k", "y")
     (loop,) = fold.lower(axes=SCOPE)
     assert [str(stmt.value) for stmt in loop.body if isinstance(stmt, Assign)] == ["y"]
-    spelled = replace(fold, lift=lift.rename({"value": "y"}))
+    spelled = fold.replace(lift=lift.rename({"value": "y"}))
     assert fold.canonical() == spelled.canonical() and fold.lower(axes=SCOPE) == spelled.lower(axes=SCOPE)
     # A projection passing the state through exposes the state's own name, and its store follows.
     passthrough = Fold(operands=(fold,), lift=Lambda(params=("total",), body=Body(()), results=("total",)))

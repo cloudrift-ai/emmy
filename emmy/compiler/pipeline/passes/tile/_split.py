@@ -135,7 +135,7 @@ def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
         ]
         results = [f"{score}__in", *channels]
     body = Body((*fold.lift.body, *stmts))
-    return replace(fold, lift=Lambda.closing(fold.lift.params, body, tuple(results)))
+    return fold.replace(lift=Lambda.closing(fold.lift.params, body, tuple(results)))
 
 
 def _direct_atomic_output(outputs) -> str | None:
@@ -591,7 +591,7 @@ def _slice_fold(fold: Fold, axis: Axis, width: int, split: Axis) -> tuple[Axis, 
     # piece whose head IS such a masked reduce makes the split pass offer ``g<n>k`` on it, and greedy
     # prices a fork by materializing every arm, so merely OFFERING the split raised.
     lift = Lambda.closing(fold.lift.params, body, fold.lift.results)
-    return sliced_axis, _masked(replace(fold, operands=operands, lift=lift), axis, offset)
+    return sliced_axis, _masked(fold.replace(operands=operands, lift=lift), axis, offset)
 
 
 def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpression]:
@@ -630,7 +630,7 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | No
     # moved with the hash seed and ``_prune_unread`` then dropped a param the body still read.
     # Closing keeps the prefix exactly and appends the partition coordinate where a coordinate sits.
     lift = Lambda.closing(edge.lift.params, body, edge.lift.results)
-    return replace(edge, operands=ops, lift=lift)
+    return edge.replace(operands=ops, lift=lift)
 
 
 def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, Fold]:
@@ -658,7 +658,7 @@ def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, F
     # param — where a coordinate already sits, and past the operand correspondence.
     body = Body(tuple(stmt.substitute(Sigma({node.axis: position})) for stmt in node.lift.body))
     lift = Lambda.closing(node.lift.params, body, node.lift.results)
-    return ksplit, kslice, _masked(replace(node, operands=operands, lift=lift), k_axis, position)
+    return ksplit, kslice, _masked(node.replace(operands=operands, lift=lift), k_axis, position)
 
 
 # ---- the piece / fragment builders ------------------------------------------------------------ #
@@ -783,7 +783,7 @@ def _rebind(term: Fold, node: Fold, replacement: Fold) -> Fold:
     if term is node:
         return replacement
     operands = tuple(_rebind(edge, node, replacement) for edge in term.operands)
-    return term if operands == term.operands else replace(term, operands=operands)
+    return term if operands == term.operands else term.replace(operands=operands)
 
 
 def output_root(root: Node, outputs: set[str]) -> Node:

@@ -10,7 +10,6 @@ slow kernel, and no numerics assert downstream would attribute the wrong answer 
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from textwrap import indent
 
 import pytest
@@ -97,7 +96,7 @@ def test_a_weight_may_read_only_its_own_operand_coordinates(coordinate, contract
         ev = multiply(e, v)
         """
     )
-    carrier = replace(carrier, lift=Lambda.closing(carrier.lift.params, body, carrier.lift.results))
+    carrier = carrier.replace(lift=Lambda.closing(carrier.lift.params, body, carrier.lift.results))
     assert (carrier.as_contraction() is not None) == contracts
 
 
@@ -214,7 +213,7 @@ def test_twist_compares_operand_values_independently_of_coordinate_parameter_ord
         # The same load can close its captured coordinates in either order. Neither order is
         # an index permutation; changing the actual coordinates must still reject the recipe.
         if suffix:
-            weights = replace(weights, lift=weights.lift.replace(params=tuple(reversed(weights.lift.params))))
+            weights = weights.replace(lift=weights.lift.replace(params=tuple(reversed(weights.lift.params))))
         values = slab(f"x{suffix}", "x", "k" if suffix and different == "coordinate" else "row", "d")
         return contraction("d", values, (weights, f"score{suffix}"))
 
