@@ -481,25 +481,31 @@ What the session changes for the milestones:
      runs out of device memory at load, and under the 64-row kernel's recorded route one piece does not finish in
      80 s. This is a cut problem and reproduces off the card at sm_120 lowering. Done when the 256-row program
      compiles to a kernel set whose workspaces fit the standing memory condition and every piece finishes; its rows
-     are then recorded on the card.
+     are then recorded on the card. The compile half is done (#1398); the records are not.
    - **The row cost of the Gated DeltaNet layers falls about 2.4x.** Width alone meets the 197,632-token cell and
      not the 7,680-token one. The layers are 27.7 ms of a 35.9 ms chunk; the in projections and the input norm, the
      state and convolution pieces and `k_slice_unsqueeze_reduce` are the row-bound ones (8's table). A tune on the
      card, at the wide width once it loads.
 
-   The first piece's cause, found off the card on 2026-11-13 from the layer traced with no weights. The reference
-   rule writes each 64-token chunk's output through a slice assignment, and the tracer clamped every source
-   coordinate of such a write outside its region, on the axes that never leave the source too. At 256 rows the
-   output kernel then held four guarded copies of the per-chunk body, each over all 256 rows with its head and
-   position indices tied to the chunk's guard; a cut gave each clamped index a workspace axis of its own and swept
-   every chunk (`[4, 64, 48, 48, 64]` on the unquantized layer, where `[64, 48, 64]` is all that is read). The
-   tracer now clamps only the written axis, and on that layer no cut workspace is above 0.01 GiB. Every stored
-   Gated DeltaNet program was brought onto the new trace and its golden restamped: 16 files, about four kernels
-   re-keyed and 8-20 decisions dropped in each recipe golden, so the recurrence kernels' recorded routes are gone
-   and a strict export of either RTX 5090 recipe stops there until they are recorded again. Not checked: the
-   NVFP4 layer under recorded cuts (it needs the checkpoint), and the piece that did not finish in 80 s. Still
-   open on the same layer: the triangular solve stores all 61 of its steps (0.18 GiB at 256 rows) and only the
-   last is read.
+   The first piece loads since #1398 (2026-11-13): a program wider than one chunk traces the delta rule with the
+   scan carrying only the state, and the 256-row NVFP4 layer lowers at sm_120 with no workspace above 0.18 GiB (the
+   stored steps of the triangular solve, which exist once a program because scratch is packed by liveness). A
+   second fix for the same fault, a tracer that clamps only the written axis of a slice write, was built and
+   dropped: on top of #1398 it changes no workspace, and it re-keys the Gated DeltaNet kernels of 16 goldens on
+   seven cards. Keeping only the last step of the solve was tried and reverted too: the shared-memory schedule of
+   the solve needs every step stored at its own index, and without it the 16-row solve went from 59 to 214 us.
+
+   What a rented RTX 5090 measured on 2026-11-14, on the trace before #1398, so no row of it is in a golden. The
+   256-row layer's slow picks are a search problem, not a width problem: the main output kernel is 22.6 ms as
+   the priors pick it and 0.84 ms after a 60-schedule tune of each of its fourteen heavy cut pieces (0.4-4 ms
+   each before, 8-160 us after); the solve is 21 ms as picked and 0.14 ms tuned; `k_matmul` at 256 rows 1.9 ms
+   and 13 us. Every heavy piece refuses a plain `--tune` (it is cut again) and tunes under `PLACE=fuse`. The
+   pieces to record again on #1398's trace are the same ones, and the same steps apply: bench the root so its
+   routing rows land in the tune DB, record the kernel set through a seed row on the root, tune each piece above
+   about 25 us by name, record again. Each `emmy run` on the 79-program working golden spends about 13 minutes
+   on one core before it benches, so the rows go in parallel streams. Not recorded: the two 256-row attention
+   targets (7.2 ms a layer as picked; their strict record stops at a second cut fork), and no first token was
+   timed at 256 rows.
 
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.

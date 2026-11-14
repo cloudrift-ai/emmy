@@ -841,35 +841,6 @@ def test_trace_rejects_in_place_write_to_input_parameter_or_buffer():
 
 
 @pytest.mark.parametrize(
-    ("write", "source_axes"),
-    [(lambda x, cache: cache[:, 1:3].copy_(x[:, :2]), (0, 1)), (lambda x, cache: cache[:, 2].copy_(x[:, 0]), (0,))],
-    ids=["slice", "select"],
-)
-def test_trace_slice_write_clamps_only_the_written_axis(write, source_axes):
-    """A write through a slice or a select reads its source at the output's own coordinate on every axis but the
-    written one: only that axis's coordinate can leave the source outside the region, so it alone carries the
-    region's predicate. A clamp on the other axes would tie them to the written axis in every kernel the write
-    fuses into."""
-    import torch
-    import torch.nn as nn
-
-    from emmy.compiler.ir.expression import placeholder
-    from emmy.compiler.ir.tensor.ir import IndexMapOp
-    from emmy.compiler.trace.torch import trace_module_functional
-
-    class Write(nn.Module):
-        def forward(self, x, cache):
-            write(x, cache)
-            return cache.sum(-1)
-
-    graph, _ = trace_module_functional(Write(), (torch.randn(4, 4), torch.randn(4, 4)))
-    (region,) = [s for n in graph.nodes.values() if isinstance(n.op, IndexMapOp) for s in n.op.sources if s.select is not None]
-    assert region.select.free_vars() == {placeholder(1).name}
-    plain = [axis for axis, coord in zip(source_axes, region.coord_map, strict=True) if coord == placeholder(axis)]
-    assert plain == [0]
-
-
-@pytest.mark.parametrize(
     "write",
     [
         lambda x, cache: x.add_(1),

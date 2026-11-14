@@ -1306,12 +1306,17 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         if start >= end:  # an empty region leaves the base as it was
             node_map[name] = input_ids[0]
             return
-        # The region is the scattered axis's range. Only that axis's source coordinate can leave the source outside
-        # the region, so it alone clamps to 0, as backends may evaluate both sources.
-        coord = placeholder(dim)
-        select = BinaryExpression("&&", BinaryExpression(">=", coord, Literal(start, "int")), coord.lt(Literal(end, "int")))
+        # The region is a rectangle over every axis, its predicate seeded with a boolean literal; a source
+        # coordinate outside it clamps to 0, as backends may evaluate both sources.
+        select = Literal(True, "bool")
+        for axis, extent in enumerate(base_shape):
+            lo, hi = (start, end) if axis == dim else (0, extent)
+            coord = placeholder(axis)
+            select = BinaryExpression(
+                "&&", select, BinaryExpression("&&", BinaryExpression(">=", coord, Literal(lo, "int")), coord.lt(Literal(hi, "int")))
+            )
         src_coords = [
-            TernaryExpression(select, coord - Literal(start, "int") if start else coord, Literal(0, "int")) if a == dim else placeholder(a)
+            TernaryExpression(select, placeholder(a) - Literal(start, "int") if a == dim and start else placeholder(a), Literal(0, "int"))
             for a in range(len(base_shape))
             if not (a == dim and op_name == "select_scatter")
         ]
