@@ -16,6 +16,7 @@ import functools
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -94,11 +95,16 @@ def version() -> str:
     return hashlib.sha1(text.encode()).hexdigest()[:12]
 
 
+#: The version of how a cubin is assembled from its text, part of the cache's key: a change to it (the one-wave
+#: directive dropped where ptxas spills) re-assembles every kernel.
+_ASSEMBLY = "2"
+
+
 def _cubin_key(source: str, arch: str) -> str:
     """Content address of a cubin: identical PTX text, target and ptxas give the same cubin, so the persistent cache
     is safe to share across (even concurrent) runs."""
     h = hashlib.sha1()
-    for part in (source, arch, version()):
+    for part in (source, arch, version(), _ASSEMBLY):
         h.update(part.encode())
         h.update(b"\0")
     return h.hexdigest()
@@ -117,9 +123,23 @@ def compile_to_cubin(source: str, name: str, *, arch: str) -> Path:
     with tempfile.TemporaryDirectory(dir=cache) as td:
         text, cubin = Path(td) / "k.ptx", Path(td) / "k.cubin"
         text.write_text(source)
-        subprocess.run([_ptxas(), f"-arch={arch}", "-m64", "-o", str(cubin), str(text)], check=True, capture_output=True)
+        if _assemble(text, cubin, arch) and _ONE_WAVE in source:
+            # Told the launch is one wave, ptxas spends every register a thread may hold, and a kernel whose
+            # registers already near that cap then spills: without the directive it keeps its own choice.
+            text.write_text(source.replace(_ONE_WAVE, ""))
+            _assemble(text, cubin, arch)
         os.replace(cubin, out)  # atomic publish
     return out
+
+
+#: The directive the PTX compiler states for a launch of one wave.
+_ONE_WAVE = ".minnctapersm 1\n"
+
+
+def _assemble(text: Path, cubin: Path, arch: str) -> bool:
+    """Assemble ``text`` into ``cubin``; whether ptxas spilled registers to local memory."""
+    run = subprocess.run([_ptxas(), f"-arch={arch}", "-m64", "-v", "-o", str(cubin), str(text)], check=True, capture_output=True)
+    return any(int(spill) > 0 for spill in re.findall(rb"(\d+) bytes spill stores", run.stdout + run.stderr))
 
 
 def compile_kernel(source: str, name: str, *, arch_specific: bool) -> Path:
