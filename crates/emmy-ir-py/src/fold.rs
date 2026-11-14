@@ -11,16 +11,30 @@ use std::sync::OnceLock;
 use emmy_ir::Name;
 use emmy_pure::Lambda;
 use emmy_pure::fold::{Data, Fold, Parts, Seed};
+use emmy_pure::lower::Store;
 use emmy_pure::twist::{Channel, Recipe, RecipeData, Twist};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyFrozenSet, PyInt, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyFrozenSet, PyInt, PyString, PyTuple, PyType};
 
+use crate::body::PyBody;
 use crate::body::{Table, purge, tables};
-use crate::convert::{ELEMENTWISE, Imported, IntoPyErr, name_from_py, str_tuple};
+use crate::convert::{
+    ELEMENTWISE, Imported, IntoPyErr, axis_from_py, expression_from_py, name_from_py, op_to_py,
+    statement_from_py, str_tuple,
+};
 use crate::lambda::PyLambda;
 
 static WEAKREF: Imported = Imported::new("weakref", "ref");
+static CONTRACTION_VIEW: Imported = Imported::new("emmy.compiler.ir.pure.fold", "ContractionView");
+static REDUCTION_VIEW: Imported = Imported::new("emmy.compiler.ir.pure.fold", "ReductionView");
+static SLAB_VIEW: Imported = Imported::new("emmy.compiler.ir.pure.fold", "SlabView");
+static AFFINE_VIEW: Imported = Imported::new("emmy.compiler.ir.pure.fold", "AffineView");
+static EXTENTS: Imported = Imported::new("emmy.compiler.ir.pure.fold", "EXTENTS");
+
+fn names_of(value: &Bound<'_, PyAny>) -> PyResult<Vec<Name>> {
+    names(Some(value))
+}
 
 static FOLDS: OnceLock<Table<Data, Py<PyAny>>> = OnceLock::new();
 static RECIPES: OnceLock<Table<RecipeData, Py<PyAny>>> = OnceLock::new();
@@ -511,6 +525,9 @@ pub struct PyFold {
     exposes: OnceLock<Py<PyTuple>>,
     bindings: OnceLock<Py<PyTuple>>,
     free_axes: OnceLock<Py<PyFrozenSet>>,
+    contraction: OnceLock<Option<Py<PyAny>>>,
+    reduction: OnceLock<Option<Py<PyAny>>>,
+    step: OnceLock<Py<PyBody>>,
 }
 
 impl PyFold {
@@ -523,6 +540,9 @@ impl PyFold {
             exposes: OnceLock::new(),
             bindings: OnceLock::new(),
             free_axes: OnceLock::new(),
+            contraction: OnceLock::new(),
+            reduction: OnceLock::new(),
+            step: OnceLock::new(),
         }
     }
 
@@ -851,6 +871,319 @@ impl PyFold {
         Ok(Some(
             PyFold::lift_object(slf)?.getattr("body")?.get_item(0)?,
         ))
+    }
+
+    /// This term restricted to the results `names`.
+    fn exposing<'py>(
+        &self,
+        py: Python<'py>,
+        names: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyFold>> {
+        let names = names_of(names)?;
+        let narrowed = self.fold.exposing(&names).py()?;
+        PyFold::wrap(py, &narrowed)
+    }
+
+    /// The singleton the ⊕ folds: the applied lift.
+    #[getter]
+    fn injected<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyLambda>> {
+        self.applied(py)
+    }
+
+    /// The lift in base coordinates, for recognition only.
+    fn based<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyLambda>> {
+        PyLambda::wrap(py, self.fold.based().py()?)
+    }
+
+    /// This term's spelling of the recipe's roles, `(score, *extras)`.
+    #[getter]
+    fn roles<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        str_tuple(py, &self.fold.roles().py()?)
+    }
+
+    /// Whether this operand varies over nothing a term evaluated over `axes` does not.
+    fn uniform_leaf(&self, axes: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let axes: std::collections::HashSet<Name> = names_of(axes)?.into_iter().collect();
+        Ok(self.fold.uniform_leaf(&axes))
+    }
+
+    /// Every bilinear channel as `(state, streamed edge, the result of it the product multiplies)`.
+    fn channel_operands<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let operands = PyFold::operands(slf)?;
+        let items: Vec<Bound<'py, PyTuple>> = slf
+            .get()
+            .fold
+            .channel_operands()
+            .py()?
+            .iter()
+            .map(|c| {
+                PyTuple::new(
+                    py,
+                    [
+                        c.state.into_pyobject(py)?.into_any(),
+                        operands.get_item(c.operand)?,
+                        PyString::new(py, &c.name).into_any(),
+                    ],
+                )
+            })
+            .collect::<PyResult<_>>()?;
+        PyTuple::new(py, items)
+    }
+
+    /// Every bilinear channel as `(state, streamed edge)`.
+    fn bilinear_channels<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let operands = PyFold::operands(slf)?;
+        let items: Vec<Bound<'py, PyTuple>> = slf
+            .get()
+            .fold
+            .bilinear_channels()
+            .py()?
+            .iter()
+            .map(|(state, operand)| {
+                PyTuple::new(
+                    py,
+                    [
+                        state.into_pyobject(py)?.into_any(),
+                        operands.get_item(*operand)?,
+                    ],
+                )
+            })
+            .collect::<PyResult<_>>()?;
+        PyTuple::new(py, items)
+    }
+
+    /// The `ContractionView` of one channel of this term, or `None`.
+    fn as_contraction<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        if let Some(held) = self.contraction.get() {
+            return Ok(held.as_ref().map(|v| v.bind(py).clone()));
+        }
+        let view = match self.fold.as_contraction().py()? {
+            None => None,
+            Some(c) => {
+                let set = |names: &std::collections::HashSet<Name>| {
+                    PyFrozenSet::new(py, names.iter().map(|n| PyString::new(py, n)))
+                };
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("axis", PyString::new(py, &c.axis))?;
+                kwargs.set_item("left_axes", set(&c.left_axes)?)?;
+                kwargs.set_item("right_axes", set(&c.right_axes)?)?;
+                kwargs.set_item("shared_axes", set(&c.shared_axes)?)?;
+                kwargs.set_item("product", op_to_py(py, &c.product)?)?;
+                kwargs.set_item("plus", op_to_py(py, &c.plus)?)?;
+                kwargs.set_item("b_trans", c.b_trans)?;
+                kwargs.set_item("channel", c.channel)?;
+                Some(CONTRACTION_VIEW.get(py)?.call((), Some(&kwargs))?.unbind())
+            }
+        };
+        let view = self.contraction.get_or_init(|| view);
+        Ok(view.as_ref().map(|v| v.bind(py).clone()))
+    }
+
+    /// Whether an atom tier could fold this term whole.
+    fn tiles_whole(&self) -> PyResult<bool> {
+        self.fold.tiles_whole().py()
+    }
+
+    /// Whether the recipe this twisted carrier names lets a tier fold it chunk by chunk.
+    fn chunked(&self) -> PyResult<bool> {
+        self.fold.chunked().py()
+    }
+
+    /// The operand edge a tier streams along this carrier's axis.
+    #[getter]
+    fn streamed<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let index = slf.get().fold.streamed().py()?;
+        PyFold::operands(slf)?.get_item(index)
+    }
+
+    /// This carrier as one fold per carried state under a projection, or `None`.
+    fn per_state<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyFold>>> {
+        self.fold
+            .per_state()
+            .py()?
+            .map(|f| PyFold::wrap(py, &f))
+            .transpose()
+    }
+
+    /// The `ReductionView` of this term, or `None`.
+    fn as_reduction<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        if let Some(held) = self.reduction.get() {
+            return Ok(held.as_ref().map(|v| v.bind(py).clone()));
+        }
+        let view = match self.fold.as_reduction().py()? {
+            None => None,
+            Some(r) => {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("axis", PyString::new(py, &r.axis))?;
+                kwargs.set_item("states", str_tuple(py, &r.states)?)?;
+                kwargs.set_item("other", str_tuple(py, &r.other)?)?;
+                kwargs.set_item("terms", str_tuple(py, &r.terms)?)?;
+                let ops = match &r.ops {
+                    None => py.None().into_bound(py),
+                    Some(ops) => PyTuple::new(
+                        py,
+                        ops.iter()
+                            .map(|op| op_to_py(py, op))
+                            .collect::<PyResult<Vec<_>>>()?,
+                    )?
+                    .into_any(),
+                };
+                kwargs.set_item("ops", ops)?;
+                Some(REDUCTION_VIEW.get(py)?.call((), Some(&kwargs))?.unbind())
+            }
+        };
+        let view = self.reduction.get_or_init(|| view);
+        Ok(view.as_ref().map(|v| v.bind(py).clone()))
+    }
+
+    /// The `SlabView` of this term — its one gmem read — or `None`.
+    fn as_slab<'py>(slf: &Bound<'py, Self>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let Some(load) = PyFold::_slab_load(slf)? else {
+            return Ok(None);
+        };
+        let kwargs = PyDict::new(slf.py());
+        kwargs.set_item("load", load)?;
+        Ok(Some(SLAB_VIEW.get(slf.py())?.call((), Some(&kwargs))?))
+    }
+
+    /// Whether this term is one value for the whole kernel.
+    fn scalar(&self) -> bool {
+        self.fold.scalar()
+    }
+
+    /// The `AffineView` of this carried state, or `None`.
+    fn affine<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let Some(a) = self.fold.affine().py()? else {
+            return Ok(None);
+        };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("state", PyString::new(py, &a.state))?;
+        kwargs.set_item("mixed", a.mixed)?;
+        kwargs.set_item("kept", a.kept)?;
+        Ok(Some(AFFINE_VIEW.get(py)?.call((), Some(&kwargs))?))
+    }
+
+    /// One gmem read as a term.
+    #[classmethod]
+    fn slab<'py>(
+        _cls: &Bound<'py, PyType>,
+        load: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyFold>> {
+        let py = load.py();
+        PyFold::wrap(py, &Fold::slab(statement_from_py(load)?).py()?)
+    }
+
+    /// A read of a carried state as a term.
+    #[classmethod]
+    fn carrier_read<'py>(
+        _cls: &Bound<'py, PyType>,
+        read: &Bound<'py, PyAny>,
+        axis: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyFold>> {
+        let py = read.py();
+        PyFold::wrap(
+            py,
+            &Fold::carrier_read(statement_from_py(read)?, name_from_py(axis)?).py()?,
+        )
+    }
+
+    /// The combine applied at `(state, other)` as loop-IR statements.
+    fn merge<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        PyBody::wrap(py, &self.fold.merge(&names_of(other)?).py()?)
+    }
+
+    /// The per-step statements this fold derives.
+    fn step<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBody>> {
+        if let Some(held) = self.step.get() {
+            return Ok(held.bind(py).clone());
+        }
+        let body = PyBody::wrap(py, &self.fold.step().py()?)?;
+        Ok(self.step.get_or_init(|| body.unbind()).bind(py).clone())
+    }
+
+    /// This tree with every operand result component no reader reads dropped, `stored` the names the boundary stores
+    /// read.
+    fn pruned<'py>(
+        &self,
+        py: Python<'py>,
+        stored: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyFold>> {
+        PyFold::wrap(py, &self.fold.pruned(&names_of(stored)?).py()?)
+    }
+
+    /// This complete tree normalized under the kernel's boundary stores: `values` the names they write, `reads` every
+    /// name they read. The fixpoint is remembered on the result per stored set.
+    fn normalized<'py>(
+        &self,
+        py: Python<'py>,
+        values: &Bound<'py, PyAny>,
+        reads: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyFold>> {
+        let result = self
+            .fold
+            .normalized(&names_of(values)?, &names_of(reads)?)
+            .py()?;
+        PyFold::wrap(py, &result)
+    }
+
+    /// Flatten this term to the Loop IR nest the materializer expands, the boundary `stores` (output specs) placed in
+    /// it; `bound` the coordinates the caller binds (`None`: every free coordinate), `axes` the kernel's axis table.
+    /// The symbolic extents the launch binds are read from `EXTENTS`.
+    #[pyo3(signature = (bound = None, stores = None, axes = None))]
+    fn _lower<'py>(
+        &self,
+        py: Python<'py>,
+        bound: Option<&Bound<'py, PyAny>>,
+        stores: Option<&Bound<'py, PyAny>>,
+        axes: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let bound: Option<std::collections::HashSet<Name>> = match bound.filter(|b| !b.is_none()) {
+            None => None,
+            Some(value) => Some(names_of(value)?.into_iter().collect()),
+        };
+        let mut specs = Vec::new();
+        if let Some(stores) = stores.filter(|s| !s.is_none()) {
+            for spec in stores.try_iter()? {
+                let spec = spec?;
+                let sweep: Vec<std::sync::Arc<emmy_ir::axis::Axis>> = spec
+                    .getattr("sweep")?
+                    .try_iter()?
+                    .map(|axis| axis_from_py(&axis?, 0))
+                    .collect::<PyResult<_>>()?;
+                let when = spec.getattr("when")?;
+                specs.push(Store {
+                    write: statement_from_py(&spec.getattr("write")?)?,
+                    sweep,
+                    when: if when.is_none() {
+                        None
+                    } else {
+                        Some(expression_from_py(&when)?)
+                    },
+                });
+            }
+        }
+        let axes: Vec<std::sync::Arc<emmy_ir::axis::Axis>> = match axes.filter(|a| !a.is_none()) {
+            None => Vec::new(),
+            Some(value) => value
+                .try_iter()?
+                .map(|axis| axis_from_py(&axis?, 0))
+                .collect::<PyResult<_>>()?,
+        };
+        let extents: std::collections::HashSet<Name> =
+            names_of(&EXTENTS.get(py)?.call_method0("get")?)?
+                .into_iter()
+                .collect();
+        let body = self
+            .fold
+            .lower(bound.as_ref(), &specs, &axes, &extents)
+            .py()?;
+        PyBody::wrap(py, &body)
     }
 
     /// This term with some of its parts replaced, formed and checked like any other.

@@ -4,6 +4,9 @@
 
 pub mod fold;
 pub mod lambda;
+pub mod lower;
+pub mod readings;
+pub mod tree;
 pub mod twist;
 
 pub use fold::Fold;

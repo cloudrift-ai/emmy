@@ -1,7 +1,7 @@
 """The canonical Tile IR tree — what formation states about a term and what only the whole tree
 can: ``TileOp.__post_init__`` (an elided unit row recovered from the stores, a shared store sweep
 promoted to a free axis, the identity projection dissolved), the bilinear form the lift builds
-(cone operands, orientation, one shared A), and ``_share_common_cones`` restoring one object per
+(cone operands, orientation, one shared A), and the cone-sharing pass restoring one object per
 value."""
 
 from __future__ import annotations
@@ -15,8 +15,7 @@ from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write, parse_body
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.normalize import _share_common_cones
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, normalize_fold_tree
 from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
@@ -922,7 +921,7 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
 
     def rooted(second: Fold) -> Fold:
         root = projection((consumer(cone("l1", "p1"), "u"), consumer(second, "v")), parse_body("w = add(u, v)"), ("w",))
-        return _share_common_cones(root)
+        return normalize_fold_tree(root)
 
     unified = rooted(cone("l2", "p2"))
     assert unified.operands[0].operands[0] is unified.operands[1].operands[0]

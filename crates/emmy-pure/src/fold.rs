@@ -95,6 +95,8 @@ pub struct Data {
     combine: OnceLock<Option<Lambda>>,
     free_axes: OnceLock<HashSet<Name>>,
     canonical: OnceLock<Fold>,
+    readings: crate::readings::Memos,
+    normal: std::sync::Mutex<Vec<Vec<Name>>>,
 }
 
 /// The stored parts of a term, what [`Fold::new`] forms one from.
@@ -505,6 +507,8 @@ impl Fold {
             combine: OnceLock::new(),
             free_axes: OnceLock::new(),
             canonical: OnceLock::new(),
+            readings: crate::readings::Memos::default(),
+            normal: std::sync::Mutex::new(Vec::new()),
         }))
     }
 
@@ -524,6 +528,29 @@ impl Fold {
     /// The shared data: what a table keyed per term holds a weak handle on.
     pub fn arc(&self) -> &Arc<Data> {
         &self.0
+    }
+
+    /// Whether this tree is known to be its own normal form under the stored names `key` (sorted).
+    pub(crate) fn normal_under(&self, key: &[Name]) -> bool {
+        self.0
+            .normal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|k| k == key)
+    }
+
+    /// Remember that this tree is its own normal form under the stored names `key` (sorted).
+    pub(crate) fn remember_normal(&self, key: Vec<Name>) {
+        let mut normal = self.0.normal.lock().unwrap_or_else(|e| e.into_inner());
+        if !normal.contains(&key) {
+            normal.push(key);
+        }
+    }
+
+    /// The memo table of the derived readings.
+    pub(crate) fn readings(&self) -> &crate::readings::Memos {
+        &self.0.readings
     }
 
     pub fn ptr_eq(&self, other: &Fold) -> bool {

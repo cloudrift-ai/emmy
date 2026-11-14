@@ -1295,9 +1295,7 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
 
 def _channels(node: Fold, names: tuple[str, ...]) -> Fold:
     """``node`` computing only the components ``names``, every operand it no longer reads dropped."""
-    from emmy.compiler.ir.tile.normalize import _prune_unread  # noqa: PLC0415
-
-    return _prune_unread(node.exposing(names), frozenset(names))
+    return node.exposing(names).pruned(names)
 
 
 def _unchanged(pieces: tuple, members) -> bool:
