@@ -1236,9 +1236,18 @@ fn a_bool_converted_to_a_number_keeps_its_predicate() {
         EXACT,
     );
     let selp = got.iter().filter(|line| line.starts_with("selp")).count();
-    assert!(got.iter().all(|line| !line.starts_with("setp.neu")), "{got:#?}");
-    assert!(got.iter().all(|line| !line.starts_with("cvt.rn.f32.s64")), "{got:#?}");
-    assert!(got.iter().any(|line| line.starts_with("and.pred")), "{got:#?}");
+    assert!(
+        got.iter().all(|line| !line.starts_with("setp.neu")),
+        "{got:#?}"
+    );
+    assert!(
+        got.iter().all(|line| !line.starts_with("cvt.rn.f32.s64")),
+        "{got:#?}"
+    );
+    assert!(
+        got.iter().any(|line| line.starts_with("and.pred")),
+        "{got:#?}"
+    );
     assert!(selp >= 1, "{got:#?}");
 }
 
