@@ -72,6 +72,12 @@ class CudaOp(Op):
     #: Serial launch axes ``(name, extent)``: the launcher runs the kernel once per coordinate in
     #: order, passing the coordinate through the ``runtime_args`` slot of the same name.
     serial: tuple[tuple[str, int], ...] = ()
+    #: Whether the kernel must be assembled for the arch-suffixed target (``sm_<cc>a``): it holds TMA, the
+    #: block-scaled fp4 ``mma`` or ``wgmma``.
+    arch_specific: bool = False
+    #: Whether the kernel waits on the grid ahead of it before its first memory access, so the runtime may launch
+    #: it as a programmatic dependent launch. Every lowered kernel does; a hand-written source says so itself.
+    dependent_launch: bool = False
 
     def pretty_body(self) -> str:
         return self.kernel_source
@@ -79,14 +85,9 @@ class CudaOp(Op):
     def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
         """Override :meth:`Op.identity_key` whole: digest of the rendered source + launch
         params — past rendering, body / io / knobs are all realized into the artifact, so the
-        lattice flags have nothing left to fold and are accepted-and-ignored. (the
-        bits that determine runtime behavior). Name-invariant: the kernel function name is
-        rendered into the source (``void <name>(...)``) but doesn't change runtime behavior,
-        so it normalizes out — renaming a kernel (e.g. via op provenance) neither busts the
-        perf cache nor blocks an isolated-kernel tune from transferring to a whole-model
-        compile."""
-        src = self.kernel_source.replace(self.kernel_name, "_K_") if self.kernel_name else self.kernel_source
-        return digest(type(self).__name__, src, self.arg_order, self.grid, self.block, self.smem_bytes)
+        lattice flags have nothing left to fold and are accepted-and-ignored. The kernel's name is in the source, and
+        it is the kernel's exact identity, so one kernel has one source wherever it is compiled."""
+        return digest(type(self).__name__, self.kernel_source, self.arg_order, self.grid, self.block, self.smem_bytes)
 
 
 def resolve_dim(spec, sym_values: dict[str, int]) -> int:

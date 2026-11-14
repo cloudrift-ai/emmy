@@ -13,8 +13,11 @@ def _render(halve: TreeHalve) -> str:
 
 def test_the_warp_partials_fold_in_one_warp_behind_one_barrier() -> None:
     """Sixteen warp partials are a register butterfly for warp 0, not four barrier-separated halvings."""
-    src = _render(TreeHalve(bufs=("acc0_smem",), state=("acc0",), state_b=("acc0__o",), combine_states=_SUM, length=16, tid_var="warp"))
-    assert "if (warp == 0) {" in src and "acc0_smem[lane & 15]" in src
+    halve = TreeHalve(
+        bufs=("acc0_smem",), state=("acc0",), state_b=("acc0__o",), combine_states=_SUM, length=16, tid_var="warp", lane="lane"
+    )
+    src = _render(halve)
+    assert "if (warp == 0) {" in src and "acc0_smem[lane & 15]" in src and "if (lane == 0) {" in src
     assert src.count("__syncthreads();") == 1 and "for (int s" not in src
     assert src.rstrip().endswith("acc0 = acc0_smem[0];")
 

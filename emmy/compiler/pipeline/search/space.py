@@ -210,16 +210,16 @@ PAIR_LDMATRIX = Knob(
     off=False,
 )
 
-#: The unroll budget — the max static loop trip count eligible for ``#pragma unroll``. Pin-only
-#: (``off`` defaults to ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the
-#: search or the goldens): ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact,
-#: readable kernels — e.g. for a blog listing), a high value unrolls more. Unset → each call site's
-#: built-in cap (64 for an inner reduce, 128 for the flash KV fold, uncapped for the tensor-core
-#: K-chunk), so the default codegen is byte-identical. Consumed by ``lowering/kernel/_atom.unroll_ok``.
+#: The unroll budget — the max static loop trip count a lowering site flags for unrolling
+#: (``lowering/kernel/117_unroll_loops`` then writes the flagged loops out). Pin-only (``off`` defaults to
+#: ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the search or the goldens):
+#: ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact kernels), a high value flags more. Unset →
+#: each call site's built-in cap (64 for an inner reduce, 16 for a lane loop, none for the tensor-core K loop).
+#: Consumed by ``lowering/kernel/_atom.unroll_ok``.
 UNROLL = Knob(
     "UNROLL",
     KnobType.INT,
-    help="Max static loop trip count to #pragma-unroll (the unroll budget); pin 0 to keep loops rolled. Unset = per-site cap.",
+    help="Max static loop trip count a lowering site flags for unrolling; pin 0 to keep loops rolled. Unset = per-site cap.",
 )
 
 FAST_EXP = Knob(
@@ -228,18 +228,21 @@ FAST_EXP = Knob(
     # Pin-only precision policy; its effective default follows FAST_MATH. An explicit
     # EMMY_FAST_EXP pin overrides the umbrella without changing the other precision gates.
     hints=(False,),
-    help="Lower f32 exp through the SFU fast path (__expf: one FMUL + MUFU.EX2) instead of libm expf.",
+    help="Lower f32 exp through the SFU fast path (__expf: one FMUL + MUFU.EX2) instead of libm expf; with FAST_MATH, "
+    "the logarithm, sine, cosine, hyperbolic tangent and power take their approximate instruction too.",
     off=False,
 )
 
 # The other instruction classes of the precision-trading family, each pin-only and, but for FMA contraction, following
-# FAST_MATH like FAST_EXP. Each maps to the nvcc flag that picks its instruction (``backend.cuda.nvcc.precision_flags``).
+# FAST_MATH like FAST_EXP. An approximate instruction is an operation the kernel body names
+# (``lowering/kernel/130_approximate_math``); flush to zero and FMA contraction hold for a whole kernel and are nvcc
+# flags (``backend.cuda.nvcc.precision_flags``).
 
 FAST_DIV = Knob(
     "FAST_DIV",
     KnobType.BOOL,
     hints=(False,),
-    help="Approximate f32 division and reciprocal (nvcc --prec-div=false); a floating divisor invariant in its loop "
+    help="Approximate f32 division and reciprocal (div.approx, rcp.approx); a floating divisor invariant in its loop "
     "becomes one hoisted reciprocal and a multiply (lowering/kernel/040). Unset follows FAST_MATH.",
 )
 
@@ -247,7 +250,7 @@ FAST_SQRT = Knob(
     "FAST_SQRT",
     KnobType.BOOL,
     hints=(False,),
-    help="Approximate f32 square root (nvcc --prec-sqrt=false). Unset follows FAST_MATH.",
+    help="Approximate f32 square root (sqrt.approx). Unset follows FAST_MATH.",
 )
 
 FLUSH_TO_ZERO = Knob(
@@ -283,7 +286,7 @@ CPU_TILE = Knob(
 # --- The regime knobs: the precision-trading family (under the FAST_MATH umbrella) and the cache knob ------
 #
 # Precedence: an individual pin > FAST_MATH > True (precision_pin); CONTRACT_FMA alone keeps its own default. The
-# umbrella is unfeatured: concrete schedule choices retain their own identity, while effective compiler flags and the
+# umbrella is unfeatured: concrete schedule choices retain their own identity, while the flush flag and the
 # independent overrides separate the fast and precise measurement contexts. Golden input pins record the umbrella.
 
 COLD_CACHE = Knob(
@@ -300,7 +303,7 @@ FAST_MATH = Knob(
     KnobType.BOOL,
     hints=(True,),
     help="Fast math is enabled by default: the precision-trading knobs that follow it (FAST_EXP, FAST_DIV, FAST_SQRT, "
-    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA) and nvcc's fast library. Pin 0 to disable; individual pins win.",
+    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA). Pin 0 to disable; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
 
@@ -401,18 +404,8 @@ def regime_pins(pins: dict | None = None) -> dict[str, bool]:
     return {**precision_pins(pins), **others}
 
 
-LOOPIFY = Knob(
-    "LOOPIFY",
-    KnobType.INT,
-    # Off by default (0) and not a search dimension — a readability-only codegen policy: re-roll a
-    # maximal run of parallel per-fragment ``FragmentApply`` (the flash mma epilogue's element-wise
-    # C-fragment arithmetic) into a ``#pragma unroll`` loop over an arrayed fragment family. The value
-    # is the MINIMUM run length to re-roll: ``0`` / unset (and any value < 2) → off, byte-identical
-    # CUDA; ``EMMY_LOOPIFY=4`` re-rolls the 8-long O rescale / divide runs (most of the win) while
-    # skipping the 2-long QK scale; ``EMMY_LOOPIFY=2`` re-rolls every run ≥ 2. Identical SASS (nvcc
-    # unrolls the pragma) — purely a listing-shrink for blog / ``--ir cuda`` inspection.
-    hints=(0,),
-    help="Min parallel FragmentApply run length to re-roll into a #pragma-unroll loop (0 = off, byte-identical).",
-    off=0,
-    unfeatured=True,  # SASS-identical listing re-spell — excluded from the feature vector; batch-enabled by EMMY_READABLE
-)
+#: Retired: the pass that read it (a re-roller of statement runs into ``#pragma unroll`` loops, for listings) is gone
+#: and nothing stamps or reads it. The name stays registered because the rows stored while that pass ran (the
+#: goldens, the freezes, tune DBs) carry ``LOOPIFY: 0``, and a row key no knob declares is a number to the priors'
+#: featurizer. It goes with a rewrite of those rows.
+LOOPIFY = Knob("LOOPIFY", KnobType.INT, hints=(0,), help="Retired; stored rows carry its 0.", off=0, unfeatured=True)

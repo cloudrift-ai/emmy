@@ -270,6 +270,15 @@ object it was given, so a caller can tell a change by pointer. A leaf is by valu
 an interned symbol, so a copy is a word and a compare an integer. Derived readings of an immutable value live beside it
 in a `OnceLock`, computed on first use, never in a table keyed off another object.
 
+### Exit early
+
+A transform first asks whether it has anything to do, and returns its input when it has not, before any costly
+analysis: a merge of two sibling loops leaves a scope with no such pair alone without working out its ordering
+constraints. A rebuild that goes through an emptied block compares the result with the block it started from and
+returns that block when the two hold the same values, so the pointer still says whether anything changed. A fixed-point
+loop reads that answer, and a value a computation already knows (a normal form is its own) is stored where the next
+asker finds it rather than computed again.
+
 ## Commit Messages
 
 - Keep the subject line short (under ~72 characters).

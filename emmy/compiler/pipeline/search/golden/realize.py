@@ -137,7 +137,9 @@ def realize(paths: Iterable[Path], *, jobs: int | None = None, drop: bool = Fals
 def _collect(files: list[tuple[Realization, GoldenFile, list[int]]], reasons: Iterator[str | None], drop: bool) -> Iterator[Realization]:
     for report, document, indices in files:
         unrealized = {index: reason for index, reason in zip(indices, reasons, strict=False) if reason is not None}
-        report.failed.extend((document.rows[index].name, document.rows[index].kernel, reason) for index, reason in unrealized.items())
+        report.failed.extend(
+            (document.rows[index].name, document.kernel(document.rows[index].kernel).name, reason) for index, reason in unrealized.items()
+        )
         logger.info("%s: %d of %d rows realize", report.file, report.rows - len(report.failed), report.rows)
         if drop and unrealized:
             kept = [row for index, row in enumerate(document.rows) if index not in unrealized]

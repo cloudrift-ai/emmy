@@ -28,6 +28,55 @@ _OVERRIDE: tuple[int, int] | None = None
 CPU_TARGET = "cpu"
 
 
+#: The element counts one vector access of a buffer of each dtype may hold: the 4-, 8- and 16-byte load and store
+#: widths over the element's size. A fact of the card, read by the vector passes and by whoever spells the access.
+_VECTOR_WIDTHS: dict[str, tuple[int, ...]] = {
+    "f32": (2, 4),
+    "f16": (2, 4, 8),
+    "bf16": (2, 4, 8),
+    "f8e4m3": (2, 4, 8, 16),
+    "f8e5m2": (2, 4, 8, 16),
+    "f4e2m1x2": (2, 4, 8, 16),
+}
+
+
+def vector_widths(dtype: str) -> tuple[int, ...]:
+    """The element counts a vector access of ``dtype`` elements may hold, narrowest first; empty when none."""
+    return _VECTOR_WIDTHS.get(dtype, ())
+
+
+#: The operations a half-precision value computes natively, by the abstract names the elementwise table gives them:
+#: the card rounds each once at f16. Any other operation over f16 computes in f32 and converts its result once. Not
+#: ``sigmoid``: its half spelling ``1/(1+hexp(-x))`` rounds three times, which lands up to two half-ulps from torch's
+#: compute-in-f32-round-once value and fails the strict ``rtol=1e-3`` gate.
+_NATIVE_F16_OPS: frozenset[str] = frozenset(
+    {
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "maximum",
+        "minimum",
+        "exp",
+        "log",
+        "sqrt",
+        "rsqrt",
+        "tanh",
+        "fabs",
+        "abs",
+        "negative",
+        "copy",
+        "reciprocal",
+        "relu",
+    }
+)
+
+
+def native_f16_ops() -> frozenset[str]:
+    """The operations the target computes at f16 without leaving it; the type pass promotes every other one to f32."""
+    return _NATIVE_F16_OPS
+
+
 def parse_sm(spec: str) -> tuple[int, int]:
     """Parse ``sm_NN`` / ``sm_NNN`` (with optional arch suffix) into ``(major, minor)``.
 

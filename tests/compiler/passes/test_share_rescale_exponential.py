@@ -12,7 +12,6 @@ from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel import KernelOp
@@ -23,7 +22,7 @@ from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, FINAL_LOWERING_PASS, Pipeline, RuleSkipped
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import recording_kernels, requires_cuda, statements
 from tests.compiler.realization.helpers import CASES_DIR, load_case, pin_of, seeded_inputs
 from tests.compiler.terms import projection, slab
 
@@ -167,13 +166,26 @@ def _compile(graph: Graph, pins: dict, *, cap: tuple[int, int], shared: bool, pa
         return pipeline.run(graph.copy(), ctx=Context.from_target(cap), db=None)
 
 
+def _exponentials(kernels) -> int:
+    """How many exponentials ``kernels`` compute: each call in a value, and each fragment statement that is one."""
+
+    def name(node) -> str:
+        return getattr(node, "fn", None) or getattr(getattr(node, "operation", None), "name", "")
+
+    count = 0
+    for stmt in statements(kernels):
+        count += sum(name(node).startswith("exp") for e in stmt.expressions() for node in e.subterms())
+        count += getattr(getattr(stmt, "op", None), "name", "").startswith("exp")
+    return count
+
+
 def _both(graph: Graph, pins: dict, feeds: list[dict], *, cap: tuple[int, int], passes: list[str] = CUDA_PASSES) -> None:
     """Run ``graph`` with and without the rewrite on every feed: the same bits out."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    compiled = {shared: _compile(graph, pins, cap=cap, shared=shared, passes=passes) for shared in (True, False)}
-    sources = {shared: "".join(n.op.kernel_source for n in g.nodes.values() if isinstance(n.op, CudaOp)) for shared, g in compiled.items()}
-    exps = {shared: source.count("expf(") for shared, source in sources.items()}
+    with recording_kernels() as kernels_of:
+        compiled = {shared: _compile(graph, pins, cap=cap, shared=shared, passes=passes) for shared in (True, False)}
+    exps = {shared: _exponentials(kernels_of(g)) for shared, g in compiled.items()}
     assert exps[True] < exps[False], f"the rewrite took no factor pair: {exps}"
     backend = CudaBackend()
     for feed in feeds:
@@ -207,7 +219,7 @@ def test_the_factors_are_the_two_exponentials_bits_on_the_device(pins) -> None:
     for name, tensor in io.items():
         graph.add_node(InputOp(), [], tensor, node_id=name)
     factors = Tensor("F", (2, n), F32)
-    graph.add_node(KernelOp(body=body, name="k_advance", inputs=io, outputs={"F": factors}), list(io), factors, node_id="F")
+    graph.add_node(KernelOp(body=body, inputs=io, outputs={"F": factors}), list(io), factors, node_id="F")
     graph.inputs, graph.outputs = list(io), ["F"]
     _both(graph, pins, [{"G": g, "GO": g_o}], cap=(12, 0), passes=["lowering/kernel", FINAL_LOWERING_PASS])
 

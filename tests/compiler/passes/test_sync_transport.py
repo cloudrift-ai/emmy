@@ -5,13 +5,11 @@ import pytest
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel.ir import pack_smem, swizzle_fn, swizzle_xor
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Assign, Body, parse_body
+from emmy.compiler.ir.stmt import Assign, Body, Load, parse_body
 from emmy.compiler.ir.tile.ops import cone_stat
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     _SWIZZLE_SLAB_ALIGN,
     CtaTile,
@@ -22,6 +20,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     software_swizzle,
 )
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import compile_with_kernels, statements
 from tests.compiler.terms import projection, reduction, slab
 
 
@@ -171,10 +170,9 @@ def test_a_computed_operand_merges_its_reads_only_where_each_run_is_aligned(widt
     )
     pin = {"TILE": "mma_m16n8k16_bf16_f32/f2x4/k4", "WORK": "w2x2", "STAGE": "d1/smem", "REDUCE": "", "PLACE": "fuse"}
     with pinned_knobs(pin):
-        graph = Pipeline.build(CUDA_PASSES).run(graph_from_code(code)[0], ctx=Context.from_target((12, 0)))
-    (source,) = [node.op.kernel_source for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
+        _, kernels = compile_with_kernels(graph_from_code(code)[0], ctx=Context.from_target((12, 0)))
 
     aligned = width % 8 == 0
     assert plans, "the pin must lower through the compute fill"
     assert any("vector" in plan for plan in plans) is aligned
-    assert ("reinterpret_cast<const uint4*>(&x[" in source) is aligned
+    assert any(load.input == "x" and load.width == 8 for load in statements(kernels, Load)) is aligned, "one 16 B read of eight"

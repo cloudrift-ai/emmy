@@ -7,7 +7,7 @@ reads the node kind + role + reduce plan off ``tile.op`` and picks the tier:
 
 - **Tiled ``CONTRACTION``** (warp / register tile) — ``factorize`` synthesizes its bare
   grid-``Write`` (needs ``root.output``, so it can't ride the node) and expands it (mma → the
-  ``RegFragment`` / ``LdmatrixLoad`` / ``MmaSyncPtx`` / ``RegStore`` fragment soup; scalar → the
+  ``RegFragment`` / fragment load / ``MmaSyncPtx`` / ``RegStore`` fragment soup; scalar → the
   per-thread register cell tile) through the shared four-level tiling layer (in ``_factor``).
 - **Reduce tier** — a ``PLANAR`` / ``TWISTED`` reduce (or a non-output-tiled ``CONTRACTION``) whose
   ``Reduce`` carries a BLOCK ``coop`` and/or a REG ``reg`` stage: the reduce axis is partitioned
@@ -27,7 +27,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
+from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, THREAD_COORDS
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
@@ -60,7 +60,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         body = Body((materialized,))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
-        kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))
+        kernel = KernelOp(body=body, serial=() if resident else tuple(tile.place.serial))
         if resident:
             # The state's port — the buffer the lift added for the classic realization, which no
             # store of the term writes. Register storage has no global state allocation, so the
@@ -103,12 +103,12 @@ def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str)
     return fragment
 
 
-#: Names the RENDERER supplies, so a statement may read them with no binding anywhere in the IR:
-#: the CTA helper coordinates it declares in the prologue of any body that uses them,
-#: and the reserved coordinates a :class:`~emmy.compiler.ir.kernel.ir.FragmentApply`
-#: COORD / GMEM template is written over, which the render substitutes per element (tile origin + layout offset),
-#: and the in-fragment offsets a :class:`~emmy.compiler.ir.kernel.ir.RegStore` epilogue reads.
-_RENDERED_HELPERS = frozenset({"lane", "warp", FRAG_ROW, FRAG_COL, ELEM_ROW, ELEM_COL})
+#: Names a statement may read with no binding in the tile's body: a thread's lane and warp, which the grid decode
+#: binds (``THREAD_COORDS``), and names the RENDERER supplies — the reserved coordinates a
+#: :class:`~emmy.compiler.ir.kernel.ir.FragmentApply` COORD / GMEM template is written over, which the render
+#: substitutes per element (tile origin + layout offset), and the in-fragment offsets a
+#: :class:`~emmy.compiler.ir.kernel.ir.RegStore` epilogue reads.
+_RENDERED_HELPERS = frozenset({*THREAD_COORDS, FRAG_ROW, FRAG_COL, ELEM_ROW, ELEM_COL})
 
 
 def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
@@ -117,8 +117,8 @@ def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
     A well-formed kernel reads its own buffers, the symbolic extents its launch passes beside them
     (the free vars of the axis table's extents — a ``Dim('seq_len')`` reduce bound, a ceil-div block
     count — and of its buffers' shapes, which a scatter's guard compares an index with) and the
-    renderer's CTA helpers, and nothing else: every other name is bound by a statement or by an
-    enclosing axis, which is exactly what :func:`free_names` subtracts. What survives is a
+    thread coordinates and the renderer's helpers, and nothing else: every other name is bound by a statement or by
+    an enclosing axis, which is exactly what :func:`free_names` subtracts. What survives is a
     value some emission referred to under a spelling nothing defines — a per-cell rename whose shared
     coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read the
     boundary store was not re-spelled for. Each of those reached ``nvcc`` as *identifier "x" is

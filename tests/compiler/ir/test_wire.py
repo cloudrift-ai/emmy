@@ -235,13 +235,13 @@ def test_loop_graph_round_trip_preserves_structural_body_and_composite_dims() ->
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (extent,), "f16"), node_id="x")
-    graph.add_node(LoopOp(body=body, name="k_relu"), ["x"], Tensor("y", (extent,), "f16"), node_id="y")
+    graph.add_node(LoopOp(body=body), ["x"], Tensor("y", (extent,), "f16"), node_id="y")
     graph.inputs, graph.outputs = ["x"], ["y"]
 
     wire = json.loads(json.dumps(graph.to_wire()))
     restored = Graph.from_wire(wire)
 
     assert restored.nodes["y"].op.body == body
-    assert restored.nodes["y"].op.name == "k_relu"
+    assert restored.nodes["y"].op.name == graph.nodes["y"].op.name  # computed from the body, never on the wire
     assert restored.buffer("y").shape == (extent,)
     assert restored.to_wire() == wire

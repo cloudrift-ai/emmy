@@ -3,9 +3,10 @@
 One knob per instruction class: a class takes its approximate instruction exactly when its own knob is on (by its pin,
 or by the ``FAST_MATH`` umbrella it follows), and that instruction stays inside the bound the CUDA Programming Guide
 documents for it. Every bound is in units in the last place (ulp) of the f32 result, against a float64 host value.
-The approximate exponential is ``__expf``, which keeps subnormal results unless flush to zero is on; through nvcc every
-other class is a compiler flag (``backend.cuda.nvcc.precision_flags``), so these tests are what pins that a flag picks
-the instruction it names.
+Each approximate instruction is an operation the kernel body names (``lowering/kernel/130_approximate_math``), so
+these tests are what pins that a knob picks the instruction it names. The approximate exponential is ``__expf``, which
+keeps subnormal results unless flush to zero is on. The functions no knob names (logarithm, sine, cosine, hyperbolic
+tangent, power) take their approximate instruction under the umbrella with the exponential.
 """
 
 from __future__ import annotations
@@ -102,6 +103,67 @@ def test_a_class_takes_its_approximate_instruction_under_its_own_knob(name, pins
         assert ulp.max() > exact_bound, f"{name}: the approximate instruction was not taken"
     else:
         assert ulp.max() <= exact_bound, f"{name}: {ulp.max():.2f} ulp past the accurate instruction's bound"
+
+
+# --------------------------------------------------------------------------- #
+# The functions no knob names: approximate under the umbrella with the exponential
+# --------------------------------------------------------------------------- #
+
+_LOG_X = _magnitudes(-60, 60)
+_ANGLE = _RNG.uniform(-np.pi, np.pi, _N).astype(np.float32)
+_TANH_X = _RNG.uniform(-12, 12, _N).astype(np.float32)
+_POW_X, _POW_Y = _RNG.uniform(0.5, 2, _N).astype(np.float32), _RNG.uniform(-8, 8, _N).astype(np.float32)
+
+
+def _pow_bound(want: np.ndarray) -> np.ndarray:
+    """``__powf`` is ``exp2f(y * __log2f(x))``: the logarithm is within 2^-22 for a base in [0.5, 2], the product
+    rounds once and the exponential is within 2 ulp. As a relative error of the result."""
+    exponent = (_POW_Y.astype(np.float64) * np.log2(_POW_X.astype(np.float64))).astype(np.float32)
+    return np.log(2) * (np.abs(_POW_Y) * 2.0**-22 + np.spacing(np.abs(exponent)) / 2) + 2.0**-22 + 0 * want
+
+
+# Each function: the op, its inputs, the host reference, the absolute error its approximate instruction stays inside
+# for these inputs (from the CUDA Programming Guide's table of intrinsics and the PTX reference) and the ulp bound of
+# the accurate function.
+_LIBRARY = {
+    # __logf: 2^-21.41 for an input in [0.5, 2], 3 ulp otherwise.
+    "log": (
+        [("log", ["x"])],
+        {"x": _LOG_X},
+        np.log,
+        lambda want: np.where((_LOG_X >= 0.5) & (_LOG_X <= 2), 2.0**-21.41, 3 * np.spacing(np.abs(want).astype(np.float32))),
+        1.0,
+    ),
+    # __sinf: 2^-21.41 for an input in [-pi, pi]; __cosf: 2^-21.19.
+    "sin": ([("sin", ["x"])], {"x": _ANGLE}, np.sin, lambda want: 2.0**-21.41 + 0 * want, 2.0),
+    "cos": ([("cos", ["x"])], {"x": _ANGLE}, np.cos, lambda want: 2.0**-21.19 + 0 * want, 2.0),
+    # tanh.approx.f32: a relative error of 2^-11 over the whole range.
+    "tanh": ([("tanh", ["x"])], {"x": _TANH_X}, np.tanh, lambda want: 2.0**-11 * np.abs(want), 2.0),
+    "pow": ([("pow", ["x", "y"])], {"x": _POW_X, "y": _POW_Y}, np.power, lambda want: _pow_bound(want) * np.abs(want), 4.0),
+}
+
+
+@pytest.mark.parametrize("name", list(_LIBRARY))
+@pytest.mark.parametrize(
+    ("pins", "approximate"),
+    [
+        ({"FAST_MATH": False}, False),
+        ({"FAST_MATH": True}, True),
+        ({"FAST_MATH": True, "FAST_EXP": False}, False),
+        ({"FAST_MATH": False, "FAST_EXP": True}, False),
+    ],
+    ids=["standard", "umbrella", "umbrella-less-exp", "exp-alone"],
+)
+def test_a_function_no_knob_names_follows_the_umbrella_with_the_exponential(name, pins, approximate) -> None:
+    steps, feed, reference, approximate_bound, exact_bound = _LIBRARY[name]
+    want = reference(*(value.astype(np.float64) for value in feed.values()))
+    got = _run(steps, feed, pins)
+    ulp = _ulp(got, want)
+    if approximate:
+        assert np.all(np.abs(got - want) <= approximate_bound(want)), f"{name}: past the approximate instruction's bound"
+        assert ulp.max() > exact_bound, f"{name}: the approximate instruction was not taken"
+    else:
+        assert ulp.max() <= exact_bound, f"{name}: {ulp.max():.2f} ulp past the accurate function's bound"
 
 
 # --------------------------------------------------------------------------- #

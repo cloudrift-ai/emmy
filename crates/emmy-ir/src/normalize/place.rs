@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use super::with_bodies;
+use super::{refilled, with_bodies};
 use crate::body::{Body, free_names};
 use crate::expr::Expression;
 use crate::numbering::{Key, Number, Numbering, Param, value_numbers};
@@ -75,7 +75,7 @@ pub fn rename_free(stmt: &Arc<Statement>, alias: &HashMap<Name, Name>) -> Arc<St
         }
         inner.push(b.map_each(&mut |c| rename_free(c, &pruned)));
     }
-    with_bodies(&renamed, inner)
+    refilled(stmt, &renamed, inner)
 }
 
 pub(crate) type Marks = BTreeSet<(Name, u64)>;
@@ -356,7 +356,8 @@ impl Placer<'_> {
             &with_bodies(stmt, nested.iter().map(|_| Body::empty()).collect()),
             &self.alias,
         );
-        let built = with_bodies(
+        let built = refilled(
+            stmt,
             &shell,
             children
                 .iter()
@@ -442,16 +443,23 @@ pub fn place_values(body: &Body) -> Result<Body> {
 /// any member of a group of congruent states (`congruent_states`) is the same value, so placement merges the cones
 /// the members compute.
 pub fn place_values_keyed(body: &Body, states: &HashMap<Name, Key>) -> Result<Body> {
-    let numbering = value_numbers(
+    place_values_numbered(
         body,
-        &|name| {
-            states
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| crate::numbering::spelled_key(name))
-        },
-        crate::numbering::Chains::Flat,
-    );
+        &value_numbers(
+            body,
+            &|name| {
+                states
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| crate::numbering::spelled_key(name))
+            },
+            crate::numbering::Chains::Flat,
+        ),
+    )
+}
+
+/// [`place_values_keyed`] under a numbering already taken with those keys (the one `congruent_states` found stable).
+pub fn place_values_numbered(body: &Body, numbering: &Numbering) -> Result<Body> {
     let mut written: HashSet<Name> = HashSet::new();
     let mut updated: HashSet<Name> = HashSet::new();
     body.walk(&mut |here| {
@@ -464,7 +472,7 @@ pub fn place_values_keyed(body: &Body, states: &HashMap<Name, Key>) -> Result<Bo
     written.extend(updated.iter().copied());
     let mut placer = Placer {
         updated,
-        numbering: &numbering,
+        numbering,
         written,
         alias: HashMap::new(),
         defined: HashMap::new(),
@@ -603,11 +611,11 @@ mod tests {
     fn a_name_updated_in_place_keys_the_value_it_read() {
         let given = body(
             "
-            RegFragment(name=c1, role=c, shape=(16, 8, 16), dtype=f32)
-            RegFragment(name=c2, role=c, shape=(16, 8, 16), dtype=f32)
-            LdmatrixLoad(frag=a, src_buffer=A, src_index=(0, 0), role=a)
-            LdmatrixLoad(frag=b, src_buffer=B, src_index=(0, 0), role=b)
-            LdmatrixLoad(frag=b2, src_buffer=B2, src_index=(0, 0), role=b)
+            RegFragment(name=c1, role=c, dtype=f32)
+            RegFragment(name=c2, role=c, dtype=f32)
+            LdmatrixLoad(frag=a, src_buffer=A, src_index=(0, 0), role=a, ldm=16)
+            LdmatrixLoad(frag=b, src_buffer=B, src_index=(0, 0), role=b, ldm=8)
+            LdmatrixLoad(frag=b2, src_buffer=B2, src_index=(0, 0), role=b, ldm=8)
             MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b2, shape=(16, 8, 16))
             MmaSyncPtx(c_frag=c1, a_frag=a, b_frag=b, shape=(16, 8, 16))
             MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b, shape=(16, 8, 16))

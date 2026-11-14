@@ -1,10 +1,9 @@
 """ProvenanceStrategy — op provenance, end to end, as pipeline strategy.
 
-Provenance (which original model ops a kernel realizes — the ``k_…`` naming and coverage data)
-is a concern of THIS pipeline, not of the engine or the graph: ``Graph.splice`` is pure surgery
-and the engine emits events. A pipeline built without this strategy simply has no provenance
-anywhere; the consumers (kernel naming's ``name_for``, golden origin selection) fall back to
-node-id names or are specific to pipelines that carry it. A splice performed outside a run
+Provenance (which original model ops a kernel realizes — its coverage data) is a concern of THIS
+pipeline, not of the engine or the graph: ``Graph.splice`` is pure surgery and the engine emits
+events. A pipeline built without this strategy simply has no provenance anywhere; its consumer
+(golden origin selection) is specific to pipelines that carry it. A splice performed outside a run
 (e.g. the checkpoint loader's spelling splices) threads no provenance either — the next run's
 seed gives every unseeded node a fresh self-origin.
 """

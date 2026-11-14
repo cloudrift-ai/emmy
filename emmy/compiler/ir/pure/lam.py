@@ -16,23 +16,12 @@ from emmy.compiler.ir.expression import Var, apply
 from emmy.compiler.ir.stmt import (
     Assign,
     Body,
-    canonical_values,
     exposed_defines,
-    fragment_order,
-    free_names,
+    normalize_lambda_body,
     one_operation_per_definition,
     pretty_body,
 )
 from emmy.compiler.wire import Wire
-
-
-def _normalize_body(body: Body, params: tuple[str, ...]) -> Body:
-    """The construction canonicalization of a pure body — an idempotent transform, applied by
-    :meth:`Lambda.__post_init__`: the normal form's statement order with the names as they stand (``fragment_order``,
-    a read of a parameter ahead of the body's rebinding of it reading the parameter) and every value spelled in its
-    canonical form under those names (commutative operands and a sum's terms by rank), the context-independent
-    storage invariants a term's structural identity reads directly."""
-    return canonical_values(fragment_order(body, params) if len(body) > 1 else body)
 
 
 @dataclass(frozen=True)
@@ -47,7 +36,8 @@ class Lambda(Wire):
     ``Load`` / ``Assign`` and the structural nodes opt in; ``Accum`` / ``Write`` / ``Init`` /
     ``Loop`` never do; no isinstance whitelist, so a new statement type is excluded until it declares
     itself), every result is defined, and every value or coordinate read is bound. Scope-aware
-    ``free_names`` supplies the construction check, the crate's ``fragment_order`` the statement order.
+    ``Body.free`` supplies the construction check, ``normalize_lambda_body`` the statement order and the canonical
+    value spellings.
 
     α-invariance is CANONICAL RENUMBERING (the existing rename machinery), not de Bruijn:
     :meth:`canonical` renumbers params (``_p0…``) and internal defs (``_v0…``) in walk order,
@@ -60,7 +50,7 @@ class Lambda(Wire):
     def __post_init__(self) -> None:
         if not isinstance(self.params, tuple):
             object.__setattr__(self, "params", tuple(self.params))
-        body = _normalize_body(Body.coerce(self.body), self.params)
+        body = normalize_lambda_body(self.body, self.params)
         if not isinstance(self.body, Body) or body != self.body:
             object.__setattr__(self, "body", body)
         if not isinstance(self.results, tuple):
@@ -68,9 +58,7 @@ class Lambda(Wire):
         impure = [type(s).__name__ for s in self.body if not s.pure]
         if impure:
             raise ValueError(f"Lambda body must be pure — impure statement type(s): {impure}")
-        defined = set(self.params)
-        for s in self.body:
-            defined |= exposed_defines(s)
+        defined = set(self.params) | self.body.defined
         missing = [r for r in self.results if r not in defined]
         if missing:
             raise ValueError(f"Lambda results {missing} are not defined by the body or params")
@@ -79,7 +67,7 @@ class Lambda(Wire):
         # are coordinates is the binder's knowledge (a ``Fold`` reads them as its free coordinates
         # past the operand binding); a bare lambda cannot tell. :meth:`closing` FORMS a closed
         # lambda; this only refuses.
-        free = set().union(*(free_names(stmt) for stmt in self.body)) - defined
+        free = self.body.free - defined
         if free:
             raise ValueError(
                 f"Lambda body reads {sorted(free)} it does not bind. Pass them as params — "
@@ -101,15 +89,12 @@ class Lambda(Wire):
 
         Callers form; :meth:`__post_init__` refuses. They stay separate because a constructor that
         repaired its own input would enforce nothing."""
-        body = _normalize_body(Body.coerce(body), tuple(params))
-        bound = set(params)
-        for stmt in body:
-            bound |= exposed_defines(stmt)
+        body = normalize_lambda_body(body, tuple(params))
+        bound = set(params) | body.defined
         # Reads the body does not define, plus any RESULT it does not define either: a write may
         # pass an enclosing value straight through (``o[j] = acc`` over an already-reduced
         # accumulator), and that result has no def to name, so it binds as a param like any read.
-        residual = set().union(*(free_names(stmt) for stmt in body))
-        residual |= set(results)
+        residual = body.free | set(results)
         return cls(params=(*params, *sorted(residual - bound)), body=body, results=tuple(results))
 
     @classmethod
@@ -142,10 +127,7 @@ class Lambda(Wire):
     @property
     def defined(self) -> frozenset[str]:
         """Every name this lambda binds — params plus every def its body exposes (deep)."""
-        out = set(self.params)
-        for s in self.body:
-            out |= exposed_defines(s)
-        return frozenset(out)
+        return frozenset(self.params) | self.body.defined
 
     def __getstate__(self):
         """Pickle the stored fields only — memoized reads recompute after transport."""

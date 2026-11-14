@@ -8,8 +8,8 @@ import subprocess
 import pytest
 
 from emmy.compiler.backend.cuda import nvcc
-from emmy.compiler.backend.plan import _needs_arch_isa
 from emmy.compiler.dtype import F16, F32
+from emmy.compiler.ir.kernel.interface import needs_arch_isa
 from emmy.compiler.ir.kernel.ir import (
     KernelOp,
     Literal,
@@ -107,10 +107,10 @@ def test_fence_commit_wait_render_the_bare_instructions() -> None:
 
 
 def test_the_prelude_joins_only_with_a_wgmma_cell() -> None:
-    plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)), name="k")
+    plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)))
     assert _wgmma_prelude(plain) == ""
     assert "emmy_wgmma_" not in render_kernelop(plain)
-    op = KernelOp(body=Body((_cell(64, "bf16", "ss"), _cell(64, "bf16", "ss", trans_b=1), _cell(64, "f16", "rs"))), name="k")
+    op = KernelOp(body=Body((_cell(64, "bf16", "ss"), _cell(64, "bf16", "ss", trans_b=1), _cell(64, "f16", "rs"))))
     prelude = _wgmma_prelude(op)
     assert prelude.count("emmy_smem_u32(") == 1 and prelude.count("emmy_wgmma_desc(") == 1
     # One wrapper per (N, dtype, form) — the two ss cells share theirs; the transpose bits are template
@@ -131,16 +131,9 @@ def test_the_prelude_joins_only_with_a_wgmma_cell() -> None:
 
 
 def test_a_kernel_carrying_a_wgmma_cell_asks_for_the_arch_suffixed_target() -> None:
-    class _Op:
-        tma_descriptors = ()
-        kernel_source = "... emmy_wgmma_m64n128k16_bf16_f32_ss<0, 0>(c0, c1, aD, bD, 1); ..."
-
-    class _Plain:
-        tma_descriptors = ()
-        kernel_source = "... emmy_mma_m16n8k16_f16_f32(c, a, b, c); ..."
-
-    assert _needs_arch_isa(_Op())
-    assert not _needs_arch_isa(_Plain())
+    plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)))
+    assert needs_arch_isa(KernelOp(body=Body((_cell(64, "bf16", "ss"),))))
+    assert not needs_arch_isa(plain)
 
 
 def _driver() -> str:
@@ -152,17 +145,17 @@ def _driver() -> str:
     forms = [(n, ab, form) for n in _NS for ab in _DTYPES for form in _FORMS]
     stmts = [
         Smem(name="K_s", extents=(64 * 64,), dtype="unsigned short", align=1024),
-        *(RegFragment(name=f"c{j}", role="c", shape=(16, 8, 16), dtype=F32) for j in range(256 // 8)),
-        RegFragment(name="a", role="a", shape=(16, 8, 16), dtype=F16),
+        *(RegFragment(name=f"c{j}", role="c", dtype=F32, fragment_layout="wgmma") for j in range(256 // 8)),
+        RegFragment(name="a", role="a", dtype=F16, fragment_layout="wgmma"),
         WgmmaDescriptor(name="aD", smem="K_s", smem_index=None, swizzle="B128", lbo_bytes=16, sbo_bytes=1024),
         WgmmaDescriptor(name="bD", smem="K_s", smem_index=Literal(64 * 8, "int"), swizzle="B128", lbo_bytes=16, sbo_bytes=1024),
         WgmmaFence(),
         *(_cell(n, ab, form, scale_d=int(i > 0), trans_b=int(ab == "f16")) for i, (n, ab, form) in enumerate(forms)),
         WgmmaCommit(),
         WgmmaWait(),
-        *parse_body("\n".join(f"out[{4 * j + k}] = `c{j}[{k}]`" for j in range(256 // 8) for k in range(4))),
+        *parse_body("\n".join(f"f32 out[{4 * j + k}] = `c{j}[{k}]`" for j in range(256 // 8) for k in range(4))),
     ]
-    return render_kernelop(KernelOp(body=Body(tuple(stmts)), name="k_wgmma_probe"), shapes={"out": (128,)})
+    return render_kernelop(KernelOp(body=Body(tuple(stmts))), shapes={"out": (128,)})
 
 
 @pytest.mark.skipif(nvcc.nvcc_path() is None, reason="nvcc unavailable")
@@ -171,7 +164,7 @@ def test_every_wrapper_form_builds_at_sm_90a(monkeypatch, tmp_path) -> None:
     source = _driver()
     assert nvcc.compile_to_cubin(source, "k_wgmma_probe", arch="sm_90a").exists()
     # The instruction is arch-specific: the same source is refused at the plain target, which is
-    # what ``_needs_arch_isa`` guards.
+    # what ``needs_arch_isa`` guards.
     with pytest.raises(subprocess.CalledProcessError) as err:
         nvcc.compile_to_cubin(source, "k_wgmma_probe", arch="sm_90")
     assert b"wgmma" in err.value.stderr

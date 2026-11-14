@@ -15,10 +15,17 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import Assign, LoopOp
+from emmy.compiler.ir.stmt import Accum, Loop, StridedLoop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: F401
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import matmul_graph, requires_cuda
+from tests.compiler.helpers import compile_with_kernels, matmul_graph, operations, requires_cuda, statements, text
+
+
+def _folds_in_a_loop(kernel, op: str) -> bool:
+    """Whether ``kernel`` holds a loop whose body folds an accumulator with ``op``."""
+    loops = statements(kernel, Loop, StridedLoop)
+    return any(isinstance(stmt, Accum) and stmt.op.name == op for loop in loops for stmt in loop.body.iter())
 
 
 def _pointwise_add_graph() -> Graph:
@@ -86,9 +93,10 @@ def test_pointwise_emits_correct_source():
     compiled = CudaBackend().compile(_pointwise_add_graph())
     nodes = _cuda_nodes(compiled)
     assert len(nodes) == 1
+    # CUDA spelling: moves to the PTX compiler's tests
     source = nodes[0].op.kernel_source
     assert "threadIdx.x" in source
-    assert "x[" in source and "y[" in source
+    assert "buf0[" in source and "buf1[" in source  # buffers are spelled by their role
 
 
 def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
@@ -102,6 +110,7 @@ def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
     )
 
     compiled = CudaBackend().compile(loop_graph)
+    # CUDA spelling: moves to the PTX compiler's tests
     source = _cuda_nodes(compiled)[0].op.kernel_source
     assert "== 0.0f" in source
 
@@ -109,18 +118,15 @@ def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
 def test_reduce_emits_k_loop():
     # The scalar serial emitter with its K loop retained; the greedy pick may unroll the loop away.
     with pinned_knobs({"UNROLL": 0, "TILE": "", "REDUCE": ""}):
-        compiled = CudaBackend().compile(_reduce_sum_graph())
-    source = _cuda_nodes(compiled)[0].op.kernel_source
-    assert "for (int" in source
-    assert "+=" in source
+        _, kernels = compile_with_kernels(_reduce_sum_graph())
+    assert _folds_in_a_loop(next(iter(kernels.values())), "add")
 
 
 def test_contraction_emits_matmul():
     # Inspect the scalar serial emitter with its K loop retained.
     with pinned_knobs({"UNROLL": 0, "TILE": "", "REDUCE": ""}):
-        compiled = CudaBackend().compile(_matmul_graph())
-    sources = [n.op.kernel_source for n in _cuda_nodes(compiled)]
-    assert any("for (int " in s and "+=" in s for s in sources)  # accumulator fold
+        _, kernels = compile_with_kernels(_matmul_graph())
+    assert any(_folds_in_a_loop(kernel, "add") for kernel in kernels.values())  # accumulator fold
 
 
 def test_buffer_roles():
@@ -131,28 +137,27 @@ def test_buffer_roles():
 
 
 def test_softmax_emits_multiple_k_loops():
-    """Softmax emits separate K-loops: the online reduce (running ``fmaxf`` max + the
+    """Softmax emits separate K-loops: the online reduce (running max + the
     rescaled running denominator, the twisted state-merge) then the per-element div —
     two loops, not a single collapsed pass. (The online formulation folds max + sum in
     one loop via the ``exp(x−m)`` twist, so the sum accumulates as a state-merge, not a
     literal ``+=``.)"""
     with pinned_knobs({"PLACE": "fuse"}):
-        compiled = CudaBackend().compile(_softmax_graph())
-    sources = [n.op.kernel_source for n in _cuda_nodes(compiled)]
-    # Find the softmax-bearing kernel (contains fmaxf for max reduction).
-    softmax_src = next((s for s in sources if "fmaxf" in s), None)
-    assert softmax_src is not None, f"no kernel with fmaxf found; sources={sources}"
-    loop_count = softmax_src.count("for (int")
-    assert loop_count >= 2, f"expected >= 2 K-loops, got {loop_count}\n{softmax_src}"
-    assert "expf" in softmax_src  # the softmax numerator / online-reduce normalizer
+        _, kernels = compile_with_kernels(_softmax_graph())
+    # Find the softmax-bearing kernel (it folds a maximum).
+    softmax = next((kernel for kernel in kernels.values() if "maximum" in operations(kernel)), None)
+    assert softmax is not None, f"no kernel folds a maximum: {text(kernels)}"
+    loop_count = len(statements(softmax, Loop, StridedLoop))
+    assert loop_count >= 2, f"expected >= 2 K-loops, got {loop_count}\n{text(softmax)}"
+    assert operations(softmax) & {"exp", "exp_fast"}  # the softmax numerator / online-reduce normalizer
 
 
 def test_softmax_emits_per_element_store():
     """Softmax output is per-element: the final div stores inside a K-loop."""
-    compiled = CudaBackend().compile(_softmax_graph())
+    compiled, kernels = compile_with_kernels(_softmax_graph())
     out_name = compiled.outputs[0]
-    sources = [n.op.kernel_source for n in _cuda_nodes(compiled)]
-    assert any(f"{out_name}[" in s for s in sources)
+    stores = [write for loop in statements(kernels, Loop, StridedLoop) for write in loop.body.iter() if isinstance(write, Write)]
+    assert any(write.output == out_name for write in stores)
 
 
 def test_chained_pointwise_single_kernel():

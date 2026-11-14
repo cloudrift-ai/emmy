@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F16
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import operations, recording_kernels, requires_cuda
 from tests.serving import helpers
 
 # NOT perf-marked: these are correctness pins (the only regression guards for the serving
@@ -1086,7 +1086,8 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
         return lowered[-1]
 
     monkeypatch.setattr(CudaBackend, "compile", capture)
-    prog, _plan = _compile_split(wrapper, [x], None, F16, ckpt=(str(ckpt), id_to_key))
+    with recording_kernels() as kernels_of:
+        prog, _plan = _compile_split(wrapper, [x], None, F16, ckpt=(str(ckpt), id_to_key))
     (graph,) = stamped
 
     # The program must carry the ACTIVATION encode: a W4A16 split would pass every numeric check
@@ -1098,8 +1099,7 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
     assert [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and n.id not in weights], (
         "no packed f4e2m1x2 activation buffer: only the weight side is spelled"
     )
-    sources = [s for node in lowered[0].nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    assert any("emmy_to_f4e2m1" in s for s in sources), "the activation encode never reached a kernel"
+    assert "to_f4e2m1" in operations(kernels_of(lowered[0])), "the activation encode never reached a kernel"
 
     feed = {prog.input_names[0]: x.numpy()}
     ref, _ = NumpyBackend().run(graph, input_data={**load_constants_from_safetensors(graph, str(ckpt)), **feed})
@@ -1220,13 +1220,13 @@ def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch, signed):
         return lowered[-1]
 
     monkeypatch.setattr(CudaBackend, "compile", capture)
-    prog, plan = _compile_split(wrapper, list(examples), None, BF16, ckpt=(str(ckpt), id_to_key))
+    with recording_kernels() as kernels_of:
+        prog, plan = _compile_split(wrapper, list(examples), None, BF16, ckpt=(str(ckpt), id_to_key))
     (graph,) = stamped
     assert all(b.dtype.name == "bf16" for b in plan.buffers if b.name in plan.inputs + plan.outputs)
     assert any(type(n.op).__name__ == "ElementwiseOp" and n.op.name == "to_f4e2m1" for n in graph.nodes.values())
     assert any(n.output.dtype.name == "f4e2m1x2" for n in graph.nodes.values())
-    sources = [s for n in lowered[0].nodes.values() if (s := getattr(n.op, "kernel_source", None))]
-    assert any("emmy_to_f4e2m1" in s for s in sources)
+    assert "to_f4e2m1" in operations(kernels_of(lowered[0]))
 
     feed = {n: encode_bf16(t.float().numpy()) for n, t in zip(prog.input_names, examples, strict=True)}
     probe = graph.copy()

@@ -61,6 +61,52 @@ impl Numbering {
 
 type Value = (Number, Vec<Param>);
 
+/// The values in scope, with every change since a scope opened undone when it closes: a journal of each changed
+/// name's previous value, so a block costs what it changes rather than a copy of every value defined ahead of it.
+#[derive(Default)]
+struct ScopedValues {
+    values: HashMap<Name, Value>,
+    journal: Vec<(Name, Option<Value>)>,
+}
+
+impl ScopedValues {
+    fn get(&self, name: &Name) -> Option<&Value> {
+        self.values.get(name)
+    }
+
+    fn contains_key(&self, name: &Name) -> bool {
+        self.values.contains_key(name)
+    }
+
+    fn insert(&mut self, name: Name, value: Value) {
+        let previous = self.values.insert(name, value);
+        self.journal.push((name, previous));
+    }
+
+    fn remove(&mut self, name: &Name) {
+        if let Some(previous) = self.values.remove(name) {
+            self.journal.push((*name, Some(previous)));
+        }
+    }
+
+    /// Where a scope opens: [`ScopedValues::close`] undoes every change made after it.
+    fn open(&self) -> usize {
+        self.journal.len()
+    }
+
+    fn close(&mut self, opened: usize) {
+        while self.journal.len() > opened {
+            let Some((name, previous)) = self.journal.pop() else {
+                break;
+            };
+            match previous {
+                Some(value) => self.values.insert(name, value),
+                None => self.values.remove(&name),
+            };
+        }
+    }
+}
+
 /// How a chain of one associative commutative operation is keyed: as one node over every term (`Flat`: two
 /// associations of one sum number alike, which the normal form's order needs, since it orders a sum's terms by the
 /// ranks the numbering gives), or as the tree it is spelled as (`Kept`: the clustered identity spells every FMA-class
@@ -75,7 +121,7 @@ struct Context<'a> {
     out: Numbering,
     resource_key: &'a dyn Fn(&Name) -> Key,
     chains: Chains,
-    env: HashMap<Name, Value>,
+    env: ScopedValues,
     axes: HashMap<Name, Key>,
     loops: Vec<Name>,
     path: Vec<usize>,
@@ -638,8 +684,15 @@ impl Context<'_> {
                 Statement::Accum(s) => {
                     let redirected = s.base.as_ref().is_some_and(|base| *base != s.name);
                     let value_key = self.value_key(&s.value, &mut params, &mut ops, &mut touched);
+                    // A fold the back edge of its loop seeds (the first update of a state its loop carries, read as
+                    // the step before) is the whole reduction of its value. A fold whose state already holds a value
+                    // here (a seed in its own scope, an update ahead of it: an unrolled loop's copies, a merge of
+                    // partials after their loop) is one step on that value, and its number keeps it.
                     let base_key = match &s.base {
                         Some(base) if redirected => self.operand(base, &mut ops, &mut touched),
+                        _ if self.env.contains_key(&s.name) => {
+                            self.operand(&s.name, &mut ops, &mut touched)
+                        }
                         _ => Key::None,
                     };
                     let bound: Vec<Name> = if s.axes.is_empty() {
@@ -772,7 +825,7 @@ impl Context<'_> {
                         .filter_map(|name| self.defined_by.get(name).copied())
                         .collect();
                     let bound = stmt.bound_axes();
-                    let saved_env = self.env.clone();
+                    let opened = self.env.open();
                     let saved_axes: Vec<(Name, Option<Key>)> = bound
                         .iter()
                         .map(|axis| (axis.name, self.axes.get(&axis.name).cloned()))
@@ -810,8 +863,10 @@ impl Context<'_> {
                             }
                         }
                     }
-                    self.env = saved_env;
-                    self.env.extend(exported);
+                    self.env.close(opened);
+                    for (name, value) in exported {
+                        self.env.insert(name, value);
+                    }
                     for (name, previous) in saved_axes {
                         match previous {
                             None => {
@@ -963,7 +1018,7 @@ pub fn value_numbers(
         out: Numbering::default(),
         resource_key,
         chains,
-        env: HashMap::new(),
+        env: ScopedValues::default(),
         axes: HashMap::new(),
         loops: Vec::new(),
         path: Vec::new(),
@@ -1116,6 +1171,31 @@ mod tests {
                 .unwrap()
         };
         assert_ne!(kept("(x + y) + z"), kept("x + (y + z)"));
+    }
+
+    /// A fold whose state already holds a value is one step on that value: two states seeded alike that fold one
+    /// value last hold two values when an earlier step differs (an unrolled loop's last copies, where one state's
+    /// lane ran past the row and folds the seed). A fold its loop's back edge seeds keeps the number of its value's
+    /// whole reduction.
+    #[test]
+    fn a_fold_on_a_held_value_numbers_with_that_value() {
+        let body = crate::text::parse_body(
+            "init f32 p = -1e+30\ninit f32 q = -1e+30\nf32 a = load A[0]\nf32 b = load A[1]\n\
+             f32 p <- maximum(p, a)\nf32 q <- maximum(q, b)\nf32 p <- maximum(p, b)\nf32 q <- maximum(q, b)\n\
+             f32 O[0] = p\nf32 O[1] = q",
+        )
+        .unwrap();
+        let numbering = value_numbers(&body, &|name| Key::Str(*name), Chains::Flat);
+        assert_ne!(numbering.numbers[6], numbering.numbers[7]);
+        let looped = |seed: &str| {
+            let body = crate::text::parse_body(&format!(
+                "{seed}for k in 0..4:\n    f32 x = load A[k]\n    f32 s <- add(s, x)\nf32 O[0] = s"
+            ))
+            .unwrap();
+            let numbering = value_numbers(&body, &|name| Key::Str(*name), Chains::Flat);
+            numbering.numbers.iter().rev().nth(1).cloned().unwrap()
+        };
+        assert_eq!(looped(""), looped("init f32 s = 0\n"));
     }
 
     /// Each side of a commutative node is keyed once: a chain the clustered identity keeps as a tree is linear in

@@ -12,6 +12,7 @@ import logging
 import re
 import sys
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -304,6 +305,78 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     return LayerWrapper()
 
 
+#: The Gated DeltaNet rule's chunk, Transformers' default: a program wider than it scans several chunks.
+CHUNK = 64
+
+
+def _chunk_rule_scan_then_read(
+    scope,
+    query,
+    key,
+    value,
+    g,
+    beta,
+    chunk_size=CHUNK,
+    initial_state=None,
+    output_final_state=False,
+    use_qk_l2norm_in_kernel=False,
+    **kwargs,
+):
+    """Transformers' ``torch_chunk_gated_delta_rule`` (``scope`` is its module) with the outputs read after the scan.
+
+    The scan keeps the state each chunk starts from and the chunk's new values; the output of every chunk is then
+    ``query @ state + intra @ new_values`` over the stacked chunks at once. The arithmetic is the reference's, term
+    for term."""
+    import torch
+    import torch.nn.functional as F
+
+    dtype = query.dtype
+    batch, length, _, k_dim = key.shape
+    v_heads, v_dim = value.shape[-2:]
+    query, key, value, beta, g = (
+        x.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format) for x in (query, key, value, beta, g)
+    )
+    if use_qk_l2norm_in_kernel:
+        query, key = scope["l2norm"](query, dim=-1, eps=1e-6), scope["l2norm"](key, dim=-1, eps=1e-6)
+    query = query * query.shape[-1] ** -0.5
+    pad = (chunk_size - length % chunk_size) % chunk_size
+    query, key, value = (F.pad(x, (0, 0, 0, pad)) for x in (query, key, value))
+    beta, g = (F.pad(x, (0, pad)) for x in (beta, g))
+    chunks = (length + pad) // chunk_size
+    v_beta, k_beta = value * beta.unsqueeze(-1), key * beta.unsqueeze(-1)
+    query, key, k_beta, v_beta = (x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, k_beta, v_beta))
+    g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
+    upper = torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device).triu(1)
+    cum = g.cumsum(dim=3)
+    pairwise = (cum.unsqueeze(4) - cum.unsqueeze(3)).masked_fill(upper, float("-inf")).exp()
+    system = (k_beta @ key.transpose(-1, -2)) * pairwise
+    intra = (query @ key.transpose(-1, -2)) * pairwise
+    decayed = k_beta * cum.exp().unsqueeze(-1)
+    if not scope["is_torchdynamo_exporting"]():
+        new_values = torch.linalg.solve_triangular(system, v_beta, upper=False, unitriangular=True)
+        k_cumdecay = torch.linalg.solve_triangular(system, decayed, upper=False, unitriangular=True)
+    else:
+        system = -system.tril(-1)
+        for i in range(1, chunk_size):
+            row = system[..., i, :i].clone()
+            sub = system[..., :i, :i].clone()
+            system[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+        system = system + torch.eye(chunk_size, dtype=system.dtype, device=system.device)
+        new_values, k_cumdecay = system @ v_beta, system @ decayed
+    state = new_values.new_zeros((batch, v_heads, k_dim, v_dim)) if initial_state is None else initial_state.to(new_values)
+    query = query * cum.exp().unsqueeze(-1)
+    key = key * (cum[..., -1:] - cum).exp().unsqueeze(-1)
+    chunk_decay = cum[..., -1].exp()[..., None, None]
+    starts, news = [], []
+    for i in range(chunks):
+        starts.append(state)
+        news.append(new_values[:, :, i] - k_cumdecay[:, :, i] @ state)
+        state = state * chunk_decay[:, :, i] + key[:, :, i].transpose(-1, -2) @ news[-1]
+    out = query @ torch.stack(starts, dim=2) + intra @ torch.stack(news, dim=2)
+    out = out.reshape(batch, v_heads, -1, v_dim)[:, :, :length]
+    return out.transpose(1, 2).to(dtype, memory_format=torch.contiguous_format), state if output_final_state else None
+
+
 def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool = False) -> nn.Module:
     """Expose a GDN block as ``(x, state, history) -> (y, state, history)`` without input mutation.
 
@@ -369,7 +442,23 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool
             # One row's state is the final state, so a single row is the plain program.
             if rows and x.shape[1] > 1:
                 return self._rows(x, cache)
+            if x.shape[1] > CHUNK:
+                return self._chunks(x, cache)
             return (*self._block(x, cache), cache.recurrent_states[0], cache.conv_states[0])
+
+        def _chunks(self, x, cache):
+            # Several chunks: the scan over them carries only the state and each chunk's new values, and every
+            # chunk's output is read from the stacked states afterwards, one batched product, the same arithmetic
+            # as the block's own rule. Written inside the scan, each output would trace as one branch per chunk
+            # of a select every output cell evaluates.
+            scope = sys.modules[type(mixer).__module__].__dict__
+            saved = scope["torch_chunk_gated_delta_rule"]
+            scope["torch_chunk_gated_delta_rule"] = partial(_chunk_rule_scan_then_read, scope)
+            try:
+                outs = self._block(x, cache)
+            finally:
+                scope["torch_chunk_gated_delta_rule"] = saved
+            return (*outs, cache.recurrent_states[0], cache.conv_states[0])
 
         def _block(self, x, cache):
             if not routed and not float32_residual:

@@ -3,8 +3,8 @@
   {"inputs":["a","b"],"outputs":["o"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[1,512,1024]]]},{"id":"b","op":"input","outputs":[["b","f32",[1024,1024]]]},{"id":"o","op":"torch.matmul","inputs":["a","b"],"outputs":[["o","f32",[1,512,1024]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["b","a"],"outputs":["o"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[1,512,1024]]]},{"id":"b","op":"input","outputs":[["b","f32",[1024,1024]]]},{"id":"o","op":"loop","attrs":{"body":"for a0 in 0..512:\n    for a1 in 0..1024:\n        for a2 in 0..1024:\n            in0 = load a[0, a0, a2]\n            in1 = load b[a2, a1]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        o[0, a0, a1] = acc0","name":"k_matmul_bd3b61"},"inputs":["b","a"],"outputs":[["o","f32",[1,512,1024]]]}]},"name":"k_matmul_bd3b61","formed":true,"traced":0,"origins":["o"]}
+  {"loop_ir":{"inputs":["b","a"],"outputs":["o"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[1,512,1024]]]},{"id":"b","op":"input","outputs":[["b","f32",[1024,1024]]]},{"id":"o","op":"loop","attrs":{"body":"for a0 in 0..512:\n    for a1 in 0..1024:\n        for a2 in 0..1024:\n            in0 = load a[0, a0, a2]\n            in1 = load b[a2, a1]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        o[0, a0, a1] = acc0"},"inputs":["b","a"],"outputs":[["o","f32",[1,512,1024]]]}]},"formed":true,"traced":0,"origins":["o"]}
  ],
  "rows": [
-  {"name":"k_matmul_bd3b61","kernel":"k_matmul_bd3b61","pins":{"FAST_MATH":false},"knobs":{"WORK":"t64x8","TILE":"f1x8","REDUCE":"","STAGE":"d1/smem-tma","RASTER":""},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":52.618105160562614,"tcompile_us":30.701177961686078,"kernels":["k_matmul_bd3b61"]}}}
+  {"name":"k_matmul_bd3b61","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"t64x8","TILE":"f1x8","REDUCE":"","STAGE":"d1/smem-tma","RASTER":""},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":52.618105160562614,"tcompile_us":30.701177961686078,"kernels":[0]}}}
  ]}

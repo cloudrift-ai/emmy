@@ -304,7 +304,7 @@ def test_a_lambda_binds_an_enclosing_value_as_a_trailing_param() -> None:
     instead of deciding it: all three arrive as params, in the order ``Lambda.closing`` appends."""
     node = _product(a=_capturing_cone())
     m = Axis("m", 128)
-    tile = TileOp(op=node, name="k_flashish", place=Placement(free=(m,), grid=(m,), mapped=True), axes=(m, K_PRODUCT))
+    tile = TileOp(op=node, place=Placement(free=(m,), grid=(m,), mapped=True), axes=(m, K_PRODUCT))
     text = tile.pretty_body()
     assert "│  └─ lift: λ(k, m, m_run) -> (p)" in text
     assert "captures" not in text
@@ -323,7 +323,6 @@ def test_iteration_vars_are_not_captures() -> None:
     (write,) = parse_body("y[m, n] = o")
     tile = TileOp(
         op=projection((_stat_fold(),), body),
-        name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         axes=(m, n, K_STAT),
         output_specs=(OutputSpec(write=write, sweep=(n,)),),
@@ -344,7 +343,7 @@ def test_the_capture_set_is_omitted_when_the_iteration_space_is_unknown() -> Non
 
 def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> None:
     fold = _stat_fold()
-    bare = TileOp(op=fold, name="k_stat", axes=(K_STAT,))
+    bare = TileOp(op=fold, axes=(K_STAT,))
     assert "REDUCE=" not in bare.pretty_body()
 
     context = ClassicScheduleContext(bare)
@@ -359,7 +358,6 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
     )
     scheduled = TileOp(
         op=fold,
-        name="k_stat",
         axes=(K_STAT,),
         schedule=classic,
         materialization=ClassicMaterialization({}, {}),
@@ -377,7 +375,6 @@ def test_pretty_body_separates_placement_and_outputs_from_the_term() -> None:
     (write,) = parse_body("y[m, n] = o")
     tile = TileOp(
         op=projection((_stat_fold(),), parse_body("o = rsqrt(acc0)")),
-        name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         axes=(m, n, K_STAT),
         output_specs=(OutputSpec(write=write, sweep=(n,)),),
@@ -389,5 +386,5 @@ def test_pretty_body_separates_placement_and_outputs_from_the_term() -> None:
 
 def test_an_unmapped_placement_says_so() -> None:
     m = Axis("m", 128)
-    tile = TileOp(op=_stat_fold(), name="k_stat", place=Placement(free=(m,)), axes=(m, K_STAT))
+    tile = TileOp(op=_stat_fold(), place=Placement(free=(m,)), axes=(m, K_STAT))
     assert "unmapped" in tile.pretty_body()

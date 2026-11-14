@@ -509,7 +509,7 @@ def test_gated_runner_post_is_the_serving_twin(tmp_path, monkeypatch):
         twin = twins["post-sym" if rows is None else f"post{rows}"]
         assert graph.structural_key() == twin.structural_key()
         if rows is not None:  # the symbolic program lowers per bound width; the static ones stand for it
-            identities = [{kernel_row(t, "k").exact_identity for t in lift_targets(g, ctx).values()} for g in (graph, twin)]
+            identities = [{kernel_row(t).exact_identity for t in lift_targets(g, ctx).values()} for g in (graph, twin)]
             assert identities[0] and identities[0] == identities[1]
 
 

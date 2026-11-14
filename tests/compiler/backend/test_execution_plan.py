@@ -60,6 +60,7 @@ def _sample_graph() -> Graph:
             zero_outputs=("y",),
             tma_descriptors=(TmaDescMeta(name="x_desc", src_buf="x", box_extents=(64, 32), swizzle="B128"),),
             runtime_args=("seq_len",),
+            arch_specific=True,
         ),
         inputs=["x", "w", "eps", "div"],
         output=Tensor("y", ("seq_len", 64)),
@@ -143,12 +144,12 @@ def test_a_plan_stored_under_the_old_tma_key_still_reads():
 
 def test_only_a_kernel_that_waits_on_its_predecessor_launches_dependent():
     """A programmatic dependent launch may start a kernel before the grid ahead of it finished, so
-    only a kernel whose source waits on that grid (``griddepcontrol.wait``) is marked, and a plan
+    only a kernel that waits on that grid is marked (the lowering marks every kernel it writes), and a plan
     stored before the mark existed reads unmarked: its kernels launch serialized."""
     graph = _sample_graph()
     assert plan_from_graph(graph).kernels["k_test"].dependent_launch is False
     node = graph.nodes["y"]
-    node.op = dataclasses.replace(node.op, kernel_source='__global__ void k_test() { asm volatile("griddepcontrol.wait;"); }')
+    node.op = dataclasses.replace(node.op, dependent_launch=True)
     plan = plan_from_graph(graph)
     assert plan.kernels["k_test"].dependent_launch is True
     wire = json.loads(json.dumps(plan_to_dict(plan)))
@@ -468,3 +469,24 @@ def test_merged_kernels_keep_their_names_unless_another_source_holds_one():
     assert renamed.startswith("k_copy_") and names["k_add"] == "k_add"
     assert kernels[renamed].source == other.source.replace("k_copy", renamed) and set(kernels) == {"k_copy", renamed, "k_add"}
     assert merge_kernels(kernels, {"k_copy": other}) == {"k_copy": renamed}
+
+
+def test_a_name_with_two_sources_launches_each_under_its_own_symbol():
+    """Kernels of one identity share a name; under one schedule they render one source and share it, while one that
+    carries other code (a neighbor's zero-init) launches under a symbol of its own, never the first source."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (64,)), node_id="x")
+    sources = ('extern "C" __global__ void k_twin(float* a, float* b) {}', 'extern "C" __global__ void k_twin(float* a, float* b) {}')
+    other = 'extern "C" __global__ void k_twin(float* a, float* b) { /* zero-init */ }'
+    for node, (source, inp) in enumerate(zip((*sources, other), ("x", "y0", "y1"), strict=True)):
+        g.add_node(
+            op=CudaOp(kernel_source=source, kernel_name="k_twin", arg_order=(inp, f"y{node}")),
+            inputs=[inp],
+            output=Tensor(f"y{node}", (64,)),
+            node_id=f"y{node}",
+        )
+    g.inputs, g.outputs = ["x"], ["y2"]
+    plan = plan_from_graph(g)
+    first, second, third = (launch.kernel_name for launch in plan.launches)
+    assert first == second == "k_twin" and third.startswith("k_twin_")
+    assert plan.kernels[third].source == other.replace(" k_twin(", f" {third}(")

@@ -3,8 +3,8 @@
   {"inputs":["a","b"],"outputs":["c"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[1,64,64]]]},{"id":"b","op":"input","outputs":[["b","f32",[64,64]]]},{"id":"c","op":"torch.matmul","inputs":["a","b"],"outputs":[["c","f32",[1,64,64]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["b","a"],"outputs":["c"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[1,64,64]]]},{"id":"b","op":"input","outputs":[["b","f32",[64,64]]]},{"id":"c","op":"loop","attrs":{"body":"for a0 in 0..64:\n    for a1 in 0..64:\n        for a2 in 0..64:\n            in0 = load a[0, a0, a2]\n            in1 = load b[a2, a1]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        c[0, a0, a1] = acc0","name":"k_matmul_722f51"},"inputs":["b","a"],"outputs":[["c","f32",[1,64,64]]]}]},"name":"k_matmul_722f51","formed":true,"traced":0,"origins":["c"]}
+  {"loop_ir":{"inputs":["b","a"],"outputs":["c"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[1,64,64]]]},{"id":"b","op":"input","outputs":[["b","f32",[64,64]]]},{"id":"c","op":"loop","attrs":{"body":"for a0 in 0..64:\n    for a1 in 0..64:\n        for a2 in 0..64:\n            in0 = load a[0, a0, a2]\n            in1 = load b[a2, a1]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        c[0, a0, a1] = acc0"},"inputs":["b","a"],"outputs":[["c","f32",[1,64,64]]]}]},"formed":true,"traced":0,"origins":["c"]}
  ],
  "rows": [
-  {"name":"k_matmul_722f51","kernel":"k_matmul_722f51","pins":{"FAST_MATH":false},"knobs":{"WORK":"","TILE":"f4"},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":3.1378113623685056,"tcompile_us":2.9771105586318805,"kernels":["k_matmul_722f51"]}}}
+  {"name":"k_matmul_722f51","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"","TILE":"f4"},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":3.1378113623685056,"tcompile_us":2.9771105586318805,"kernels":[0]}}}
  ]}

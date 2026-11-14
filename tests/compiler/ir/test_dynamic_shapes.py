@@ -115,6 +115,7 @@ def test_cuda_symbolic_elementwise_one_kernel_multiple_seq_lens():
     assert len(cuda_ops) == 1, f"expected one CudaOp, got {len(cuda_ops)}"
     op = cuda_ops[0]
     assert "seq_len" in op.runtime_args, f"runtime_args missing 'seq_len': {op.runtime_args}"
+    # CUDA spelling: moves to the PTX compiler's tests (the launch-time argument checked above, as the signature spells it)
     assert "int seq_len" in op.kernel_source, f"kernel signature missing int seq_len param:\n{op.kernel_source}"
 
     cached_source = op.kernel_source

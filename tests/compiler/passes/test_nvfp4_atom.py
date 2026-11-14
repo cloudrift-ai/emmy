@@ -34,7 +34,7 @@ def test_the_atom_is_registered_with_packed_operands_and_an_f32_accumulator():
     assert atom.operand_dtype("a") is F4E2M1x2
     assert atom.operand_dtype("b") is F4E2M1x2
     assert atom.operand_dtype("c") is F32
-    assert (atom.fragment_nregs("a"), atom.fragment_nregs("b")) == (4, 2)
+    assert (atom.fragment_registers("a"), atom.fragment_registers("b")) == (4, 2)
     assert atom.target_feature == "has_block_scaled_f4_mma"
 
 
@@ -86,25 +86,19 @@ def test_the_block_scaled_call_passes_scales_where_the_others_repeat_the_accumul
 
 
 def test_a_kernel_carrying_the_block_scaled_mma_asks_for_the_arch_suffixed_target():
-    """TMA announces itself through its descriptors; this instruction has no such marker in a
-    plan, so the wrapper name in the rendered source is what identifies it."""
-    from emmy.compiler.backend.plan import _needs_arch_isa
+    """ptxas assembles the block-scaled fp4 ``mma`` only for the arch-suffixed target, as it does TMA; the kernel's
+    statements say which a kernel holds."""
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.ir.kernel.interface import needs_arch_isa
+    from emmy.compiler.ir.kernel.ir import TmaDescriptor
+    from emmy.compiler.ir.stmt import Body
 
-    class _Op:
-        tma_descriptors = ()
-        kernel_source = "... emmy_mma_m16n8k64_e2m1_f32(c, a, b, sa, sb); ..."
-
-    class _Plain:
-        tma_descriptors = ()
-        kernel_source = "... emmy_mma_m16n8k16_f16_f32(c, a, b, c); ..."
-
-    class _Tma:
-        tma_descriptors = ("desc",)
-        kernel_source = "... cp.async.bulk.tensor ..."
-
-    assert _needs_arch_isa(_Op())
-    assert _needs_arch_isa(_Tma())
-    assert not _needs_arch_isa(_Plain())
+    scaled = MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 64), ab_dtype="e2m1", sfa_frag="sa", sfb_frag="sb")
+    plain = MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16))
+    tma = TmaDescriptor(name="desc", src_buf="x", src_shape=(16, 16), box_extents=(16, 16))
+    assert needs_arch_isa(KernelOp(body=Body((scaled,))))
+    assert needs_arch_isa(KernelOp(body=Body((tma,))))
+    assert not needs_arch_isa(KernelOp(body=Body((plain,))))
 
 
 # The driver around the prelude under test: one warp, one atom cell, gmem-direct operands. A

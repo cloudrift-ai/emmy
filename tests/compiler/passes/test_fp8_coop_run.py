@@ -8,22 +8,20 @@ when ``n`` divides K (a mask spells every index as a modulo, which no vector loa
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import decode_f8
+from emmy.compiler.dtype import F16, decode_f8
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.expression import CastExpression
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import parse_body
+from emmy.compiler.ir.stmt import Assign, Load, parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import device_compute_capability, requires_cuda
+from tests.compiler.helpers import compile_with_kernels, device_compute_capability, requires_cuda, statements, text
 
 # K divides into 16-byte runs but not into the 128-lane band's 2048-element stride, so the band ends mid-row.
 N, K = 256, 3072
@@ -51,7 +49,7 @@ def _graph() -> Graph:
     graph.add_node(InputOp(), [], Tensor("w_scale", (N // 128, K // 128), "f32"), node_id="w_scale")
     graph.add_node(InputOp(), [], Tensor("x", (K,), "f16"), node_id="x")
     graph.add_node(
-        LoopOp(body=body, name="k_fp8_matvec"),
+        LoopOp(body=body),
         ["w_bits", "w_scale", "x"],
         Tensor("out", (N,), "f32"),
         node_id="out",
@@ -65,24 +63,28 @@ def _compiled(run: int, cc=(7, 0)):
         return Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target(cc))
 
 
-def _kernel(compiled) -> str:
-    (src,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    return src[src.index("__global__") :]
+def _kernel(run: int):
+    with pinned_knobs({"PLACE": "fuse", "WORK": "t128", "REDUCE": f"coop/v{run}", "TILE": "", "STAGE": ""}):
+        _, kernels = compile_with_kernels(_graph(), ctx=Context.from_target((7, 0)))
+    (kernel,) = kernels.values()
+    return kernel
 
 
-@pytest.mark.parametrize(("run", "word"), [(4, "unsigned int"), (8, "uint2"), (16, "uint4")])
-def test_a_lane_reads_its_run_of_weight_bytes_as_one_word(run, word):
-    src = _kernel(_compiled(run))
-    assert re.search(rf"{word} \w+ = \*reinterpret_cast<const {word}\*>\(&w_bits\[", src), "one vector load per run"
-    assert "w_bits[" not in src.replace(f"reinterpret_cast<const {word}*>(&w_bits[", ""), "no scalar byte load is left"
-    assert f"% {K}" not in src, "a run that divides K needs no bounds mask"
-    runs = len(re.findall(rf"reinterpret_cast<const {word}\*>\(&w_bits\[", src))
-    assert len(set(re.findall(r"w_scale\[([^\]]*)\]", src))) == runs, "a run inside one 128-wide block reads its scale at one index"
+@pytest.mark.parametrize("run", [4, 8, 16])
+def test_a_lane_reads_its_run_of_weight_bytes_as_one_word(run):
+    kernel = _kernel(run)
+    weights = [load for load in statements(kernel, Load) if load.input == "w_bits"]
+    assert weights and all(load.width == run for load in weights), "one vector load per run, no scalar byte load left"
+    assert f"% {K}" not in text(kernel), "a run that divides K needs no bounds mask"
+    scales = {str(load.index) for load in statements(kernel, Load) if load.input == "w_scale"}
+    assert len(scales) == len(weights), "a run inside one 128-wide block reads its scale at one index"
 
 
 def test_the_decode_converts_each_byte_straight_to_f16():
-    src = _kernel(_compiled(16))
-    assert "emmy_from_f8e4m3(" in src and "emmy_from_f8e4m3_f32(" not in src
+    kernel = _kernel(16)
+    weights = {name for load in statements(kernel, Load) if load.input == "w_bits" for name in load.names}
+    decodes = [stmt for stmt in statements(kernel, Assign) if set(stmt.deps()) & weights]
+    assert len(decodes) == len(weights) and all(stmt.dtype == F16 and isinstance(stmt.value, CastExpression) for stmt in decodes)
 
 
 @requires_cuda

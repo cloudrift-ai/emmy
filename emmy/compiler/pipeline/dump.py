@@ -372,8 +372,6 @@ def format_kernels(graph: Graph) -> str:
     Scalar ``ConstantOp`` inputs are inlined as literals: header
     ``in_k = load <buf>[0]`` lines for scalar constants are dropped, and
     the literal value is substituted at every use site in the body.
-    Behaves like ``RenderCtx.literal_constants`` does for the cuda
-    renderer — same idea, applied to the human-readable IR dump.
     """
     from emmy.compiler.ir.base import ConstantOp
     from emmy.compiler.ir.cuda import CudaOp

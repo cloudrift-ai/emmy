@@ -43,12 +43,12 @@ def test_a_merged_case_reports_its_positive_count():
 # --- the golden group builder's pool merge ------------------------------------------
 
 
-def _pool(name, rows, goldens, *, regime="", kernel="k"):
+def _pool(kernel, rows, goldens, *, regime=""):
     """A :class:`GoldenPool` with its candidate pool handed in directly instead of enumerated — it rides on the
     kernel row's wire, where the stub enumerator below reads it. ``rows`` are single-token dicts the stub
     signature reads; ``goldens`` the tokens the pool's golden rows recorded. ``kernel`` is the kernel row's
-    identity, so two pools can be two kernels; the pool is labelled ``<name>.<kernel>``."""
-    row = replace(kernel_row(kernel, name=name), loop_ir={"rows": rows}).keyed(kernel)
+    identity, so two pools can be two kernels; the pool is labelled by the kernel's name, ``k_<kernel>``."""
+    row = replace(kernel_row(kernel), loop_ir={"rows": rows}).keyed(kernel)
     rows_ = tuple(GoldenRow({"TILE": tag}, 1.0, "golden:test") for tag in goldens)
     return GoldenPool("gpuA", (12, 0), regime, row, {}, rows_)
 
@@ -103,8 +103,8 @@ def test_builder_pins_every_golden_row_of_a_pool_and_keys_regimes_apart(monkeypa
         [_pool("m.512", std, ["b", "c", "zz"]), _pool("m.512", fastmath, ["f"], regime=FAST_MATH_FLAG)],
         monkeypatch,
     )
-    assert [(c.key, c.golden_ids, len(c.feats)) for c in groups] == [("gpuA/m.512.k", (1, 2), 3), ("gpuA/m.512.k#2", (3,), 4)]
-    assert skipped == [("gpuA", "m.512.k", "golden not in 3 candidates")]
+    assert [(c.key, c.golden_ids, len(c.feats)) for c in groups] == [("gpuA/k_m.512", (1, 2), 3), ("gpuA/k_m.512#2", (3,), 4)]
+    assert skipped == [("gpuA", "k_m.512", "golden not in 3 candidates")]
     # The ``#N`` suffix is spent only where a key would otherwise collide, so the first group keeps the plain
     # key that ``cv.run_folds`` accumulates train ranks under.
     assert len({c.key for c in groups}) == len(groups)
@@ -135,7 +135,7 @@ def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
     metric."""
     std = [{"TILE": "a"}, {"TILE": "b"}]
     groups, _ = _build([_pool("m.512", std, ["b", "b"])], monkeypatch)
-    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/m.512.k", (1,))]
+    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/k_m.512", (1,))]
 
 
 def test_builder_folds_two_pools_that_pack_identically(monkeypatch):
@@ -143,8 +143,8 @@ def test_builder_folds_two_pools_that_pack_identically(monkeypatch):
     featurizer cannot tell apart enumerate twice and produce identical pools, and the second stage folds them,
     so a pool is one group however many times it was recorded."""
     std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
-    groups, _ = _build([_pool("m.512", std, ["b"]), _pool("m.512", std, ["c"], kernel="other")], monkeypatch)
-    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/m.512.k", (1, 2))]
+    groups, _ = _build([_pool("m.512", std, ["b"]), _pool("other", std, ["c"])], monkeypatch)
+    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/k_m.512", (1, 2))]
 
 
 def test_a_pool_none_of_whose_goldens_is_found_is_no_group(monkeypatch):
@@ -154,8 +154,8 @@ def test_a_pool_none_of_whose_goldens_is_found_is_no_group(monkeypatch):
     std = [{"TILE": "a"}, {"TILE": "b"}]
     pools = [_pool("m.512.absent", std, ["zz"]), _pool("m.512.broken", "broken", ["b"]), _pool("m.512", std, ["b"])]
     groups, skipped = _build(pools, monkeypatch)
-    assert [(c.key, c.name) for c in groups] == [("gpuA/m.512.k", "m.512.k")]
-    assert skipped == [("gpuA", "m.512.absent.k", "golden not in 2 candidates"), ("gpuA", "m.512.broken.k", "did not lower")]
+    assert [(c.key, c.name) for c in groups] == [("gpuA/k_m.512", "k_m.512")]
+    assert skipped == [("gpuA", "k_m.512.absent", "golden not in 2 candidates"), ("gpuA", "k_m.512.broken", "did not lower")]
 
 
 # --- synthetic groups ---------------------------------------------------------------

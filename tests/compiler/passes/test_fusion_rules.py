@@ -795,13 +795,13 @@ def test_shared_const_broadcast_correctness(scalar_dtype):
 
 def test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel():
     from emmy.compiler.ir.cuda import CudaOp
-    from emmy.compiler.pipeline import CUDA_PASSES
+    from tests.compiler.helpers import compile_with_kernels
 
-    result = Pipeline.build(CUDA_PASSES).run(_make_shared_const_broadcast())
+    result, kernels = compile_with_kernels(_make_shared_const_broadcast())
     (kernel,) = [node for node in result.nodes.values() if isinstance(node.op, CudaOp)]
     assert kernel.buffer_names() == ("c1", "c2")
     assert kernel.op.arg_order[-2:] == ("c1", "c2")
-    assert "float* __restrict__ c1" in kernel.op.kernel_source and "float* __restrict__ c2" in kernel.op.kernel_source
+    assert {name: tensor.dtype.name for name, tensor in kernels[kernel.id].outputs.items()} == {"c1": "f32", "c2": "f32"}
 
 
 def _make_shared_transpose():

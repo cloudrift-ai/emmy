@@ -1,12 +1,13 @@
 //! What a statement knows of an elementwise operation: its name, whether its operands commute, its neutral element,
-//! the compute-unit cluster it belongs to, and its value on literal operands. The callable behind a name lives in
-//! Python (`ElementwiseImpl`); these properties are the one source, which that module reads back through the
-//! extension's tables.
+//! the compute-unit cluster it belongs to, its value on literal operands, and, for a composite one, its definition
+//! in primitive operations. The callable behind a name lives in Python (`ElementwiseImpl`); these properties are the
+//! one source, which that module reads back through the extension's tables.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 
-use crate::{Name, closed_set};
+use crate::expr::Expression;
+use crate::{Name, Result, closed_set};
 
 /// How `fold_affine` reads an operation: as a term of a sum.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -69,6 +70,10 @@ pub struct OperationInfo {
     pub eval: Eval,
     /// The infix spelling an expression gives it, and how tightly that binds (higher binds tighter).
     pub infix: Option<(&'static str, u8)>,
+    /// A composite operation's definition over its operand `x`, in primitive operations: what one machine
+    /// instruction or one math-library call computes. `None` for a primitive. Every code generator computes a
+    /// composite as its definition says, in this order, so two generators give the same bits.
+    pub definition: Option<&'static str>,
 }
 
 impl OperationInfo {
@@ -83,6 +88,7 @@ impl OperationInfo {
         affine: None,
         eval: Eval::None,
         infix: None,
+        definition: None,
     };
 }
 
@@ -110,6 +116,11 @@ macro_rules! operations {
 
 use Operation as E;
 
+// A `_fast` operation is the approximate form of the operation it is named after: the same function by a faster
+// instruction with a documented error (`div.approx`, `rcp.approx`, `sqrt.approx`, `ex2.approx`, …). A kernel pass
+// picks one under a precision knob, so the kernel body names every approximate instruction it runs. A host computes
+// it as the exact operation, which is what `eval` says. There is no fast `rsqrt`: its only instruction is the
+// approximate one.
 operations! {
     Add = "add" { commutative: true, associative: true, neutral: Some(0.0), cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Sum), eval: Eval::Binary(|a, b| a + b), infix: Some(("+", 5)) },
     Sum = "sum" { commutative: true, associative: true, neutral: Some(0.0), cluster: Some(E::Multiply) },
@@ -119,7 +130,7 @@ operations! {
     Multiply = "multiply" { commutative: true, associative: true, neutral: Some(1.0), cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Scale), eval: Eval::Binary(|a, b| a * b), infix: Some(("*", 6)) },
     Prod = "prod" { commutative: true, associative: true, neutral: Some(1.0), cluster: Some(E::Multiply) },
     Fma = "fma" { cluster: Some(E::Multiply) },
-    Square = "square" { cluster: Some(E::Multiply), eval: Eval::Unary(|x| x * x) },
+    Square = "square" { cluster: Some(E::Multiply), eval: Eval::Unary(|x| x * x), definition: Some("x * x") },
     Abs = "abs" { cluster: Some(E::Multiply), eval: Eval::Unary(f32::abs) },
     Absolute = "absolute" { eval: Eval::Unary(f32::abs) },
     Fabs = "fabs" { eval: Eval::Unary(f32::abs) },
@@ -131,25 +142,32 @@ operations! {
     Sign = "sign" { cluster: Some(E::Maximum), eval: Eval::Unary(|x| if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }) },
     Divide = "divide" { cluster: Some(E::Divide), affine: Some(AffineRole::Quotient), eval: Eval::Binary(|a, b| a / b), infix: Some(("/", 6)) },
     DivideRnF32 = "divide_rn_f32" { cluster: Some(E::Divide), eval: Eval::Binary(|a, b| a / b) },
+    DivideFast = "divide_fast" { cluster: Some(E::Divide), eval: Eval::Binary(|a, b| a / b) },
     TrueDivide = "true_divide" { cluster: Some(E::Divide), eval: Eval::Binary(|a, b| a / b) },
     FloorDivide = "floor_divide" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| (a / b).floor()), infix: Some(("//", 6)) },
     Remainder = "remainder" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| a - (a / b).floor() * b), infix: Some(("%", 6)) },
     Mod = "mod" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| a - (a / b).floor() * b) },
-    Reciprocal = "reciprocal" { cluster: Some(E::Divide), eval: Eval::Unary(|x| 1.0 / x) },
+    Reciprocal = "reciprocal" { cluster: Some(E::Divide), eval: Eval::Unary(|x| 1.0 / x), definition: Some("1.0 / x") },
+    ReciprocalFast = "reciprocal_fast" { cluster: Some(E::Divide), eval: Eval::Unary(|x| 1.0 / x) },
     Sqrt = "sqrt" { cluster: Some(E::Exp), eval: Eval::Unary(f32::sqrt) },
+    SqrtFast = "sqrt_fast" { cluster: Some(E::Exp), eval: Eval::Unary(f32::sqrt) },
     Rsqrt = "rsqrt" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 1.0 / x.sqrt()) },
     Exp = "exp" { cluster: Some(E::Exp), eval: Eval::Unary(f32::exp) },
     ExpFast = "exp_fast" { cluster: Some(E::Exp), eval: Eval::Unary(f32::exp) },
     Exp2 = "exp2" { eval: Eval::Unary(f32::exp2) },
     Expm1 = "expm1" { eval: Eval::Unary(f32::exp_m1) },
     Log = "log" { cluster: Some(E::Exp), eval: Eval::Unary(f32::ln) },
+    LogFast = "log_fast" { cluster: Some(E::Exp), eval: Eval::Unary(f32::ln) },
     Log2 = "log2" { cluster: Some(E::Exp), eval: Eval::Unary(f32::log2) },
     Log10 = "log10" { cluster: Some(E::Exp), eval: Eval::Unary(f32::log10) },
     Log1p = "log1p" { eval: Eval::Unary(f32::ln_1p) },
     Sin = "sin" { cluster: Some(E::Exp), eval: Eval::Unary(f32::sin) },
+    SinFast = "sin_fast" { cluster: Some(E::Exp), eval: Eval::Unary(f32::sin) },
     Cos = "cos" { cluster: Some(E::Exp), eval: Eval::Unary(f32::cos) },
+    CosFast = "cos_fast" { cluster: Some(E::Exp), eval: Eval::Unary(f32::cos) },
     Tan = "tan" { cluster: Some(E::Exp), eval: Eval::Unary(f32::tan) },
     Tanh = "tanh" { cluster: Some(E::Exp), eval: Eval::Unary(f32::tanh) },
+    TanhFast = "tanh_fast" { cluster: Some(E::Exp), eval: Eval::Unary(f32::tanh) },
     Sinh = "sinh" { eval: Eval::Unary(f32::sinh) },
     Cosh = "cosh" { eval: Eval::Unary(f32::cosh) },
     Arctan = "arctan" { eval: Eval::Unary(f32::atan) },
@@ -160,7 +178,8 @@ operations! {
     Trunc = "trunc" { eval: Eval::Unary(f32::trunc) },
     Rint = "rint" { eval: Eval::Unary(libm::rintf) },
     Round = "round" { eval: Eval::Unary(libm::rintf) },
-    Sigmoid = "sigmoid" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 1.0 / (1.0 + (-x).exp())) },
+    Sigmoid = "sigmoid" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 1.0 / (1.0 + (-x).exp())), definition: Some("1.0 / (1.0 + exp(-x))") },
+    SigmoidFast = "sigmoid_fast" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 1.0 / (1.0 + (-x).exp())), definition: Some("reciprocal_fast(1.0 + exp_fast(-x))") },
     Silu = "silu" { cluster: Some(E::Exp), eval: Eval::Unary(|x| x / (1.0 + (-x).exp())) },
     // np.logaddexp(0, x) = max(0, x) + log1p(exp(-|x|))
     Softplus = "softplus" { cluster: Some(E::Exp), eval: Eval::Unary(|x| x.max(0.0) + (-x.abs()).exp().ln_1p()) },
@@ -168,8 +187,9 @@ operations! {
     Gelu = "gelu" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 0.5 * x * (1.0 + libm::erff(x / 2f32.sqrt()))) },
     GeluTanh = "gelu_tanh" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 0.5 * x * (1.0 + ((2.0f32 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())) },
     Pow = "pow" { cluster: Some(E::Exp), eval: Eval::Binary(f32::powf) },
+    PowFast = "pow_fast" { cluster: Some(E::Exp), eval: Eval::Binary(f32::powf) },
     Power = "power" { cluster: Some(E::Exp), eval: Eval::Binary(f32::powf) },
-    Relu = "relu" { cluster: Some(E::Exp), eval: Eval::Unary(|x| x.max(0.0)) },
+    Relu = "relu" { cluster: Some(E::Exp), eval: Eval::Unary(|x| x.max(0.0)), definition: Some("maximum(0.0, x)") },
     Where = "where" { eval: Eval::Ternary(|c, a, b| if c != 0.0 { a } else { b }) },
     Copy = "copy" { cluster: Some(E::Copy), copies: true, eval: Eval::Unary(|x| x) },
     Pad = "pad" { eval: Eval::Unary(|x| x) },
@@ -234,6 +254,19 @@ impl Operation {
             .find(|op| op.infix() == Some(text))
     }
 
+    /// Whether the operation compares its two operands: it yields a truth value, whatever they compute at.
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            Operation::Less
+                | Operation::LessEqual
+                | Operation::Greater
+                | Operation::GreaterEqual
+                | Operation::Equal
+                | Operation::NotEqual
+        )
+    }
+
     pub fn is_division(self) -> bool {
         matches!(self, Operation::Divide | Operation::FloorDivide)
     }
@@ -248,6 +281,15 @@ impl Operation {
         self.info()
             .neutral
             .map(|neutral| neutral.clamp(-SEED_BOUND, SEED_BOUND))
+    }
+
+    /// A composite operation over `operand` as its definition in primitive operations; `None` for a primitive.
+    pub fn definition(self, operand: &Expression) -> Result<Option<Expression>> {
+        let Some(text) = self.info().definition else {
+            return Ok(None);
+        };
+        let operand = HashMap::from([(Name::from("x"), operand.clone())]);
+        Ok(Some(crate::expr::parse(text)?.substitute(&operand)))
     }
 
     /// The op's value on `f32` operands, as NumPy computes it for `np.float32` scalars; `None` for an op with no host
@@ -356,8 +398,6 @@ impl fmt::Display for ElementwiseOp {
     }
 }
 
-pub type ElementwiseOps = Arc<[ElementwiseOp]>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,25 +434,32 @@ mod tests {
                 "sign",
                 "divide",
                 "divide_rn_f32",
+                "divide_fast",
                 "true_divide",
                 "floor_divide",
                 "remainder",
                 "mod",
                 "reciprocal",
+                "reciprocal_fast",
                 "sqrt",
+                "sqrt_fast",
                 "rsqrt",
                 "exp",
                 "exp_fast",
                 "exp2",
                 "expm1",
                 "log",
+                "log_fast",
                 "log2",
                 "log10",
                 "log1p",
                 "sin",
+                "sin_fast",
                 "cos",
+                "cos_fast",
                 "tan",
                 "tanh",
+                "tanh_fast",
                 "sinh",
                 "cosh",
                 "arctan",
@@ -424,12 +471,14 @@ mod tests {
                 "rint",
                 "round",
                 "sigmoid",
+                "sigmoid_fast",
                 "silu",
                 "softplus",
                 "erf",
                 "gelu",
                 "gelu_tanh",
                 "pow",
+                "pow_fast",
                 "power",
                 "relu",
                 "where",
@@ -465,5 +514,60 @@ mod tests {
             ElementwiseOp::Known(Operation::RightShift)
         );
         assert!(ElementwiseOp::new("unknown_op").info().is_none());
+    }
+
+    /// A definition holds primitive operations only, and computes what the operation's host form computes.
+    #[test]
+    fn a_composite_is_defined_by_primitives_and_computes_the_same() {
+        /// `expression` over float literals, each operation on `f32`.
+        fn value(expression: &Expression) -> f32 {
+            match expression.operation() {
+                Some((op, operands)) => {
+                    let operands: Vec<f32> = operands.iter().map(value).collect();
+                    op.evaluate_f32(&operands).unwrap()
+                }
+                None => expression.literal_value().unwrap().as_f64() as f32,
+            }
+        }
+        let composites: Vec<Operation> = Operation::ALL
+            .iter()
+            .copied()
+            .filter(|op| op.info().definition.is_some())
+            .collect();
+        assert_eq!(
+            composites,
+            [
+                E::Square,
+                E::Reciprocal,
+                E::Sigmoid,
+                E::SigmoidFast,
+                E::Relu
+            ]
+        );
+        for op in composites {
+            for sample in [-3.5f32, -0.25, 0.5, 7.0] {
+                let operand = Expression::float(f64::from(sample));
+                let definition = op.definition(&operand).unwrap().unwrap();
+                for node in definition.subterms() {
+                    if let Some((inner, _)) = node.operation() {
+                        assert!(inner.info().definition.is_none(), "{op}: {inner}");
+                    }
+                }
+                assert_eq!(
+                    value(&definition),
+                    op.evaluate_f32(&[sample]).unwrap(),
+                    "{op}({sample})"
+                );
+            }
+        }
+        assert_eq!(E::Exp.definition(&Expression::var("v")).unwrap(), None);
+        assert_eq!(
+            E::Sigmoid
+                .definition(&Expression::var("v"))
+                .unwrap()
+                .unwrap()
+                .text(),
+            "1.0 / (1.0 + exp(-v))"
+        );
     }
 }

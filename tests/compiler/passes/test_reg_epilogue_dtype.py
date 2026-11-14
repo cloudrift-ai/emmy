@@ -6,26 +6,40 @@ import pytest
 from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import Var
-from emmy.compiler.ir.kernel.ir import RegStore
+from emmy.compiler.ir.kernel.ir import MmaSyncPtx, RegStore, WgmmaMma
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, parse_body
+from emmy.compiler.ir.stmt import Assign, Body, Load, Select, check_types, parse_body
+from emmy.compiler.ir.types import epilogue_conversions
 from emmy.compiler.pipeline import RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
-from tests.compiler.helpers import requires_cuda, requires_sm, requires_sm90
+from emmy.compiler.target import native_f16_ops
+from tests.compiler.helpers import (
+    case_kernels,
+    compile_with_kernels,
+    operations,
+    requires_cuda,
+    requires_sm,
+    requires_sm90,
+    statements,
+)
+
+
+def _is_m16n8k16(kernels) -> bool:
+    return any(tuple(mma.shape) == (16, 8, 16) for mma in statements(kernels, MmaSyncPtx))
 
 
 def test_fp4_encode_in_register_epilogue_emits_its_helper() -> None:
     from emmy.compiler.ir.cuda.ir import CudaOp
-    from tests.compiler.realization.helpers import CASES_DIR, load_case, lowered
+    from tests.compiler.realization.helpers import CASES_DIR, load_case
 
     case = load_case(CASES_DIR / "matmul/mma-fp4-encode-epilogue.json")
-    compiled, _ = lowered(case, case.context())
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1
-    source = sources[0]
-    assert "mma.sync.aligned.m16n8k16" in source
-    assert "emmy_to_f4e2m1(" in source
+    compiled, kernels = case_kernels(case)
+    assert len(kernels) == 1
+    assert _is_m16n8k16(kernels)
+    assert "to_f4e2m1" in operations(kernels)
+    # CUDA spelling: moves to the PTX compiler's tests
+    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert "unsigned char emmy_to_f4e2m1(float value)" in source
 
 
@@ -35,7 +49,6 @@ def test_fp4_encode_in_register_epilogue_emits_its_helper() -> None:
 def test_packed_fp4_epilogue_reads_each_elements_block_scale(runtime_rows) -> None:
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.graph import Graph
-    from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.compiler.realization.helpers import CASES_DIR, load_case
 
@@ -57,10 +70,9 @@ def test_packed_fp4_epilogue_reads_each_elements_block_scale(runtime_rows) -> No
     scales = rng.choice(np.array([8, 12, 20, 28], np.float32), (rows, 8))
     backend = CudaBackend()
     with pinned_knobs({**case.row.pins, **case.row.knobs}):
-        compiled = backend.compile(graph)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1 and "mma.sync.aligned.m16n8k16" in sources[0]
-    assert "emmy_to_f4e2m1(" in sources[0]
+        compiled, kernels = compile_with_kernels(graph)
+    assert len(kernels) == 1 and _is_m16n8k16(kernels)
+    assert "to_f4e2m1" in operations(kernels)
     got = backend.run(compiled, input_data={"a": a, "b": b, "scales": scales})[0].outputs["packed"]
 
     normalized = (a.astype(np.float32) @ b.astype(np.float32)) / np.repeat(scales, 16, axis=1)
@@ -76,14 +88,20 @@ def test_packed_fp4_epilogue_reads_each_elements_block_scale(runtime_rows) -> No
     np.testing.assert_array_equal(got, expected)
 
 
-def _render(chain: str) -> tuple[str, object]:
-    """Render the register epilogue of the projection ``chain`` (a body's text) feeding ``out[m, n]``."""
-    chain = parse_body(chain)
-    tail = [*chain, *parse_body(f"out[m, n] = {chain[-1].name}")]
+def _typed_store(tail, buffers) -> RegStore:
+    """The register store of the projection ``tail`` into ``out[m, n]``, its epilogue typed as the type pass types it."""
     epilogue = _warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)
     assert epilogue
     store = RegStore(dst_buffer="out", dst_index=(Var("m"), Var("n")), frag="_c", shape=(16, 8, 16), ldm=16, **epilogue)
-    ctx = RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "f16"})
+    return store.replace(epilogue=epilogue_conversions(store.epilogue, store.epilogue_params, buffers, native_f16_ops()))
+
+
+def _render(chain: str) -> tuple[str, object]:
+    """Render the register epilogue of the projection ``chain`` (a body's text) feeding ``out[m, n]``: the CUDA text and
+    the typed epilogue."""
+    chain = parse_body(chain)
+    store = _typed_store([*chain, *parse_body(f"out[m, n] = {chain[-1].name}")], {"out": F16})
+    ctx = RenderCtx(shapes={"out": (16, 16), "neg_inf": (1,)}, buffer_dtypes={"out": "f16"})
     return "\n".join(render_stmt(store, ctx)), store.epilogue
 
 
@@ -103,7 +121,7 @@ def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
 def test_untyped_copy_keeps_the_existing_f32_epilogue() -> None:
     source, epilogue = _render("result = copy(acc)")
 
-    assert epilogue[0].dtype is None
+    assert epilogue[0].dtype is F32
     assert "const float result_e0 = _c[0];" in source
     assert "__float2half(_c[0])" not in source
 
@@ -178,10 +196,11 @@ def test_fast_exp_policy_reaches_generated_fragment_epilogues(monkeypatch, fast_
                     if node.operation
                 ]
                 assert expected in ops and ("exp" if enabled else "exp_fast") not in ops
+        assert any(isinstance(stmt, WgmmaMma) for stmt in kernel.body.iter())
         compiled = Pipeline.build([FINAL_LOWERING_PASS]).run(lowered, ctx=ctx)
+    # CUDA spelling: moves to the PTX compiler's tests
     (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert ("__expf(" in source) == enabled
-    assert "wgmma.mma_async" in source
     values = np.array([-12, -1, 0, 1, 12], dtype=np.float32)
     np.testing.assert_array_equal(ElementwiseImpl(expected)(values), np.exp(values))
 
@@ -213,9 +232,9 @@ def test_a_mask_over_an_op_result_renders_after_that_op() -> None:
 
 
 def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
-    """A chain op keeps the tail's dtype, so a mask over a narrowed value converts back: a ternary
-    mixing ``__half`` and ``float`` does not compile."""
-    source, _ = _render(
+    """A chain op keeps the tail's dtype, so a mask over a narrowed value converts back: an epilogue's select is f32,
+    every branch converted to it ahead of the select."""
+    source, epilogue = _render(
         """
         ninf = load neg_inf[0]
         f16 narrow = copy(acc)
@@ -226,8 +245,11 @@ def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
         """
     )
 
-    assert "const __half narrow_e0 = __float2half(_c[0]);" in source
-    assert "const float masked_e0 = ((_t * 2 + 0 + n <= _g + m) ? __half2float(narrow_e0) : ninf_e0);" in source
+    dtypes = {stmt.name: stmt.dtype for stmt in epilogue if isinstance(stmt, (Assign, Load))}
+    (select,) = [stmt for stmt in epilogue if isinstance(stmt, Select)]
+    assert dtypes["narrow"] is F16 and {dtypes[branch.value] for branch in select.branches} == {F32}
+    # CUDA spelling: moves to the PTX compiler's tests
+    assert "const float narrow__f32_e0 = __half2float(narrow_e0);" in source
 
 
 def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> None:
@@ -240,19 +262,12 @@ def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> Non
         out[m, n] = bits
         """
     )
-    epilogue = _warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)
-    assert epilogue
-    store = RegStore(dst_buffer="out", dst_index=(Var("m"), Var("n")), frag="_c", shape=(16, 8, 16), ldm=16, **epilogue)
+    store = _typed_store(tail, {"out": I32, "shift": I32})
     ctx = RenderCtx(shapes={"out": (16, 16), "shift": (1,)}, buffer_dtypes={"out": "i32", "shift": "i32"})
     source = "\n".join(render_stmt(store, ctx))
 
     assert "const int shift_e0 = shift[0];" in source
     assert "int bits_e0 = code_e0 << shift_e0;" in source
-
-    literal = RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "i32"}, literal_constants={"shift": 4.0})
-    literal_source = "\n".join(render_stmt(store, literal))
-    assert "const int shift_e0 = 4;" in literal_source
-    assert "int bits_e0 = code_e0 << shift_e0;" in literal_source
 
 
 @requires_sm90
@@ -282,9 +297,20 @@ def test_integer_shift_stays_in_fused_mma_epilogue_on_gpu(monkeypatch) -> None:
     b = rng.integers(-2, 3, size=(128, 128)).astype(np.float16)
     shift = rng.integers(0, 4, size=(128, 128), dtype=np.int32)
     backend = CudaBackend()
-    compiled = backend.compile(graph)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None)]
-    assert len(sources) == 1 and "mma.sync.aligned.m16n8k16" in sources[0] and " << " in sources[0]
+    compiled, kernels = compile_with_kernels(graph)
+    assert len(kernels) == 1 and _is_m16n8k16(kernels) and "left_shift" in operations(kernels)
     got = backend.run(compiled, input_data={"a": a, "b": b, "shift": shift})[0].outputs["out"]
     expected = (a.astype(np.float32) @ b.astype(np.float32)).astype(np.int32) << shift
     np.testing.assert_array_equal(got, expected)
+
+
+def test_the_type_check_reads_a_stores_epilogue() -> None:
+    """A store's epilogue is a body the type check holds like any: untyped as the lowering writes it, typed after the
+    type pass."""
+    tail = parse_body("in2 = load r[m, n]\nv1 = add(acc, in2)\nout[m, n] = v1")
+    buffers = {"out": F16, "r": F16}
+    store = _typed_store(tail, buffers)
+    check_types(Body([store]), {name: dtype.name for name, dtype in buffers.items()})
+    untyped = store.replace(epilogue=_warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)["epilogue"])
+    with pytest.raises(TypeError, match="load r.*carries no dtype"):
+        check_types(Body([untyped]), {name: dtype.name for name, dtype in buffers.items()})

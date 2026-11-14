@@ -11,14 +11,13 @@ from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp
-from emmy.compiler.ir.stmt import Select, parse_body
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.ir.stmt import Select, StridedLoop, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _mask_key_bounds
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import compile_with_kernels, statements
 
 KEY = Axis(name="a2", extent=Dim(512))
 ROW_BLOCK = AxisOffset(atom_dim=16, reg=1, block_var="a1_b", unit_var="a1_u", unit_count=4)  # a 64-row CTA
@@ -119,7 +118,7 @@ def _sdpa(causal: bool, heads: int = 1, rows: int = 64) -> str:
     return f"F.scaled_dot_product_attention({q}, {q}, {q}{', is_causal=True' if causal else ''})"
 
 
-def _sources(code: str, window: int | None = None) -> list[str]:
+def _kernels(code: str, window: int | None = None) -> list:
     graph = graph_from_code(code)[0]
     if window is not None:  # the HF-wrapper stamp path: F.scaled_dot_product_attention has no window arg to trace
         for node in graph.nodes.values():
@@ -135,12 +134,12 @@ def _sources(code: str, window: int | None = None) -> list[str]:
         "WORK": "w1x1",
     }
     with pinned_knobs(pins):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
-    return [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
+    return list(kernels.values())
 
 
-def _chunk_loop(source: str) -> str:
-    return next(line.strip() for line in source.splitlines() if "for (int " in line and "__ck" in line)
+def _chunk_loops(kernel) -> list[StridedLoop]:
+    return [loop for loop in statements(kernel, StridedLoop) if loop.axis.name.endswith("__ck")]
 
 
 @pytest.mark.parametrize(
@@ -161,11 +160,11 @@ def _chunk_loop(source: str) -> str:
     ids=["causal-multi-wave", "causal-one-wave", "global", "band-multi-wave", "band-one-wave"],
 )
 def test_the_emitted_chunk_loop_carries_the_bounds_only_where_they_can_shorten_the_kernel(code, window, starts, stops, why) -> None:
-    sources = _sources(code, window)
-    assert len(sources) == 1 and "__ck" in sources[0], "one fused kernel with a chunk loop"
-    loop = _chunk_loop(sources[0])
-    assert ("__ck_end" in loop) is stops, f"{why}: {loop}"
-    assert ("__ck = 0" not in loop) is starts, f"{why}: {loop}"
+    kernels = _kernels(code, window)
+    assert len(kernels) == 1 and _chunk_loops(kernels[0]), "one fused kernel with a chunk loop"
+    loop = _chunk_loops(kernels[0])[0]
+    assert (loop.end is not None) is stops, f"{why}: {loop.end}"
+    assert (loop.start != Literal(0, "int")) is starts, f"{why}: {loop.start}"
 
 
 def test_the_launch_count_is_the_lead_extents_times_the_block_counts() -> None:

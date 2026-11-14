@@ -18,7 +18,7 @@ exponential the kernel takes and with or without flush to zero, so the rewrite i
 the exponential is the accurate one: there it saves an ``expf`` for two compares and four selects. The fast
 exponential (``FAST_EXP``) is one ``MUFU`` and one multiply, fewer instructions than the selects (a four-row
 cooperative softmax ran 1.32x slower on the RTX 5090 with them), so under it the pair keeps both exponentials. The
-rewrite decides nothing either way: it reads the kernel's exponential, as ``085_fast_exp``, which runs after it,
+rewrite decides nothing either way: it reads the kernel's exponential, as ``130_approximate_math``, which runs after it,
 does. The recipe stays as it is: it is Loop IR,
 every attention kernel's identity reads it, and the chunk tier's matcher reads the factor's shape there.
 """

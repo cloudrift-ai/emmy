@@ -38,6 +38,7 @@ from emmy.compiler.pipeline.fork import Fork, exact_schedule_leaf, iter_leaves
 # pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import family_pins, kernel_pin, schedule_pin_fingerprint
+from emmy.compiler.pipeline.passes.tile._cut import PIECE
 from emmy.compiler.pipeline.passes.tile._fromloop import serial_form
 from emmy.compiler.pipeline.schedule import fork_schedule
 from emmy.compiler.structural import digest
@@ -47,9 +48,9 @@ PATTERN = [Pattern("root", TileOp)]
 _FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
 
 
-def pin_row(*kernel: str, split_consumed: bool, published: bool = True, families: tuple[str, ...] = _FAMILIES) -> dict[str, str]:
-    """The environment's schedule pins for the kernel known by the names ``kernel`` as one knob row — the source
-    every site reads, the same way it reads a golden row. A kernel pin that reaches this kernel is
+def pin_row(kernel: str, *, split_consumed: bool, published: bool = True, families: tuple[str, ...] = _FAMILIES) -> dict[str, str]:
+    """The environment's schedule pins for the kernel called ``kernel`` as one knob row — the source
+    every site reads, the same way it reads a golden row. A kernel pin that names this kernel is
     its family's bare pin here, in place of the one every kernel reads. A kernel that consumed a
     split (``split_consumed``) reads a ``REDUCE`` pin without the ``g<n>`` half the split already took.
     ``published=False`` leaves out the pins published to every kernel, keeping this kernel's own. ``families`` are
@@ -57,7 +58,7 @@ def pin_row(*kernel: str, split_consumed: bool, published: bool = True, families
     row: dict[str, str] = {}
     for family in families:
         pins = dict(family_pins(family)) if published else {}
-        if (own := kernel_pin(family, *kernel)) is not None:
+        if (own := kernel_pin(family, kernel)) is not None:
             pins[family] = own
         for key, value in pins.items():
             if split_consumed and family == "REDUCE":
@@ -66,11 +67,11 @@ def pin_row(*kernel: str, split_consumed: bool, published: bool = True, families
     return row
 
 
-def cpu_forks(tile: TileOp, knobs: dict, ctx, *, node: str = "") -> list[Fork]:
+def cpu_forks(tile: TileOp, knobs: dict, ctx) -> list[Fork]:
     """The CPU family's lazy fork over ``tile``, its knobs read from the pins the way a CUDA family reads its own."""
     from emmy.compiler.ir.schedule.cpu import CpuCodec, CpuContext, CpuProblem, materialize_cpu  # noqa: PLC0415
 
-    row = pin_row(tile.name, node, split_consumed=False, families=CpuCodec.keys())
+    row = pin_row(tile.name, split_consumed=False, families=CpuCodec.keys())
     context = CpuContext(CpuProblem(tile, ctx, row=row))
     if row and not context.problem.bound:
         # A pin published to every kernel takes where it fits; a kernel it does not fit keeps its catalog.
@@ -88,7 +89,6 @@ def cpu_forks(tile: TileOp, knobs: dict, ctx, *, node: str = "") -> list[Fork]:
 
 def classic_forks(
     tile: TileOp,
-    name: str,
     knobs: dict,
     ctx,
     *,
@@ -103,12 +103,12 @@ def classic_forks(
     ``kernel_set`` says the kernel is one piece of a cut kernel set. A hand pin is published to
     every piece at once, so each takes the values it can and keeps its catalog where it cannot —
     the reading a row published across peer kernels takes — instead of refusing a value that names
-    a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin. ``node``
-    is the kernel's graph node id, which a ``node_`` pin names."""
+    a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin. ``node`` is the
+    kernel's graph node id, which names the buffer a carried state's serial form keeps it in."""
     from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
-    row = pin_row(name, node, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
+    row = pin_row(tile.name, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
     catalog = () if published else ("catalog",)  # a pool without the published pins is another pool
     register = []
     if tile.register_program is not None and not any(value for key, value in row.items() if key not in ("WORK", "TILE", "STAGE")):
@@ -126,7 +126,7 @@ def classic_forks(
             inherited_knobs=knobs,
             materialize=lambda schedule, selected, tile=tile: materialize_register(tile, schedule, selected),
             pool_id=digest(
-                tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint(tile.name, node), *catalog
+                tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint(tile.name), *catalog
             ),
             sample=getattr(ctx, "pool_sample", None),
         )
@@ -147,7 +147,7 @@ def classic_forks(
     named = frozenset(
         family
         for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
-        if kernel_pin(family, tile.name, node) is not None and not (peer and family in ("WORK", "RASTER", "REDUCE"))
+        if kernel_pin(family, tile.name) is not None and not (peer and family in ("WORK", "RASTER", "REDUCE"))
     )
     problem = ClassicProblem(
         tile,
@@ -167,7 +167,7 @@ def classic_forks(
         ctx.structural_key(),
         tuple((axis.name, repr(axis.extent)) for axis in tile.place.free),
         codec.keys(),
-        schedule_pin_fingerprint(tile.name, node),
+        schedule_pin_fingerprint(tile.name),
         tile.split_consumed,
         *catalog,
     )
@@ -177,7 +177,6 @@ def classic_forks(
         inherited_knobs=knobs,
         materialize=lambda schedule, row: materialize_classic(
             tile,
-            name=name,
             knobs=row,
             target=ctx,
             schedule=schedule,
@@ -196,7 +195,7 @@ def classic_forks(
         # can still leave a piece no complete row (an f32 GDN piece under a GEMM sweep's ``STAGE=d1/smem``,
         # which none of its scalar tiles' loads resolve). That piece keeps its catalog instead of running
         # unscheduled; its own kernel pins still hold.
-        return classic_forks(tile, name, knobs, ctx, kernel_set=kernel_set, node=node, published=False, paged=paged)
+        return classic_forks(tile, knobs, ctx, kernel_set=kernel_set, node=node, published=False, paged=paged)
     return forks
 
 
@@ -208,19 +207,18 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
         raise RuleSkipped("TileOp already scheduled / nothing to map")
-    # A cut's pieces carry the seam token in their name or read a workspace named by one.
-    kernel_set = "__place_" in tile.name or any("__place_" in buffer for buffer in root.inputs)
+    kernel_set = root.hints.has(PIECE)  # a kernel a cut left
     if getattr(ctx, "backend_name", "cuda") == "cpu":
-        options = cpu_forks(tile, tile.knobs, ctx, node=root.id)
+        options = cpu_forks(tile, tile.knobs, ctx)
     else:
-        options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set, node=root.id, paged=paged)
+        options = classic_forks(tile, tile.knobs, ctx, kernel_set=kernel_set, node=root.id, paged=paged)
     # A pin that names THIS kernel and leaves it no row is refused here, with the pins that did it.
     # Left to the lazy fork, the empty enumeration was skipped: the kernel ran unscheduled and the
     # pin looked realized by nothing (a SiLU-prologue down projection under a mma TILE pin).
-    scoped = {family: value for family in _FAMILIES if (value := kernel_pin(family, tile.name, root.id)) is not None}
+    scoped = {family: value for family in _FAMILIES if (value := kernel_pin(family, tile.name)) is not None}
     if scoped and next(iter_leaves(options), None) is None:
         pins = ", ".join(f"{family}={value}" for family, value in scoped.items())
-        raise ValueError(f"{tile.name or root.id}: its kernel pins ({pins}) leave no schedule row this kernel offers")
+        raise ValueError(f"{tile.name}: its kernel pins ({pins}) leave no schedule row this kernel offers")
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

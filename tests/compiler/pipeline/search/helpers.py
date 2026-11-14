@@ -56,13 +56,13 @@ class StubKernel:
         return iter((self,))
 
 
-def kernel_row(identity: str, *, name: str | None = None, symbolic: tuple[str, ...] = (), formed: bool = True) -> KernelDef:
+def kernel_row(identity: str, *, symbolic: tuple[str, ...] = (), formed: bool = True) -> KernelDef:
     """A ``kernel`` row keyed ``identity`` with a minimal wire — one loop node whose output carries the
     ``symbolic`` dims. Every ``perf`` row names a kernel row, so tests seed one of these before recording
     measurements of it. The key is handed in (``KernelDef.keyed``), as the DB hands back the one it stores."""
     dims: list = [{"sym": var, "hint": 512} for var in symbolic] + [4]
     wire = {"inputs": [], "outputs": ["y"], "nodes": [{"id": "y", "op": "loop", "attrs": {"body": []}, "outputs": [["y", "f32", dims]]}]}
-    return KernelDef(loop_ir=wire, name=name or f"k_{identity}", formed=formed).keyed(identity)
+    return KernelDef(loop_ir=wire, formed=formed).keyed(identity)
 
 
 def perf_row(
@@ -107,7 +107,7 @@ def tuned_db(path, cases: tuple[str, ...], *, source: str = "measured", us: floa
     capability and the case's own regime, ``source`` on every row."""
     from dataclasses import replace
 
-    from emmy.compiler.context import FAST_MATH_FLAG, Context
+    from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden import Measurements, import_rows
     from tests.compiler.realization import helpers as corpus
 
@@ -117,9 +117,8 @@ def tuned_db(path, cases: tuple[str, ...], *, source: str = "measured", us: floa
         case = corpus.load_case(corpus.CASES_DIR / case_path)
         rows = [replace(row, measurements=measured) if row.measurements is None else row for row in case.rows]
         regime = case.regime
-        # Measured at the deployable opt level whatever lane the suite compiles at.
-        ctx = Context.from_target(
-            case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags=FAST_MATH_FLAG if regime.get("FAST_MATH") else ""
-        )
+        # Measured at the deployable opt level whatever lane the suite compiles at: the regime alone spells the flags.
+        precision = {"FAST_MATH": bool(regime.get("FAST_MATH"))}
+        ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision=precision)
         import_rows(db, ctx, case.document, rows, source=source)
     return db

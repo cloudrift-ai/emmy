@@ -139,8 +139,8 @@ def test_independent_precision_regimes_never_replace_or_price_each_other(name, u
         with pinned_knobs({"FAST_MATH": umbrella, name: enabled}):
             contexts.append(Context.from_target((12, 0), gpu_name=_5090))
     ordinary, override = contexts
-    # A class nvcc picks the instruction of spells its flag; the exponential drops the umbrella's fast library with it.
-    flagged = name in ("FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA") or (name == "FAST_EXP" and umbrella)
+    # The two whole-kernel decisions spell an nvcc flag; an approximate instruction is an operation of the kernel body.
+    flagged = name in ("FLUSH_TO_ZERO", "CONTRACT_FMA")
     assert (ordinary.compile_flags != override.compile_flags) is flagged
     assert ordinary.structural_key() != override.structural_key()
     # Later ambient changes cannot change either captured regime.
@@ -189,22 +189,21 @@ def test_a_placement_knob_is_refused_as_a_measurement() -> None:
 
 def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
     db = SearchDB()
-    db.record_kernel(kernel_row("k", name="k_first"))
-    db.record_kernel(kernel_row("k", name="k_second"))
-    assert db.kernel_names() == {"k": "k_first"}
+    db.record_kernel(kernel_row("k"))
+    db.record_kernel(kernel_row("k"))
     [row] = list(db.iter_kernels())
-    assert (row.name, row.exact_identity) == ("k_first", "k"), "the stored key is the row's identity; nothing lifts the wire to learn it"
+    assert (row.name, row.exact_identity) == ("k_k", "k"), "the stored key is the row's identity; nothing lifts the wire to learn it"
 
 
 #: Pins for the tune DB's identity computation: a formed kernel, a split's partial, a twisted softmax, attention,
 #: a contraction and a piece formed from no loop op. Re-pinning a changed corpus body does not change the DB version.
 _PINNED_IDENTITIES = {
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "aee18fd8b70ef8deb26b624698c57faa",
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "c6a11571d7ceafb35273b317542392b9",
-    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "39de2351761faf2231319b2251070968",
-    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "a66857bbc1699894ee65bb33b37fe170",
-    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "954a87376449a67967b4e7e30dd4575c",
-    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "db72314a5d4a426daa4d072c6fbfea82",
+    ("reduce/cross-cta-sum-kernel.json", 0): "aee18fd8b70ef8deb26b624698c57faa",
+    ("reduce/cross-cta-sum-kernel.json", 1): "c6a11571d7ceafb35273b317542392b9",
+    ("reduce/online-softmax-4x128.json", 0): "39de2351761faf2231319b2251070968",
+    ("attention/sdpa-hd128-softmax-v-mma.json", 0): "a66857bbc1699894ee65bb33b37fe170",
+    ("matmul/bf16-mma-sm120.json", 0): "954a87376449a67967b4e7e30dd4575c",
+    ("fused/nvfp4-gate-up-requant-place-cut.json", 2): "db72314a5d4a426daa4d072c6fbfea82",
 }
 
 

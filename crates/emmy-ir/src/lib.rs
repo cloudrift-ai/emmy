@@ -8,7 +8,9 @@ pub mod dtype;
 pub mod elementwise;
 pub mod expr;
 pub mod field;
+pub mod fragment;
 pub mod identity;
+pub mod input;
 pub mod memo;
 mod name;
 pub mod normalize;
@@ -18,6 +20,7 @@ pub mod protocol;
 pub mod statement;
 pub mod strength;
 pub mod text;
+pub mod types;
 
 pub use name::Name;
 

@@ -4,8 +4,8 @@
   {"inputs":["x0","x1"],"outputs":["linear"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","bf16",[32,384]]]},{"id":"x1","op":"input","outputs":[["x1","bf16",[64,384]]]},{"id":"linear","op":"torch.linear","inputs":["x0","x1"],"outputs":[["linear","bf16",[32,64]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["x1","x0"],"outputs":["linear"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","bf16",[32,384]]]},{"id":"x1","op":"input","outputs":[["x1","bf16",[64,384]]]},{"id":"linear","op":"loop","attrs":{"body":"for a0 in 0..32:\n    for a1 in 0..64:\n        for a2 in 0..384:\n            in0 = load x0[a0, a2]\n            in1 = load x1[a1, a2]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        linear[a0, a1] = acc0","name":"k_linear_53c05c"},"inputs":["x1","x0"],"outputs":[["linear","bf16",[32,64]]]}]},"name":"k_linear_53c05c","formed":true,"traced":0,"origins":["linear"]}
+  {"loop_ir":{"inputs":["x1","x0"],"outputs":["linear"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","bf16",[32,384]]]},{"id":"x1","op":"input","outputs":[["x1","bf16",[64,384]]]},{"id":"linear","op":"loop","attrs":{"body":"for a0 in 0..32:\n    for a1 in 0..64:\n        for a2 in 0..384:\n            in0 = load x0[a0, a2]\n            in1 = load x1[a1, a2]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        linear[a0, a1] = acc0"},"inputs":["x1","x0"],"outputs":[["linear","bf16",[32,64]]]}]},"formed":true,"traced":0,"origins":["linear"]}
  ],
  "rows": [
-  {"name":"k_linear_53c05c","kernel":"k_linear_53c05c","pins":{"FAST_MATH":true},"knobs":{"WORK":"t16x8","TILE":"f2x2","REDUCE":"","STAGE":"d2/smem","RASTER":""}}
+  {"name":"k_linear_53c05c","kernel":0,"pins":{"FAST_MATH":true},"knobs":{"WORK":"t16x8","TILE":"f2x2","REDUCE":"","STAGE":"d2/smem","RASTER":""}}
  ]}

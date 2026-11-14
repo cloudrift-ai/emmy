@@ -1,1 +1,1 @@
-"""Loop IR to an unmapped tile: the kernel cache replay, the total lift, then the twisted rewrite."""
+"""Loop IR to an unmapped tile: the total lift, then the twisted rewrite."""

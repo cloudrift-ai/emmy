@@ -18,17 +18,19 @@ import pytest
 from emmy import config
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.kernel.ir import MmaSyncPtx, RegStore
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
 from emmy.compiler.ir.stmt import Assign, Let, Loop, parse_body
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import _hoist_invariant, _replace, rewrite_twisted
+from tests.compiler.helpers import compile_with_kernels, statements
 from tests.compiler.ir.stmt import listing
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -277,13 +279,16 @@ def test_sdpa_score_contraction_reaches_the_mma_tier(monkeypatch) -> None:
         "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
         "torch.randn(1, 1, 32, 16, dtype=torch.float16))"
     )
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
-    sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1, "the pinned carrier is one kernel"
-    assert "emmy_mma_m16n8k16" in sources[0], "the score contraction reaches the tensor-core tier"
-    # The kernel writes the f16 output and converts at the boundary — through the explicit packer,
-    # or through the per-element assign a fragment store converts implicitly.
-    assert "__float2half" in sources[0] or "half2_rn" in sources[0] or "acc" in sources[0]
+    _, kernels = compile_with_kernels(graph, ctx=Context.from_target((8, 0)))
+    assert len(kernels) == 1, "the pinned carrier is one kernel"
+    (kernel,) = kernels.values()
+    assert {tuple(mma.shape) for mma in statements(kernel, MmaSyncPtx)} == {(16, 8, 16)}, (
+        "the score contraction reaches the tensor-core tier"
+    )
+    # The kernel writes the f16 output and converts at the boundary: the fragment store of the f32 accumulator.
+    ((output, tensor),) = kernel.outputs.items()
+    assert tensor.dtype == F16 and statements(kernel, RegStore)
+    assert all(store.dst_buffer == output for store in statements(kernel, RegStore))
 
 
 # ===================================================================
@@ -405,7 +410,7 @@ def _row(*parts: str) -> LoopOp:
 def _rewrite(*parts: str) -> tuple[Fold, tuple]:
     """Lift the statements under one row and rewrite: the second loop's read of ``acc0`` arrives as
     an operand edge, which is what the recipe matches on. Returns the tree and the kernel's axis table."""
-    tile = lift_loop_op(_row(*parts), name="k_pair")
+    tile = lift_loop_op(_row(*parts))
     return rewrite_twisted(tile.op, tile.axes), tile.axes
 
 
@@ -441,7 +446,7 @@ def test_an_invariant_factor_hoists_out_of_the_fold(spelling: str) -> None:
     Loop IR may already have split the divide into a reciprocal ahead of the loop, so the epilogue
     applies the factor by whichever ⊗ reached the term."""
     weight = "inv = reciprocal(d)\np = multiply(in1, inv)" if spelling == "reciprocal" else "p = divide(in1, d)"
-    tile = lift_loop_op(_row("d = load den[a0]", _reduce_loop(f"in1 = load x[a0, a1]\n{weight}\nacc1 <- add(acc1, p)")), name="k_hoist")
+    tile = lift_loop_op(_row("d = load den[a0]", _reduce_loop(f"in1 = load x[a0, a1]\n{weight}\nacc1 <- add(acc1, p)")))
     fold = next(term for term in _folds(tile.op) if term.axis is not None)
     (state,) = fold.as_reduction().states
     inner, epilogue = _hoist_invariant(fold)

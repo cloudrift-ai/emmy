@@ -11,7 +11,7 @@ from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.expression import CastExpression, Var
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work
 from emmy.compiler.ir.schedule import schedule as advance_schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
@@ -24,12 +24,12 @@ from emmy.compiler.ir.schedule.classic import (
 )
 from emmy.compiler.ir.schedule.classic import refusals as classic
 from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works, packed_works
-from emmy.compiler.ir.stmt import Body, Loop, parse_body
+from emmy.compiler.ir.stmt import Assign, Body, Loop, parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
-from tests.compiler.helpers import enumerate_classic_reference, requires_cuda
+from tests.compiler.helpers import compile_with_kernels, enumerate_classic_reference, requires_cuda, statements
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
@@ -82,7 +82,7 @@ def _reference(tile, target, *, pins=None):
 
 def _schedule_leaves(tile, name, target):
     """Expand the lazy traversal while retaining its typed schedule leaves."""
-    return tuple(iter_leaves(classic_forks(tile, name, {}, target)))
+    return tuple(iter_leaves(classic_forks(tile, {}, target)))
 
 
 def _pointwise() -> TileOp:
@@ -165,7 +165,7 @@ def test_eight_output_lanes_are_offered_on_volta_and_lower_with_their_own_grid()
         problem = ClassicProblem(tile, target, row=row, validate_pins=True)
         choices = list(advance_schedule(ClassicScheduleContext(tile, target, problem)))
         assert len(choices) == 1, (spec, choices)
-        realized = materialize_classic(tile, name="matmul", knobs=row, target=target, schedule=choices[0])
+        realized = materialize_classic(tile, knobs=row, target=target, schedule=choices[0])
         bound = factorize(realized, root=None)
         assert tuple(axis.extent.as_static() for axis in bound.axes[1:]) == expected
         (tree,) = [stmt for stmt in bound.body.iter() if isinstance(stmt, TreeHalve)]
@@ -235,7 +235,6 @@ def _partial_states():
 def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, work):
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.ir.tile.ops import merges_partition
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     tile = _deferred_softmax_merge(count)
@@ -243,11 +242,14 @@ def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, 
     graph = _deferred_merge_graph(tile)
     row = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0"}
     with pinned_knobs(row):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)), db=None)
+        compiled, kernels = compile_with_kernels(graph, ctx=Context.from_target((8, 0)), db=None)
     (kernel,) = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    (body,) = kernels.values()
     assert kernel.knobs["REDUCE"] == reduce and kernel.knobs["WORK"] == work
-    assert kernel.kernel_source.count("__float2half(") == 1
-    assert "const float*" in kernel.kernel_source
+    # The states are read and merged in f32; the one conversion is the result's, to the f16 output.
+    conversions = [stmt for stmt in statements(body, Assign) if isinstance(stmt.value, CastExpression) and stmt.dtype == F16]
+    assert len(conversions) == 1
+    assert [tensor.dtype for tensor in body.inputs.values()] == [F32]
 
 
 @pytest.mark.parametrize("reduce", ["r2", "r4"])
@@ -264,7 +266,7 @@ def test_deferred_register_partials_preserve_empty_states_and_the_uneven_tail(re
     row = {"WORK": "", "REDUCE": reduce}
     problem = ClassicProblem(tile, target, row=row, validate_pins=True)
     (choice,) = advance_schedule(ClassicScheduleContext(tile, target, problem))
-    realized = materialize_classic(tile, name="merge", knobs=row, target=target, schedule=choice)
+    realized = materialize_classic(tile, knobs=row, target=target, schedule=choice)
     bound = factorize(realized, root=None)
     assert bound.axes == tile.place.free
     # This serial Kernel IR uses only the shared scalar statements. Execute its actual strided
@@ -721,12 +723,11 @@ def test_kernel_pin_without_work_keeps_the_matching_catalog_rows(monkeypatch, fa
         Axis("m", 64),
         Axis("n", 64),
         Axis("k", 64),
-        name="k_matmul__place_ab12",
         inputs={name: Tensor(name, (64, 64), "f16") for name in ("a", "b")},
         outputs={"out": Tensor("out", (64, 64), "f16")},
     )
-    monkeypatch.setenv(f"EMMY_{family}@place_ab12", value)
-    forks = classic_forks(tile, tile.name, {}, Context.from_target(target), kernel_set=True)
+    monkeypatch.setenv(f"EMMY_{family}@{tile.name}", value)
+    forks = classic_forks(tile, {}, Context.from_target(target), kernel_set=True)
     leaf = next(iter_leaves(forks), None)
     assert leaf is not None, "a partial kernel pin must find WORK in the catalog"
     assert leaf.row[family] == value
@@ -755,12 +756,12 @@ def test_a_cut_piece_keeps_its_catalog_when_published_pins_leave_it_no_row(monke
     tile = TileOp(op=root, place=Placement(free=(Axis("m", 64), Axis("n", 64))), axes=(Axis("m", 64), Axis("n", 64), k))
     target = Context.from_target((7, 0))
     monkeypatch.setenv("EMMY_STAGE", "d1/smem")
-    assert tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, published=True)))
+    assert tuple(iter_leaves(classic_forks(tile, {}, target, kernel_set=True, published=True)))
     with pytest.raises(ValueError, match="does not resolve"):  # a kernel of its own is held to the pin, loudly
-        tuple(iter_leaves(classic_forks(tile, "k", {}, target)))
+        tuple(iter_leaves(classic_forks(tile, {}, target)))
 
-    monkeypatch.setenv("EMMY_WORK@place_ab12", "t16x16")
-    leaves = tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, node="out__place_ab12_0")))
+    monkeypatch.setenv(f"EMMY_WORK@{tile.name}", "t16x16")
+    leaves = tuple(iter_leaves(classic_forks(tile, {}, target, kernel_set=True)))
     assert leaves and {leaf.schedule.kernel.work.spell() for leaf in leaves} == {"t16x16"}
 
 

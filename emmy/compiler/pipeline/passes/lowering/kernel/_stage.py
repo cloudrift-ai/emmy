@@ -18,7 +18,7 @@ wait / barrier placement DERIVED from which tagged body segments read each group
 whole-body single-group entry is :func:`staged_kloop`) — driven by a :class:`Transport` strategy
 (:class:`SyncTransport` / :class:`CpAsyncTransport` / :class:`TmaTransport`) — the three
 producers put behind one ``fill``/``commit``/``wait`` seam. The
-slab feeds the same staged ``LdmatrixLoad`` / scalar ``Load`` drain regardless of which producer
+slab feeds the same staged fragment load / scalar ``Load`` drain regardless of which producer
 (synchronous copy / cp.async / TMA) filled it. A modern slab feeding an mma drain is **swizzled** (per operand): TMA
 permutes the 16 B chunks in hardware during the box copy (:func:`pick_swizzle_atom`), every other producer applies the
 identical XOR in software on its destination index (:func:`software_swizzle`), and each staged ``LdmatrixLoad`` reads
@@ -488,7 +488,7 @@ def sync_stat_fill(
 # --------------------------------------------------------------------------- #
 # TMA (``cp.async.bulk.tensor``) descriptor — the host-built ``CUtensorMap`` the
 # box copies index off (the copy + mbarrier handshake live in :class:`TmaTransport`
-# below). Shares the slab + staged-``LdmatrixLoad`` drain with the cp.async path.
+# below). Shares the slab + the staged fragment load drain with the cp.async path.
 # --------------------------------------------------------------------------- #
 
 # TMA destination smem must be aligned (``cp.async.bulk.tensor`` faults otherwise);
@@ -622,7 +622,7 @@ class Operand:
     ride as an ``(a, b)`` pair so :meth:`CpAsyncTransport.fill` / ``slab_decls`` loop over them instead
     of spelling A then B. ``shape`` is ``(rows, cols)`` of one ring slot (A ``(tile_m, bk)`` / B
     ``(bk, tile_n)``); each slab is ``ring·rows`` rows (slot ``s`` at row ``s·rows``), plain row-major /
-    NONE-swizzle, feeding the same staged ``LdmatrixLoad`` (mma) / scalar ``Load`` drain. ``index`` maps
+    NONE-swizzle, feeding the same staged fragment load (mma) / scalar ``Load`` drain. ``index`` maps
     a K-chunk offset ``k0`` to the cp.async ``(row, col) → gmem-index`` closure; ``coords`` maps ``k0`` to
     the TMA box origin. Each transport reads only the one it needs."""
 
@@ -640,7 +640,7 @@ class Operand:
     # A transposed-B (``F.linear`` serving-layout) slab: stored N-MAJOR (``tile_n × bk``, the
     # operand's own gmem orientation, K stride-1 in both) instead of the canonical K-major
     # ``bk × tile_n``. The mma drain reads it with the plain (no ``.trans``) ldmatrix — the
-    # ``LdmatrixLoad(b_trans=True)`` staged path flash's K slab already drains through. Role
+    # ``b_trans=True`` staged path flash's K slab already drains through. Role
     # "b" only, on every staged transport (cp.async / TMA / the ``smem`` fill's async B fills).
     trans: bool = False
     # Extra smem columns padding each slab row (cp.async transport only — a TMA box deposit is

@@ -25,7 +25,6 @@ pub type Axes = Arc<[AxisRef]>;
 pub type Stmts = Arc<[Arc<Statement>]>;
 pub type Branches = Arc<[SelectBranch]>;
 pub type FragmentArgs = Arc<[FragmentArg]>;
-pub type ElementwiseOps = Arc<[ElementwiseOp]>;
 pub type Ints = Arc<[i64]>;
 pub type Floats = Arc<[Float]>;
 

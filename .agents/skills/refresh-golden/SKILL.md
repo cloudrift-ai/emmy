@@ -18,8 +18,9 @@ a hardware golden under `emmy/compiler/pipeline/search/golden/records/` or a rec
 
 **Is the file the fresh lowering of its own programs?** A restamp of it must change nothing: every stored kernel is
 the kernel the current compiler lowers the program to (the stored body and the fresh one compute the same exact
-identity), and every kernel-set decision is one the fresh parent takes the same way. A golden stores no identity and
-no stamps — both are computed from the stored body — so a change to how identity is computed makes no file stale.
+identity), and every kernel-set decision is one the fresh parent takes the same way. A golden stores no identity, no
+name and no stamps — all are computed from the stored body — so a change to how identity is computed makes no file
+stale.
 
 A file failing that is *stale*: its rows are rows of kernels a deploy no longer builds, so a strict boot finds no
 evidence. The check has no list of expected failures: a red node stays red until the file is refreshed. Never
@@ -48,9 +49,9 @@ emmy golden check recipes/<model>/golden/<card>.json
 
 Read the reason on each line:
 
-- `re-keyed NAME old -> new` — the kernel still exists (same outputs), but its stored body and the fresh lowering are
-  two kernels: their exact identities (`old`, `new`) differ. A restamp gives it the fresh body under the same name in
-  the file; each of its rows survives and loses its measurement.
+- `re-keyed OLD -> NEW` — the kernel still exists (same outputs), but its stored body and the fresh lowering are two
+  kernels: their names, each computed from the exact identity, differ. A restamp gives the file's entry the fresh body,
+  so the kernel takes the new name; each of its rows survives and loses its measurement.
 - `dropped kernel NAME: no fresh kernel writes its outputs` — the layer regrouped (fused into a neighbour, split).
   The kernel and its rows describe no kernel; a restamp drops them, and the fresh kernels are unrecorded inventory.
 - `dropped decision PARENT ARM: the fresh parent does not take it the same way` — the seam the arm names moved (a
@@ -59,7 +60,7 @@ Read the reason on each line:
 - `demoted to a proposal NAME` — a measured row whose kernel was re-keyed: the schedule stays, the microseconds go.
 - `re-spelled row NAME OLD -> NEW` — a scoped schedule key (`TILE@…`, `REDUCE@…`, `STAGE@…`) the kernel's fresh tile
   no longer offers, moved as a seam is: to the one offered key of its family and kind one segment away (a node the
-  lift now forms before the site moved its operand index). `dropped key NAME: KEY names no site of REF` is a key no
+  lift now forms before the site moved its operand index). `dropped key NAME: KEY names no site of KERNEL` is a key no
   such rule maps to exactly one site, removed from its row.
 
 To see what moved in one program, compare the stored body (the kernel's `loop_ir` entry in the file) with the fresh
@@ -88,7 +89,7 @@ until measured again. It refuses to write a file nothing survives in. Read its r
 | --- | --- | --- |
 | `demoted to a proposal NAME` | the kernel changed under the row | measure it again on the card (step 3) |
 | `re-spelled row NAME OLD -> NEW` | the row's site address moved by an operand index | measure it again on the card (step 3) |
-| `dropped key NAME: KEY names no site of REF` | the key's site is not one segment away from any offered site | the row keeps its other keys; measure it again (step 3) |
+| `dropped key NAME: KEY names no site of KERNEL` | the key's site is not one segment away from any offered site | the row keeps its other keys; measure it again (step 3) |
 | `re-spelled seam PARENT OLD -> NEW` | the seam moved, and the new seam cuts the same pieces, or pieces that read and write alike | where a piece shows as demoted too, compare the fresh cut's operands |
 | `dropped decision …` | the fresh parent takes no such decision | record the fresh kernel set (step 3) |
 | `dropped kernel NAME: no fresh kernel writes its outputs` | the layer regrouped | trace and record the fresh kernels (step 4) |
@@ -115,13 +116,13 @@ The file id is the hardware golden's name (`h100_sm90.json`) or `<recipe>/<name>
 
 ### 3. Measure the file's proposals on its card
 
-The measurement writers refuse a canonical path, so work on a copy. Select both the exact kernel reference and row
-name when refreshing an existing schedule, including a cut piece:
+The measurement writers refuse a canonical path, so work on a copy. Select both the kernel's name and the row name
+when refreshing an existing schedule, including a cut piece:
 
 ```bash
 mkdir -p _tune/<run> && cp recipes/<model>/golden/<card>.json _tune/<run>/working.json
 EMMY_NVCC_FLAGS= EMMY_KNOBS="PLACE=fuse,<the row's knobs, every family spelled>" \
-  emmy run --golden _tune/<run>/working.json --kernel <exact kernel ref> \
+  emmy run --golden _tune/<run>/working.json --kernel <kernel name> \
     --realization <exact row name> --bench --record-greedy --strict
 ```
 
@@ -151,8 +152,8 @@ back) and commit them from the local checkout, where `git lfs install` has run o
 measured").
 
 Promote the validated entries through `GoldenFile.edit(path)` with `add_kernel`, `add_routing` and `upsert_row`,
-including qualified whole-target latency on its root seed. A canonical file can know the same exact kernel under a
-different reference, so copied rows and routing entries must use the reference returned by `add_kernel`. Verify that
+including qualified whole-target latency on its root seed. A canonical file holds the same exact kernel at another
+position, so copied rows and routing entries must use the reference returned by `add_kernel`. Verify that
 `emmy golden check PATH` stays clean, a target compiled with `--strict-evidence --golden PATH` uses the recorded rows,
 and `emmy golden list PATH` shows the restored whole-target comparisons. Distinguish proposals already present before
 the compiler change from measurements this refresh invalidated.
@@ -166,7 +167,7 @@ When the restamp leaves nothing, or drops the kernels a deploy needs (a serving 
   `emmy trace` inventory; the old file is history, not a seed.
 - **A kernel regrouped into a bigger one** (a whole layer fused into one) — the unpinned greedy may hang on it.
   Loop fusion stays maximal, so the fix is a cut, never a smaller region. Find one without scheduling:
-  `emmy compile --golden PATH --realization NAME --ir tile --passes dolfstp` under `EMMY_KNOBS="PLACE@<seam>=cut,…"`
+  `emmy compile --golden PATH --realization NAME --ir tile --passes dolftp` under `EMMY_KNOBS="PLACE@<seam>=cut,…"`
   prints the unscheduled kernel set in seconds, with the seam spellings the cut pass accepts. Cut first where a
   piece's value is recomputed under consumer axes it does not read, judged from the realized piece's grid (a seam's
   raw axes omit the strides the cut applies). Add cuts one at a time; more cuts are not faster by themselves. Then
@@ -203,14 +204,15 @@ Each of these cost a record run on a rented card:
 - `GoldenFile.path_to` takes the first route that reaches a piece, so a hand pin spelled along a sibling root's path
   names no seam of this target. Spell the pins along the target's own decisions.
 - A piece with one CTA and a multi-ms or hung time has lost its split decision (a restamp can drop producer decisions).
-  Cut its seams by hand with `PLACE@place_<token>/<seam>=cut`.
-- A pin on a cut piece spells the piece's own seams, bare where it has one (`PLACE@place_<token>=cut`); the audit's
-  "names no seam" warning lists them. A strict record of such a cut needs rows for the pieces it mints: bench the piece
-  alone under `EMMY_KNOBS=PLACE=cut` at the tune standard (its routing row and the pieces' rows land in the tune DB),
-  then record the whole target with that DB in scope. `--kernel PIECE --realization ROW` pins the row's kernel whole
-  and takes no hand `PLACE` pin.
-- A recorded root-most cut replays as `PLACE@step.0=cut`, and under strict evidence a record stops at a remainder's own
-  fork by name instead of fusing it.
+  Cut its seams by hand with `PLACE@k_<hash>/<seam>=cut`, the piece's name read off a dump or a first compile.
+- A pin on a cut piece names the piece and spells its own seams, or none for its root-most seam
+  (`PLACE@k_<hash>=cut`); the audit's "names no seam" warning lists them. A strict record of such a cut needs rows for
+  the pieces it mints: bench the piece alone under `EMMY_KNOBS=PLACE=cut` at the tune standard (its routing row and
+  the pieces' rows land in the tune DB), then record the whole target with that DB in scope.
+  `--kernel PIECE --realization ROW` pins the row's kernel whole and takes no hand `PLACE` pin.
+- A recorded cut replays as a pin on its parent's name (`PLACE@k_<hash>/<seam>=cut`, or `PLACE@k_<hash>=cut` for a
+  root-most cut), and under strict evidence a record stops at an unpriced piece's own fork, naming it, instead of
+  fusing it. Every piece is a kernel of its own name, so pin one piece down a chain of cuts by that name.
 - `--record-greedy` spells every precision gate in the new rows' pins (`FAST_MATH`, `FAST_EXP`, `F16_MMA_F32_ACC`,
   `FP8_MMA`); the golden rows carry `{"FAST_MATH": lane}` alone. The audit reads both spellings as one lane.
 - A whole-target bench now and then falls back from CUDA graph capture, and a strict record refuses it ("backend

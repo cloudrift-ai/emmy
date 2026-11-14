@@ -18,7 +18,7 @@ from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Write, parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
 shared = import_module("emmy.compiler.pipeline.passes.lowering.kernel.035_shared_carry")
 _PINS = {"PLACE": "fuse", "WORK": "t512", "REDUCE": "coop-t/n8/v4", "FAST_MATH": True}
@@ -56,7 +56,7 @@ def _body(n=40, *, masked=True, extra_reader=False):
 def _graph(dtype=F32, *, masked=True, n=40):
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("seed", (2, n, n), dtype), node_id="seed")
-    graph.add_node(LoopOp(body=_body(n, masked=masked)[0], name="k_step"), ["seed"], Tensor("out", (3, 2, n, n), dtype), node_id="out")
+    graph.add_node(LoopOp(body=_body(n, masked=masked)[0]), ["seed"], Tensor("out", (3, 2, n, n), dtype), node_id="out")
     graph.inputs, graph.outputs = ["seed"], ["out"]
     return graph
 
@@ -70,13 +70,14 @@ def test_discarded_clamps_do_not_change_the_state_owner():
 
 def test_shared_storage_keeps_the_ordered_loop_inside_one_launch():
     with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((7, 0)))
+        compiled, kernels = compile_with_kernels(_graph(), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     assert not op.serial
     assert op.arg_order == ("seed", "out")
     assert op.knobs["SHARED_CARRY"] == 1
-    assert "_carry_copy" in op.kernel_source
-    assert "__acc" not in op.kernel_source
+    (kernel,) = kernels.values()
+    assert "_carry_copy" in text(kernel)
+    assert "__acc" not in text(kernel)
     assert len(compiled.nodes["out"].outputs) == 1
 
 
@@ -169,10 +170,12 @@ def test_a_state_the_term_stores_every_step_has_no_port():
     lifted = Pipeline.build(["tile/lift"]).run(_graph(), ctx=Context.from_target((7, 0)))
     assert [t.name for t in lifted.nodes["out"].outputs] == ["out"]
     with pinned_knobs({**_PINS, "SHARED_CARRY": 0}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((7, 0)))
+        compiled, kernels = compile_with_kernels(_graph(), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
-    assert op.serial and op.arg_order == ("seed", "out") and "__acc" not in op.kernel_source
-    assert op.kernel_source.count("out[") >= 2, "the lagged read is a read of the term's own output"
+    (kernel,) = kernels.values()
+    assert op.serial and op.arg_order == ("seed", "out") and "__acc" not in text(kernel)
+    reads = [load for load in statements(kernel, Load) if load.input == "out"]
+    assert reads and statements(kernel, Write), "the lagged read is a read of the term's own output"
 
 
 @requires_cuda

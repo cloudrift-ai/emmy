@@ -1,5 +1,7 @@
 """CLI tests for ``emmy compile`` argument handling and ``--code``."""
 
+import re
+
 
 def test_compile_code_torch_ir(run_cli):
     rc, stdout, stderr = run_cli("compile", "--code", "torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))", "--ir", "torch")
@@ -44,7 +46,7 @@ def test_compile_code_saves_default_cuda_to_output(run_cli, tmp_path):
     text = out.read_text()
     # Default IR is cuda — expect a __global__ kernel rendered to source.
     assert "__global__" in text
-    assert "k_rms_norm" in text
+    assert re.search(r"void k_[0-9a-f]{12}\(", text), "a kernel is named by its exact identity"
 
 
 def test_compile_code_functional_silu(run_cli):
@@ -64,9 +66,9 @@ def test_compile_code_functional_softmax_bakes_kwargs(run_cli):
 
 
 def test_compile_passes_shorthand(run_cli, tmp_path):
-    """'dolfstph' should expand to every pass through the tile schedule."""
+    """'dolftph' should expand to every pass through the tile schedule."""
     out = tmp_path / "out.txt"
-    rc, stdout, stderr = run_cli("compile", "-c", "F.relu(torch.randn(8))", "--passes", "dolfstph", "-o", str(out), "-vv")
+    rc, stdout, stderr = run_cli("compile", "-c", "F.relu(torch.randn(8))", "--passes", "dolftph", "-o", str(out), "-vv")
     assert rc == 0, f"stderr: {stderr}"
     log = stdout + stderr
     for name in (
@@ -74,7 +76,6 @@ def test_compile_passes_shorthand(run_cli, tmp_path):
         "frontend/optimization",
         "loop/lowering",
         "loop/fusion",
-        "loop/stamp",
         "tile/lift",
         "tile/cut",
         "tile/schedule",

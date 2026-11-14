@@ -9,7 +9,7 @@ emitter.
 
 Legality, judged structurally on the two loads:
 
-- both staged role-``"b"``, same slab / ``ldm`` / ``b_trans`` / swizzle mode (the drain's
+- both ``LdmatrixLoad`` of role ``"b"``, same slab / ``ldm`` / ``b_trans`` / swizzle mode (the drain's
   swizzle XOR is per-lane address-based, so it commutes with the paired lane map — each lane
   un-permutes its own 16 B chunk), no masks (staged loads carry none);
 - **transposed-B** (N-major slab): equal K col, N row exactly ``+8`` — the pair is one plain
@@ -17,7 +17,7 @@ Legality, judged structurally on the two loads:
 - **canonical-B** (K-major slab): equal K row, col exactly ``+8`` — the pair is one
   ``x4.trans`` (lanes 16-31 address the ``+8`` column). The ``+8``-half offsets are 16 B, so
   every paired lane address keeps ldmatrix's 16 B alignment;
-- **Volta**: adjacent logical fragment indices under the matching derived layout, with equal
+- **Volta** (two staged ``FragmentLoad``): adjacent logical fragment indices under the matching derived layout, with equal
   logical K coordinates. A pairs register rows; B pairs register columns. Each becomes one
   LDS.128 and the coupled row/row MMA plus interleaved accumulator map preserve the output;
 - no statement must stand between the two loads under the scope's ordering constraints
@@ -37,7 +37,7 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import VOLTA_B_CONGRUOUS, VOLTA_CROSSWISE, LdmatrixLoad
+from emmy.compiler.ir.kernel.ir import VOLTA_B_CONGRUOUS, VOLTA_CROSSWISE, FragmentLoad, LdmatrixLoad
 from emmy.compiler.ir.stmt import Body, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._siblings import Siblings
@@ -111,36 +111,41 @@ def _delta(a: Expression, b: Expression) -> int | None:
     return bc - ac if ab == bb else None
 
 
+def _volta(s: Statement) -> bool:
+    """A staged gather under Volta's layout: a staged gather of a byte slab is nothing to pair."""
+    return isinstance(s, FragmentLoad) and s.staged and s.fragment_layout == "m8n8k4"
+
+
 def _candidate(s: Statement) -> bool:
-    # A staged byte-slab (fp8) drain is a cooperative gather, not an ldmatrix — nothing to pair.
-    if not isinstance(s, LdmatrixLoad) or not s.staged or s.byte_slab or s.pair_frag is not None or len(s.src_index) != 2:
+    if not (isinstance(s, LdmatrixLoad) or _volta(s)) or s.pair_frag is not None or len(s.src_index) != 2:
         return False
-    if s.fragment_layout == "m8n8k4":
+    if _volta(s):
         # A and a transposed B both drain the crosswise layout; only a canonical B is congruous.
-        return s.swizzle == VOLTA_CROSSWISE if s.role == "a" or s.b_trans else s.swizzle == VOLTA_B_CONGRUOUS
+        return s.slab_layout == VOLTA_CROSSWISE if s.role == "a" or s.b_trans else s.slab_layout == VOLTA_B_CONGRUOUS
     return s.role == "b"
 
 
-def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
+def _pairs_with(a: LdmatrixLoad | FragmentLoad, b: LdmatrixLoad | FragmentLoad) -> bool:
     """``b`` is ``a``'s slab-adjacent partner: the SECOND fragment of one x4 (the ``+8``
     matrices lanes 16-31 address)."""
     if (
-        a.frag == b.frag
+        type(a) is not type(b)
+        or a.frag == b.frag
         or a.src_buffer != b.src_buffer
         or a.role != b.role
         or a.ldm != b.ldm
         or a.b_trans != b.b_trans
-        or a.swizzle != b.swizzle
-        or a.fragment_layout != b.fragment_layout
     ):
         return False
     row_d, col_d = _delta(a.src_index[0], b.src_index[0]), _delta(a.src_index[1], b.src_index[1])
-    if a.fragment_layout == "m8n8k4":
-        if a.fragment_index % 2 or b.fragment_index != a.fragment_index + 1:
+    if _volta(a):
+        if a.slab_layout != b.slab_layout or a.fragment_index % 2 or b.fragment_index != a.fragment_index + 1:
             return False
         # Crosswise pairs along the slab's ROW axis (A's M, a transposed B's N) at one K
         # column; the congruous canonical B pairs along its columns at one row.
-        return col_d == 0 if a.swizzle == VOLTA_CROSSWISE else row_d == 0
+        return col_d == 0 if a.slab_layout == VOLTA_CROSSWISE else row_d == 0
+    if a.swizzle != b.swizzle:
+        return False
     if a.b_trans:  # N-major slab: N rows adjacent, same K col
         return row_d == _ATOM8 and col_d == 0
     return row_d == 0 and col_d == _ATOM8  # K-major slab: same K row, cols adjacent

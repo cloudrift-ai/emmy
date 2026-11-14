@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::ties;
-use super::{unify_siblings, with_bodies};
+use super::{refilled, unify_siblings, with_bodies};
 use crate::body::{Body, free_names, unique};
 use crate::elementwise::{AffineRole, Operation};
 use crate::expr::{Expr, ExprClass, Expression, LitType};
@@ -185,7 +185,7 @@ impl SequentialScope {
             self.sources.extend(scope.sources);
             renamed_children.push(child.rebuilt(members));
         }
-        with_bodies(&renamed, renamed_children)
+        refilled(stmt, &renamed, renamed_children)
     }
 }
 
@@ -344,7 +344,10 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         let bodies: Result<Vec<Body>> = nested.iter().map(unify_siblings).collect();
         Ok(Some(with_bodies(stmt, bodies?)))
     })?;
-    unify_siblings(&unified)
+    // Every scope was ordered under its dependencies and effects, and the renaming keeps each read's binding.
+    let canonical = unify_siblings(&unified)?;
+    canonical.mark_sorted();
+    Ok(canonical)
 }
 
 /// Every expression of `stmt` in canonical form, each in the coefficient domain its field's class declares
@@ -1564,9 +1567,9 @@ for r in 0..4:
             &optimize_uncached(&body(
                 "
                 Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
-                    RegFragment(name=_a0, role=a, shape=(16, 8, 16), dtype=f16)
-                    RegFragment(name=_b0, role=b, shape=(16, 8, 16), dtype=f16)
-                    RegFragment(name=_c0, role=c, shape=(16, 8, 16), dtype=f32)
+                    RegFragment(name=_a0, role=a, dtype=f16)
+                    RegFragment(name=_b0, role=b, dtype=f16)
+                    RegFragment(name=_c0, role=c, dtype=f32)
                     for k in 0..128 step 16:
                         LdmatrixLoad(frag=_a0, src_buffer=A, src_index=(16 * m, k), role=a, ldm=128)
                         LdmatrixLoad(frag=_b0, src_buffer=B, src_index=(k, 8 * n), role=b, ldm=8)
@@ -1585,17 +1588,17 @@ for r in 0..4:
             rest[..rest.find([',', ')']).unwrap()].to_string()
         };
         assert_eq!(
-            field("role=a, shape", "name="),
+            field("role=a, dtype", "name="),
             field("MmaSyncPtx", "a_frag="),
             "{normal}"
         );
         assert_eq!(
-            field("role=b, shape", "name="),
+            field("role=b, dtype", "name="),
             field("MmaSyncPtx", "b_frag="),
             "{normal}"
         );
         assert_eq!(
-            field("role=c, shape", "name="),
+            field("role=c, dtype", "name="),
             field("RegStore", "frag="),
             "{normal}"
         );
@@ -1786,8 +1789,8 @@ for r in 0..4:
             &normalize_uncached(&body(
                 "
                 Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
-                    RegFragment(name=_sf, role=a, shape=(16, 8, 64), dtype=f4e2m1x2, nregs=0)
-                    RegFragment(name=_c, role=c, shape=(16, 8, 16), dtype=f32)
+                    RegFragment(name=_sf, role=sfa, dtype=f4e2m1x2)
+                    RegFragment(name=_c, role=c, dtype=f32)
                     f32 w = load W[m]
                     for k in 0..128 step 64:
                         BlockScaleLoad(frag=_sf, src_buffer=S, src_index=(16 * m, k / 16), role=a, ldm=16)
@@ -1806,7 +1809,7 @@ for r in 0..4:
             rest[..rest.find([',', ')']).unwrap()].to_string()
         };
         assert_eq!(
-            named("nregs=0", "name="),
+            named("role=sfa", "name="),
             named("BlockScaleLoad", "frag="),
             "{normal}"
         );

@@ -414,6 +414,19 @@ impl PyExpression {
         PyTuple::new(py, items?)
     }
 
+    /// A composite operation node as its definition in primitive operations (the operations' table); `None` for a
+    /// primitive and for any other node.
+    #[getter]
+    fn definition(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let Some((op, [operand])) = self.expr.operation() else {
+            return Ok(None);
+        };
+        match op.definition(operand).py()? {
+            Some(definition) => Ok(Some(PyExpression::wrap(py, &definition)?.unbind())),
+            None => Ok(None),
+        }
+    }
+
     /// The direct children, in field order.
     fn children<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let items: PyResult<Vec<Bound<'py, PyAny>>> = self

@@ -36,8 +36,7 @@ _STEPS = (
     "normalize_body",
     "optimize_body",
     "one_operation_per_definition",
-    "canonical_values",
-    "fragment_order",
+    "normalize_lambda_body",
     "simplify_body",
     "prepare_body",
 )
@@ -157,10 +156,10 @@ def test_a_kernel_body_takes_the_optimizing_half_of_the_normal_form() -> None:
     from emmy.compiler.ir.stmt import normalize_body, optimize_body, parse_body
 
     body = parse_body("late = load X[1]\nearly = load X[0]\nb = add(early, late)\nunused = multiply(early, 3)\nY[0] = b")
-    kernel = KernelOp(body=body, name="k").body
+    kernel = KernelOp(body=body).body
     assert kernel == optimize_body(body)
     assert [str(stmt).split(" = ")[0] for stmt in kernel] == ["late", "early", "b", "Y[0]"]
-    assert LoopOp(body=body, name="k").body == normalize_body(body) != kernel
+    assert LoopOp(body=body).body == normalize_body(body) != kernel
 
 
 _STMT_PACKAGE = "emmy.compiler.ir.stmt"
@@ -203,11 +202,12 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
     statement_types += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
     containers = ["Body", "Identity", "OutputSpec"]
-    functions = ["canonicalize_identity", "free_names", "exposed_defines", "rename_free"]
-    functions += ["clear_memos"]
+    functions = ["canonicalize_identity", "free_names", "exposed_defines"]
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
     # The target's spelling of an index division, which an emitter runs on the body it renders.
     functions += ["reduce_strength"]
+    # The input check of a code generator: the body says every type and every conversion, and asks for nothing.
+    functions += ["check_types", "check_input"]
     # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
     steps = list(_STEPS)
     assembly = ["Call", "Subroutine"]
@@ -440,7 +440,7 @@ def test_kernel_identity_is_not_redefined_outside_its_home() -> None:
 
 def test_a_golden_file_stores_inputs_only() -> None:
     """A golden file and a corpus case hold inputs — the Loop IR, the decisions, the measurements — and nothing
-    computed from them: no kernel identity, no ``S_*`` stamp. A stored copy of a computed value has to be kept in
+    computed from them: no kernel identity, no kernel name, no ``S_*`` stamp. A stored copy of a computed value has to be kept in
     agreement with the computation, and every time the two drifted a row stopped pricing its own fork with nothing
     reporting it. So the field lists are pinned here: a new field is an input, or it does not go in the file.
 
@@ -451,7 +451,7 @@ def test_a_golden_file_stores_inputs_only() -> None:
     from emmy.compiler.pipeline.search.db import RoutingRow
     from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Latency, Measurements, Row
 
-    assert [f.name for f in fields(Kernel)] == ["loop_ir", "name", "formed", "key", "traced", "origins", "bindings"]
+    assert [f.name for f in fields(Kernel) if f.name not in Kernel.wire_skip] == ["loop_ir", "formed", "traced", "origins", "bindings"]
     assert [f.name for f in fields(Row)] == ["name", "kernel", "bindings", "pins", "knobs", "measurements", "latency", "note"]
     assert [f.name for f in fields(RoutingRow)] == ["parent", "arm", "children"]
     assert [f.name for f in fields(Measurements)] == ["emmy_us", "reference_us", "reference_backend", "tried"]
@@ -516,7 +516,7 @@ def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
         for name, member in vars(cls).items()
         if isinstance(member, (types.FunctionType, property, functools.cached_property, staticmethod, classmethod))
     ]
-    assert len(statement_types) == 31 and all(
+    assert len(statement_types) == 32 and all(
         cls.__module__ == "emmy.compiler.ir.kernel.ir" and "_fields" in vars(cls) for cls in statement_types
     )
     assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))

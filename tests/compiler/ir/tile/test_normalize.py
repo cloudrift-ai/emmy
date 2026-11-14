@@ -415,7 +415,7 @@ def test_unit_row_requires_every_output_root_to_be_rowless(second_has_row, mirro
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
     """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
     tile = case_target_tile("attention/rmsnorm-gqa-b-cut.json")
-    reconstructed = TileOp(op=tile.op, name=tile.name, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
+    reconstructed = TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
 
     assert tuple(axis.extent for axis in tile.place.free) == (Dim(4), Dim(4), Dim(16))
     assert all(spec.sweep == () for spec in tile.output_specs)
@@ -506,7 +506,7 @@ def test_normalization_prunes_an_operand_component_no_reader_reads() -> None:
         results=("scale", "v10"),
     )
     root = projection((epilogue,), parse_body("out = multiply(v10, v10)"))
-    tile = TileOp(op=root, name="k_epilogue", place=Placement(free=(M8,)), axes=(M8,), output_specs=(_spec("o[m] = out"),))
+    tile = TileOp(op=root, place=Placement(free=(M8,)), axes=(M8,), output_specs=(_spec("o[m] = out"),))
     (edge,) = tile.op.operands
     assert edge.exposes == ("v10",)  # ``scale`` went with the param nothing bound
     assert tile.op.lift.params == ("v10",)
@@ -611,7 +611,7 @@ def test_normalization_keeps_a_component_only_a_boundary_store_reads() -> None:
     cell = projection((slab("acc", "workspace", "m"),), parse_body("v = exp(acc)"), results=("acc", "v"))
     root = projection((cell,), parse_body("out = rsqrt(acc)"))
     specs = (_spec("o[m] = out"), _spec("tap[m] = v"))
-    tile = TileOp(op=root, name="k_tap", place=Placement(free=(M8,)), axes=(M8,), output_specs=specs)
+    tile = TileOp(op=root, place=Placement(free=(M8,)), axes=(M8,), output_specs=specs)
     (edge,) = tile.op.operands
     assert edge.exposes == ("acc", "v")  # ``v`` survives on the store's word alone
 

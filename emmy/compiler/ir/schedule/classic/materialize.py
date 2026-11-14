@@ -80,7 +80,6 @@ class ClassicMaterialization:
 def materialize_classic(
     tile: TileOp,
     *,
-    name: str,
     knobs: dict,
     target: Context,
     schedule: ClassicSchedule,
@@ -118,7 +117,6 @@ def materialize_classic(
             resolved[edge] = stage
     return scheduled(
         tile,
-        name=name,
         place=tile.place.on_grid(),
         knobs=knobs,
         schedule=schedule,

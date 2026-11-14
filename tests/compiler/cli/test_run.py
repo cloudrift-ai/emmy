@@ -2412,7 +2412,9 @@ def test_kernel_stats_reuse_runtime_loader(monkeypatch):
 
     graph = Graph()
     source = "emmy_wgmma_"
-    graph.add_node(op=CudaOp(kernel_name="k", kernel_source=source), inputs=[], output=Tensor("out", (4,)), node_id="out")
+    graph.add_node(
+        op=CudaOp(kernel_name="k", kernel_source=source, arch_specific=True), inputs=[], output=Tensor("out", (4,)), node_id="out"
+    )
     seen = []
 
     def attributes(name, spec):

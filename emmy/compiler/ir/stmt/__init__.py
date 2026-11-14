@@ -40,19 +40,18 @@ parse_body = _ir.parse_body
 pretty_body = _ir.pretty_body
 normalize_body = _ir.normalize_body
 optimize_body = _ir.optimize_body
+check_types = _ir.check_types
+check_input = _ir.check_input
 reduce_strength = _ir.reduce_strength
 one_operation_per_definition = _ir.one_operation_per_definition
-canonical_values = _ir.canonical_values
-fragment_order = _ir.fragment_order
+normalize_lambda_body = _ir.normalize_lambda_body
 simplify_body = _ir.simplify_body
 prepare_body = _ir.prepare_body
 free_names = _ir.free_names
 exposed_defines = _ir.exposed_defines
-rename_free = _ir.rename_free
 mask_select_predicate = _ir.mask_select_predicate
 ordering_constraints = _ir.ordering_constraints
 dtype_promote = _ir.dtype_promote
-clear_memos = _ir.clear_memos
 
 from emmy.compiler.ir.stmt.glue import (  # noqa: E402 — the glue installs members on the classes above
     Identity,
@@ -82,10 +81,7 @@ __all__ = [
     "Subroutine",
     "Write",
     "ZeroPrologue",
-    "canonical_values",
-    "fragment_order",
     "canonicalize_identity",
-    "clear_memos",
     "dtype_promote",
     "exposed_defines",
     "fields_of",
@@ -93,12 +89,14 @@ __all__ = [
     "free_names",
     "mask_select_predicate",
     "normalize_body",
+    "normalize_lambda_body",
     "optimize_body",
+    "check_types",
+    "check_input",
     "reduce_strength",
     "ordering_constraints",
     "prepare_body",
     "parse_body",
     "pretty_body",
-    "rename_free",
     "simplify_body",
 ]

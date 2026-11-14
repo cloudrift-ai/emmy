@@ -238,7 +238,7 @@ def test_a_sweep_with_a_projection_beside_a_nested_sweep_lifts() -> None:
         """
     )
 
-    tile = lift_loop_op(LoopOp(body=body), name="k_nested_sweep")
+    tile = lift_loop_op(LoopOp(body=body))
 
     paths = {spec.write.output: tuple(axis.extent.as_static() for axis in spec.sweep) for spec in tile.output_specs}
     assert paths == {"o": (), "view": (4,), "mul": (4, 256)}
@@ -274,7 +274,7 @@ def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_unde
                 out[m, n] = acc
         """
     )
-    tile = lift_loop_op(LoopOp(body=body), name="k_sweep")
+    tile = lift_loop_op(LoopOp(body=body))
 
     # Canonical renumbering renames the axes; the sweep coordinate is one the fold's slab declares.
     # The sibling total is what the swept fold reads, so it arrives as that fold's operand — the

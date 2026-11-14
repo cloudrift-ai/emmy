@@ -10,9 +10,11 @@ from emmy.commands.trace import graph_from_code
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.kernel.ir import LdmatrixLoad, MmaSyncPtx, Sync
+from emmy.compiler.ir.stmt import Body, StridedLoop
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import compile_with_kernels, requires_cuda
 
 _TILE = {"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f4x4/k4", "RASTER": "gm8", "REDUCE": ""}
 
@@ -21,29 +23,35 @@ def _code(k: int) -> str:
     return f"torch.matmul(torch.randn((256, {k}), dtype=torch.float16), torch.randn(({k}, 256), dtype=torch.float16))"
 
 
-def _source(k: int, stage: str, ctx: Context) -> str:
+def _split_at_chunk_loop(k: int, stage: str, ctx: Context) -> tuple[list, list]:
+    """The kernel's statements ahead of the K chunk loop and from it on, nested ones included, in body order."""
     graph = graph_from_code(_code(k))[0]
     with pinned_knobs({**_TILE, "STAGE": stage}):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
-    (source,) = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    return source
+        _, kernels = compile_with_kernels(graph, ctx=ctx)
+    ((grid,),) = [kernel.body for kernel in kernels.values()]
+    at = next(i for i, stmt in enumerate(grid.body) if isinstance(stmt, StridedLoop) and stmt.axis.name == "_ks")
+    return list(Body(grid.body[:at]).iter()), list(Body(grid.body[at:]).iter())
+
+
+def _first_step_load(stmt) -> bool:
+    return isinstance(stmt, LdmatrixLoad) and stmt.frag == "_a0_s0"
 
 
 def test_a_carried_ring_loads_the_next_chunk_behind_its_one_barrier() -> None:
     """One barrier per chunk, and the first fragment load of the loop body reads the slot set the
     loop's head (or the previous iteration's last step) did not: the next step's buffer."""
-    loop = _source(1024, "d3/smem-async/p2", Context.from_target((8, 0)))
-    head, body = loop[: loop.index("for (int _ks")], loop[loop.index("for (int _ks") :]
-    assert "emmy_ldmatrix_x4(_a0_s0" in head, "the head loads the first chunk's first step"
-    assert body.count("__syncthreads()") == 1, "one barrier per chunk"
-    after = body[body.index("__syncthreads()") :]
-    assert after.index("emmy_ldmatrix_x4(_a0_s0") < after.index("emmy_mma_m16n8k16_f16_f32("), "the next chunk loads before this step's mma"
+    head, body = _split_at_chunk_loop(1024, "d3/smem-async/p2", Context.from_target((8, 0)))
+    assert any(_first_step_load(stmt) for stmt in head), "the head loads the first chunk's first step"
+    assert sum(isinstance(stmt, Sync) for stmt in body) == 1, "one barrier per chunk"
+    after = body[next(i for i, stmt in enumerate(body) if isinstance(stmt, Sync)) :]
+    load = next(i for i, stmt in enumerate(after) if _first_step_load(stmt))
+    assert load < next(i for i, stmt in enumerate(after) if isinstance(stmt, MmaSyncPtx)), "the next chunk loads before this step's mma"
 
 
 def test_a_two_slot_ring_keeps_the_ordinary_schedule() -> None:
     """At two slots the prefetch would target the slot about to be read, so there is nothing to carry."""
-    loop = _source(1024, "d2/smem-async/p2", Context.from_target((8, 0)))
-    assert loop[loop.index("for (int _ks") :].count("__syncthreads()") == 2
+    _, body = _split_at_chunk_loop(1024, "d2/smem-async/p2", Context.from_target((8, 0)))
+    assert sum(isinstance(stmt, Sync) for stmt in body) == 2
 
 
 @requires_cuda

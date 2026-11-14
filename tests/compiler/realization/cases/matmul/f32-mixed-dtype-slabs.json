@@ -4,8 +4,8 @@
   {"inputs":["a","b"],"outputs":["c"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[64,128]]]},{"id":"b","op":"input","outputs":[["b","f16",[128,96]]]},{"id":"c","op":"torch.matmul","inputs":["a","b"],"outputs":[["c","f32",[64,96]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["b","a"],"outputs":["c"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[64,128]]]},{"id":"b","op":"input","outputs":[["b","f16",[128,96]]]},{"id":"c","op":"loop","attrs":{"body":"for a0 in 0..64:\n    for a1 in 0..96:\n        for a2 in 0..128:\n            in0 = load a[a0, a2]\n            in1 = load b[a2, a1]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        c[a0, a1] = acc0","name":"k_matmul_186335"},"inputs":["b","a"],"outputs":[["c","f32",[64,96]]]}]},"name":"k_matmul_186335","formed":true,"traced":0,"origins":["c"]}
+  {"loop_ir":{"inputs":["b","a"],"outputs":["c"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[64,128]]]},{"id":"b","op":"input","outputs":[["b","f16",[128,96]]]},{"id":"c","op":"loop","attrs":{"body":"for a0 in 0..64:\n    for a1 in 0..96:\n        for a2 in 0..128:\n            in0 = load a[a0, a2]\n            in1 = load b[a2, a1]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        c[a0, a1] = acc0"},"inputs":["b","a"],"outputs":[["c","f32",[64,96]]]}]},"formed":true,"traced":0,"origins":["c"]}
  ],
  "rows": [
-  {"name":"k_matmul_186335","kernel":"k_matmul_186335","pins":{"FAST_MATH":false},"knobs":{"WORK":"t16x8","TILE":"f2x4","STAGE":"d1/smem-async"}}
+  {"name":"k_matmul_186335","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"t16x8","TILE":"f2x4","STAGE":"d1/smem-async"}}
  ]}
