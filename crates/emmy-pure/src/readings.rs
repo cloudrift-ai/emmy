@@ -346,19 +346,11 @@ impl Fold {
                 Statement::Load(load) if load.index.iter().all(|i| i.free_vars().is_empty()) => {
                     known.insert(load.names[0]);
                 }
-                Statement::Let(l) => {
-                    if l.value.free_vars().iter().all(|n| known.contains(n)) {
-                        known.insert(l.name);
-                    } else {
-                        return false;
-                    }
+                Statement::Let(l) if l.value.free_vars().iter().all(|n| known.contains(n)) => {
+                    known.insert(l.name);
                 }
-                Statement::Assign(a) => {
-                    if a.value.free_vars().iter().all(|n| known.contains(n)) {
-                        known.insert(a.name);
-                    } else {
-                        return false;
-                    }
+                Statement::Assign(a) if a.value.free_vars().iter().all(|n| known.contains(n)) => {
+                    known.insert(a.name);
                 }
                 _ => return false,
             }

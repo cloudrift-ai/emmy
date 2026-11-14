@@ -245,6 +245,8 @@ fn tree_names(root: &Fold) -> HashSet<Name> {
 
 /// Restore object sharing between same-value cones: every term hash-consed bottom-up onto the first occurrence in
 /// walk order with the same canonical form, the same exposed names and the same free coordinates by name.
+// A term's memos sit behind interior mutability, but its hash and equality read only its stored parts.
+#[allow(clippy::mutable_key_type)]
 fn share_common_cones(root: &Fold) -> Result<Fold> {
     type Key = (Fold, Vec<Name>, Vec<Name>);
     let mut canon: HashMap<Key, Fold> = HashMap::new();

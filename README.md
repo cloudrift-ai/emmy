@@ -392,8 +392,11 @@ require CloudRift organization access.
   its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
 - [crates/emmy-ir/](crates/emmy-ir/) — The compiler's statement and expression vocabulary in Rust: the statement types,
   bodies, their text, value numbering and normalization (see [ARCHITECTURE.md](crates/emmy-ir/ARCHITECTURE.md));
-  [crates/emmy-ir-py/](crates/emmy-ir-py/) is the `emmy.emmy_ir` extension the `ir/stmt` and `ir/expression` modules
-  export from
+  [crates/emmy-ir-py/](crates/emmy-ir-py/) is the `emmy.emmy_ir` extension the `ir/stmt`, `ir/expression` and
+  `ir/pure` modules export from
+- [crates/emmy-pure/](crates/emmy-pure/) — The pure terms in Rust: the `Lambda` every IR level binds with, the Tile IR
+  `Fold` term and its twist recipe, the tree normalization and the lowering to Loop IR (see
+  [ARCHITECTURE.md](crates/emmy-pure/ARCHITECTURE.md))
 - [crates/emmy-ptx/](crates/emmy-ptx/) — The compiler from Kernel IR to PTX: an instruction list, its builder, printer
   and verifier, and the rule of each statement type; scalar kernels so far, and no pipeline stage calls it yet (see
   [ARCHITECTURE.md](crates/emmy-ptx/ARCHITECTURE.md))

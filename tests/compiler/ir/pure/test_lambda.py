@@ -198,7 +198,7 @@ def test_rename_that_merges_names_forms_the_lambda_it_spells() -> None:
     for names in ({"x": "a", "t": "b"}, {"t": "x"}, lambda name: f"{name}_1"):
         renamed = fn.rename(names)
         spell = names.get if isinstance(names, dict) else None
-        rn = (lambda n: spell(n, n)) if spell else names
+        rn = (lambda n, spell=spell: spell(n, n)) if spell else names
         expected = Lambda(
             params=tuple(rn(p) for p in fn.params),
             body=parse_body("\n".join(str(stmt.rename({n: rn(n) for n in stmt._names()})) for stmt in fn.body)),

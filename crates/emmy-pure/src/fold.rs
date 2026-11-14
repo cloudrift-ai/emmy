@@ -12,7 +12,6 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-use emmy_ir::body::Body;
 use emmy_ir::elementwise::ElementwiseOp;
 use emmy_ir::expr::Expr;
 use emmy_ir::statement::Statement;
@@ -562,11 +561,6 @@ impl Fold {
         Arc::as_ptr(&self.0) as usize
     }
 
-    /// A weak handle on this term, for a table keyed by [`Fold::address`] to tell a live entry from a dead one.
-    pub fn downgrade(&self) -> std::sync::Weak<Data> {
-        Arc::downgrade(&self.0)
-    }
-
     pub fn operands(&self) -> &[Fold] {
         &self.0.operands
     }
@@ -795,8 +789,8 @@ impl Fold {
         let mut counter = 0;
         for here in lift.body().iter_refs() {
             for name in here.stmt().defines() {
-                if !mapping.contains_key(&name) {
-                    mapping.insert(name, Name::new(&format!("_v{counter}")));
+                if let std::collections::hash_map::Entry::Vacant(slot) = mapping.entry(name) {
+                    slot.insert(Name::new(&format!("_v{counter}")));
                     counter += 1;
                 }
             }
@@ -839,17 +833,6 @@ impl Fold {
     /// The base ⊕ components, when the base is componentwise.
     pub fn ops(&self) -> Option<Vec<ElementwiseOp>> {
         self.0.base.as_ref().and_then(|base| base.components())
-    }
-
-    /// The parts with the body of the lift replaced: a convenience for rebuilds that keep everything else.
-    pub fn with_lift_body(&self, body: &Body) -> Result<Fold> {
-        let mut parts = self.parts();
-        parts.lift = Some(Lambda::new(
-            self.0.lift.params().to_vec(),
-            body,
-            self.0.lift.results().to_vec(),
-        )?);
-        Fold::new(parts)
     }
 }
 

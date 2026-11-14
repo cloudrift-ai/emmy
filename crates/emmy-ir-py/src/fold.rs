@@ -25,6 +25,9 @@ use crate::convert::{
 };
 use crate::lambda::PyLambda;
 
+/// Objects the caller already holds for some terms, by term address.
+type Known<'py> = HashMap<usize, Bound<'py, PyFold>>;
+
 static WEAKREF: Imported = Imported::new("weakref", "ref");
 static CONTRACTION_VIEW: Imported = Imported::new("emmy.compiler.ir.pure.fold", "ContractionView");
 static REDUCTION_VIEW: Imported = Imported::new("emmy.compiler.ir.pure.fold", "ReductionView");
@@ -591,9 +594,10 @@ impl PyFold {
         Ok(PyFold::wrap_with(py, &fold, &known)?.unbind())
     }
 
+    /// The terms a Python operand tuple holds, and their objects by term address.
     fn operand_objects<'py>(
         value: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<(Vec<Fold>, HashMap<usize, Bound<'py, PyFold>>)> {
+    ) -> PyResult<(Vec<Fold>, Known<'py>)> {
         let mut terms = Vec::new();
         let mut known = HashMap::new();
         let Some(value) = value.filter(|v| !v.is_none()) else {

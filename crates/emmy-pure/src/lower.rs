@@ -293,6 +293,7 @@ impl Lowering<'_> {
 
     /// The stores over what `term` defines as `kind`, right after it in `target`; `computed` selects the stores whose
     /// coordinates name a value some term computes, the others, or every store.
+    #[allow(clippy::too_many_arguments)]
     fn attach(
         &mut self,
         term: &Fold,

@@ -25,6 +25,9 @@ scope, and — for a carrier — a seed the enclosing scope has to declare. A **
 (`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
 α-renaming, and has no position at all. `Lambda`, the `Fold` term and the twist recipes (`ir/pure/twist.py` — a
 twisted monoid as data, which `Fold.fuse` fuses a reduce and the reduce it reads into) all live on the term side.
+The terms are the `emmy-pure` crate's (`crates/emmy-pure/ARCHITECTURE.md`): Python holds a handle and asks whole
+questions — a reading, the tree normalization, the lowering — and never walks a term node by node across the
+boundary. The recipe definitions, `Fold.fuse` and `Fold.rewrite` stay in Python.
 
 **A pure class is never a `Statement` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
@@ -52,21 +55,19 @@ cross-CTA finalize was numerically wrong as a result, and became correct when th
 arriving as ordinary statements.
 
 **Derived reads memoize on the immutable term; pickling carries only the stored params.** A term's
-expensive derived reads — the structural key, `Fold.deps`, `Lambda.free_names`, the synthesized
-`loop`, the normalize fixpoint stamp, the codec's spelling tables — ride the instance, which is what
-keeps a walk over a large fused tree linear instead of re-deriving every subtree per ancestor. They
-are declared members: a `cached_property` on the type that owns the value, or a field computed in
-`__post_init__`, per STYLE.md. `__getstate__` strips them: every memo recomputes after transport,
-and an id-keyed cache carried across processes could collide with a fresh object's id. A memo holds
-only values derivable from the term — never decisions, never mutable policy.
+expensive derived reads — a fold's readings, its canonical form, its step, the normalize fixpoint, a lambda's
+canonical form — are memoized on the crate's term, so a structural copy that keeps a subtree keeps its answers and a
+walk over a large fused tree stays linear instead of re-deriving every subtree per ancestor. Transport pickles the
+stored params only: every memo recomputes on the far side. A memo holds only values derivable from the term — never
+decisions, never mutable policy.
 
 The `structural.instance_memo` tables are a holdout predating that rule, not a second sanctioned
 form. STYLE.md forbids the undeclared memo slot they stash into; new derived reads take a declared
-member, and the existing tables are to be converted to one.
+member, and the remaining table (the path spellings) is to be converted to one.
 
 **Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term; the typed classic
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
-`ir/pure/fold.py` and is not a `Statement`.
+`ir/pure` and is not a `Statement`.
 
 **Lambda construction binds every read and orders definitions before uses.** Both checks use the scope-aware
 `Body.free` reading, including coordinates in predicates and indices. `Lambda.closing` appends unbound reads as
@@ -590,8 +591,8 @@ definitions of one state name are an error. **Example** — the online-softmax c
 
 **The λ-foldMap primitives** (`ir/pure/lam.py`) — the finished algebra vocabulary the tile IR
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
-binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
-`__post_init__` via the **`Statement.pure` trait** (declared on the `Statement` interface, conservative `False` default;
+binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated at
+construction via the **`Statement.pure` trait** (declared on the `Statement` interface, conservative `False` default;
 `Load`/`Assign`/`Select` and the structural `Fold` node opt in; `Accum`/`Write`/`Init`/`Loop`
 never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering

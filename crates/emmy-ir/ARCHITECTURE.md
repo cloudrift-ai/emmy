@@ -4,7 +4,9 @@
 and their text, the forty-five statement types, `Body`, the body text, the statement protocol, value numbering,
 identity and body normalization. Pure Rust, no Python in it, so `cargo test -p emmy-ir` runs it alone, and the tests
 of the normalization steps sit beside the steps there. The extension beside it, `emmy-ir-py`, is the `emmy.emmy_ir`
-module those two Python packages re-export from; `make setup` builds it into the package like the runtime extension.
+module those two Python packages re-export from (and `ir/pure`, from the `emmy-pure` crate beside this one, which
+holds the pure terms over this vocabulary: `crates/emmy-pure/ARCHITECTURE.md`); `make setup` builds it into the package
+like the runtime extension.
 It exports the driver, `normalize_body`, the steps a pass calls on its own (`one_operation_per_definition`,
 `simplify_body`, `prepare_body`) and the lambda normalization (`normalize_lambda_body`: `fragment_order`, then
 `canonical_values`), no other step. Design: `ir/ARCHITECTURE.md` owns what a
@@ -219,8 +221,11 @@ own form, since it is its own normal form: a body built again equal to one, whic
 instead of taking a round to learn it is final. It keeps, the same way, whether every scope of it is in dependency
 order (`is_sorted`, `mark_sorted`): the dependency sort's result and the canonical order's are, so the sort leaves
 such a body alone without working out its constraints. The extension's wrapper tables (a body's statement wrappers, a
-subroutine's one Python object) are not bounded, since a live object keeps its one wrapper, and drop their dead
-entries when their size reaches a multiple of 1,024.
+subroutine's, a term's and a recipe's one Python object) are not bounded, since a live object keeps its one wrapper.
+A purge of their dead entries walks the whole table, so the next one waits for as many inserts as the last left
+entries alive, never fewer than 1,024: an insert costs a constant share of the walks. (A purge due whenever the size
+was a multiple of 1,024 walked the table on every insert that reused a dead object's address, which a body made and
+dropped in a loop does every time: building one body took milliseconds once a few hundred thousand were alive.)
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation

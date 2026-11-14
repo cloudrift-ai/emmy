@@ -344,8 +344,8 @@ impl Lambda {
         let mut counter = 0;
         for here in split.body().iter_refs() {
             for name in here.stmt().defines() {
-                if !mapping.contains_key(&name) {
-                    mapping.insert(name, Name::new(&format!("_v{counter}")));
+                if let std::collections::hash_map::Entry::Vacant(slot) = mapping.entry(name) {
+                    slot.insert(Name::new(&format!("_v{counter}")));
                     counter += 1;
                 }
             }
