@@ -41,7 +41,7 @@ def _edit(term: Fold, names: dict[str, str]) -> Fold:
     return replace(
         term,
         operands=tuple(_edit(operand, names) for operand in term.operands),
-        lift=replace(term.lift, body=term.lift.body.map(load)),
+        lift=term.lift.replace(body=term.lift.body.map(load)),
     )
 
 

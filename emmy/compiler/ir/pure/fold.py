@@ -294,7 +294,7 @@ class Fold:
                         params.extend(self.lift.params[cursor : cursor + width])
                     cursor += width
                 object.__setattr__(self, "operands", tuple(kept))
-                object.__setattr__(self, "lift", replace(self.lift, params=(*params, *self.lift.params[cursor:])))
+                object.__setattr__(self, "lift", self.lift.replace(params=(*params, *self.lift.params[cursor:])))
             arity = sum(len(edge.exposes) for edge in self.operands)
             assert len(self.lift.params) >= arity, f"lift binds {len(self.lift.params)} params for {arity} operand result components"
             return
@@ -379,7 +379,7 @@ class Fold:
                 reordered = (a_edge, *(edge for edge in self.operands if edge is not a_edge))
                 bound = tuple(param for edge in reordered for param, held, _ in self.bindings if held is edge)
                 object.__setattr__(self, "operands", reordered)
-                object.__setattr__(self, "lift", replace(lam, params=(lam.params[0], *bound, *lam.params[1 + arity :])))
+                object.__setattr__(self, "lift", lam.replace(params=(lam.params[0], *bound, *lam.params[1 + arity :])))
                 del self.__dict__["bindings"]  # read before the reorder; the memo is stale
         if self.observe is not None:
             reading = self.as_reduction()

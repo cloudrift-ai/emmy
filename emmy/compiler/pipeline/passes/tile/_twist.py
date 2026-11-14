@@ -64,7 +64,7 @@ def _replace(term: Fold, mapping: dict[int, tuple[Fold, dict[int, int]]]) -> Fol
     lead = term.lift.params[:1] if term.axis is not None else ()
     bound = [param or f"_unread{index}" for index, param in enumerate(param for edge in order for param in slots[id(edge)])]
     params = (*lead, *bound, *term.lift.params[len(lead) + len(term.bindings) :])
-    return replace(term, operands=operands, lift=replace(term.lift.rename(aliases), params=params))
+    return replace(term, operands=operands, lift=term.lift.rename(aliases).replace(params=params))
 
 
 def _varies(fold: Fold, name: str, bound: dict[str, Fold]) -> bool:

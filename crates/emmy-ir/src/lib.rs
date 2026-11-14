@@ -11,6 +11,7 @@ pub mod field;
 pub mod fragment;
 pub mod identity;
 pub mod input;
+pub mod lambda;
 pub mod memo;
 mod name;
 pub mod normalize;

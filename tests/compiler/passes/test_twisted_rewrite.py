@@ -214,7 +214,7 @@ def test_twist_compares_operand_values_independently_of_coordinate_parameter_ord
         # The same load can close its captured coordinates in either order. Neither order is
         # an index permutation; changing the actual coordinates must still reject the recipe.
         if suffix:
-            weights = replace(weights, lift=replace(weights.lift, params=tuple(reversed(weights.lift.params))))
+            weights = replace(weights, lift=weights.lift.replace(params=tuple(reversed(weights.lift.params))))
         values = slab(f"x{suffix}", "x", "k" if suffix and different == "coordinate" else "row", "d")
         return contraction("d", values, (weights, f"score{suffix}"))
 

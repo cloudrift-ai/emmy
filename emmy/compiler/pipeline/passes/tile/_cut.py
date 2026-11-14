@@ -1426,12 +1426,12 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
     body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets, renamed))
     if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body) and not lift_reads:
         return node
-    lift = replace(node.lift, body=Body(body))
+    lift = node.lift.replace(body=Body(body))
     if not all(bound):
         lead = 1 if node.base is not None else 0
         params = node.lift.params
         head, slots, tail = params[:lead], params[lead : lead + len(bound)], params[lead + len(bound) :]
-        lift = replace(lift, params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
+        lift = lift.replace(params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
     return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed, lift_reads)
 
 

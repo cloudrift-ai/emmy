@@ -366,13 +366,13 @@ def test_fusing_a_shared_dependent_reuses_only_an_equal_carried_state(name, conf
     axes = {axis.name: axis for axis in SCOPE}
     pivot = denominator.fuse(SOFTMAX, axes)
     if conflict == "injection":
-        pivot = replace(pivot, lift=replace(pivot.lift, body=parse_body("let one = 2.0")))
+        pivot = replace(pivot, lift=pivot.lift.replace(body=parse_body("let one = 2.0")))
     dependent = replace(
         denominator,
         operands=(score, pivot),
         init=(1.0,) if conflict == "seed" else (0.0,),
         base=Lambda.componentwise(("add",), (name,)),
-        lift=replace(denominator.lift, params=("k", "score", "maximum", "unused")),
+        lift=denominator.lift.replace(params=("k", "score", "maximum", "unused")),
     )
     if conflict is not None:
         with pytest.raises(ValueError, match="conflicting definitions of twisted state 'd'"):
@@ -406,7 +406,7 @@ def test_shared_twisted_state_equality_compares_bound_operand_values(parameter, 
     dependent = replace(
         expectation,
         operands=(score, pivot, slab(parameter, buffer, "k", "n")),
-        lift=replace(expectation.lift.rename({"v": parameter}), params=("k", "score", "maximum", "unused", parameter)),
+        lift=expectation.lift.rename({"v": parameter}).replace(params=("k", "score", "maximum", "unused", parameter)),
     )
     if buffer == "second":
         with pytest.raises(ValueError, match="conflicting definitions of twisted state 'o'"):
