@@ -45,7 +45,11 @@ impl Key {
     }
 
     pub fn tag(tag: Tag) -> Key {
-        Key::Str(Name::new(tag.text()))
+        // Each tag's name is interned once: a key is built millions of times, and interning takes a global lock.
+        static NAMES: std::sync::OnceLock<Vec<Name>> = std::sync::OnceLock::new();
+        let names =
+            NAMES.get_or_init(|| Tag::ALL.iter().map(|tag| Name::new(tag.text())).collect());
+        Key::Str(names[tag as usize])
     }
 
     pub fn float(value: f64) -> Key {
@@ -73,47 +77,55 @@ impl Key {
         text.map_or(Key::None, Key::str)
     }
 
-    fn feed(&self, hasher: &mut blake3::Hasher) {
+    /// The bytes the hash reads, appended to `out`: a byte tag per primitive, lengths as eight little-endian bytes.
+    fn write(&self, out: &mut Vec<u8>) {
         match self {
-            Key::None => hasher.update(&[0]),
-            Key::Bool(v) => hasher.update(&[1, *v as u8]),
+            Key::None => out.push(0),
+            Key::Bool(v) => out.extend_from_slice(&[1, *v as u8]),
             Key::Int(v) => {
-                hasher.update(&[2]);
-                hasher.update(&v.to_le_bytes())
+                out.push(2);
+                out.extend_from_slice(&v.to_le_bytes());
             }
             Key::Float(v) => {
-                hasher.update(&[3]);
-                hasher.update(&v.to_le_bytes())
+                out.push(3);
+                out.extend_from_slice(&v.to_le_bytes());
             }
-            Key::Str(s) => Key::feed_text(s, hasher),
-            Key::Text(s) => Key::feed_text(s, hasher),
+            Key::Str(s) => Key::write_text(s, out),
+            Key::Text(s) => Key::write_text(s, out),
             Key::Num(n) => {
-                hasher.update(&[5]);
-                hasher.update(&n.to_le_bytes())
+                out.push(5);
+                out.extend_from_slice(&n.to_le_bytes());
             }
             Key::Tuple(parts) => {
-                hasher.update(&[6]);
-                hasher.update(&(parts.len() as u64).to_le_bytes());
+                out.push(6);
+                out.extend_from_slice(&(parts.len() as u64).to_le_bytes());
                 for part in parts {
-                    part.feed(hasher);
+                    part.write(out);
                 }
-                hasher
             }
-        };
+        }
     }
 
-    fn feed_text<'h>(text: &str, hasher: &'h mut blake3::Hasher) -> &'h mut blake3::Hasher {
-        hasher.update(&[4]);
-        hasher.update(&(text.len() as u64).to_le_bytes());
-        hasher.update(text.as_bytes())
+    fn write_text(text: &str, out: &mut Vec<u8>) {
+        out.push(4);
+        out.extend_from_slice(&(text.len() as u64).to_le_bytes());
+        out.extend_from_slice(text.as_bytes());
     }
 
+    /// The key's number: the first sixteen bytes of the BLAKE3 hash of its bytes, little-endian. The bytes are
+    /// gathered in one buffer and hashed at once, which costs far less than feeding the hasher a primitive at a time.
     pub fn hash(&self) -> Number {
-        let mut hasher = blake3::Hasher::new();
-        self.feed(&mut hasher);
-        let bytes = hasher.finalize();
+        thread_local! {
+            static BYTES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let digest = BYTES.with(|bytes| {
+            let mut bytes = bytes.borrow_mut();
+            bytes.clear();
+            self.write(&mut bytes);
+            blake3::hash(&bytes)
+        });
         let mut head = [0u8; 16];
-        head.copy_from_slice(&bytes.as_bytes()[..16]);
+        head.copy_from_slice(&digest.as_bytes()[..16]);
         u128::from_le_bytes(head)
     }
 }
