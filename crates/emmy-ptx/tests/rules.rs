@@ -1241,6 +1241,38 @@ fn a_seeded_state_steps_in_place_and_is_copied_where_it_is_named() {
     );
 }
 
+/// The finite stand-in of a maximum's or a minimum's unbounded neutral element seeds an integer state with its
+/// type's own bound: the lowest value for a maximum, the highest for a minimum, by the body's seed or the loop's.
+#[test]
+fn an_integer_maximum_or_minimum_is_seeded_with_its_types_bound() {
+    let got = under_grid(
+        "
+        init i64 low = -1e+30
+        init i32 high = 1e+30
+        for j in 0..4:
+            i32 m <- maximum(m, j)
+        i64 low <- maximum(low, m)
+        i32 high <- minimum(high, m)
+        i64 o[i] = low
+        ",
+        &[("o", Output, Some(DType::I64))],
+        EXACT,
+    );
+    let seeds: Vec<&String> = got
+        .iter()
+        .filter(|line| line.starts_with("mov.s"))
+        .collect();
+    assert_eq!(
+        seeds,
+        [
+            "mov.s64 %rd1, -9223372036854775808",
+            "mov.s32 %r4, 2147483647",
+            "mov.s32 %r5, -2147483648",
+        ],
+        "{got:?}"
+    );
+}
+
 // --- the value table -------------------------------------------------------------------------------------
 
 /// A value the compiler makes twice in one scope is made once; what a body made is forgotten when the body closes,
@@ -1349,8 +1381,8 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
             "no PTX rule for the operation exp at f64",
         ),
         (
-            "    for j in 0..4:\n        i32 m <- maximum(m, j)",
-            "no PTX rule for a state of i32 seeded -1000000",
+            "    init i32 m = 0.5",
+            "no PTX rule for a state of i32 seeded 0.5",
         ),
         (
             "    bf16 v = (bf16)x\n    bf16 w = v + v",
