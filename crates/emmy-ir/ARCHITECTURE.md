@@ -138,7 +138,8 @@ roles and the digest; `congruence.rs` the congruent carried states (`congruent_s
 state keyed by its group until the groups hold. Statements are keyed by their position in the body they sit in (a
 `StmtRef`), so a body that holds one statement object twice numbers it twice and nothing is copied first; digest
 material is a `Key` tree hashed with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total
-order. The operands of a commutative operation that share a number take the order whose layout key is least under a
+order. A value carries its parameters to every statement that reads it, so a `Param` is shared, not copied, and keeps a
+fingerprint; inside a key it hashes, compares and orders as the key it holds. The operands of a commutative operation that share a number take the order whose layout key is least under a
 bounded search: every order is tried while the groups allow at most 7! of them, generated in place, and a larger
 operation (an unrolled window sum over eight or more shifted reads, which the full search never finished) takes the
 order built position by position: canonical and independent of the input order like the full search's, but not always
