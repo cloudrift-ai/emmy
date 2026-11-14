@@ -16,9 +16,10 @@ from emmy.publish import model_slug
 # (decode_bucket, 256] ride this twin via the prefix upload (pad-up; per-token-independent),
 # wider row sets fall to the symbolic program. Every boot with an any-width program builds it.
 EXPERT_PREFILL_M = 256
-# The grouped prefill program's expert count: on experts sliced across ranks, a prefill step runs every expert routed
-# more rows than the decode bucket in launches of this many experts, each against blocks of ``EXPERT_PREFILL_M`` of
-# its rows. Their decoded weights are the launch's transient, 2.4 MB per expert for Qwen3.8-Flash-Next's slices.
+# The grouped prefill programs' expert count: on experts sliced across ranks, a prefill step runs its experts in
+# launches of this many, each against blocks of its rows: the decode bucket's for the experts routed that many rows or
+# fewer, ``EXPERT_PREFILL_M`` for the rest. The wide program's decoded weights are the launch's transient, 2.4 MB per
+# expert for Qwen3.8-Flash-Next's slices.
 EXPERT_GROUP = 32
 
 _KEY = re.compile(r"[A-Z][A-Z0-9_]*")

@@ -403,7 +403,7 @@ def capture_twin_graphs(
 
     def emit_experts(parts, expert_w, suffix, members):
         """The expert twins of one MoE profile: one per serving width, the M=1 and prefill ones every MoE boot
-        builds, the fixed-slot decode program and, on sliced experts, the grouped prefill program."""
+        builds, the fixed-slot decode program and, on sliced experts, the grouped prefill programs."""
         transposed = moe_expert_layout(parts[1])[0]
 
         def spell(name, graph, lead=()):
