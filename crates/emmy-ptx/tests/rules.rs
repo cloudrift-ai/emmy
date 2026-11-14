@@ -1214,6 +1214,34 @@ fn a_condition_branches_and_a_select_picks() {
     );
 }
 
+/// A bool converted to a number is its predicate's 1 or 0: the truth of that number is the predicate again, a
+/// logical operation over two such numbers combines their predicates, and the number converted to another number
+/// type selects that type's 1 or 0. No comparison with zero and no integer conversion stands between them.
+#[test]
+fn a_bool_converted_to_a_number_keeps_its_predicate() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        bool b__bool = x < 2.0
+        f32 b = (f32)b__bool
+        bool c__bool = x == 3.0
+        f32 c = (f32)c__bool
+        f32 both = b && c
+        bool d = (bool)both
+        i64 k = (i64)d
+        f32 h = (f32)k
+        f32 o[i] = h
+        ",
+        A_O,
+        EXACT,
+    );
+    let selp = got.iter().filter(|line| line.starts_with("selp")).count();
+    assert!(got.iter().all(|line| !line.starts_with("setp.neu")), "{got:#?}");
+    assert!(got.iter().all(|line| !line.starts_with("cvt.rn.f32.s64")), "{got:#?}");
+    assert!(got.iter().any(|line| line.starts_with("and.pred")), "{got:#?}");
+    assert!(selp >= 1, "{got:#?}");
+}
+
 /// A bool equals a literal 0 where it does not hold, a literal 1 where it does, and another bool where their
 /// exclusive or does not hold: the chunk bounds write `0 == i < n` for a negation.
 #[test]

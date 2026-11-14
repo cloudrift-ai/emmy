@@ -481,14 +481,7 @@ impl Lowerer {
                     Inst::new(opcode, Ty::Pred, Vec::new(), operands),
                     Bank::Pred,
                 );
-                let (one, zero) = (self.float_constant(ty, 1.0), self.float_constant(ty, 0.0));
-                let inst = Inst::new(
-                    Opcode::Selp,
-                    ty.held(),
-                    Vec::new(),
-                    vec![one, zero, holds.into()],
-                );
-                Ok(self.b.value(inst, ty.bank()).into())
+                Ok(self.selected(holds, ty).op)
             }
             _ if ty == VTy::F64 => Err(self.no_rule(format_args!("the operation {op} at f64"))),
             _ => {
@@ -583,6 +576,9 @@ impl Lowerer {
             (VTy::Bool, Some(known)) => &Val::int(known),
             _ => val,
         };
+        if let Some(pred) = val.op.reg().and_then(|reg| self.flags.get(&reg)) {
+            return Ok(*pred);
+        }
         let (cmp, zero) = match val.ty {
             VTy::Bool => {
                 return val
@@ -608,9 +604,25 @@ impl Lowerer {
     /// A bool as the integer 1 or 0.
     pub(super) fn flag(&mut self, val: &Val) -> Result<Val> {
         let pred = self.truth(val)?;
-        let operands = vec![Operand::Int(1), Operand::Int(0), pred.into()];
-        let inst = Inst::new(Opcode::Selp, Ty::S32, Vec::new(), operands);
-        Ok(Val::reg(self.b.value(inst, Bank::B32), VTy::I32))
+        Ok(self.selected(pred, VTy::I32))
+    }
+
+    /// The 1 or 0 of type `to` where `pred` holds or does not, kept as that predicate's flag.
+    fn selected(&mut self, pred: Reg, to: VTy) -> Val {
+        let (one, zero) = if to.is_float() {
+            (self.float_constant(to, 1.0), self.float_constant(to, 0.0))
+        } else {
+            (Operand::Int(1), Operand::Int(0))
+        };
+        let inst = Inst::new(
+            Opcode::Selp,
+            to.held(),
+            Vec::new(),
+            vec![one, zero, pred.into()],
+        );
+        let reg = self.b.value(inst, to.bank());
+        self.flags.insert(reg, pred);
+        Val::reg(reg, to)
     }
 
     /// The predicate `expression` is: a comparison, a logical operation over predicates, or the truth of a value.
@@ -731,18 +743,7 @@ impl Lowerer {
             (_, VTy::Bool) => Ok(Val::reg(self.pred(inner, ctx)?, VTy::Bool)),
             (VTy::Bool, _) => {
                 let pred = self.pred(inner, ctx)?;
-                let (one, zero) = if to.is_float() {
-                    (self.float_constant(to, 1.0), self.float_constant(to, 0.0))
-                } else {
-                    (Operand::Int(1), Operand::Int(0))
-                };
-                let inst = Inst::new(
-                    Opcode::Selp,
-                    to.held(),
-                    Vec::new(),
-                    vec![one, zero, pred.into()],
-                );
-                Ok(Val::reg(self.b.value(inst, to.bank()), to))
+                Ok(self.selected(pred, to))
             }
             // A half widens exactly; a narrowing rounds to nearest.
             (VTy::F16 | VTy::Bf16, VTy::F32) => {
@@ -779,6 +780,9 @@ impl Lowerer {
             }
             _ => {
                 let val = self.int(inner, ctx)?;
+                if let Some(pred) = val.op.reg().and_then(|reg| self.flags.get(&reg)) {
+                    return Ok(self.selected(*pred, to));
+                }
                 match val.op.int() {
                     Some(constant) => Ok(Val {
                         op: self.float_constant(to, constant as f64),
