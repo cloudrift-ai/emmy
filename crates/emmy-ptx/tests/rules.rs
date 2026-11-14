@@ -1339,8 +1339,8 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
             "an index of 2 coordinates into o is not flat: `f32 o[i, 0] = x`",
         ),
         (
-            "    f32 v = sin(x)",
-            "no PTX rule for the operation sin at f32: `f32 v = sin(x)`",
+            "    f32 v = log2(x)",
+            "no PTX rule for the operation log2 at f32: `f32 v = log2(x)`",
         ),
         (
             "    WgmmaFence",
