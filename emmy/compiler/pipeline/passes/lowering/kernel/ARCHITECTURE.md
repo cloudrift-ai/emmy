@@ -905,6 +905,10 @@ idempotent.
 which cicc merged after it unrolled. A loop stepping `C` trips states its step, so the alignment proof holds on its
 copies as on any strided loop; a remainder copy's offset is the launch's and stays scalar.
 
+`121_join_conditions` joins the conditions that stand side by side and test the same thing, where neither has another
+side and the first defines no name the test reads: a register tile's epilogue guards each element of a row by the
+same test, and one condition makes the test once and computes once what the stores share.
+
 `125_spell_composites` follows. A composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is defined by
 primitive operations in one table, beside the operations' declarations in the crate. The pass turns each `Assign` of
 a composite into its definition, one `Assign` per primitive, so a code generator finds primitives only and the
