@@ -1132,6 +1132,37 @@ impl PyFold {
         PyFold::wrap(py, &result)
     }
 
+    /// The components each term in this tree supplies to all its readers and boundary stores, keyed by the `id` of
+    /// the term's object.
+    #[pyo3(signature = (stored = None))]
+    fn read_components<'py>(
+        slf: &Bound<'py, Self>,
+        stored: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let py = slf.py();
+        let stored: std::collections::HashSet<Name> = match stored {
+            None => std::collections::HashSet::new(),
+            Some(value) => names_of(value)?.into_iter().collect(),
+        };
+        let taken = slf.get().fold.read_components(&stored).py()?;
+        let out = PyDict::new(py);
+        let mut pending: Vec<Bound<'py, PyFold>> = vec![slf.clone()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(term) = pending.pop() {
+            let address = term.get().fold.address();
+            if !seen.insert(address) {
+                continue;
+            }
+            if let Some(names) = taken.get(&address) {
+                out.set_item(term.as_ptr() as usize, str_tuple(py, names)?)?;
+            }
+            for edge in PyFold::operands(&term)?.iter() {
+                pending.push(edge.cast_into::<PyFold>()?);
+            }
+        }
+        Ok(out)
+    }
+
     /// Flatten this term to the Loop IR nest the materializer expands, the boundary `stores` (output specs) placed in
     /// it; `bound` the coordinates the caller binds (`None`: every free coordinate), `axes` the kernel's axis table.
     /// The symbolic extents the launch binds are read from `EXTENTS`.
