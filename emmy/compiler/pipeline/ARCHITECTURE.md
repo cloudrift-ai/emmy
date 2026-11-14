@@ -798,8 +798,8 @@ design, so there only a node with a recorded rejection counts.
 ## Part 5: Recording evidence
 
 Nothing in this package benchmarks on its own initiative. A measurement is taken by `run --bench`, and it reaches
-the next compile as a `perf` row of the tune DB. Every writer records in the deployable regime — the precision decisions `compile`
-/ `run` / `serve` use — so a recorded latency is the deployed latency and no store carries a per-regime lane (Part 3).
+the next compile as a `perf` row of the tune DB. Every writer records in the deployable regime — the precision
+decisions `compile` / `run` / `serve` use — so a recorded latency is the deployed latency and no store carries a per-regime lane (Part 3).
 
 - **`run --bench`** records every clean pinned row (a golden row, an `--ab` row) and the greedy pick's own isolated
   re-bench, one `kernel` + `perf` row per benched kernel (`bench_record.persist_kernel_perf`), so a replayed golden

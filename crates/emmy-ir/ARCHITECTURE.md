@@ -155,7 +155,8 @@ identity stays the same whatever the buffers are called.
 The normal form is two kinds of step. The optimizing steps remove work: the exact simplifications, every value
 computed once and placed at the shallowest scope that holds its operands, congruent states merged, unread values
 dropped. A kernel body's also put a condition its test decides in the place of the side it takes, and join the
-conditions side by side that test the same thing (a register tile's row of guarded stores) into one. The canonical steps make equal bodies one body: sibling reduce loops over one axis merged into one loop, the
+conditions side by side that test the same thing (a register tile's row of guarded stores) into one. The canonical
+steps make equal bodies one body: sibling reduce loops over one axis merged into one loop, the
 sibling order, the operand order its ranks spell, and the sequential names. An identity reads a Loop IR body, so
 `normalize_body` runs both until they settle. No identity reads a kernel body, so a `KernelOp` takes the optimizing
 steps alone, through `optimize_body`, at construction: its statements stand in the order and under the names the pass

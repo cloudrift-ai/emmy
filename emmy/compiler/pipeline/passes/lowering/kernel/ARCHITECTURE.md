@@ -868,8 +868,8 @@ that runs up to 32 copies of its body per trip, and says it is `unrolled`. The t
 calibrated on NVIDIA's compilers: a 64-trip scalar reduce written out in full, a 128-trip tensor-core K loop as 32
 copies per trip (all 128 copies are four times the machine code). A flagged loop with no static bound on its trips
 (a symbolic extent, an early stop) stays as it is. A loop that takes copies of an inner loop's folds seeds its own
-folds as a statement ahead of itself, since a loop seeds the folds standing in its body. The unroll itself is one function, `_unroll.unroll_where`, which `047` calls for its short
-lane loops. The body's optimization then folds each copy's index and computes once what two copies share. It runs
+folds as a statement ahead of itself, since a loop seeds the folds standing in its body. The unroll itself is one
+function, `_unroll.unroll_where`, which `047` calls for its short lane loops. The body's optimization then folds each copy's index and computes once what two copies share. It runs
 after the passes that match loops and the statements in them, and before `120`: a copy reads its axis as a literal,
 and a literal is typed by the operation that reads it. After it no statement carries the flag, which `lowering/cuda`
 checks (`check_input`) beside the types.

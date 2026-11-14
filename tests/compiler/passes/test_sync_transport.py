@@ -145,7 +145,7 @@ def test_no_copied_slab_lands_misaligned_behind_an_odd_neighbour() -> None:
     of the next slab's chunk. Placing an f16 operand after such a neighbour is exactly what put a
     16 B ``cp.async`` write on an 8 mod 16 address; :func:`pack_smem` must now round it up.
     """
-    [odd] = parse_body("Smem(name=_bs_smem, extents=(3, 4), dtype=half)")  # 24 B — leaves the cursor at 8 mod 16
+    [odd] = parse_body("Smem(name=_bs_smem, extents=(3, 4), dtype=f16)")  # 24 B — leaves the cursor at 8 mod 16
     copied = slab_smem("_a_smem", 8, 64, F16, align=_fill_align(64, 2, "NONE"))
     offsets, _total = pack_smem([odd, copied])
     assert offsets["_a_smem"] % 16 == 0, f"copied slab at {offsets['_a_smem']}, not 16 B-aligned"

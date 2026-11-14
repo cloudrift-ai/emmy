@@ -188,7 +188,8 @@ filename: no suffix means every stage must pass, `_xfail_<stage>` means it is a 
   assembles that code with ptxas for the declared card on any machine whose ptxas takes the target (CUDA 13's no
   longer takes `sm_70`, so a Volta case is built where an older toolkit is installed), and `correct` runs only on a
   card whose capability equals it.
-- **Latency is measured in `tests/perf/`, whose case list IS the corpus.** `make test` never measures; `make bench-kernels` benches every closed case the card can run, prints the comparison against eager and
+- **Latency is measured in `tests/perf/`, whose case list IS the corpus.** `make test` never measures;
+  `make bench-kernels` benches every closed case the card can run, prints the comparison against eager and
   `torch.compile`, and reports a case slower than its stored number. A regression there is a finding, not a failure.
 - **Never write a benchmark script.** `emmy run --golden FILE --bench --record` benches a golden and writes its
   timings back. If it cannot express what you need, that is a missing flag to add, not a script to write.
