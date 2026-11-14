@@ -507,6 +507,15 @@ What the session changes for the milestones:
    targets (7.2 ms a layer as picked; their strict record stops at a second cut fork), and no first token was
    timed at 256 rows.
 
+   Recorded on #1398's trace the same day (second rental, the recipe golden): 25 of the 28 targets a 256-row
+   chunk adds. The Gated DeltaNet layer's twelve kernels sum to about 1.06 ms at 256 rows, about 4.1 us a row,
+   against about 9 us a row in the 64-row chunk of 2026-11-12. As the priors picked them the solve was 21.7 ms
+   (0.14 ms recorded), triangle-times-values 1.16 ms (63 us) and the main output kernel 0.73 ms (0.30 ms). A
+   record of a wide twin compiles its narrower twins first under strict evidence, so the targets are recorded
+   inside a working copy of the recipe golden, never in a bare trace. Left: the two 256-row attention targets
+   (they need the per-window records the 64-row ones have), one `post` kernel whose pick hangs, and then the
+   strict export and the first token at 256 rows.
+
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
 
