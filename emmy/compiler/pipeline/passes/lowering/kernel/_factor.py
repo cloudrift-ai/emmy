@@ -391,7 +391,7 @@ def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
                 raise UnbindableProjection(f"output-tiled roots reuse top-level SSA names: {sorted(overlap)}")
             top_defs.update(stmt.defines())
             body.append(stmt)
-    return replace(first, body=Body(body))
+    return first.replace(body=Body(body))
 
 
 def _scope_bindings(stmt: Statement) -> set[str]:
