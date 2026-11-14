@@ -1739,8 +1739,10 @@ def _dump_ir(project_root: Path, code: str, stage: str, out_dir: Path) -> Path:
         cwd=project_root,
     )
     assert rc.returncode == 0, rc.stderr
-    # Stage dumps are named ``NN_<stage>.json`` — pick the matching one.
-    candidates = sorted(out_dir.glob(f"*_{stage.replace('/', '_')}*.json"))
+    # Stage dumps are named ``NN_<pass>.json`` after the stage's last pass — pick the matching one. The PTX stage's
+    # last pass is ``lowering/cuda``.
+    dumped = {"ptx": "lowering/cuda"}.get(stage, stage)
+    candidates = sorted(out_dir.glob(f"*_{dumped.replace('/', '_')}*.json"))
     candidates = [p for p in candidates if not p.name.endswith(".rules.json") and not p.name.endswith(".kernels.json")]
     assert candidates, f"no dump matched stage={stage} in {out_dir}: {list(out_dir.iterdir())}"
     return candidates[-1]
@@ -1792,13 +1794,13 @@ def test_run_ir_kernel_stage(run_cli, project_root, tmp_path):
 
 
 @requires_cuda
-def test_run_ir_cuda_stage_no_tail(run_cli, project_root, tmp_path):
-    """Already-lowered cuda IR has no remaining passes."""
-    ir_path = _dump_ir(project_root, "torch.nn.RMSNorm(64)(torch.randn(1,8,64))", "cuda", tmp_path)
+def test_run_ir_ptx_stage_no_tail(run_cli, project_root, tmp_path):
+    """Already-lowered PTX-stage IR has no remaining passes."""
+    ir_path = _dump_ir(project_root, "torch.nn.RMSNorm(64)(torch.randn(1,8,64))", "ptx", tmp_path)
     rc, stdout, stderr = run_cli("run", "-v", "--ir", str(ir_path))
     assert rc == 0, f"stderr: {stderr}"
     log = stdout + stderr
-    assert "Loaded cuda IR" in log
+    assert "Loaded ptx IR" in log
     assert "running tail passes: (none)" in log
 
 
