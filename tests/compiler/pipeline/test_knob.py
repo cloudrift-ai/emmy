@@ -298,6 +298,8 @@ def test_parse_knob_spec_grammar():
     assert parse_knob_spec("") == {}
     with pytest.raises(ValueError, match="missing '='"):
         parse_knob_spec("BK2")
+    with pytest.raises(ValueError, match="whitespace in its value"):
+        parse_knob_spec("WORK=t1024 REDUCE=coop")
 
 
 def test_apply_knobs_env_uppercases_key(monkeypatch):

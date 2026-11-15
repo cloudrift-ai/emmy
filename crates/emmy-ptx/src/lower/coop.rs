@@ -341,7 +341,7 @@ impl Lowerer {
     }
 
     /// The value of `ty` in `from`, read from the lane the shuffle picks. A shuffle moves 32 bits: a float goes
-    /// through its bits, a half through a 32-bit register.
+    /// through its bits, a half through a 32-bit register, a 64-bit integer as its two halves.
     pub(super) fn shuffled(
         &mut self,
         shuffle: Shuffle,
@@ -355,6 +355,27 @@ impl Lowerer {
                 .emit(Inst::new(opcode, ty, vec![to], vec![operand.into()]));
             to
         };
+        if matches!(ty, VTy::I64 | VTy::U64) {
+            let shifted = |this: &mut Lowerer, opcode, operand: Reg| {
+                let to = this.b.reg(Bank::B64);
+                let operands = vec![operand.into(), Operand::Int(32)];
+                this.b.emit(Inst::new(opcode, Ty::B64, vec![to], operands));
+                to
+            };
+            let high = shifted(self, Opcode::Shr, from);
+            let mut halves = [from, high];
+            for half in halves.iter_mut() {
+                let word = moved(self, Opcode::Cvt(Ty::U64), Ty::U32, *half);
+                let theirs = self.shuffled(shuffle, (word, VTy::U32), (lane, clamp), mask)?;
+                *half = moved(self, Opcode::Cvt(Ty::U32), Ty::U64, theirs);
+            }
+            let high = shifted(self, Opcode::Shl, halves[1]);
+            let to = self.b.reg(Bank::B64);
+            let operands = vec![halves[0].into(), high.into()];
+            self.b
+                .emit(Inst::new(Opcode::Or, Ty::B64, vec![to], operands));
+            return Ok(to);
+        }
         let bits = match ty {
             VTy::F32 => moved(self, Opcode::Mov, Ty::B32, from),
             VTy::F16 | VTy::Bf16 => moved(self, Opcode::Cvt(Ty::U16), Ty::U32, from),

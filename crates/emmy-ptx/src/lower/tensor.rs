@@ -65,6 +65,16 @@ const MMA_BLOCK_SCALED: Needs = Needs {
     version: (8, 7),
 };
 
+const MMA_BYTES_SCALED: Needs = Needs {
+    what: "the block-scaled `mma.sync` m16n8k32",
+    sm: 120..=SM_LAST,
+    arch_specific: true,
+    version: (8, 7),
+};
+
+/// The scale of one in the 8-bit exponent form (`ue8m0`) the block-scaled product of 8-bit floats reads.
+const UNIT_SCALE: i64 = 0x7F;
+
 fn thread() -> Expression {
     Expression::new(Expr::Builtin(Builtin::ThreadIdxX))
 }
@@ -432,7 +442,15 @@ impl Lowerer {
                 "an `mma.sync` of m{m}n{n}k{k} at {ab} into {acc}{b}{scales}"
             )));
         };
-        self.requires(needs)?;
+        // A card with the block-scaled product runs the 8-bit one through it, every scale one: the same sum, bit
+        // for bit, at twice the rate of the plain form (measured on an RTX 5090).
+        let unit_scaled =
+            shape == MmaShape::M16n8k32 && MMA_BYTES_SCALED.sm.contains(&self.target.sm);
+        self.requires(if unit_scaled {
+            &MMA_BYTES_SCALED
+        } else {
+            needs
+        })?;
         let floats = acc == "f32";
         let c_ty = if floats { VTy::F32 } else { VTy::U32 };
         let a = self.tensor_fragment(node.a_frag, a_count, VTy::U32)?;
@@ -460,12 +478,19 @@ impl Lowerer {
                 operands.push(Operand::Ints(vec![0, selector]));
             }
         }
+        if unit_scaled {
+            let one = self.word(Opcode::Mov, Ty::U32, vec![Operand::Int(UNIT_SCALE)]);
+            for _side in 0..2 {
+                operands.push(Operand::Tuple(vec![one]));
+                operands.push(Operand::Ints(vec![0, 0]));
+            }
+        }
         let mma = Mma {
             shape,
             b_row: node.b_row_major,
             ab: ab_ty,
             acc: if floats { Ty::F32 } else { Ty::F16 },
-            block_scale: scaled,
+            block_scale: scaled || unit_scaled,
         };
         let ty = if floats { Ty::F32 } else { Ty::B32 };
         self.b.emit(Inst::new(Opcode::Mma(mma), ty, c, operands));

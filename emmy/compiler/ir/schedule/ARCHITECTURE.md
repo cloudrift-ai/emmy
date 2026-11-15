@@ -92,7 +92,9 @@ The classic family is the `classic/` package, one role per module: `schedule` (t
 spellings and keys), `refusals` (every per-choice legality rule), `sites` (the source),
 `context` (the join), `codec` (the wire boundary) and `materialize` (the lowering boundary). Imports flow in that
 order and nothing in the package imports the tile package at module level, which is what lets `ir/tile/ops` read
-the choice types and key spellings through the package.
+the choice types and key spellings through the package. [`classic/ARCHITECTURE.md`](classic/ARCHITECTURE.md) holds
+this family against the best known hand-written kernels: which a row reproduces, which it beats, and where the space
+has a gap.
 
 `ClassicProblem` (`classic/sites`) is `p + t` and the row: the unscheduled TileOp, its target, and the knob row
 whose values its sites offer where it names them. `ClassicScheduleContext` is the immutable `c + p + t` prefix over

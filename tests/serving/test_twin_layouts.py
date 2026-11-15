@@ -4,6 +4,7 @@ layouts the twins before it bound (CPU-only)."""
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -209,6 +210,7 @@ def test_a_named_realization_compiles_with_the_layouts_its_narrower_twins_bound(
     from emmy.compiler.pipeline.search.golden import GoldenFile
     from emmy.compiler.pipeline.search.golden.working import write_trace_inventories
     from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.space import regime_pins
     from emmy.serving.twins import graph_layouts
 
     path = tmp_path / "twins.json"
@@ -235,6 +237,11 @@ def test_a_named_realization_compiles_with_the_layouts_its_narrower_twins_bound(
         assert _layout._SETTLED.get() == bound
     with _layout.settled_layouts({"w": "source"}), run._family_layouts(named("gdn16", _explicit_realization=False)):
         assert _layout._SETTLED.get() == {"w": "source"}
+    # A narrower twin whose rows spell every precision gate, as a record writes them, is still the same family.
+    with GoldenFile.edit(path) as document:
+        document.rows[:] = [replace(row, pins=regime_pins(row.pins)) if row.name == names["gdn1"] else row for row in document.rows]
+    with run._family_layouts(named("gdn16")):
+        assert _layout._SETTLED.get() == bound
 
 
 def _twin(n: int) -> Graph:

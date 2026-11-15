@@ -224,10 +224,10 @@ fn mnemonic(inst: &Inst) -> String {
 /// result, of A, of B and of the accumulator read, and of the scales.
 fn mma_text(mma: Mma) -> String {
     let b = if mma.b_row { "row" } else { "col" };
-    let (kind, scales) = if mma.block_scale {
-        (".kind::mxf4nvf4.block_scale.scale_vec::4X", ".ue4m3")
-    } else {
-        ("", "")
+    let (kind, scales) = match (mma.block_scale, mma.ab) {
+        (false, _) => ("", ""),
+        (true, Ty::E2m1) => (".kind::mxf4nvf4.block_scale.scale_vec::4X", ".ue4m3"),
+        (true, _) => (".kind::mxf8f6f4.block_scale.scale_vec::1X", ".ue8m0"),
     };
     let (shape, ab, acc) = (mma.shape.text(), mma.ab.text(), mma.acc.text());
     format!("mma.sync.aligned.{shape}.row.{b}{kind}.{acc}.{ab}.{ab}.{acc}{scales}")
