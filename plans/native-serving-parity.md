@@ -516,6 +516,17 @@ What the session changes for the milestones:
    (they need the per-window records the 64-row ones have), one `post` kernel whose pick hangs, and then the
    strict export and the first token at 256 rows.
 
+   The hanging `post` kernel is not a cut problem (read off the card on 2026-11-15, sm_120 lowering of the
+   golden's stored `post256-dense-full@nvfp4` program). The unrecorded root is the MLP's gate and up projections
+   with the FP4 quantization of their product. It offers the seams its 16- and 64-row twins are recorded at
+   (`PLACE@map.1/map.2/inner`, `PLACE@map.1/map`, `PLACE@map.2/map`), and the compile already takes that cut: the
+   projections computed once, then the two small quantization pieces. The piece that did not finish in 2 s on the
+   card is the projection matmul itself, scheduled `TILE=mma_m16n8k64_e2m1_f32/f2x8/k4 STAGE=d2/smem-tma` with no
+   `WORK`; the 64-row twin's recorded row is the same tile and stage with `WORK=w2x2` (48 us). Its Kernel IR is
+   544 CTAs of 20 staged steps, which is no 2 s of work, so this reads as a deadlock in that schedule and not a
+   slow pick. On the card: bench the piece under the 64-row row's knobs first, then tune it by name; if the
+   schedule without `WORK` hangs again in isolation, that is a compiler bug to reduce to a corpus case.
+
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
 
