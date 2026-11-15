@@ -29,6 +29,7 @@ from emmy.compiler.ir.schedule.choices import (
     derive_inventory,
     resolve_site_tile,
 )
+from emmy.compiler.ir.schedule.register import REGISTER_WORKS, register_accepts, register_tiles
 from emmy.compiler.ir.schedule.staging import stage_target
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 from emmy.utils import cached_method
@@ -69,6 +70,7 @@ from .schedule import (
     classic_node_key,
     classic_stage_key,
     classic_state_keys,
+    classic_state_tile_keys,
     holds_state,
     node_id_spelling,
     output_sweep_works,
@@ -701,17 +703,45 @@ class ClassicKernelSite(Site[ClassicSchedule]):
 
     @cached_property
     def keys(self) -> tuple[str, ...]:
-        return ("WORK", "RASTER", *classic_state_keys(self.problem.tile))
+        tile = self.problem.tile
+        return ("WORK", "RASTER", *classic_state_tile_keys(tile), *classic_state_keys(tile))
 
     @cached_property
     def kernels(self) -> tuple[KernelSchedule, ...]:
-        return tuple(
+        classic = tuple(
             KernelSchedule(work, raster, state)
             for work in self._works()
             for raster in self._rasters()
             for state in self._states()
-            if state.is_direct or holds_state(work, raster)
+            if state.is_direct or (state.transport == "smem" and holds_state(work, raster))
         )
+        return (*classic, *self._register_kernels())
+
+    def _register_kernels(self) -> tuple[KernelSchedule, ...]:
+        """The kernel choices that keep the carried state in registers: a warp inventory and the fragment
+        geometry of every stored value. Offered under the f16-accumulate precision policy, or where the row
+        names the geometry."""
+        problem = self.problem
+        program, register = problem.tile.state_program, Stage(transport="reg")
+        if program is None or register not in self._states():
+            return ()
+        (key,) = classic_state_tile_keys(problem.tile)
+        named = problem.row.get(key) or (problem.bare_pins.get("TILE") if key != "TILE" else None)
+        if not named and not problem.allow_f16_accumulate:
+            return ()
+        works = REGISTER_WORKS if "WORK" not in problem.row else (() if problem.work is None else (problem.work,))
+        kernels = []
+        for work in works:
+            try:
+                plans = (Tile.parse(named, work),) if named else register_tiles(program, work)
+            except ValueError:
+                continue
+            kernels.extend(
+                KernelSchedule(work, Raster.parse(""), register, plan)
+                for plan in plans
+                if register_accepts(program, work, plan, problem.target)
+            )
+        return tuple(kernels)
 
     def _states(self) -> tuple[Stage, ...]:
         """Where the carried state may be kept: direct, and the storage its ownership proof admits."""
@@ -829,8 +859,9 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: such an operand, so the stage catalog keeps the transports that need one off it
     #: (:func:`~.refusals._stage_candidates`).
     paged: Mapping[str, tuple[int, int]] = field(default_factory=frozendict)
-    #: The storage, beside direct, the kernel's one carried state may take — what the proof that one CTA owns
-    #: each state whole admits. Empty for a kernel that carries no state, or whose state the proof leaves global.
+    #: The storage, beside direct, the kernel's one carried state may take: shared memory where one CTA owns
+    #: each state whole, registers where the kernel has a register program. Empty for a kernel that carries no
+    #: state, or whose state stays global.
     state_stages: tuple[Stage, ...] = ()
     #: Row keys whose values must be accepted exactly. Strict replay adds only the keys it supplies,
     #: leaving unrelated inherited pins under their original published-row reading.
@@ -932,7 +963,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
         spells the family at several sites. Such a pin names ONE site — some site carries the
         value and every other is OFF — so each site offers the value beside OFF, and
         :meth:`unrealized_bare_pin` asks the completed schedule which site carried it."""
-        keys = [*(key for site in self.node_sites for key in site.keys), *classic_state_keys(self.tile)]
+        keys = [*(key for site in self.node_sites for key in site.keys), *self.kernel_site.keys]
         return frozendict(
             {
                 family: value
@@ -974,7 +1005,10 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     def _spelled(self, schedule: ClassicSchedule, family: str) -> dict[str, str]:
         tile = self.tile
         if family == "TILE":
-            return {classic_node_key(tile, "TILE", site): schedule.nodes[site].tile.spell() for site in tile.family_sites["TILE"]}
+            return {
+                **{classic_node_key(tile, "TILE", site): schedule.nodes[site].tile.spell() for site in tile.family_sites["TILE"]},
+                **dict.fromkeys(classic_state_tile_keys(tile), schedule.kernel.state_tile.spell()),
+            }
         if family == "REDUCE":
             return {
                 classic_node_key(tile, "REDUCE", site): node.reduce.spell()
