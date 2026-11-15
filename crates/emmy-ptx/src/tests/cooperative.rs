@@ -398,6 +398,43 @@ fn a_prefix_shuffle_combines_under_a_guard_and_a_broadcast_reads_the_last_lane()
     );
 }
 
+/// A shuffle moves 32 bits, so a 64-bit state, the index an argmax carries beside its value, moves as its two
+/// halves, each read from the same lane, and is joined again.
+#[test]
+fn a_64_bit_state_moves_as_its_two_halves() {
+    let module = row_module(
+        "
+        i32 n = load c[t]
+        i64 wide = (i64)n
+        WarpBroadcast(state=(wide), length=4)
+        i32 back = (i32)wide
+        i32 d[t] = back
+        ",
+        HALVES,
+        32,
+        &[],
+    );
+    assert_eq!(
+        row_code(&module),
+        [
+            "mul.wide.s32 %rd4, %r1, 4",
+            "add.s64 %rd5, %rd2, %rd4",
+            "ld.global.nc.s32 %r2, [%rd5]",
+            "cvt.s64.s32 %rd6, %r2",
+            "mov.s64 %rd7, %rd6",
+            "activemask.b32 %r3",
+            "mov.b64 {%r4, %r5}, %rd7",
+            "shfl.sync.idx.b32 %r6, %r4, 3, 7199, %r3",
+            "shfl.sync.idx.b32 %r7, %r5, 3, 7199, %r3",
+            "mov.b64 %rd8, {%r6, %r7}",
+            "mov.s64 %rd7, %rd8",
+            "cvt.u32.u64 %r8, %rd7",
+            "add.s64 %rd9, %rd3, %rd4",
+            "st.global.s32 [%rd9], %r8",
+        ]
+    );
+}
+
 /// Where each thread has a slot of its own, every halving step is a condition over the threads of the low half,
 /// which read their slot and the one a stride above, combine them and write their own, and a barrier of the
 /// block. Every thread then reads the first slot into its state.
@@ -1201,10 +1238,6 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         (
             "WarpShuffle(state=(later), state_b=(later__o), length=4):\n            combine_states:\n                f32 later = later + later__o",
             "later is updated before it is defined",
-        ),
-        (
-            "WarpBroadcast(state=(wide), length=4)",
-            "no PTX rule for a shuffle of i64",
         ),
         (
             "TreeHalve(bufs=(slab), state=(acc), state_b=(acc__o), length=32, tid_var=pair):\n            combine_states:\n                f32 acc = acc + acc__o",
