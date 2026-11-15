@@ -398,6 +398,43 @@ fn a_prefix_shuffle_combines_under_a_guard_and_a_broadcast_reads_the_last_lane()
     );
 }
 
+/// A 64-bit integer state crosses lanes as its two halves, each through one shuffle, joined again in the lane
+/// that reads them.
+#[test]
+fn a_shuffle_of_a_64_bit_integer_moves_its_two_halves() {
+    let module = row_module(
+        "
+        i64 wide = (i64)t
+        WarpBroadcast(state=(wide), length=4)
+        i64 m[t] = wide
+        ",
+        SUMS,
+        32,
+        &[],
+    );
+    assert_eq!(
+        row_code(&module),
+        [
+            "cvt.s64.s32 %rd4, %r1",
+            "mov.s64 %rd5, %rd4",
+            "activemask.b32 %r2",
+            "shr.b64 %rd6, %rd5, 32",
+            "cvt.u32.u64 %r3, %rd5",
+            "shfl.sync.idx.b32 %r4, %r3, 3, 7199, %r2",
+            "cvt.u64.u32 %rd7, %r4",
+            "cvt.u32.u64 %r5, %rd6",
+            "shfl.sync.idx.b32 %r6, %r5, 3, 7199, %r2",
+            "cvt.u64.u32 %rd8, %r6",
+            "shl.b64 %rd9, %rd8, 32",
+            "or.b64 %rd10, %rd7, %rd9",
+            "mov.s64 %rd5, %rd10",
+            "mul.wide.s32 %rd11, %r1, 8",
+            "add.s64 %rd12, %rd3, %rd11",
+            "st.global.s64 [%rd12], %rd5",
+        ]
+    );
+}
+
 /// Where each thread has a slot of its own, every halving step is a condition over the threads of the low half,
 /// which read their slot and the one a stride above, combine them and write their own, and a barrier of the
 /// block. Every thread then reads the first slot into its state.
@@ -1179,8 +1216,7 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         let i32 pair = t / 2
         let i32 warp = t / 32
         f32 acc = load a[t]
-        f16 h = (f16)acc
-        i64 wide = (i64)t";
+        f16 h = (f16)acc";
     for (statements, expected) in [
         (
             "Smem(name=odd, extents=(4), dtype=f32, align=24)",
@@ -1201,10 +1237,6 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         (
             "WarpShuffle(state=(later), state_b=(later__o), length=4):\n            combine_states:\n                f32 later = later + later__o",
             "later is updated before it is defined",
-        ),
-        (
-            "WarpBroadcast(state=(wide), length=4)",
-            "no PTX rule for a shuffle of i64",
         ),
         (
             "TreeHalve(bufs=(slab), state=(acc), state_b=(acc__o), length=32, tid_var=pair):\n            combine_states:\n                f32 acc = acc + acc__o",
@@ -1232,7 +1264,7 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         ),
         (
             "f32 x0, x1, x2, x3 = load a[t * 2]",
-            "`ld.global.nc.v4.f32 {%f1, %f2, %f3, %f4}, [%rd6]` is a 16-byte access with no alignment proven",
+            "`ld.global.nc.v4.f32 {%f1, %f2, %f3, %f4}, [%rd5]` is a 16-byte access with no alignment proven",
         ),
         (
             "f32 o[t * 2 + 1] = (acc, acc)",
@@ -1315,6 +1347,33 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         let message = row_refusal(&format!("        {statements}"), A_O, &[pool]);
         assert!(message.contains(expected), "{message}");
     }
+}
+
+/// An integer state whose slab holds f32 reads its root truncated toward zero, as the C assignment did.
+#[test]
+fn an_integer_state_reads_a_float_slab_truncated() {
+    let module = row_module(
+        "
+        i64 best = (i64)t
+        Smem(name=bs, extents=(32), dtype=f32)
+        f32 bw = (f32)best
+        f32 bs[t] = bw
+        Sync
+        TreeHalve(bufs=(bs), state=(best), state_b=(best__o), length=32, tid_var=t):
+            combine_states:
+                best = maximum(best, best__o)
+        i64 m[t] = best
+        ",
+        SUMS,
+        32,
+        &[],
+    );
+    let code = row_code(&module);
+    let reads: Vec<_> = code
+        .iter()
+        .filter(|line| line.starts_with("cvt.") && line.contains(".s64.f32"))
+        .collect();
+    assert_eq!(reads, ["cvt.rzi.s64.f32 %rd6, %f16"], "{code:#?}");
 }
 
 /// A selection held at a half beside a reduction at f32 combines at the f32, as the renderer's merge did: the half

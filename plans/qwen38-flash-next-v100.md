@@ -1211,6 +1211,43 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     parting after 650-1,460 characters. Boot 1,116 s, as main's 1,117.
   - Next: from the 2026-11-13 ranking, for the owner to pick. In the 4K first token the 3,920-token step is still the
     largest part of the gap; its 256-row blocks are about half padding, and gathering the rows into them takes 33 ms.
+- **The fixed-slot program at the step's width (2026-11-14).** Round 2 of the 2026-11-13 ranking, main `7cfbdf9db`.
+  A fixed-slot program reads every slot's expert whatever the step's rows, so a step of two or four rows through the
+  eight-row program paid for eight. The program is now built at every slot width, the decode bucket and its halvings
+  down to two rows (the twins `expert-slots2@nvfp4` and `expert-slots4@nvfp4` beside `expert-slots8`), and a step
+  runs the narrowest that holds it; the widths share the eight-row selector and partials.
+  - Gate: both new programs take the eight-row program's two cuts and its schedules, cold on the card, per layer:
+    four rows 102 us and two rows 59 us, against 176 us for eight in the same run: 0.58x and 0.34x, the "about half"
+    the ranking expected. They were recorded as measured; the eight-row round's tunes found nothing faster for these
+    pieces, so none was run.
+  - A B B A on boots never profiled, main against the branch:
+
+    | Point | Main | This round |
+    | --- | ---: | ---: |
+    | One request, 1K / 512, per token | 17.20 ms | 17.18 ms |
+    | 2 requests, 4K / 1K, total output | 70.7-70.8 tok/s (25.6 ms) | 84.9-85.1 tok/s (20.8 ms) |
+    | 4 requests, 4K / 1K, total output | 128.8-128.9 tok/s (26.3 ms) | 143.4-144.2 tok/s (23.1 ms) |
+    | 8 requests, 4K / 1K, total output | 220.7-221.1 tok/s (27.4 ms) | 219.6 tok/s (27.4 ms) |
+    | First token, 1K | 0.80 s | 0.80 s |
+    | First token, 4K | 1.42 s | 1.42-1.43 s |
+
+  - Two requests gain 20% and four requests 12%, a step 4.8 and 3.2 ms shorter (expected at four: 2.6 ms, 135 to
+    about 150 tok/s). One and eight requests and the first tokens are unchanged, as expected.
+  - Main itself is slower than on 2026-11-14 morning: four requests 128.9 against 137.4-138.4 tok/s, eight 221
+    against 233, one request 17.2 against 16.7 ms. The cause is #1399, the Rust PTX compiler in place of nvcc: the
+    same kernels under the same schedules, cold, before and at that commit: the eight-row slot program 128 to 175 us,
+    the small-expert group program 193 to 225, the wide group program 629 to 677, the one-row expert programs 36-37
+    to 41-42; the other programs within 2%. Not fixed here. The new programs were recorded on the slower code, so
+    they gain with the eight-row one when it is fixed.
+  - Against the async fork (2026-11-13's 201.7-203.2 tok/s): four requests 0.71x its output, from 0.64x on today's
+    main and 0.68x before #1399.
+  - Checks on the branch: all 18 programs compile strict from the golden alone and the release audit deploys all 18
+    twins. GSM8K 124 of 128 with none at the output limit; acceptance cases 28, 27, 27 without thinking and 27, 28, 27
+    with it; long-document lookups 339 of 339 and 336 of 336. The margin test passes with 566-568 MiB spare per card
+    (582-584 before: the two programs' instances per layer). Six greedy texts, one request at a time, are main's, 6
+    of 6. Boot 698 s, main's 689 (1,116 before #1399).
+  - Next: the PTX compiler's slowdown of the gathered expert programs first, since it costs four and eight requests
+    more than this round gained at eight; then the 2026-11-13 ranking, for the owner to pick.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

@@ -1001,12 +1001,20 @@ def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str,
         return fork_less_of[id(graph)]
 
     ordered = []
-    for pin_set in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
-        same_pins = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == pin_set]
+    for pin_set in dict.fromkeys(_regime(pins) for _, pins, _ in targets):
+        same_pins = [(name, pins, target) for name, pins, target in targets if _regime(pins) == pin_set]
         reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
         for index, scope in twins_in_build_order(reached, fork_less):
             ordered += [(name, pins, target, scope) for name, pins, target in same_pins if traced[target] == index]
     return ordered
+
+
+def _regime(pins: dict) -> tuple:
+    """The regime ``pins`` spell, as a comparable key: a row that spells every precision gate and one that spells only
+    the ``FAST_MATH`` umbrella name the same regime, so twins recorded either way are one family."""
+    from emmy.compiler.pipeline.search.space import regime_pins  # noqa: PLC0415
+
+    return tuple(sorted(regime_pins(pins).items()))
 
 
 def _family_layouts(args):
@@ -1031,7 +1039,7 @@ def _family_layouts(args):
         return contextlib.nullcontext()
     path = document.path_to(rows[0].kernel)
     target = path[0].parent if path else rows[0].kernel
-    regime = {key: group for key, group in document.target_rows().items() if dict(key[1]) == rows[0].pins}
+    regime = {key: group for key, group in document.target_rows().items() if _regime(dict(key[1])) == _regime(rows[0].pins)}
     ordered = _targets_in_build_order(document, regime)
     scope = next((scope for _, _, ref, scope in ordered if ref == target), None)
     if scope is None:

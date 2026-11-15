@@ -1,5 +1,42 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## A 256-row prefill chunk, recorded and timed (2026-11-15)
+
+Native generation can run a prompt in 256-row chunks (`--prefill-size 256`, `SERVE_NATIVE_PREFILL=256`), keeping the
+64-row chunk and the decode width for a prompt's tail. This recipe still serves 64-row chunks; the golden now holds
+every program of the wider chunk. Measured on one rented RTX 5090 (48 vCPUs, 108 GiB of RAM, PCIe Gen4 x16, driver
+610.57, CUDA 13.3), one session, both packs exported from this golden alone under strict evidence and served by the
+same build. The client and settings are the 2026-10-25 section's; the prompts are cut again from this tree's Markdown.
+Stock vLLM was not measured in this session, so the bar below is the 2026-11-12 one.
+
+| | 64-row chunks | 256-row chunks | bar |
+|---|---|---|---|
+| first token, 256-token prompt | 0.147 s | 0.068 s | 0.32 s |
+| first token, 7,680-token prompt | 4.46 s | 2.44 s | 1.51 s |
+| first token, 197,632-token prompt | 172 s | 113 s | 136 s |
+| TPOT at 256 / 7,680 / 197,632 | 8.84 / 8.78 / 11.9 ms | 8.60 / 8.67 / 11.5 ms | 9.44 / 9.28 / 14.3 ms |
+| device memory at rest | 28.6 GiB | 28.9 GiB | |
+| GSM8K strict / flexible match | 0.690 / 0.735 | 0.675 / 0.695 | |
+| twins that deploy from the golden alone | 67 of 67 | 80 of 80 | |
+
+- **Width halves the first token and does not reach the 7,680-token bar.** A 256-row chunk takes about 81 ms where
+  four 64-row chunks take about 149 ms. From the golden's rows, the 48 Gated DeltaNet layers are about 51 ms of it
+  (1.06 ms each) and the 64 MLPs about 25 ms; the bar needs about 45 ms a chunk.
+- **The 197,632-token first token is inside the bar.** Long-window attention at 256 rows takes 4.96 ms a layer at
+  131,072 positions, 3.1x the 64-row fold for four times the rows.
+- **GSM8K.** The two packs differ by 0.015 strict and 0.040 flexible, with a standard error of 0.033 on each score:
+  inside one standard error on strict, 1.2 on flexible. The same prompts continue differently after 0 to 110
+  characters on the two packs, and both continuations read well; the kernels differ at every width, so their
+  rounding does.
+- **What was recorded.** The last three 256-row targets: the MLP's gate and up projection kernel (184 us) and the
+  attention fold at both window ranges (207 us at 4,096, a 2-way key split; 4.96 ms at 131,072, a 16-way one). As
+  the priors pick it, that fold takes 3.8 ms and 117 ms. The drafter's two 256-row programs are recorded again with
+  the weight layouts its narrower programs settle (0.36 and 0.97 ms, as before); recorded alone they were kernels an
+  export never builds. The plugin's any-width `pre` program, the one twin the strict audit failed on, is recorded.
+- **No native pack exported on main before this session's fixes.** Token selection carries the picked index, a
+  64-bit integer, through a warp shuffle and through a 32-bit float slab, and the PTX compiler that replaced nvcc had
+  a rule for neither.
+
 ## One cache read per verify step, and the golden measured again (2026-11-12)
 
 A verify step's attention now folds its three rows beside the query group, so every row shares one read of the
