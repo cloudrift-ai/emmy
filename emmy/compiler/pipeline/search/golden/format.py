@@ -211,7 +211,7 @@ class GoldenFile(Wire):
 
         source = Path(path)
         try:
-            document = cls.from_wire(json.loads(source.read_text()))
+            document = cls.from_wire(_joined(json.loads(source.read_text())))
             document.check(repository=is_repository_golden_path(source) if repository is None else repository)
         except (OSError, ValueError) as exc:
             raise ValueError(f"invalid golden file {source}: {exc}") from exc
@@ -518,12 +518,55 @@ def _lines(entries: Iterable[str], indent: str) -> str:
     return "[\n" + ",\n".join(indent + entry for entry in entries) + f"\n{indent[:-1]}]"
 
 
+def _spread(key: str | None, value: object) -> bool:
+    """Whether ``value`` (under ``key``) holds a graph's node list or a multi-line body — what the text spreads."""
+    if key == "nodes" and isinstance(value, list) and value:
+        return True
+    if key == "body" and isinstance(value, str):
+        return "\n" in value
+    if isinstance(value, dict):
+        return any(_spread(k, v) for k, v in value.items())
+    return False
+
+
+def _entry(value: object, indent: str, key: str | None = None) -> str:
+    """``value`` compact, except that a graph's nodes take a line each and a body a line per statement — a list of
+    strings on the wire, joined back on load (:func:`_joined`) — so a diff lands on the node or statement that
+    changed."""
+    if not _spread(key, value):
+        return _compact(value)
+    if key == "body":
+        return _lines(map(json.dumps, value.split("\n")), indent + " ")
+    if key == "nodes":
+        return _lines((_entry(node, indent + " ") for node in value), indent + " ")
+    return "{" + ",".join(f"{json.dumps(k)}:{_entry(v, indent, k)}" for k, v in value.items()) + "}"
+
+
+def _row(row: Mapping) -> str:
+    """A row with a field per line, so a changed knob or timing is a line of its own."""
+    return "{" + ",\n   ".join(f"{json.dumps(k)}:{_compact(v)}" for k, v in row.items()) + "}"
+
+
+def _joined(wire: dict) -> dict:
+    """The wire :func:`_document_text` spread, each body's lines joined back into its text."""
+    for kernel in wire.get("kernels", ()):
+        for node in kernel.get("loop_ir", {}).get("nodes", ()):
+            attrs = node.get("attrs") or {}
+            if isinstance(attrs.get("body"), list):
+                attrs["body"] = "\n".join(attrs["body"])
+    return wire
+
+
 def _document_text(wire: Mapping) -> str:
     """A golden as JSON a diff reads: a header key per line, ``gpu_name`` first on the opening line (what the card
-    sniff reads alone), then each table with an entry per line."""
+    sniff reads alone), then each table with an entry per line — a row's fields, a graph's nodes and a body's
+    statements each on lines of their own."""
     items = []
     for key, value in wire.items():
-        text = _lines(map(_compact, value), "  ") if key in _TABLES and value else json.dumps(value)
+        if key in _TABLES and value:
+            text = _lines((_row(entry) if key == "rows" else _entry(entry, "  ") for entry in value), "  ")
+        else:
+            text = json.dumps(value)
         items.append(f"{json.dumps(key)}: {text}")
     return "{" + ",\n ".join(items) + "}\n"
 
