@@ -496,6 +496,25 @@ for k in 0..3:
         assert_eq!(body_text(&again).unwrap(), body_text(&normal).unwrap());
     }
 
+    #[test]
+    fn a_difference_of_two_reads_of_one_buffer_settles() {
+        // The order spells this difference `a - b` or `-b + a` by the ranks of its two loads. A numbering that told
+        // the two spellings apart gave the buffers other roles each round, and the loads swapped places for ever.
+        normal(
+            "in0 = load cumsum[0, _s0, 0, _s1]
+in1 = load cumsum[0, _s0, 0, _s2]
+v0 = in0 - in1
+in2 = load masked_fill_c2[0]
+in3 = load ones_scalar[0]
+in4 = load triu_zero[0]
+v1 = select:
+    in3 when _s1 + 1 <= _s2
+    in4 when true
+v2 = where(v1, in2, v0)
+v3 = exp(v2)",
+        );
+    }
+
     fn symbolic_axis(name: &str, extent: &str) -> std::sync::Arc<Axis> {
         Axis::new(
             name,

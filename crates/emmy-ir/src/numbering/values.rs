@@ -208,6 +208,39 @@ impl Context<'_> {
         ops: &mut Vec<Value>,
         touched: &mut Vec<Name>,
     ) -> Key {
+        // A sum with a subtracted term is keyed as what it adds less what it subtracts, each side one chain. The
+        // normal form writes a sum's terms by rank, so `a - b` and `-b + a` are two spellings the order picks
+        // between, and a number that told them apart would move with the order it decides.
+        if self.chains == Chains::Flat
+            && matches!(
+                e.operation(),
+                Some((Operation::Add | Operation::Subtract, _))
+            )
+            && !(self.reads_axis(e) && self.coordinate_only(e))
+        {
+            let (mut added, mut subtracted) = (Vec::new(), Vec::new());
+            signed_terms(e, false, &mut added, &mut subtracted);
+            if !subtracted.is_empty() {
+                let chain = |terms: Vec<Expression>| {
+                    terms
+                        .into_iter()
+                        .reduce(|sum, term| Expression::apply(Operation::Add, vec![sum, term]))
+                };
+                let (head, sides) = match chain(added) {
+                    Some(sum) => (Operation::Subtract, vec![sum, chain(subtracted).unwrap()]),
+                    None => (Operation::Negative, vec![chain(subtracted).unwrap()]),
+                };
+                let children: Vec<Key> = sides
+                    .iter()
+                    .map(|side| self.value_key(side, params, ops, touched))
+                    .collect();
+                return Key::tuple([
+                    Key::str(ExprType::Apply.text()),
+                    Key::str(head.text()),
+                    Key::Tuple(children),
+                ]);
+            }
+        }
         if let Some((op, args)) = e.operation()
             && op.info().commutative
             && args.len() == 2
@@ -1049,6 +1082,28 @@ fn associative_terms(e: &Expression, op: Operation, out: &mut Vec<Expression>) {
             }
         }
         _ => out.push(e.clone()),
+    }
+}
+
+/// The terms a sum adds and the terms it subtracts, read through every addition, subtraction and negation of it.
+fn signed_terms(
+    e: &Expression,
+    negated: bool,
+    added: &mut Vec<Expression>,
+    subtracted: &mut Vec<Expression>,
+) {
+    match e.operation() {
+        Some((Operation::Add, [left, right])) => {
+            signed_terms(left, negated, added, subtracted);
+            signed_terms(right, negated, added, subtracted);
+        }
+        Some((Operation::Subtract, [left, right])) => {
+            signed_terms(left, negated, added, subtracted);
+            signed_terms(right, !negated, added, subtracted);
+        }
+        Some((Operation::Negative, [inner])) => signed_terms(inner, !negated, added, subtracted),
+        _ if negated => subtracted.push(e.clone()),
+        _ => added.push(e.clone()),
     }
 }
 

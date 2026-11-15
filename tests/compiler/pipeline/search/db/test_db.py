@@ -199,8 +199,8 @@ def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
 _PINNED_IDENTITIES = {
     ("reduce/cross-cta-sum-kernel.json", 0): "aee18fd8b70ef8deb26b624698c57faa",
     ("reduce/cross-cta-sum-kernel.json", 1): "c6a11571d7ceafb35273b317542392b9",
-    ("reduce/online-softmax-4x128.json", 0): "39de2351761faf2231319b2251070968",
-    ("attention/sdpa-hd128-softmax-v-mma.json", 0): "a66857bbc1699894ee65bb33b37fe170",
+    ("reduce/online-softmax-4x128.json", 0): "c2515008584c7dc6b0189eaa69b77cc6",
+    ("attention/sdpa-hd128-softmax-v-mma.json", 0): "85f82a42991950add7c4c8c320e236c6",
     ("matmul/bf16-mma-sm120.json", 0): "954a87376449a67967b4e7e30dd4575c",
     ("fused/nvfp4-gate-up-requant-place-cut.json", 2): "db72314a5d4a426daa4d072c6fbfea82",
 }
