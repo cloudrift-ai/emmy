@@ -277,8 +277,8 @@ impl MmaShape {
 }
 
 /// One form of `mma.sync`: the tile, whether B is read row-major (Volta's second form), the type of the
-/// multiplicands, the type of the accumulator, and whether every 16 elements of the sum carry a scale of their own
-/// (the block-scaled 4-bit form).
+/// multiplicands, the type of the accumulator, and whether the sum carries scales: one for every 16 elements in the
+/// 4-bit form, one for the whole of each side in the 8-bit form.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Mma {
     pub shape: MmaShape,

@@ -331,7 +331,7 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
             "shape=(16, 8, 32), ab_dtype=e4m3",
             "m16n8k32.row.col.f32.e4m3.e4m3.f32",
             floats,
-            vec![89, 90, 120],
+            vec![89, 90],
             (8, 4),
         ),
         (
@@ -340,7 +340,7 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
             "shape=(16, 8, 32), ab_dtype=e5m2",
             "m16n8k32.row.col.f32.e5m2.e5m2.f32",
             floats,
-            vec![89, 90, 120],
+            vec![89, 90],
             (8, 4),
         ),
     ];
@@ -358,6 +358,37 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
                 (stated, &*format!("sm_{sm}"))
             );
         }
+    }
+}
+
+/// A card with the block-scaled product runs a product of 8-bit floats through it with a scale of one on each
+/// side: the same sum at twice the plain form's rate. The module's target then carries the suffix.
+#[test]
+fn a_product_of_8_bit_floats_is_block_scaled_by_one_where_the_card_has_it() {
+    for (dtype, ab) in [("f8e4m3", "e4m3"), ("f8e5m2", "e5m2")] {
+        let body = format!(
+            "
+        Smem(name=sa, extents=(16, 64), dtype=f16, align=16)
+        RegFragment(name=fa, role=a, dtype={dtype})
+        RegFragment(name=fb, role=b, dtype={dtype})
+        RegFragment(name=fc, role=c, dtype=f32)
+        LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 0), role=a, ldm=64)
+        LdmatrixLoad(frag=fb, src_buffer=sa, src_index=(0, 0), role=b, ldm=64)
+        MmaSyncPtx(c_frag=fc, a_frag=fa, b_frag=fb, shape=(16, 8, 32), ab_dtype={ab})
+        "
+        );
+        let module = warp(&body, 120).unwrap();
+        assert_eq!((module.version, &*module.target), ((8, 7), "sm_120a"));
+        let text = only(&module, &["mma"]);
+        assert_eq!(text.len(), 1);
+        assert!(text[0].starts_with(&format!(
+            "mma.sync.aligned.m16n8k32.row.col.kind::mxf8f6f4.block_scale.scale_vec::1X.f32.{ab}.{ab}.f32.ue8m0 "
+        )));
+        assert!(text[0].ends_with(", {%r16}, {0, 0}, {%r16}, {0, 0}"));
+        assert_eq!(
+            only(&module, &["mov.u32"]).last().unwrap(),
+            "mov.u32 %r16, 127"
+        );
     }
 }
 
