@@ -570,8 +570,8 @@ pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
     out
 }
 
-/// The sum an affine form spells, its terms ordered by `rank`: the one spelling of a sum in the normal form, and the
-/// one every reader that takes a sum apart and puts it back uses.
+/// The sum an affine form spells, its added terms ahead of its subtracted ones and each group ordered by `rank`: the
+/// one spelling of a sum in the normal form, and the one every reader that takes a sum apart and puts it back uses.
 pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression {
     let AffineTerms {
         terms,
@@ -600,7 +600,8 @@ pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression 
         }
     }
     merged.retain(|(c, _)| *c != 0.0);
-    merged.sort_by_cached_key(|(c, term)| (ranked(term, rank), Key::float(*c)));
+    // Added terms ahead of subtracted ones, so a sum opens with a negation only when it adds nothing; then by rank.
+    merged.sort_by_cached_key(|(c, term)| (*c < 0.0, ranked(term, rank), Key::float(*c)));
     let spells_none = offset == 0.0 && merged.iter().all(|(c, _)| c.abs() == 1.0);
     let mut out: Option<Expression> = None;
     for (index, (coefficient, term)) in merged.into_iter().enumerate() {

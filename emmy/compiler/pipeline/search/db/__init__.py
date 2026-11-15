@@ -282,7 +282,7 @@ _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "k
 #: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key, and
 #: what a context's regime measures. A file holding another is re-created; bump when any changes. The DB tests pin
 #: kernel and context identities.
-_VERSION = 17  # The exact identity keys a sum by what it adds and what it subtracts, not by how it is spelled.
+_VERSION = 17  # The exact identity keys a sum as one node over its terms and offset, not by how it is spelled.
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",
