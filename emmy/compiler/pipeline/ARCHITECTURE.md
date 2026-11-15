@@ -1589,8 +1589,7 @@ keeps `gn4` and `gn8` out unless an exact `RASTER` parameter selects one. Wall-t
 **`SHARED_CARRY`** (INT, `lowering/kernel/035_shared_carry`) — late carried-state storage: `0` keeps global storage
 and one launch per ordered step, `1` keeps the state in two shared buffers, each row padded by one column. The pass
 offers the shared layout only when state reads prove CTA ownership and both buffers plus existing scratch fit. A
-store that does not read the step — the state a rolled scan ends with — is written behind the last step alone under
-either storage. The
+store that does not read the step — the state a rolled scan ends with — is written once under either storage. The
 choice is part of the measured kernel row, so a recorded row replays its storage without a manual pin. Shared
 storage is not a rule: with few independent batches and a large per-step grid it serializes the card (2 CTAs doing
 every row: 163 ms against 2.8 ms for ordered launches on a V100), so evidence decides.
