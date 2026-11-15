@@ -322,11 +322,14 @@ def _chunk_rule_scan_then_read(
     use_qk_l2norm_in_kernel=False,
     **kwargs,
 ):
-    """Transformers' ``torch_chunk_gated_delta_rule`` (``scope`` is its module) with the outputs read after the scan.
+    """Transformers' ``torch_chunk_gated_delta_rule`` (``scope`` is its module) with the outputs read after the scan
+    and every pointwise scale applied to the small side of a product.
 
     The scan keeps the state each chunk starts from and the chunk's new values; the output of every chunk is then
-    ``query @ state + intra @ new_values`` over the stacked chunks at once. The arithmetic is the reference's, term
-    for term."""
+    ``query @ state + intra @ new_values`` over the stacked chunks at once. ``beta``, the decay and the query scale
+    multiply the ``chunk x chunk`` matrices and the rows of a product's result, never the queries, keys or values:
+    those stay the operands they were loaded as, which is what a tensor-core tile reads. The sums are the
+    reference's; a scale meets its product on the other side, so the rounding differs in the last place."""
     import torch
     import torch.nn.functional as F
 
@@ -338,41 +341,41 @@ def _chunk_rule_scan_then_read(
     )
     if use_qk_l2norm_in_kernel:
         query, key = scope["l2norm"](query, dim=-1, eps=1e-6), scope["l2norm"](key, dim=-1, eps=1e-6)
-    query = query * query.shape[-1] ** -0.5
+    scale = query.shape[-1] ** -0.5
     pad = (chunk_size - length % chunk_size) % chunk_size
     query, key, value = (F.pad(x, (0, 0, 0, pad)) for x in (query, key, value))
     beta, g = (F.pad(x, (0, pad)) for x in (beta, g))
-    chunks = (length + pad) // chunk_size
-    v_beta, k_beta = value * beta.unsqueeze(-1), key * beta.unsqueeze(-1)
-    query, key, k_beta, v_beta = (x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, k_beta, v_beta))
-    g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
+    query, key, value = (x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, value))
+    beta, g = (x.reshape(x.shape[0], x.shape[1], -1, chunk_size) for x in (beta, g))
+    chunks = query.shape[2]
     upper = torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device).triu(1)
     cum = g.cumsum(dim=3)
     pairwise = (cum.unsqueeze(4) - cum.unsqueeze(3)).masked_fill(upper, float("-inf")).exp()
-    system = (k_beta @ key.transpose(-1, -2)) * pairwise
-    intra = (query @ key.transpose(-1, -2)) * pairwise
-    decayed = k_beta * cum.exp().unsqueeze(-1)
+    keys_t = key.transpose(-1, -2)
+    system = (key @ keys_t) * (pairwise * beta.unsqueeze(4))
+    eye = torch.eye(chunk_size, dtype=system.dtype, device=system.device)
     if not scope["is_torchdynamo_exporting"]():
-        new_values = torch.linalg.solve_triangular(system, v_beta, upper=False, unitriangular=True)
-        k_cumdecay = torch.linalg.solve_triangular(system, decayed, upper=False, unitriangular=True)
+        inverse = torch.linalg.solve_triangular(system, eye.expand_as(system), upper=False, unitriangular=True)
     else:
-        system = -system.tril(-1)
+        inverse = -system.tril(-1)
         for i in range(1, chunk_size):
-            row = system[..., i, :i].clone()
-            sub = system[..., :i, :i].clone()
-            system[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
-        system = system + torch.eye(chunk_size, dtype=system.dtype, device=system.device)
-        new_values, k_cumdecay = system @ v_beta, system @ decayed
+            row = inverse[..., i, :i].clone()
+            sub = inverse[..., :i, :i].clone()
+            inverse[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+        inverse = inverse + eye
+    new_values = (inverse * beta.unsqueeze(3)) @ value
+    k_cumdecay = (inverse * (beta * cum.exp()).unsqueeze(3)) @ key
+    intra = (query @ keys_t) * (pairwise * scale)
     state = new_values.new_zeros((batch, v_heads, k_dim, v_dim)) if initial_state is None else initial_state.to(new_values)
-    query = query * cum.exp().unsqueeze(-1)
-    key = key * (cum[..., -1:] - cum).exp().unsqueeze(-1)
+    query_row = (cum.exp() * scale).unsqueeze(4)
+    key_row = (cum[..., -1:] - cum).exp().unsqueeze(4)
     chunk_decay = cum[..., -1].exp()[..., None, None]
     starts, news = [], []
     for i in range(chunks):
         starts.append(state)
         news.append(new_values[:, :, i] - k_cumdecay[:, :, i] @ state)
-        state = state * chunk_decay[:, :, i] + key[:, :, i].transpose(-1, -2) @ news[-1]
-    out = query @ torch.stack(starts, dim=2) + intra @ torch.stack(news, dim=2)
+        state = state * chunk_decay[:, :, i] + keys_t[:, :, i] @ (news[-1] * key_row[:, :, i])
+    out = (query @ torch.stack(starts, dim=2)) * query_row + intra @ torch.stack(news, dim=2)
     out = out.reshape(batch, v_heads, -1, v_dim)[:, :, :length]
     return out.transpose(1, 2).to(dtype, memory_format=torch.contiguous_format), state if output_final_state else None
 
