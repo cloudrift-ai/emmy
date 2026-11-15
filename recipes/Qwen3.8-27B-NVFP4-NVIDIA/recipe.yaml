@@ -100,14 +100,15 @@ matrices:
     deploy.gpu_count: 1
   # The native lane. Its image carries emmy-server, the runtime worker and the pack `make native-image` prepared from
   # the golden alone under strict evidence with these flags and widths: the FP8 cache over the whole window, one image
-  # a prompt, two drafts a step, the plugin's decode width (16, no width-1 tier) and 64-row chunks, the token table in
-  # host memory and one tower block on the card.
+  # a prompt, two drafts a step, the plugin's decode width (16, no width-1 tier), 256-row chunks with the plugin's 64
+  # for the tail, the token table in host memory and one tower block on the card.
   - deploy.gpu: NVIDIA GeForce RTX 5090
     deploy.gpu_count: 1
     engine.llm.native:
       image: "cloudriftai/emmy-native-qwen3.8-27b-nvfp4:0.3.23-6732a701"
       golden: golden/rtx5090_sm120.json
       extra_args: >-
+        --prefill-size 256
         --kv-cache-dtype fp8
         --limit-mm-per-prompt '{"image":1,"video":0}'
         --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
