@@ -281,8 +281,10 @@ impl Lowerer {
         }
     }
 
-    /// A float value at another float type: a half widens exactly, a narrowing rounds to nearest, and between the
-    /// two half types the value goes through f32.
+    /// A value at another type, one of the two f32 or both floats: a half widens exactly, a narrowing rounds to
+    /// nearest, and between the two half types the value goes through f32. A state an integer index holds, combined
+    /// at its float neighbour's f32, crosses too: the integer becomes the nearest float and comes back truncated
+    /// toward zero, as a C cast does.
     pub(super) fn converted(&mut self, val: Val, to: VTy) -> Operand {
         if val.ty == to {
             return val.op;
@@ -304,8 +306,11 @@ impl Lowerer {
             Vec::new(),
             vec![from.into()],
         );
-        // A narrowing rounds to nearest; a widening is exact and takes no rounding.
-        let inst = if to.held().bytes() < val.ty.held().bytes() {
+        // A float to an integer truncates; an integer to a float and a narrowing round to nearest; a widening is exact
+        // and takes no rounding.
+        let inst = if val.ty.is_float() && !to.is_float() {
+            inst.rounded(Round::Rzi)
+        } else if !val.ty.is_float() || to.held().bytes() < val.ty.held().bytes() {
             inst.rounded(Round::Rn)
         } else {
             inst

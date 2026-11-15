@@ -1350,6 +1350,77 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
     }
 }
 
+/// An argmax's index, an integer state beside its f32 value, crosses an f32 slab of a tree reduction: it is
+/// stored as the nearest float and read back truncated toward zero, each conversion with the rounding ptxas
+/// requires of it.
+#[test]
+fn an_integer_state_crosses_a_float_slab_rounded_each_way() {
+    let module = row_module(
+        "
+        f32 best = load a[r * 64 + t]
+        i64 at = (i64)t
+        Smem(name=bs, extents=(64), dtype=f32)
+        Smem(name=ats, extents=(64), dtype=f32)
+        f32 bs[t] = best
+        f32 atw = (f32)at
+        f32 ats[t] = atw
+        Sync
+        TreeHalve(bufs=(bs, ats), state=(best, at), state_b=(best__o, at__o), length=2, tid_var=t):
+            combine_states:
+                wins = best__o > best
+                at = where(wins, at__o, at)
+                best = maximum(best, best__o)
+        i32 back = (i32)at
+        i32 n[r * 64 + t] = back
+        ",
+        SUMS,
+        64,
+        &[],
+    );
+    assert_eq!(
+        row_code(&module),
+        [
+            "mul.wide.s32 %rd4, %r0, 256",
+            "add.s64 %rd5, %rd0, %rd4",
+            "mul.wide.s32 %rd6, %r1, 4",
+            "add.s64 %rd7, %rd5, %rd6",
+            "ld.global.nc.f32 %f0, [%rd7]",
+            "cvt.s64.s32 %rd8, %r1",
+            "mov.s64 %rd9, %rd8",
+            "mov.u32 %r2, k_shared_0",
+            "mov.u32 %r3, k_shared_1",
+            "shl.b32 %r4, %r1, 2",
+            "add.s32 %r5, %r2, %r4",
+            "st.shared.f32 [%r5], %f0",
+            "cvt.rn.f32.s64 %f1, %rd9",
+            "add.s32 %r6, %r3, %r4",
+            "st.shared.f32 [%r6], %f1",
+            "bar.sync 0",
+            "setp.lt.s32 %p0, %r1, 1",
+            "@!%p0 bra L1",
+            "ld.shared.f32 %f2, [%r5]",
+            "ld.shared.f32 %f3, [%r5+4]",
+            "ld.shared.f32 %f4, [%r6]",
+            "ld.shared.f32 %f5, [%r6+4]",
+            "setp.gt.f32 %p1, %f3, %f2",
+            "selp.f32 %f4, %f5, %f4, %p1",
+            "max.f32 %f2, %f2, %f3",
+            "st.shared.f32 [%r5], %f2",
+            "st.shared.f32 [%r6], %f4",
+            "L1:",
+            "bar.sync 0",
+            "ld.shared.f32 %f0, [%r2]",
+            "ld.shared.f32 %f8, [%r3]",
+            "cvt.rzi.s64.f32 %rd10, %f8",
+            "mov.s64 %rd9, %rd10",
+            "cvt.u32.u64 %r7, %rd9",
+            "add.s64 %rd11, %rd2, %rd4",
+            "add.s64 %rd12, %rd11, %rd6",
+            "st.global.s32 [%rd12], %r7",
+        ]
+    );
+}
+
 /// A selection held at a half beside a reduction at f32 combines at the f32, as the renderer's merge did: the half
 /// moves through a 32-bit register at its own width and is read widened, the program runs at f32, and the update
 /// of the half is narrowed back. A tree reduction whose slabs hold f32 gives the half its root narrowed.
