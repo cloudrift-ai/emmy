@@ -570,8 +570,9 @@ pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
     out
 }
 
-/// The sum an affine form spells, its added terms ahead of its subtracted ones and each group ordered by `rank`: the
-/// one spelling of a sum in the normal form, and the one every reader that takes a sum apart and puts it back uses.
+/// The sum an affine form spells, its terms from the largest coefficient to the smallest and by `rank` among equal
+/// ones: the one spelling of a sum in the normal form, and the one every reader that takes a sum apart and puts it
+/// back uses.
 pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression {
     let AffineTerms {
         terms,
@@ -600,8 +601,16 @@ pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression 
         }
     }
     merged.retain(|(c, _)| *c != 0.0);
-    // Added terms ahead of subtracted ones, so a sum opens with a negation only when it adds nothing; then by rank.
-    merged.sort_by_cached_key(|(c, term)| (*c < 0.0, ranked(term, rank), Key::float(*c)));
+    // From the largest coefficient to the smallest, so a sum opens with a negation only when it adds nothing; terms
+    // of one coefficient by rank.
+    let mut ordered: Vec<(Key, (f64, Expression))> = merged
+        .into_iter()
+        .map(|(c, term)| (ranked(&term, rank), (c, term)))
+        .collect();
+    ordered.sort_by(|(a_rank, (a, _)), (b_rank, (b, _))| {
+        b.total_cmp(a).then_with(|| a_rank.cmp(b_rank))
+    });
+    let merged: Vec<(f64, Expression)> = ordered.into_iter().map(|(_, term)| term).collect();
     let spells_none = offset == 0.0 && merged.iter().all(|(c, _)| c.abs() == 1.0);
     let mut out: Option<Expression> = None;
     for (index, (coefficient, term)) in merged.into_iter().enumerate() {
