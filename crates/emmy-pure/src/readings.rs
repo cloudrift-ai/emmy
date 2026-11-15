@@ -385,7 +385,7 @@ impl Fold {
             let edge = &operands[b.operand];
             let exposed = edge.exposes()[b.component];
             by_name.insert(exposed, b.operand);
-            if edge.ptr_eq(a_edge) {
+            if edge == a_edge {
                 a_names.insert(exposed);
             } else if edge.uniform_leaf(a_edge.free_axes()) {
                 uniform.insert(exposed);
@@ -431,7 +431,7 @@ impl Fold {
                 .filter_map(|arg| arg.as_var().copied())
                 .filter(|n| {
                     by_name.get(n).is_some_and(|&e| {
-                        !operands[e].ptr_eq(a_edge) && !operands[e].free_axes().is_empty()
+                        operands[e] != *a_edge && !operands[e].free_axes().is_empty()
                     })
                 })
                 .collect();
@@ -637,7 +637,7 @@ impl Fold {
                 let slots: Vec<Name> = self
                     .bindings()
                     .iter()
-                    .filter(|b| self.operands()[b.operand].ptr_eq(edge))
+                    .filter(|b| self.operands()[b.operand] == *edge)
                     .map(|b| b.param)
                     .collect();
                 if slots.iter().any(|p| read.contains(p)) {

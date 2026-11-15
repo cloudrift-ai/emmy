@@ -231,7 +231,10 @@ impl Fold {
         for x in candidates {
             // The cone may read coordinates free: this fold's own axis is the pivot's once fused, so it is compared
             // under the pivot's name, while the residual below is cut by the cone's own statements.
-            let Cone { lambda: found, values } = cone(self, x)?;
+            let Cone {
+                lambda: found,
+                values,
+            } = cone(self, x)?;
             let spelled = Cone {
                 lambda: if old == new {
                     found.clone()
@@ -285,7 +288,12 @@ impl Fold {
             }
             let extra_params: Vec<Name> = extra_edges
                 .iter()
-                .flat_map(|edge| bound.iter().filter(move |(_, e)| *e == edge).map(|(p, _)| *p))
+                .flat_map(|edge| {
+                    bound
+                        .iter()
+                        .filter(move |(_, e)| *e == edge)
+                        .map(|(p, _)| *p)
+                })
                 .collect();
             if old != new {
                 for edge in &mut extra_edges {
@@ -337,20 +345,34 @@ impl Fold {
                     "a channel's pattern binds one role per extra".into(),
                 ));
             }
-            roles.extend(pattern.params()[2..].iter().copied().zip(extras.iter().copied()));
+            roles.extend(
+                pattern.params()[2..]
+                    .iter()
+                    .copied()
+                    .zip(extras.iter().copied()),
+            );
             let arity: usize = pivot.operands().iter().map(|e| e.exposes().len()).sum();
             let mut held: Vec<(Fold, Vec<Name>)> = pivot
                 .operands()
                 .iter()
                 .cloned()
-                .zip(slots(&pivot.lift().params()[1..1 + arity], pivot.operands()))
-                .chain(extra_edges.iter().cloned().zip(slots(&extra_params, &extra_edges)))
+                .zip(slots(
+                    &pivot.lift().params()[1..1 + arity],
+                    pivot.operands(),
+                ))
+                .chain(
+                    extra_edges
+                        .iter()
+                        .cloned()
+                        .zip(slots(&extra_params, &extra_edges)),
+                )
                 .collect();
             let mut body: Vec<Arc<Statement>> = pivot.lift().body().stmts().to_vec();
             let mut results: Vec<Name> = pivot.lift().results().to_vec();
             let mut inits: Vec<Seed> = pivot.init().to_vec();
             for (name, index, init) in added.clone() {
-                let mut taken: HashSet<Name> = body.iter().flat_map(|stmt| stmt.defines()).collect();
+                let mut taken: HashSet<Name> =
+                    body.iter().flat_map(|stmt| stmt.defines()).collect();
                 taken.extend(held.iter().flat_map(|(_, slot)| slot.iter().copied()));
                 let injection = &recipe.channels[index].injection;
                 let mut names: HashMap<Name, Name> = HashMap::new();
@@ -480,7 +502,11 @@ impl Fold {
                 .ops()
                 .ok_or_else(missing)?
                 .into_iter()
-                .chain(added.iter().map(|(_, index, _)| recipe.base[1 + index].clone()))
+                .chain(
+                    added
+                        .iter()
+                        .map(|(_, index, _)| recipe.base[1 + index].clone()),
+                )
                 .collect();
             let channelled = by_channel(&order, &results);
             let mut wanted = channelled.clone();

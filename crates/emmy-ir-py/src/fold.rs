@@ -16,8 +16,8 @@ use emmy_pure::lower::Store;
 use emmy_pure::readings::{Affine, Contraction, Reduction};
 use emmy_pure::rewrite::TermRewrite;
 use emmy_pure::twist::{Channel, Recipe, RecipeData, Twist};
-use pyo3::exceptions::PyTypeError;
 use pyo3::IntoPyObjectExt;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyFrozenSet, PyInt, PyString, PyTuple, PyType};
 
@@ -39,37 +39,6 @@ fn names_of(value: &Bound<'_, PyAny>) -> PyResult<Vec<Name>> {
 }
 
 static FOLDS: OnceLock<Table<Data, Py<PyAny>>> = OnceLock::new();
-static RECIPES: OnceLock<Table<RecipeData, Py<PyAny>>> = OnceLock::new();
-
-/// The live object `table` remembers for `arc`, if any.
-fn remembered<'py, T, C: pyo3::PyClass>(
-    py: Python<'py>,
-    table: &'static Table<T, Py<PyAny>>,
-    arc: &std::sync::Arc<T>,
-) -> PyResult<Option<Bound<'py, C>>> {
-    let reference = table.lock().get(arc, |reference| reference.clone_ref(py));
-    if let Some(reference) = reference
-        && let Ok(found) = reference.bind(py).call0()?.cast_into::<C>()
-    {
-        return Ok(Some(found));
-    }
-    Ok(None)
-}
-
-/// Remember `object` as the one Python object of `arc`.
-fn remember<T>(
-    table: &'static Table<T, Py<PyAny>>,
-    arc: &std::sync::Arc<T>,
-    object: &Bound<'_, PyAny>,
-) -> PyResult<()> {
-    let reference = WEAKREF.get(object.py())?.call1((object,))?;
-    let (old, due) = table.lock().insert(arc, reference.unbind());
-    drop(old);
-    if due {
-        purge(table);
-    }
-    Ok(())
-}
 
 fn names(value: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<Name>> {
     match value {
@@ -207,29 +176,9 @@ impl PyChannel {
 }
 
 /// A twisted monoid as data, defined in Python and held here: a fold names its recipe by it.
-#[pyclass(frozen, weakref, module = "emmy.compiler.ir.pure", name = "Recipe")]
+#[pyclass(frozen, module = "emmy.compiler.ir.pure", name = "Recipe")]
 pub struct PyRecipe {
     pub recipe: Recipe,
-    channels: OnceLock<Py<PyTuple>>,
-}
-
-impl PyRecipe {
-    /// The one Python object of `recipe`.
-    pub fn wrap<'py>(py: Python<'py>, recipe: &Recipe) -> PyResult<Bound<'py, PyRecipe>> {
-        let table = tables(&RECIPES);
-        if let Some(found) = remembered::<_, PyRecipe>(py, table, recipe.arc())? {
-            return Ok(found);
-        }
-        let object = Bound::new(
-            py,
-            PyRecipe {
-                recipe: recipe.clone(),
-                channels: OnceLock::new(),
-            },
-        )?;
-        remember(table, recipe.arc(), object.as_any())?;
-        Ok(object)
-    }
 }
 
 fn op_from_py(value: &Bound<'_, PyAny>) -> PyResult<emmy_ir::elementwise::ElementwiseOp> {
@@ -257,8 +206,7 @@ impl PyRecipe {
         advance: Option<&Bound<'py, PyAny>>,
         scale: Option<&Bound<'py, PyAny>>,
         combine: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Py<PyRecipe>> {
-        let py = base.py();
+    ) -> PyResult<PyRecipe> {
         let channels: Vec<Channel> = channels
             .try_iter()?
             .map(|item| Ok(item?.cast::<PyChannel>()?.get().channel.clone()))
@@ -277,7 +225,7 @@ impl PyRecipe {
             scale: optional_lambda(scale)?,
             combine: optional_lambda(combine)?,
         });
-        Ok(PyRecipe::wrap(py, &recipe)?.unbind())
+        Ok(PyRecipe { recipe })
     }
 
     #[getter]
@@ -343,13 +291,9 @@ impl PyRecipe {
             .transpose()
     }
 
-    /// The channels, the same objects every read: a matcher compares the channel it found by object.
     #[getter]
     fn channels<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        if let Some(held) = self.channels.get() {
-            return Ok(held.bind(py).clone());
-        }
-        let items: Vec<Bound<'py, PyChannel>> = self
+        let items = self
             .recipe
             .channels
             .iter()
@@ -361,13 +305,8 @@ impl PyRecipe {
                     },
                 )
             })
-            .collect::<PyResult<_>>()?;
-        let tuple = PyTuple::new(py, items)?;
-        Ok(self
-            .channels
-            .get_or_init(|| tuple.unbind())
-            .bind(py)
-            .clone())
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, items)
     }
 
     /// The fused ⊕ over these state names, the second operand `<n>__o`.
@@ -402,7 +341,7 @@ impl PyRecipe {
         Ok(format!("Recipe({})", parts.join(", ")))
     }
 
-    /// Transport by the stored parts; one pickle holds one recipe object however many terms name it.
+    /// Transport by the stored parts.
     fn __reduce__<'py>(
         slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
@@ -438,8 +377,10 @@ impl PyTwist {
     }
 
     #[getter]
-    fn recipe<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyRecipe>> {
-        PyRecipe::wrap(py, &self.twist.recipe)
+    fn recipe(&self) -> PyRecipe {
+        PyRecipe {
+            recipe: self.twist.recipe.clone(),
+        }
     }
 
     #[getter]
@@ -755,7 +696,10 @@ fn optional_twist(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Twist>> {
 fn axes_from_py(value: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<Arc<emmy_ir::axis::Axis>>> {
     match value.filter(|v| !v.is_none()) {
         None => Ok(Vec::new()),
-        Some(value) => value.try_iter()?.map(|axis| axis_from_py(&axis?, 0)).collect(),
+        Some(value) => value
+            .try_iter()?
+            .map(|axis| axis_from_py(&axis?, 0))
+            .collect(),
     }
 }
 
@@ -767,10 +711,15 @@ fn extents(py: Python<'_>) -> PyResult<HashSet<Name>> {
 }
 
 impl PyFold {
-    /// The one Python object of `fold`.
+    /// The one Python object of `fold`: the live one the table remembers, or a new one it then remembers.
     pub fn wrap<'py>(py: Python<'py>, fold: &Fold) -> PyResult<Bound<'py, PyFold>> {
         let table = tables(&FOLDS);
-        if let Some(found) = remembered::<_, PyFold>(py, table, fold.arc())? {
+        let held = table
+            .lock()
+            .get(fold.arc(), |reference| reference.clone_ref(py));
+        if let Some(reference) = held
+            && let Ok(found) = reference.bind(py).call0()?.cast_into::<PyFold>()
+        {
             return Ok(found);
         }
         let object = Bound::new(
@@ -780,7 +729,12 @@ impl PyFold {
                 held: slots(Held::Step as usize + 1),
             },
         )?;
-        remember(table, fold.arc(), object.as_any())?;
+        let reference = WEAKREF.get(py)?.call1((&object,))?;
+        let (old, due) = table.lock().insert(fold.arc(), reference.unbind());
+        drop(old);
+        if due {
+            purge(table);
+        }
         Ok(object)
     }
 
@@ -1439,10 +1393,12 @@ impl PyFold {
     fn __reduce__<'py>(
         slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
-        let parts = ["operands", "lift", "init", "cells", "base", "twist", "observe"]
-            .iter()
-            .map(|name| slf.getattr(*name))
-            .collect::<PyResult<Vec<_>>>()?;
+        let parts = [
+            "operands", "lift", "init", "cells", "base", "twist", "observe",
+        ]
+        .iter()
+        .map(|name| slf.getattr(*name))
+        .collect::<PyResult<Vec<_>>>()?;
         Ok((
             slf.get_type().getattr("_formed")?,
             PyTuple::new(slf.py(), parts)?,

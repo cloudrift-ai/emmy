@@ -26,8 +26,9 @@ scope, and — for a carrier — a seed the enclosing scope has to declare. A **
 α-renaming, and has no position at all. `Lambda`, the `Fold` term and the twist recipes (`ir/pure/twist.py` — a
 twisted monoid as data, which `Fold.fuse` fuses a reduce and the reduce it reads into) all live on the term side.
 The terms are the `emmy-pure` crate's (`crates/emmy-pure/ARCHITECTURE.md`): Python holds a handle and asks whole
-questions — a reading, the tree normalization, the lowering — and never walks a term node by node across the
-boundary. The recipe definitions, `Fold.fuse` and `Fold.rewrite` stay in Python.
+questions — a reading, a rewrite, the recipe matching, the tree normalization, the lowering — and never walks a term
+node by node across the boundary. The crate interns `Fold` terms: two terms with the same stored parts are one term
+and one Python object, so `is` and `==` ask the same thing. The recipe definitions stay in Python, as data.
 
 **A pure class is never a `Statement` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never

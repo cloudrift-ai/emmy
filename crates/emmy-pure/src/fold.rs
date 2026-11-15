@@ -231,7 +231,10 @@ fn without_shadowed(operands: Vec<Fold>, lift: Lambda) -> Result<(Vec<Fold>, Lam
                     other != edge
                         && other.operands().contains(edge)
                         && other.exposes().len() > edge.exposes().len()
-                        && edge.exposes().iter().all(|name| other.exposes().contains(name))
+                        && edge
+                            .exposes()
+                            .iter()
+                            .all(|name| other.exposes().contains(name))
                         && whole(position)
                 })
         })
@@ -437,7 +440,8 @@ fn check_reduce(parts: &Parts, lift: &Lambda, base: &Lambda) -> Result<()> {
     }
     if parts.twist.is_some() || parts.observe.is_some() {
         return Err(Error::Value(
-            "a carried state streams its step's own results; it is neither twisted nor observed".into(),
+            "a carried state streams its step's own results; it is neither twisted nor observed"
+                .into(),
         ));
     }
     // Every read of the carried state, anywhere under it, indexes every cell axis.
@@ -584,7 +588,10 @@ impl Fold {
         let mut live: Vec<Arc<Data>> = Vec::new();
         let found = {
             let mut terms = emmy_ir::locked(&TERMS);
-            let bucket = terms.get_or_insert_with(HashMap::new).entry(hash).or_default();
+            let bucket = terms
+                .get_or_insert_with(HashMap::new)
+                .entry(hash)
+                .or_default();
             live.extend(bucket.iter().filter_map(Weak::upgrade));
             match live.iter().find(|held| held.same_parts(&data)) {
                 Some(held) => Err(held.clone()),
@@ -643,10 +650,6 @@ impl Fold {
     /// The memo table of the derived readings.
     pub(crate) fn readings(&self) -> &crate::readings::Memos {
         &self.0.readings
-    }
-
-    pub fn ptr_eq(&self, other: &Fold) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
     }
 
     /// The address of this term's shared data: what a walk keys the terms it has seen by.
@@ -750,9 +753,10 @@ impl Fold {
 
     /// Whether this fold CARRIES A STATE: its ⊕ is the action `next` on every component.
     pub fn carries(&self) -> bool {
-        *self.0.carries.get_or_init(|| {
-            is_action(&self.ops().unwrap_or_default())
-        })
+        *self
+            .0
+            .carries
+            .get_or_init(|| is_action(&self.ops().unwrap_or_default()))
     }
 
     /// THE ⊕ this fold folds with, `None` at zero axes: the base itself for a planar fold, the recipe's stable
