@@ -234,14 +234,16 @@ def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked)
         np.testing.assert_array_equal(*outputs)
 
 
-def test_a_scan_that_keeps_its_last_state_stores_it_at_the_last_step_alone():
-    """A store the step does not index is stored over by the next step, so the shared lowering writes it
-    once, behind the last step: the copy of the unchanged cells and the step's own cells alike."""
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
+@pytest.mark.parametrize("storage", [0, 1], ids=["global", "shared"])
+def test_a_scan_that_keeps_its_last_state_stores_it_at_the_last_step_alone(storage):
+    """A store the step does not index is stored over by the next step, so it is written once, behind the
+    last step: by the last of the ordered launches, or in the shared layout's one launch — the copy of the
+    unchanged cells and the step's own cells alike."""
+    with pinned_knobs({**_PINS, "SHARED_CARRY": storage}):
         compiled, kernels = compile_with_kernels(_graph(last=True), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     (kernel,) = kernels.values()
-    assert not op.serial and op.arg_order == ("seed", "out")
+    assert op.knobs["SHARED_CARRY"] == storage and bool(op.serial) != storage
     guarded = {id(store) for cond in statements(kernel, Cond) if "2 == " in str(cond.cond) for store in cond.nested()[0].iter()}
     stores = [store for store in statements(kernel, Write) if store.output == "out"]
     assert stores and all(id(store) in guarded for store in stores)

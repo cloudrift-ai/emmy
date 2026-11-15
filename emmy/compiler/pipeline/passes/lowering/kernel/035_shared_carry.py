@@ -203,21 +203,7 @@ def _resident(op, program, retained=frozenset()):
         copying, step, predicate = snapshot
     else:
         copying, predicate = (), None
-    # A store that does not read the step is stored over by the next one: only the last step's is kept.
-    final = {s.output for s in snapshots if Var(loop.axis.name) not in s.index}
-    last = BinaryExpression("==", Var(loop.axis.name), Literal(loop.axis.extent.as_static() - 1, "int"))
-
-    def at_the_last_step(body):
-        out = []
-        for stmt in body:
-            if isinstance(stmt, Write) and stmt.output in final:
-                stmt = Cond(last, Body((stmt,)), Body())
-            elif stmt.nested():
-                stmt = stmt.with_bodies(tuple(at_the_last_step(child) for child in stmt.nested()))
-            out.append(stmt)
-        return Body(out)
-
-    copying, step = tuple(at_the_last_step(Body(copying))), at_the_last_step(step)
+    copying, step = tuple(at_the_last_step(Body(copying), loop.axis, op.outputs)), at_the_last_step(step, loop.axis, op.outputs)
     step = Body((*step, Sync()))
     for axis in reversed(grid):
         start, end = Literal(0, "int"), axis.extent_expression()
@@ -251,6 +237,28 @@ def _resident(op, program, retained=frozenset()):
     # One padding column per row keeps column-strided reads of the state off one bank.
     body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), tensor.dtype), initialize, Sync(), *step)
     return replace(op, serial=(), body=Body((tile.replace(axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
+
+
+def at_the_last_step(body: Body, steps: Axis, outputs) -> Body:
+    """``body`` storing what every step of ``steps`` stores over — a store into one of the kernel's ``outputs``
+    whose index does not read the step, and which the body does not read back: the state a rolled scan ends
+    with — behind the last step alone."""
+    step = Var(steps.name)
+    last = BinaryExpression("==", step, Literal(steps.extent.as_static() - 1, "int"))
+    read = {load.input for load in body.iter() if isinstance(load, Load)}
+
+    def guard(stmts):
+        out = []
+        for stmt in stmts:
+            kept = isinstance(stmt, Write) and stmt.output in outputs and stmt.output not in read
+            if kept and not any(steps.name in e.free_vars() for e in stmt.index):
+                stmt = Cond(last, Body((stmt,)), Body())
+            elif stmt.nested() and not (isinstance(stmt, Cond) and stmt.cond == last):
+                stmt = stmt.with_bodies(tuple(guard(child) for child in stmt.nested()))
+            out.append(stmt)
+        return Body(out)
+
+    return guard(body)
 
 
 def _guard_stores(body: Body, types=None) -> Body:

@@ -805,6 +805,10 @@ per-cell path. Each shared row is padded by one column, so column-strided reads 
 The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks between
 shared and global storage; ownership, supported geometry and the card's shared-memory limit decide only legality.
 
+A store that does not read the step is the state a rolled scan ends with (`loop/fusion/005_roll_recurrence`): every
+step would write the same cells, and only the last step's are read. Both storages write it behind the last step alone
+(`at_the_last_step`): the shared layout inside its one launch, the ordered launches through `036_keep_last_store`.
+
 ## Kernel-IR peepholes
 
 **A kernel body is optimized at construction.** `KernelOp` runs `optimize_body` on its body, in the base it shares
