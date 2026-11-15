@@ -1316,8 +1316,9 @@ def test_bf16_nvfp4_native_mma_matches_numpy_with_quantization_tolerance(tmp_pat
 
     monkeypatch.setattr(CudaBackend, "compile", capture)
     tile = "mma_m16n8k64_e2m1_f32/f1x2/k4"
-    # The activation encoder has its own reduction schedule; these pins name the matrix output.
-    with pinned_knobs({"TILE@node_add": tile, "WORK@node_add": "w2x2", "STAGE@node_add": "d2/smem-tma", "REDUCE@node_add": ""}):
+    # Bare pins: the matrix output is the one kernel a tile reaches, and the activation encoder realizes under them.
+    # A site pin names a path inside a kernel, never a node, so ``@node_add`` reached nothing.
+    with pinned_knobs({"TILE": tile, "WORK": "w2x2", "STAGE": "d2/smem-tma", "REDUCE": ""}):
         prog, _ = _compile_split(wrapper, list(examples), None, BF16, ckpt=(str(ckpt), id_to_key))
     assert any((getattr(node.op, "knobs", None) or {}).get("TILE") == tile for node in lowered[0].nodes.values())
 
