@@ -1243,9 +1243,9 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     main and 0.68x before #1399.
   - Checks on the branch: all 18 programs compile strict from the golden alone and the release audit deploys all 18
     twins. GSM8K 124 of 128 with none at the output limit; acceptance cases 28, 27, 27 without thinking and 27, 28, 27
-    with it; long-document lookups 339 of 339 and 336 of 336. The margin test passes with 566-568 MiB spare per card (582-584 before: the two programs'
-    instances per layer). Six greedy texts, one request at a time, are main's, 6 of 6. Boot 698 s, main's 689 (1,116
-    before #1399).
+    with it; long-document lookups 339 of 339 and 336 of 336. The margin test passes with 566-568 MiB spare per card
+    (582-584 before: the two programs' instances per layer). Six greedy texts, one request at a time, are main's, 6
+    of 6. Boot 698 s, main's 689 (1,116 before #1399).
   - Next: the PTX compiler's slowdown of the gathered expert programs first, since it costs four and eight requests
     more than this round gained at eight; then the 2026-11-13 ranking, for the owner to pick.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
