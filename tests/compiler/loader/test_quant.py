@@ -593,7 +593,7 @@ def test_spell_dynamic_activations_reuses_one_shared_w8a8_value(tmp_path):
     assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 0
 
 
-def test_spell_static_activations_share_one_round_trip_per_scale(tmp_path):
+def test_spell_static_activations_share_one_encode_per_scale(tmp_path):
     bits = _finite_bits((8, 16))
     weight_scale = torch.ones((1,), dtype=torch.float32)
     tensors = {}
@@ -619,14 +619,57 @@ def test_spell_static_activations_share_one_round_trip_per_scale(tmp_path):
     assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 0
     assert spell_static_fp8_activations(g, str(tmp_path)) == 3
 
-    # q and k were calibrated to one scale and read one round trip; o has its own.
-    assert g.nodes["y_q"].inputs[0] == g.nodes["y_k"].inputs[0] != g.nodes["y_o"].inputs[0]
+    # q and k were calibrated to one scale and decode one encode's codes, each for itself; o has its own encode.
+    values = {name: g.nodes[f"y_{name}"].inputs[0] for name in ("q", "k", "o")}
+    assert len(set(values.values())) == 3
+    codes = {name: g.nodes[g.nodes[value].inputs[0]].inputs[0] for name, value in values.items()}
+    assert codes["q"] == codes["k"] != codes["o"] and g.buffer(codes["q"]).dtype == F8E4M3
     assert len([n for n in _ops_by_type(g, ElementwiseOp) if n.op.op.name == "to_f8e4m3"]) == 2
     assert not [n for n in _ops_by_type(g, ReduceOp) if n.op.op.name == "maximum"]
     assert not any(node.hints.get("trace.materialize") for node in g.nodes.values())
     scale_paths = {op.source_path for op in _constants(g).values() if op.source_path and op.source_path.endswith("activation_scale")}
     assert scale_paths == {"layer.q.activation_scale", "layer.o.activation_scale"}
     assert spell_static_fp8_activations(g, str(tmp_path)) == 0
+
+
+def test_a_static_fp8_activation_read_from_two_kernels_reaches_both_products_as_fp8_bytes(tmp_path):
+    """Two FP8 linears calibrated to one scale read one activation, and a scan parts their kernels (a Gated DeltaNet
+    layer's ``in_proj_qkv`` before its recurrence and ``in_proj_z`` after it). What crosses is the codes, so the
+    second kernel's product reads FP8 bytes on both sides, as the first one's does, not a 16-bit decoded value."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.schedule.classic.refusals import _warp_atoms
+    from emmy.compiler.ir.tensor.ir import ScanOp
+    from emmy.compiler.ir.tile.ir import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    m, k, n = 32, 512, 256
+    tensors = {}
+    for name in ("q", "z"):
+        tensors[f"layer.{name}.weight"] = _fp8_tensor(_finite_bits((n, k)))
+        tensors[f"layer.{name}.weight_scale_inv"] = torch.ones((1,), dtype=torch.float32)
+        tensors[f"layer.{name}.activation_scale"] = torch.tensor(0.5, dtype=torch.float32)
+    _write_checkpoint(tmp_path, tensors, {**_FP8_QC, "activation_scheme": "static"})
+
+    def program() -> Graph:
+        g = Graph()
+        g.add_node(InputOp(), [], Tensor("x", (m, k), "bf16"), node_id="x")
+        for name in ("z", "q"):
+            weight = ConstantOp(name=f"p_{name}", source_path=f"layer.{name}.weight", source_shape=(n, k), source_dtype="bf16")
+            g.add_node(weight, [], Tensor(f"p_{name}", (n, k), "bf16"), node_id=f"p_{name}")
+            g.add_node(LinearOp(), ["x", f"p_{name}"], Tensor(f"y_{name}", (m, n), "bf16"), node_id=f"y_{name}")
+        g.add_node(ScanOp("sum", 0), ["y_q"], Tensor("running", (m, n), "bf16"), node_id="running")
+        g.add_node(ElementwiseOp(op="multiply"), ["running", "y_z"], Tensor("out", (m, n), "bf16"), node_id="out")
+        g.inputs, g.outputs = ["x"], ["out"]
+        assert spell_quantized_constants(g, str(tmp_path)) == 2
+        assert spell_static_fp8_activations(g, str(tmp_path)) == 2
+        return g
+
+    tiled = Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(program())
+    last = tiled.producer("out")
+    crossing = {tiled.buffer(name).dtype.name for name in last.inputs if isinstance(tiled.producer(name).op, TileOp)}
+    assert crossing == {"bf16", "f8e4m3"}, "the scan's rows and the activation's codes"
+    (product,) = last.op.contractions
+    assert _warp_atoms(last.op, Context.from_target((12, 0)), last.op.sites[product].node) == ("mma_m16n8k32_e4m3_f32",)
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
