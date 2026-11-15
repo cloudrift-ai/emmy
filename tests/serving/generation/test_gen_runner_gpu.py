@@ -63,7 +63,8 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
     from emmy.compiler.backend.plan import plan_from_graph
     from emmy.compiler.dtype import encode_bf16
     from emmy.serving.gen_runner import EmmyGenRunner
-    from emmy.serving.twins import capture_twin_graphs
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
+    from emmy.serving.twins import LayoutScope, capture_twin_graphs, plan_layouts
 
     config = Qwen3Config(
         vocab_size=32,
@@ -82,7 +83,12 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
     config.save_pretrained(tmp_path)
     twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False, dtype="bfloat16")
     for name, program in (("pre4", pre), ("post4", post)):
-        twin_plan = plan_from_graph(CudaBackend(tune_db="auto").compile(twins[name]))
+        # The runner's narrower twin settles each weight's layout before this one compiles; the twin alone compiles
+        # under the same layouts, else a weight read in the other layout is another kernel.
+        scope = LayoutScope()
+        scope.record(name, plan_layouts(program.plan))
+        with settled_layouts(scope.settled()):
+            twin_plan = plan_from_graph(CudaBackend(tune_db="auto").compile(twins[name]))
         assert set(program.plan.kernels) == set(twin_plan.kernels)
 
     for program in (pre, post):
