@@ -25,30 +25,25 @@ launches per forward, counted from source.
 
 ## Experiments
 
-Each is small, needs no compiler change unless it pays, and has a result that decides the next step.
+Run 2026-11-14 on the dev-box RTX 5090 (CUDA 13.0), each comparison inside one run or one session. Results that
+last are written into the kernel comparison in the classic schedule's architecture doc.
 
-- **E1. Time the PTX build on this model.** The parity plan's P0. Everything below reads its numbers.
-- **E2. FP8 through the block-scaled instruction with a unit scale.** NInfer's source says the plain FP8 instruction
-  accumulates at half rate on the 5090. Take one recorded FP8 product kernel's PTX, swap the instruction by hand in
-  scratch, and time both in one run. Check the answer matches bit for bit first.
-  - Faster by 1.2x or more: register the atom and re-record the FP8 rows.
-  - Level: write the result into the comparison's FP8 section and drop it.
-- **E3. FlashInfer's recurrence at 512 and 1,024 rows.** The scratch probe has 64 and 256. This gives the floor per
-  layer at each chunk width A2 of the parity plan measures, so each width's gap is known before any record.
-- **E4. Chunk size 16 inside the recurrence.** NInfer solves 16 x 16 on plain cores; ours is 64. The trace cannot go
-  below 64 today (the pad of non-zero width). Time the triangular solve alone at 16 and 64 from a hand-written body
-  before fixing the trace. Only a clear win at 16 earns the trace work.
-- **E5. A kernel per row count.** NInfer uses a different product kernel at 1, 2-5, 8-64 and 1,024+ rows. For the
-  gate/up and head weights, pin the warp-split-over-K shape at 8, 32 and 64 rows against the recorded row, in one
-  run each. A win is a row to record; a pin that does not realize is a gap to name in the comparison.
-- **E6. The three-row head.** The parity plan's B3: trace the W4A4 head at three rows and measure. Worth about 0.8 ms
-  a verify step.
-- **E7. A shortlist head for the drafter.** NInfer ranks the draft over 131,072 frequent tokens; the target keeps the
-  full head. Measure acceptance and the drafter's step with a shortlist built from the tokenizer's frequencies. This
-  goes past stock vLLM, so it runs only after the bars are met or if B of the parity plan stalls.
-- **E8. FlashAttention-2's own tile at head size 256.** Pinned, it realizes at 37 µs with 255 registers and a spill;
-  the recorded row is 40.2 and PyTorch 29.4. Read the PTX for the spill. If the register count is the PTX compiler's,
-  that is its speed work, with this kernel as the case.
+| | Experiment | Result | What follows |
+|---|---|---|---|
+| E1 | The PTX build on this model | Six programs of the recipe golden, kernels only: five within 4% of their stored time (59/60, 51/52, 449/433, 13/13, 300/296 µs), one faster (239 against 290). A seventh timed out in compile. No serving cell was measured | The parity plan's P0 still owns the four cells |
+| E2 | FP8 through the block-scaled instruction, unit scale | Twice the rate, bit-equal, for `e4m3` and `e5m2`. Real tiles 1.2 to 1.5x | **Done in this PR,** in the PTX compiler; no atom. The golden's FP8 rows keep old times |
+| E3 | FlashInfer's recurrence at wide chunks | 63 µs at 64 rows, 87 at 256, 145 at 512, 157 at 1,024 | The floor for R4 and for each width of A2 |
+| E4 | Block size 16 inside the recurrence | Substitution over 256 rows: 31 µs in blocks of 16, 1,837 in blocks of 64 | R2 below changes: a chunk of 16 needs no blocked inverse |
+| E5 | A kernel per row count | Level with cuBLAS at 32 and 64 rows; at 8 rows a pin beats the pick 28 to 19. Warps cannot share one K range | A new gap (5 below). The 8-row pick is missing evidence |
+| E6 | The three-row head | Not run: it needs the model's trace | The parity plan's rental |
+| E7 | A shortlist head for the drafter | Not run: by its own condition it waits for the bars | — |
+| E8 | FlashAttention-2's tile at head size 256, causal | 46 µs against the deployed 39, PyTorch 33. Both at 255 registers with a spill | The tile is not the gap. One instruction row is 128 accumulator registers; see gap 3 |
+
+Two corrections to the first draft of this plan:
+
+- E8 named the wrong program. The 37 µs pin with a spill was head size 128, where the deployed row is 13.
+- `emmy golden list` does print every measured row. Only the ratio to `torch.compile` reads the whole-program time,
+  which is stale on some programs. That is data to re-record, not a tool to fix.
 
 ## Gaps to fill
 
@@ -57,13 +52,19 @@ Ordered by what they return on this model. Each is a cut, a schedule or lowering
 1. **The recurrence, expressed as FlashInfer's algorithm.** Its own section below. This is most of the prefill gap
    and most of the verify step (14.3 of 21.6 ms).
 2. **An FP8 tile that takes an encoded activation.** Declaring the layers W8A8 today picks scalar schedules (6.6 ms
-   against 0.15). It pays only at wide chunks, so it follows A2's width decision. E2 decides which instruction it
-   uses.
-3. **Causal attention.** Skipping masked chunks cannot pay on a one-wave launch. What is left to try: the causal
-   kernel's tile at long windows, and E8's register count. Gate: at or under PyTorch at head sizes 128 and 256.
+   against 0.15). It pays only at wide chunks, so it follows A2's width decision. E2 settled the instruction: the
+   block-scaled form.
+3. **Causal attention.** Skipping masked chunks cannot pay on a one-wave launch, and E8 rules the tile out. What is
+   left is the code of one key block and, at head size 256, the register ceiling: an accumulator of 16 by 256 values
+   takes 128 registers a thread. An accumulator kept in shared memory, or a product split over the head, would lift
+   it. Gate: at or under PyTorch at head sizes 128 and 256.
 4. **A row held in shared memory for a cooperative reduce.** A `STAGE` pin on one does not realize, so softmax and
    RMSNorm read the row from global memory once per statistic (8.1 against 7.3 µs, 8.5 against 7.6). Small per
    launch, but these run in every layer.
+
+5. **Warps that share one K range.** For 8 to 64 rows a hand-written kernel gives each warp a slice of K and adds
+   the accumulators at the end. `REDUCE=coop` takes threads only. Gate: a row that spells it, and a time under
+   cuBLAS at 8 rows.
 
 Tooling gaps that cost time in this session:
 
@@ -71,11 +72,8 @@ Tooling gaps that cost time in this session:
   only, so every FlashInfer time in the comparison came from a scratch probe. Add it as a third baseline for the
   programs it has a kernel for (the recurrence, norms, sampling, paged attention), stored with the program like the
   other two. E3 then needs no probe, and R4's gate reads from the golden.
-- **A pin that does not realize fails silently.** The run reports a time with empty knob columns. Make it an error.
-- **`emmy golden list` prints a program's first row,** which can be slower than the row a compile deploys. Print the
-  fastest, or both.
-- **Stale whole-program latencies in the 5090 hardware golden.** They go with the next re-record of that file, not
-  before.
+- **A pin that does not realize: fixed in this PR.** The check existed. It missed a `WORK` pin on a kernel that took
+  no schedule, and two pins written with a space instead of a comma were read as one value. Both are errors now.
 
 Gaps the comparison names that this model does not need. Leave them until a model does:
 
@@ -112,7 +110,8 @@ Steps:
   the fusion invariant each is a bug to raise. Gate: a list of the nine boundaries, each with its cause.
 - **R2. The blocked inverse as a rewrite.** A pass that recognizes the forward substitution of a unit
   lower-triangular system and offers the block-merge form, whose merges are products the schedule already tiles.
-  E4 decides the base block size (8, as the reference, or NInfer's direct 16 x 16 on plain cores). Gate: the inverse
+  E4 says to try a chunk of 16 first: its plain substitution costs 31 µs for 256 rows, under the reference's whole
+  kernel, so R2 may reduce to tracing the rule at 16 (the trace cannot go below 64 today). Gate: the inverse
   alone at 64 x 64 within 2x of the reference's share; bit pattern checked against the substitution in f32 within the
   usual tolerance.
 - **R3. A carried state in shared memory.** Extend the schedule that keeps a state in registers across a static loop:
@@ -130,16 +129,16 @@ Steps:
 
 ## Order
 
-- **No card:** the FlashInfer baseline in the bench; E4's hand-written body; E5's and E6's traces and lowering
-  checks; the silent-pin error; R3's design written for review.
-- **Dev box:** E2, E3, E5, E8. Each fits the two-minute budget, in capped units.
-- **Rental, with the parity plan's first:** E1, then E6's record.
-- **Then:** R0 and R1 (no card), R2 to R4, then A2's width, then gap 2 if the width needs it, then gaps 3 and 4.
+- **No card:** the FlashInfer baseline in the bench; R0 and R1; the trace of the recurrence at a chunk of 16; R3's
+  design written for review.
+- **Dev box:** evidence for the 8-row product pick; R2 at 16.
+- **Rental, with the parity plan's first:** the four cells on the PTX build with the new FP8 instruction; the FP8
+  rows of the hardware and recipe goldens measured again; E6.
+- **Then:** R3 and R4, then A2's width, then gap 2 if the width needs it, then gaps 3 to 5.
 
 ## Risks
 
 - **The recurrence is the large one and its size is unknown until R1.** R3 is a new schedule concept; its design
   goes to the owner before any code.
-- **NInfer's half-rate claim is a source comment,** not a measurement of ours. E2 may show nothing.
 - **A pinned win may not survive as a deployed row.** Compare inside one run, and record only what the same-run
   comparison supports. This session's false softmax win came from comparing a pin with a whole-program latency.

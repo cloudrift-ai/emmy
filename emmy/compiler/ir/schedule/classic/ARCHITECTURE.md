@@ -370,6 +370,12 @@ instead, which keeps the loads contiguous when the weight is stored K-major. Mor
 `torch.compile`'s time (`linear.sq.k3840.m32`: 20.0 against 68.3). None of this was measured against vLLM's own
 kernels, and the cluster reduction has no spelling.
 
+**Gap: warps that share one K range.** A hand-written kernel for 8 to 64 rows gives each warp of a CTA a slice of K
+and adds the warps' accumulators at the end. `REDUCE=coop` asks for a thread inventory, so a warp tile cannot
+cooperate over K inside a CTA; the only split of K is across CTAs. With no evidence in scope, a 4096 to 8192 f16
+product against cuBLAS, pinned in one run each: 8 rows 28 picked, 19 under `WORK=w1x2 …/f1x4/k8 STAGE=d2/smem-tma`,
+cuBLAS 17; 32 rows 31 against 29; 64 rows 32 against 30.
+
 ## FP8 and NVFP4 weights
 
 **Best known.** The same warp-specialized skeleton with a narrower operand: `mma.sync` with `e4m3` operands (K of 32
@@ -386,6 +392,11 @@ epilogue:      store(C tile <- acc)
 **Row.** `TILE=mma_m16n8k32_e4m3_f32/…` for FP8 and `TILE=mma_m16n8k64_e2m1_f32/…` for NVFP4, staged with
 `smem-tma` or `smem-async`; the codes and the scales are copied as complete K-contiguous rows. The activation's group
 scale is a per-chunk statistic of the consuming kernel, or a kernel of its own under a cut.
+
+On an RTX 5090 the plain FP8 instruction accumulates at half the rate of the block-scaled one. The PTX compiler
+therefore writes the FP8 product through the block-scaled form with a scale of one on each side where the card has
+it. The sum is the same bit for bit, and it is no row's choice. Two FP8 programs of the hardware golden, old build
+against new in one session: the tiles bound by the instruction went 448 to 304, 414 to 302 and 240 to 196.
 
 **Verdict: reproduces the atom and the transport; not compared.** Recorded rows exist on the RTX 5090 (for example
 `WORK=w2x2 TILE=mma_m16n8k64_e2m1_f32/f1x1/k8 STAGE=d4/smem-tma`). The reference kernels live on the serving path, so
@@ -490,6 +501,11 @@ warps, not FlashAttention-2's tile. That tile realizes but needs every register 
 `attention.hd128.fused` it runs 37.
 
 **Gap: causal and head size 256.** The causal kernel is 1.18 times PyTorch's time and head size 256 is 1.37 times.
+At head size 256 the reference's tile is 64 query rows by 64 keys. The deployed row already has its shape (`w4x1`,
+`f1x32` for the value product) with an f16 accumulate, and it is at the register ceiling: 255 registers and a 40-byte
+spill. The reference's tile with an f32 accumulate, pinned in the same run, is slower: 46 against 39, PyTorch 33,
+with 255 registers and a 280-byte spill. One instruction row of 16 by 256 values is 128 accumulator registers a
+thread before any operand, so no tile of this atom fits.
 The schedule is the same as the reference's; the difference measured on an A100 was in the code of one key block
 (shared-memory addresses computed again per block, twice the softmax arithmetic, a mask test per element), which is
 lowering work and not a missing row.
@@ -585,6 +601,7 @@ registers across all steps of one launch. Any other recurrence is one launch per
 
 **Verdict: gap.** The recurrence of a 27B-class layer (48 heads, head size 128), RTX 5090, 256 rows: FlashInfer 38
 (80 the way vLLM calls it); Emmy partly tuned 2,338; eager PyTorch 309; `torch.compile` 216. Three parts are missing.
+The reference alone, one sequence, by CUDA events: 63 at 64 rows, 87 at 256, 145 at 512, 157 at 1,024.
 The chunk's work is nine kernels where the reference fuses one launch per head. The solve is traced as a 63-step
 forward substitution in f32, not a blocked inverse on tensor cores. And warp groups with different roles inside one
 CTA have no spelling beyond the load warp. At 64 rows the program does not compile: the cut pass fails on one body
@@ -619,3 +636,8 @@ for size in 8, 16, 32:
 **Verdict: gap.** A triangular solve reaches the compiler as its serial substitution, and no rewrite recognizes it. A
 blocked inverse would have to be traced as such, or added as a rewrite rule; the schedule could then tile its
 products.
+
+The size of the block matters more than the algorithm. The substitution alone over 256 rows and 48 heads, pinned
+with the cooperative reduce off (`REDUCE=`) in one run each: 1,837 in blocks of 64 (eager PyTorch 543), 31 in blocks
+of 16 (eager 103). With no evidence in scope the pick is a cooperative reduce with one CTA per cell, 22,500 and 1,100.
+A recurrence chunked at 16 needs no blocked inverse; it pays with four times the state updates.
