@@ -629,6 +629,36 @@ def test_spell_static_activations_share_one_round_trip_per_scale(tmp_path):
     assert spell_static_fp8_activations(g, str(tmp_path)) == 0
 
 
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_modelopts_mixed_scheme_declares_static_fp8_activations_in_its_group(tmp_path, dynamic):
+    """NVIDIA's mixed modelopt checkpoints (Qwen3.8-27B-NVFP4) declare their FP8 leaves in a ``config_groups``
+    entry, the activations static 8-bit float with an ``input_scale`` per linear: each FP8 linear reads its input
+    through one round trip at that scale, as vLLM's FP8 linear computes. A dynamic group declares no static scale."""
+    bits = _finite_bits((8, 16))
+    tensors = {
+        "layer.q.weight": _fp8_tensor(bits),
+        "layer.q.weight_scale": torch.ones((1,), dtype=torch.float32),
+        "layer.q.input_scale": torch.tensor(0.5, dtype=torch.float32),
+    }
+    eight = {"num_bits": 8, "type": "float", "dynamic": False}
+    qc = {
+        "quant_method": "modelopt",
+        "quant_algo": "MIXED_PRECISION",
+        "config_groups": {"group_0": {"weights": eight, "input_activations": {**eight, "dynamic": dynamic}, "targets": ["layer.q"]}},
+    }
+    _write_checkpoint(tmp_path, tensors, qc)
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 16), "bf16"), node_id="x")
+    weight = ConstantOp(name="p_q", source_path="layer.q.weight", source_shape=(8, 16), source_dtype="bf16")
+    g.add_node(weight, [], Tensor("p_q", (8, 16), "bf16"), node_id="p_q")
+    g.add_node(LinearOp(), ["x", "p_q"], Tensor("y", (4, 8), "bf16"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    assert spell_static_fp8_activations(g, str(tmp_path)) == (0 if dynamic else 1)
+    assert len([n for n in _ops_by_type(g, ElementwiseOp) if n.op.op.name == "to_f8e4m3"]) == (0 if dynamic else 1)
+
+
 def test_spell_dynamic_activations_requires_checkpoint_declaration(tmp_path):
     qc = {**_FP8_QC, "activation_scheme": "static"}
     g, _bits, _scale = _spelled(tmp_path, qc=qc)

@@ -574,9 +574,21 @@ def is_fp8_checkpoint(model_dir) -> bool:
 
 
 def _declares_static_fp8(qc: dict) -> bool:
-    """Whether a ``quantization_config`` MAPPING is the official FP8 declaration with STATIC
-    activations: one calibrated scale per linear input, stored in the shards."""
-    return qc.get("quant_method") == "fp8" and qc.get("activation_scheme") == "static"
+    """Whether a ``quantization_config`` MAPPING declares FP8 weights with STATIC activations: one calibrated scale
+    per linear input, stored in the shards. The official declaration says so in ``activation_scheme``; modelopt's
+    mixed scheme and llm-compressor say it in a ``config_groups`` entry whose 8-bit float weights read 8-bit float
+    input activations that are not dynamic."""
+    if qc.get("quant_method") == "fp8":
+        return qc.get("activation_scheme") == "static"
+    for group in (qc.get("config_groups") or {}).values():
+        specs = [group.get(key) for key in ("weights", "input_activations")] if isinstance(group, dict) else []
+        if (
+            len(specs) == 2
+            and all(isinstance(spec, dict) and spec.get("type") == "float" and int(spec.get("num_bits") or 0) == 8 for spec in specs)
+            and not specs[1].get("dynamic")
+        ):
+            return True
+    return False
 
 
 def declared_quantization(hf_config) -> str | None:
