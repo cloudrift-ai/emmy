@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use emmy_ir::elementwise::ElementwiseOp;
 use emmy_ir::expr::Expr;
@@ -37,9 +37,11 @@ impl Seed {
             Seed::Buffer(_) => None,
         }
     }
+}
 
-    /// Whether two seeds hold one value, whatever kind spells the number.
-    pub fn same_value(&self, other: &Seed) -> bool {
+impl PartialEq for Seed {
+    /// Python's equality: a number equals the same number of the other kind, a buffer name only itself.
+    fn eq(&self, other: &Seed) -> bool {
         match (self, other) {
             (Seed::Buffer(a), Seed::Buffer(b)) => a == b,
             (Seed::Buffer(_), _) | (_, Seed::Buffer(_)) => false,
@@ -48,38 +50,24 @@ impl Seed {
     }
 }
 
-impl PartialEq for Seed {
-    /// Exact: a number equals the same number of the same kind, bit for bit. Two terms that differ in a seed's kind
-    /// lower to different literals, so they are two terms.
-    fn eq(&self, other: &Seed) -> bool {
-        match (self, other) {
-            (Seed::Buffer(a), Seed::Buffer(b)) => a == b,
-            (Seed::Int(a), Seed::Int(b)) => a == b,
-            (Seed::Float(a), Seed::Float(b)) => a.to_bits() == b.to_bits(),
-            _ => false,
-        }
-    }
-}
-
-impl Eq for Seed {}
-
 impl Hash for Seed {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Seed::Buffer(name) => name.hash(state),
-            Seed::Int(value) => value.hash(state),
-            Seed::Float(value) => value.to_bits().hash(state),
+            _ => {
+                let value = self.number().unwrap_or_default();
+                (if value == 0.0 { 0.0f64 } else { value })
+                    .to_bits()
+                    .hash(state);
+            }
         }
     }
 }
 
-/// One reduce term. Immutable, shared and INTERNED: two terms with the same stored parts are one term, so equality is
-/// identity, and one term reached through several operand positions is one value, which is what the placement reads.
+/// One reduce term. Immutable and shared: a clone is the same term, and sharing (one term reached through several
+/// operand positions) is meaningful: the placement reads one value where it sees one term.
 #[derive(Clone)]
 pub struct Fold(Arc<Data>);
-
-/// Every live term by the hash of its stored parts. A term leaves when its last handle drops.
-static TERMS: Mutex<Option<HashMap<u64, Vec<Weak<Data>>>>> = Mutex::new(None);
 
 /// One operand-bound lift param: the param, the operand it binds (an index into `operands`) and which of that
 /// operand's exposed components.
@@ -125,35 +113,18 @@ pub struct Parts {
 
 impl PartialEq for Fold {
     fn eq(&self, other: &Fold) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Data {
-    /// Whether two terms store the same parts; the operands are interned already, so they compare by identity.
-    fn same_parts(&self, other: &Data) -> bool {
-        self.hash == other.hash
-            && self.operands == other.operands
-            && self.lift == other.lift
-            && self.init == other.init
-            && self.cells == other.cells
-            && self.base == other.base
-            && self.twist == other.twist
-            && self.observe == other.observe
-    }
-}
-
-impl Drop for Data {
-    fn drop(&mut self) {
-        let mut terms = emmy_ir::locked(&TERMS);
-        if let Some(table) = terms.as_mut()
-            && let Some(bucket) = table.get_mut(&self.hash)
-        {
-            bucket.retain(|held| held.strong_count() > 0);
-            if bucket.is_empty() {
-                table.remove(&self.hash);
-            }
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return true;
         }
+        let (a, b) = (&*self.0, &*other.0);
+        a.hash == b.hash
+            && a.lift == b.lift
+            && a.init == b.init
+            && a.cells == b.cells
+            && a.base == b.base
+            && a.twist == b.twist
+            && a.observe == b.observe
+            && a.operands == b.operands
     }
 }
 
@@ -228,8 +199,8 @@ fn without_shadowed(operands: Vec<Fold>, lift: Lambda) -> Result<(Vec<Fold>, Lam
         .map(|(index, edge)| {
             whole(index)
                 && operands.iter().enumerate().any(|(position, other)| {
-                    other != edge
-                        && other.operands().contains(edge)
+                    !other.ptr_eq(edge)
+                        && other.operands().iter().any(|held| held.ptr_eq(edge))
                         && other.exposes().len() > edge.exposes().len()
                         && edge
                             .exposes()
@@ -315,7 +286,7 @@ fn a_operand(operands: &[Fold], lift: &Lambda) -> Result<Option<usize>> {
         return Ok(pair
             .iter()
             .copied()
-            .find(|&e| operands[e] != operands[loaded[0]]));
+            .find(|&e| !operands[e].ptr_eq(&operands[loaded[0]])));
     }
     if loaded.len() != 2 {
         return Ok(None);
@@ -351,12 +322,17 @@ fn a_first(operands: Vec<Fold>, lift: Lambda) -> Result<(Vec<Fold>, Lambda)> {
         true => a_operand(&operands, &lift)?,
         false => None,
     };
-    let Some(a) = a.filter(|a| operands[*a] != operands[0]) else {
+    let Some(a) = a.filter(|a| !operands[*a].ptr_eq(&operands[0])) else {
         return Ok((operands, lift));
     };
     let a_term = operands[a].clone();
     let reordered: Vec<Fold> = std::iter::once(a_term.clone())
-        .chain(operands.iter().filter(|edge| **edge != a_term).cloned())
+        .chain(
+            operands
+                .iter()
+                .filter(|edge| !edge.ptr_eq(&a_term))
+                .cloned(),
+        )
         .collect();
     let bindings = bindings_of(&operands, lift.params(), true);
     let arity: usize = operands.iter().map(|edge| edge.exposes().len()).sum();
@@ -364,7 +340,7 @@ fn a_first(operands: Vec<Fold>, lift: Lambda) -> Result<(Vec<Fold>, Lambda)> {
         .chain(reordered.iter().flat_map(|edge| {
             bindings
                 .iter()
-                .filter(|b| operands[b.operand] == *edge)
+                .filter(|b| operands[b.operand].ptr_eq(edge))
                 .map(|b| b.param)
         }))
         .chain(lift.params()[1 + arity..].iter().copied())
@@ -584,26 +560,7 @@ impl Fold {
             normal: Mutex::new(Vec::new()),
             lowered: Mutex::new(Vec::new()),
         };
-        // A handle upgraded under the lock is dropped after it: a term's drop takes the lock.
-        let mut live: Vec<Arc<Data>> = Vec::new();
-        let found = {
-            let mut terms = emmy_ir::locked(&TERMS);
-            let bucket = terms
-                .get_or_insert_with(HashMap::new)
-                .entry(hash)
-                .or_default();
-            live.extend(bucket.iter().filter_map(Weak::upgrade));
-            match live.iter().find(|held| held.same_parts(&data)) {
-                Some(held) => Err(held.clone()),
-                None => {
-                    let term = Arc::new(data);
-                    bucket.push(Arc::downgrade(&term));
-                    Ok(term)
-                }
-            }
-        };
-        // The duplicate's parts drop here, outside the lock.
-        Fold(found.unwrap_or_else(|held| held))
+        Fold(Arc::new(data))
     }
 
     /// The parts this term was formed from, for a rebuild that changes some of them.
@@ -650,6 +607,10 @@ impl Fold {
     /// The memo table of the derived readings.
     pub(crate) fn readings(&self) -> &crate::readings::Memos {
         &self.0.readings
+    }
+
+    pub fn ptr_eq(&self, other: &Fold) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 
     /// The address of this term's shared data: what a walk keys the terms it has seen by.

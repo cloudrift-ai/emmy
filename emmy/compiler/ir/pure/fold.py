@@ -9,8 +9,7 @@ step) is DERIVED from those params; nothing else is stored.
 
 The term and everything it answers live in the ``emmy-pure`` crate (``emmy.emmy_ir.Fold``): the fields and
 formation, every reading and view, ``merge`` / ``step``, ``fuse`` (the recipe matching), the tree normalization
-(``normalized``) and the lowering (``lower``). Terms are interned there, so two terms with the same stored parts are
-one object. Python adds one member, ``rewrite``, which takes Python functions.
+(``normalized``) and the lowering (``lower``). Python adds one member, ``rewrite``, which takes Python functions.
 
 The fold's algebra is the twisted monoid of :mod:`~emmy.compiler.ir.pure.twist`, spelled in one
 vocabulary with the recipes: ``lift`` is the per-element contribution to the BASE state, ``base``

@@ -16,21 +16,18 @@ for the mechanics. The recipe definitions (SOFTMAX, WELFORD) are Python data bui
 The one Python member of a term is the `rewrite` glue, which turns a rename function and an axis function into the
 maps the crate takes.
 
-## Terms are interned
+## A term is reached by object
 
-Two `Fold` terms with the same stored parts are ONE term: `Fold::formed` looks the parts up among the live terms
-before it allocates, and a term leaves the table when its last handle drops. Equality is therefore identity, a
-comparison costs nothing, and one term reached through several operand positions is one value, which is what the
-placement reads. A seed's kind is part of the term (`0` and `0.0` lower to different literals), so two terms that
-differ in it stay two.
+Two terms with the same stored parts are EQUAL, and they are still two terms. The placement reads one value where it
+sees one term, and a pass tells two occurrences of equal terms apart by which one it holds, so the crate keeps
+identity (`ptr_eq`) beside equality and never merges equal terms on its own. Sharing is made in one place, the tree
+normalization, which collapses same-value cones onto one term.
 
 The extension gives a term one Python object while anything holds it (a table keyed by the term's address keeps a
-weak reference to it), so `is` in Python asks what `==` asks in the crate. A wrapper keeps the objects of the reads
-it has handed out, its operands' among them, so every term reached by walking from a held one keeps its object, and
-its `id`, for the whole walk. A `Lambda`, a `Recipe` and a view are values: they compare by what they hold.
-
-The tree normalization still restores sharing between cones that are equal only up to α-renaming, which interning
-does not see.
+weak reference to it), so `is` in Python is `ptr_eq` in the crate. A term Python builds takes its operands' objects
+as it is made, so it reads back the objects it was given, and a wrapper keeps every object it hands out, so every
+term reached by walking from a held one keeps its object, and its `id`, for the whole walk. A `Lambda`, a `Recipe`
+and a view are values: they compare by what they hold.
 
 ## Modules
 
@@ -40,7 +37,7 @@ does not see.
   `componentwise` / `components`.
 - `twist.rs` — `Recipe`, `Channel`, `Twist`: the fused ⊕ over a carrier's state names (`program`) and the injected
   singleton (`inject`).
-- `fold.rs` — `Fold`: its stored parts, the interning, and formation in two halves that `Fold::new` runs in order:
+- `fold.rs` — `Fold`: its stored parts and formation in two halves that `Fold::new` runs in order:
   the canonical rewrites (a zero-axis term loses its shadowed operands, a bilinear term takes its A operand first)
   and the checks, which refuse and never repair (the positional binding, the monoid arity, the carrier reads, the
   observer, a lift that applies). Then the reads every pass asks: `exposes`, `bindings`, `applied`, `axis`,

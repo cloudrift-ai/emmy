@@ -1,9 +1,10 @@
 //! `Fold`, `Twist`, `Recipe` and `Channel` as Python classes: handles on the `emmy-pure` terms.
 //!
-//! The crate interns terms: equal stored parts are one term. A term has one Python object while any reference to it
-//! lives (a table keyed by the term's address holds a weak reference to it), so `is` in Python asks what equality
-//! asks in the crate. A wrapper holds its operands' objects, so every term reached by walking from a held one keeps
-//! its object, and with it its `id`, for the whole walk.
+//! A term is reached by OBJECT: the placement reads one value where it sees one object, so a term has exactly one
+//! Python object while any reference to it lives (a table keyed by the term's address holds a weak reference to it).
+//! A term Python builds takes its operands' objects as it is made, so it reads back the objects it was given, and
+//! a wrapper keeps every object it hands out, so every term reached by walking from a held one keeps its object, and
+//! with it its `id`, for the whole walk.
 
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -738,6 +739,14 @@ impl PyFold {
         Ok(object)
     }
 
+    /// The object of a term Python built over operand objects it holds: the wrapper takes those objects now, while
+    /// the caller still holds them, so the term reads back the operands it was given.
+    fn built<'py>(py: Python<'py>, fold: &Fold) -> PyResult<Bound<'py, PyFold>> {
+        let object = PyFold::wrap(py, fold)?;
+        PyFold::operands(&object)?;
+        Ok(object)
+    }
+
     /// The terms a Python operand tuple holds.
     fn terms(value: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<Fold>> {
         let Some(value) = value.filter(|v| !v.is_none()) else {
@@ -812,7 +821,7 @@ impl PyFold {
         observe: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Py<PyFold>> {
         let parts = PyFold::parts(operands, lift, init, cells, base, twist, observe)?;
-        Ok(PyFold::wrap(py, &Fold::new(parts).py()?)?.unbind())
+        Ok(PyFold::built(py, &Fold::new(parts).py()?)?.unbind())
     }
 
     /// A term from its stored parts, taken as formed: what transport reads back.
@@ -837,7 +846,7 @@ impl PyFold {
             Some(twist),
             Some(observe),
         )?;
-        PyFold::wrap(py, &Fold::formed(parts))
+        PyFold::built(py, &Fold::formed(parts))
     }
 
     #[classattr]
@@ -1359,7 +1368,7 @@ impl PyFold {
                 other => return Err(PyTypeError::new_err(format!("Fold has no field {other:?}"))),
             }
         }
-        PyFold::wrap(py, &Fold::new(parts).py()?)
+        PyFold::built(py, &Fold::new(parts).py()?)
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {

@@ -164,7 +164,7 @@ fn prune_unread(root: &Fold, stored: &HashSet<Name>) -> Result<Fold> {
             let new = visit(edge, stored, kept, done)?;
             let empty = HashSet::new();
             let want = kept.get(&edge.address()).unwrap_or(&empty);
-            same = same && new == *edge;
+            same = same && new.ptr_eq(edge);
             if edge.twist().is_some()
                 || edge.observe().is_some()
                 || edge.carries()
@@ -267,7 +267,7 @@ fn share_common_cones(root: &Fold) -> Result<Fold> {
         let changed = operands
             .iter()
             .zip(node.operands())
-            .any(|(new, old)| new != old);
+            .any(|(new, old)| !new.ptr_eq(old));
         let current = if changed {
             with_operands(node, operands)?
         } else {

@@ -217,7 +217,7 @@ impl Fold {
         let edge_of = |param: &Name| bound.iter().rfind(|(p, _)| p == param).map(|(_, e)| *e);
         let pivot_params: Vec<Name> = bound
             .iter()
-            .filter(|(_, edge)| *edge == pivot)
+            .filter(|(_, edge)| edge.ptr_eq(pivot))
             .map(|(p, _)| *p)
             .collect();
         let g = pivot_params[0];
@@ -291,7 +291,7 @@ impl Fold {
                 .flat_map(|edge| {
                     bound
                         .iter()
-                        .filter(move |(_, e)| *e == edge)
+                        .filter(move |(_, e)| e.ptr_eq(edge))
                         .map(|(p, _)| *p)
                 })
                 .collect();
@@ -447,7 +447,7 @@ impl Fold {
                         && pivot
                             .twist()
                             .is_some_and(|twist| twist.channels[slot - 1] == index)
-                        && pivot.init()[slot].same_value(&init)
+                        && pivot.init()[slot] == init
                         && fusing
                             .same(&cone(pivot, pivot.lift().results()[slot])?, &contribution)?;
                     if !agrees {
