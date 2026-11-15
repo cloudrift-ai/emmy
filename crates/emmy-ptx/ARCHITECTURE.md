@@ -204,6 +204,10 @@ Each flushes to zero when the kernel's decision says (`tanh.approx` has no such 
   | m16n8k32 | `e4m3` or `e5m2` | `f32` | 4, 2, 4 | `sm_89`, 8.4 |
   | m16n8k64, block-scaled | `e2m1` | `f32` | 4, 2, 4, a scale register a side | `sm_120a`, 8.7 |
 
+  On a card with the block-scaled form (`sm_120a`), the m16n8k32 product is written through it with a scale of one
+  on each side. The sum is the same bit for bit, and the plain form accumulates at half the rate there: 52 against
+  103 billion instructions a second on an RTX 5090.
+
 - **The fragment statements.** `FragmentLoad`, `RegStore`, `FragmentApply` and `FragmentRowReduce` are each one
   expansion over their row of the lane-to-element table: per register and element the table gives the element's row
   and column in the tile, and the rule adds them to the statement's own index. No rule holds a lane map of its own.
