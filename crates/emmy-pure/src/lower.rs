@@ -28,6 +28,33 @@ pub struct Store {
     pub when: Option<Expression>,
 }
 
+/// One lowering asked of a term: what its memo keys the result by.
+pub struct Request {
+    bound: Option<Vec<Name>>,
+    stores: Vec<Store>,
+    axes: Vec<Arc<Axis>>,
+    extents: Vec<Name>,
+}
+
+impl Request {
+    /// Equal with every axis's hint and window too: both reach the lowered nest, and neither is part of an axis's
+    /// equality.
+    fn same(&self, other: &Request) -> bool {
+        let axes = |a: &[Arc<Axis>], b: &[Arc<Axis>]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.exact_eq(b))
+        };
+        self.bound == other.bound
+            && self.extents == other.extents
+            && axes(&self.axes, &other.axes)
+            && self.stores.len() == other.stores.len()
+            && self
+                .stores
+                .iter()
+                .zip(&other.stores)
+                .all(|(a, b)| a == b && axes(&a.sweep, &b.sweep))
+    }
+}
+
 impl Store {
     fn values(&self) -> &[Name] {
         match &*self.write {
@@ -688,6 +715,35 @@ impl Fold {
     /// names the coordinates the caller binds (`None`: every free coordinate), `extents` the symbolic extents the
     /// launch binds, `axes` the kernel's axis table.
     pub fn lower(
+        &self,
+        bound: Option<&HashSet<Name>>,
+        stores: &[Store],
+        axes: &[Arc<Axis>],
+        extents: &HashSet<Name>,
+    ) -> Result<Body> {
+        let sorted = |names: &HashSet<Name>| {
+            let mut names: Vec<Name> = names.iter().copied().collect();
+            names.sort();
+            names
+        };
+        let request = Request {
+            bound: bound.map(sorted),
+            stores: stores.to_vec(),
+            axes: axes.to_vec(),
+            extents: sorted(extents),
+        };
+        if let Some((_, body)) = emmy_ir::locked(self.lowered())
+            .iter()
+            .find(|(asked, _)| asked.same(&request))
+        {
+            return Ok(body.clone());
+        }
+        let body = self.lower_fresh(bound, stores, axes, extents)?;
+        emmy_ir::locked(self.lowered()).push((request, body.clone()));
+        Ok(body)
+    }
+
+    fn lower_fresh(
         &self,
         bound: Option<&HashSet<Name>>,
         stores: &[Store],

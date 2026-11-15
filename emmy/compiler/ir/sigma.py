@@ -31,13 +31,19 @@ class Sigma:
     that denote the same substitution compare equal and share a hash
     bucket.
 
-    ``after`` is the extension point: a subclass that does more than substitute (fold under a range context,
-    abstract a read to a coordinate) overrides it, and ``Statement.rewrite`` applies it to every expression of the
-    subtree once the mapping has landed, under the mapping's hygiene, with the subclass's state carried through
-    ``restrict``.
+    ``folding`` makes the substitution FOLD as it lands: every expression is simplified under that range context once
+    the mapping is in, so ``((hi * c) + lo) / c`` collapses to ``hi`` and an index reaches the scheduler in the
+    substituted coordinates. Without one a substitution substitutes and stops, which is right everywhere else: a σ
+    that rewrote its result would hide what it did.
+
+    ``after`` is the extension point: a subclass that does more than substitute and fold (abstract a read to a
+    coordinate) overrides it, and ``Statement.rewrite`` applies it to every expression of the subtree once the mapping
+    has landed, under the mapping's hygiene, with the subclass's state carried through ``restrict``. A term takes
+    the mapping and the folding alone (``Fold.rewrite``).
     """
 
     mapping: dict[str, Expression] = field(default_factory=dict)
+    folding: SimplifyCtx | None = None
 
     def __post_init__(self) -> None:
         key = tuple(sorted((k, str(v)) for k, v in self.mapping.items()))
@@ -54,8 +60,13 @@ class Sigma:
         return self.after(e.substitute(self.mapping))
 
     def after(self, e: Expression) -> Expression:
-        """What this substitution does to an expression once its mapping has landed: nothing."""
-        return e
+        """What this substitution does to an expression once its mapping has landed: fold it, when it folds."""
+        return e if self.folding is None else e.simplify(self.folding)
+
+    @property
+    def lands_only(self) -> bool:
+        """Whether the mapping is all this substitution does: nothing runs on an expression after it."""
+        return self.folding is None and type(self).after is Sigma.after
 
     def reduce(self, e: Expression, ctx: SimplifyCtx) -> Expression:
         """Substitute then simplify under ``ctx``. Use when the substitution
