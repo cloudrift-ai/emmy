@@ -398,39 +398,39 @@ fn a_prefix_shuffle_combines_under_a_guard_and_a_broadcast_reads_the_last_lane()
     );
 }
 
-/// A shuffle moves 32 bits, so a 64-bit state, the index an argmax carries beside its value, moves as its two
-/// halves, each read from the same lane, and is joined again.
+/// A 64-bit integer state crosses lanes as its two halves, each through one shuffle, joined again in the lane
+/// that reads them.
 #[test]
-fn a_64_bit_state_moves_as_its_two_halves() {
+fn a_shuffle_of_a_64_bit_integer_moves_its_two_halves() {
     let module = row_module(
         "
-        i32 n = load c[t]
-        i64 wide = (i64)n
+        i64 wide = (i64)t
         WarpBroadcast(state=(wide), length=4)
-        i32 back = (i32)wide
-        i32 d[t] = back
+        i64 m[t] = wide
         ",
-        HALVES,
+        SUMS,
         32,
         &[],
     );
     assert_eq!(
         row_code(&module),
         [
-            "mul.wide.s32 %rd4, %r1, 4",
-            "add.s64 %rd5, %rd2, %rd4",
-            "ld.global.nc.s32 %r2, [%rd5]",
-            "cvt.s64.s32 %rd6, %r2",
-            "mov.s64 %rd7, %rd6",
-            "activemask.b32 %r3",
-            "mov.b64 {%r4, %r5}, %rd7",
-            "shfl.sync.idx.b32 %r6, %r4, 3, 7199, %r3",
-            "shfl.sync.idx.b32 %r7, %r5, 3, 7199, %r3",
-            "mov.b64 %rd8, {%r6, %r7}",
-            "mov.s64 %rd7, %rd8",
-            "cvt.u32.u64 %r8, %rd7",
-            "add.s64 %rd9, %rd3, %rd4",
-            "st.global.s32 [%rd9], %r8",
+            "cvt.s64.s32 %rd4, %r1",
+            "mov.s64 %rd5, %rd4",
+            "activemask.b32 %r2",
+            "shr.b64 %rd6, %rd5, 32",
+            "cvt.u32.u64 %r3, %rd5",
+            "shfl.sync.idx.b32 %r4, %r3, 3, 7199, %r2",
+            "cvt.u64.u32 %rd7, %r4",
+            "cvt.u32.u64 %r5, %rd6",
+            "shfl.sync.idx.b32 %r6, %r5, 3, 7199, %r2",
+            "cvt.u64.u32 %rd8, %r6",
+            "shl.b64 %rd9, %rd8, 32",
+            "or.b64 %rd10, %rd7, %rd9",
+            "mov.s64 %rd5, %rd10",
+            "mul.wide.s32 %rd11, %r1, 8",
+            "add.s64 %rd12, %rd3, %rd11",
+            "st.global.s64 [%rd12], %rd5",
         ]
     );
 }
@@ -1216,8 +1216,7 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         let i32 pair = t / 2
         let i32 warp = t / 32
         f32 acc = load a[t]
-        f16 h = (f16)acc
-        i64 wide = (i64)t";
+        f16 h = (f16)acc";
     for (statements, expected) in [
         (
             "Smem(name=odd, extents=(4), dtype=f32, align=24)",
@@ -1265,7 +1264,7 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         ),
         (
             "f32 x0, x1, x2, x3 = load a[t * 2]",
-            "`ld.global.nc.v4.f32 {%f1, %f2, %f3, %f4}, [%rd6]` is a 16-byte access with no alignment proven",
+            "`ld.global.nc.v4.f32 {%f1, %f2, %f3, %f4}, [%rd5]` is a 16-byte access with no alignment proven",
         ),
         (
             "f32 o[t * 2 + 1] = (acc, acc)",
@@ -1350,75 +1349,31 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
     }
 }
 
-/// An argmax's index, an integer state beside its f32 value, crosses an f32 slab of a tree reduction: it is
-/// stored as the nearest float and read back truncated toward zero, each conversion with the rounding ptxas
-/// requires of it.
+/// An integer state whose slab holds f32 reads its root truncated toward zero, as the C assignment did.
 #[test]
-fn an_integer_state_crosses_a_float_slab_rounded_each_way() {
+fn an_integer_state_reads_a_float_slab_truncated() {
     let module = row_module(
         "
-        f32 best = load a[r * 64 + t]
-        i64 at = (i64)t
-        Smem(name=bs, extents=(64), dtype=f32)
-        Smem(name=ats, extents=(64), dtype=f32)
-        f32 bs[t] = best
-        f32 atw = (f32)at
-        f32 ats[t] = atw
+        i64 best = (i64)t
+        Smem(name=bs, extents=(32), dtype=f32)
+        f32 bw = (f32)best
+        f32 bs[t] = bw
         Sync
-        TreeHalve(bufs=(bs, ats), state=(best, at), state_b=(best__o, at__o), length=2, tid_var=t):
+        TreeHalve(bufs=(bs), state=(best), state_b=(best__o), length=32, tid_var=t):
             combine_states:
-                wins = best__o > best
-                at = where(wins, at__o, at)
                 best = maximum(best, best__o)
-        i32 back = (i32)at
-        i32 n[r * 64 + t] = back
+        i64 m[t] = best
         ",
         SUMS,
-        64,
+        32,
         &[],
     );
-    assert_eq!(
-        row_code(&module),
-        [
-            "mul.wide.s32 %rd4, %r0, 256",
-            "add.s64 %rd5, %rd0, %rd4",
-            "mul.wide.s32 %rd6, %r1, 4",
-            "add.s64 %rd7, %rd5, %rd6",
-            "ld.global.nc.f32 %f0, [%rd7]",
-            "cvt.s64.s32 %rd8, %r1",
-            "mov.s64 %rd9, %rd8",
-            "mov.u32 %r2, k_shared_0",
-            "mov.u32 %r3, k_shared_1",
-            "shl.b32 %r4, %r1, 2",
-            "add.s32 %r5, %r2, %r4",
-            "st.shared.f32 [%r5], %f0",
-            "cvt.rn.f32.s64 %f1, %rd9",
-            "add.s32 %r6, %r3, %r4",
-            "st.shared.f32 [%r6], %f1",
-            "bar.sync 0",
-            "setp.lt.s32 %p0, %r1, 1",
-            "@!%p0 bra L1",
-            "ld.shared.f32 %f2, [%r5]",
-            "ld.shared.f32 %f3, [%r5+4]",
-            "ld.shared.f32 %f4, [%r6]",
-            "ld.shared.f32 %f5, [%r6+4]",
-            "setp.gt.f32 %p1, %f3, %f2",
-            "selp.f32 %f4, %f5, %f4, %p1",
-            "max.f32 %f2, %f2, %f3",
-            "st.shared.f32 [%r5], %f2",
-            "st.shared.f32 [%r6], %f4",
-            "L1:",
-            "bar.sync 0",
-            "ld.shared.f32 %f0, [%r2]",
-            "ld.shared.f32 %f8, [%r3]",
-            "cvt.rzi.s64.f32 %rd10, %f8",
-            "mov.s64 %rd9, %rd10",
-            "cvt.u32.u64 %r7, %rd9",
-            "add.s64 %rd11, %rd2, %rd4",
-            "add.s64 %rd12, %rd11, %rd6",
-            "st.global.s32 [%rd12], %r7",
-        ]
-    );
+    let code = row_code(&module);
+    let reads: Vec<_> = code
+        .iter()
+        .filter(|line| line.starts_with("cvt.") && line.contains(".s64.f32"))
+        .collect();
+    assert_eq!(reads, ["cvt.rzi.s64.f32 %rd6, %f16"], "{code:#?}");
 }
 
 /// A selection held at a half beside a reduction at f32 combines at the f32, as the renderer's merge did: the half

@@ -281,13 +281,29 @@ impl Lowerer {
         }
     }
 
-    /// A value at another type, one of the two f32 or both floats: a half widens exactly, a narrowing rounds to
-    /// nearest, and between the two half types the value goes through f32. A state an integer index holds, combined
-    /// at its float neighbour's f32, crosses too: the integer becomes the nearest float and comes back truncated
-    /// toward zero, as a C cast does.
+    /// A value at another type: a half widens exactly, a narrowing rounds to nearest, and between the two half
+    /// types the value goes through f32. A float truncates toward zero into an integer, as a C cast does, and an
+    /// integer rounds to nearest into a float: an integer state crosses a float slab that way.
     pub(super) fn converted(&mut self, val: Val, to: VTy) -> Operand {
         if val.ty == to {
             return val.op;
+        }
+        if val.ty.is_float() != to.is_float() {
+            let from = self.register(&val);
+            let operands = vec![from.into()];
+            let inst = Inst::new(
+                Opcode::Cvt(val.ty.arith()),
+                to.arith(),
+                Vec::new(),
+                operands,
+            );
+            let inst = match to.is_float() {
+                true => inst.rounded(Round::Rn),
+                false => inst
+                    .flushing(self.precision.ftz && val.ty == VTy::F32)
+                    .rounded(Round::Rzi),
+            };
+            return self.b.value(inst, to.bank()).into();
         }
         if val.ty != VTy::F32 && to != VTy::F32 {
             let wide = self.converted(val, VTy::F32);
@@ -306,11 +322,8 @@ impl Lowerer {
             Vec::new(),
             vec![from.into()],
         );
-        // A float to an integer truncates; an integer to a float and a narrowing round to nearest; a widening is exact
-        // and takes no rounding.
-        let inst = if val.ty.is_float() && !to.is_float() {
-            inst.rounded(Round::Rzi)
-        } else if !val.ty.is_float() || to.held().bytes() < val.ty.held().bytes() {
+        // A narrowing rounds to nearest; a widening is exact and takes no rounding.
+        let inst = if to.held().bytes() < val.ty.held().bytes() {
             inst.rounded(Round::Rn)
         } else {
             inst

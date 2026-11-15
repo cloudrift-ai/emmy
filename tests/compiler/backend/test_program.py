@@ -285,7 +285,9 @@ def test_straight_line_code_is_slower_after_cache_eviction():
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import F32
 
-    # 32 KB of straight-line code: a repeated launch finds it in the SM's instruction cache, an evicted one fetches it.
+    # 128 KB of straight-line code: a repeated launch finds it in the caches, an evicted one fetches it from memory.
+    # 32 KB is too little on a data-center card: an evicted launch ran 1.2x the repeated one on an H100, 1.5x on an
+    # A100, where 128 KB runs 2.2x and 2.0x (3.4x on an RTX 5090).
     sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
     plan = ExecutionPlan(
         "cuda",
@@ -295,7 +297,7 @@ def test_straight_line_code_is_slower_after_cache_eviction():
         {},
         {},
         [LaunchSpec("code", "code", ("scratch", "sink"), ((sms,), (1,), (1,)), ((128,), (1,), (1,)), 0, (), writes=("sink",))],
-        {"code": KernelSpec(source=straight_line_source("code", 32 * 1024, device_compute_capability()))},
+        {"code": KernelSpec(source=straight_line_source("code", 128 * 1024, device_compute_capability()))},
     )
     with gpu_lock():
         prog = CompiledProgram.build_from_plan(plan, {"scratch": torch.zeros(4, device="cuda")})

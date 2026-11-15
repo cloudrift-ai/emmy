@@ -24,7 +24,14 @@ def rewrite(root: Node) -> KernelOp:
 
 
 def _boolean(op: str, left: Expression, right: Expression) -> Expression:
-    return left if left == right and op in ("&&", "||") else BinaryExpression(op, left, right).simplify(SimplifyCtx(ranges={}))
+    if left == right and op in ("&&", "||"):
+        return left
+    try:
+        return BinaryExpression(op, left, right).simplify(SimplifyCtx(ranges={}))
+    except RecursionError:
+        # A select of many branches nests its demand past what an expression holds. Every predicate here bounds a
+        # demand from above, so the whole domain is a sound answer: the value is needed everywhere.
+        return _TRUE
 
 
 def _guard(body: Body, axes: frozenset[str] = frozenset()) -> Body:

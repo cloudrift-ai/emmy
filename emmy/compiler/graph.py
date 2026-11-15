@@ -373,7 +373,9 @@ def _stmt_eval_scope() -> dict:
         "nan": _math.nan,
         # Rehydrate through normal Lambda formation so a dump cannot bypass purity or normalization.
         "Lambda": _pure_lambda,
-        "__builtins__": {},
+        # No builtin but the import hook: a Rust-backed IR class imports through the calling frame's builtins, and
+        # under eval that frame is this scope.
+        "__builtins__": {"__import__": __import__},
     }
     # The stored Fold term and ordinary IR descriptors round-trip through repr-string fields. The
     # classic schedule is deliberately excluded: ``_serialize_op_fields`` and

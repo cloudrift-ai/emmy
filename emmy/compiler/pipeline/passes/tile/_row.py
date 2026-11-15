@@ -179,20 +179,6 @@ def _region_loads(region: Fold) -> tuple[Load, ...]:
     )
 
 
-class FoldingSigma(Sigma):
-    """A substitution that FOLDS as it lands, under a fixed range context: ``((hi * c) + lo) / c`` collapses to
-    ``hi`` and ``((hi * c) + lo) % c`` to ``lo``, so an index reaches the scheduler in the substituted coordinates.
-    ``Sigma.apply`` substitutes and stops, which is right everywhere else: a σ that rewrote its result would hide what
-    it did."""
-
-    def __init__(self, mapping: dict[str, Expression], ctx: SimplifyCtx) -> None:
-        super().__init__(mapping)
-        object.__setattr__(self, "_ctx", ctx)
-
-    def after(self, expression):
-        return expression.simplify(self._ctx)
-
-
 def _paired_by_loads(tile: TileOp) -> TileOp:
     """``tile`` with one output region re-spelled in the coordinates another region reads a shared input at, where
     that makes more of their reads of it coincide and breaks none; else ``tile`` itself.
@@ -241,7 +227,7 @@ def _paired_by_loads(tile: TileOp) -> TileOp:
         return tile
     index, _, full = best
     region, _, stores = regions[index]
-    sigma = FoldingSigma(full, ctx)
+    sigma = Sigma(full, ctx)
     respelled = _recoordinated(region, sigma)
     # The re-spelled region sweeps every coordinate it now reads that the grid does not bind: the other regions'
     # sweeps in their order first, so the shared ones nest outermost, then its own.
@@ -311,7 +297,7 @@ def _completed(mapping: dict[str, Expression], own: set[str], axes: dict) -> dic
 
 def _coinciding(mine: tuple, theirs: tuple, mapping: dict, ctx: SimplifyCtx, outer: set[str]) -> frozenset:
     """The pairs of ``mine`` (re-spelled by ``mapping``) and ``theirs`` that read one element."""
-    sigma = FoldingSigma(mapping, ctx)
+    sigma = Sigma(mapping, ctx)
     return frozenset(
         (i, j)
         for i, load in enumerate(mine)
@@ -322,7 +308,7 @@ def _coinciding(mine: tuple, theirs: tuple, mapping: dict, ctx: SimplifyCtx, out
     )
 
 
-def _recoordinated(node: Fold, sigma: FoldingSigma) -> Fold:
+def _recoordinated(node: Fold, sigma: Sigma) -> Fold:
     """``node`` with its coordinates substituted per statement. A free coordinate is a lift PARAM, so a σ handed the
     whole term would be dropped as shadowed exactly where it has work to do: each lift is re-closed instead, the
     substituted names leaving its params and the names it now reads appended."""

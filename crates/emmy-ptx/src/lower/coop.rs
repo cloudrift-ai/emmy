@@ -341,12 +341,12 @@ impl Lowerer {
     }
 
     /// The value of `ty` in `from`, read from the lane the shuffle picks. A shuffle moves 32 bits: a float goes
-    /// through its bits, a half through a 32-bit register, a 64-bit value as its two halves, each shuffled.
+    /// through its bits, a half through a 32-bit register, a 64-bit integer as its two halves.
     pub(super) fn shuffled(
         &mut self,
         shuffle: Shuffle,
         (from, ty): (Reg, VTy),
-        lanes: (i64, i64),
+        (lane, clamp): (i64, i64),
         mask: &Operand,
     ) -> Result<Reg> {
         let moved = |this: &mut Lowerer, opcode, ty: Ty, operand: Reg| {
@@ -355,25 +355,25 @@ impl Lowerer {
                 .emit(Inst::new(opcode, ty, vec![to], vec![operand.into()]));
             to
         };
-        if matches!(ty, VTy::I64 | VTy::U64 | VTy::F64) {
-            let halves = vec![self.b.reg(Bank::B32), self.b.reg(Bank::B32)];
-            self.b.emit(Inst::new(
-                Opcode::Mov,
-                Ty::B64,
-                halves.clone(),
-                vec![from.into()],
-            ));
-            let theirs = halves
-                .into_iter()
-                .map(|half| self.shuffled_word(shuffle, half, lanes, mask))
-                .collect();
+        if matches!(ty, VTy::I64 | VTy::U64) {
+            let shifted = |this: &mut Lowerer, opcode, operand: Reg| {
+                let to = this.b.reg(Bank::B64);
+                let operands = vec![operand.into(), Operand::Int(32)];
+                this.b.emit(Inst::new(opcode, Ty::B64, vec![to], operands));
+                to
+            };
+            let high = shifted(self, Opcode::Shr, from);
+            let mut halves = [from, high];
+            for half in halves.iter_mut() {
+                let word = moved(self, Opcode::Cvt(Ty::U64), Ty::U32, *half);
+                let theirs = self.shuffled(shuffle, (word, VTy::U32), (lane, clamp), mask)?;
+                *half = moved(self, Opcode::Cvt(Ty::U32), Ty::U64, theirs);
+            }
+            let high = shifted(self, Opcode::Shl, halves[1]);
             let to = self.b.reg(Bank::B64);
-            self.b.emit(Inst::new(
-                Opcode::Mov,
-                Ty::B64,
-                vec![to],
-                vec![Operand::Tuple(theirs)],
-            ));
+            let operands = vec![halves[0].into(), high.into()];
+            self.b
+                .emit(Inst::new(Opcode::Or, Ty::B64, vec![to], operands));
             return Ok(to);
         }
         let bits = match ty {
@@ -382,7 +382,15 @@ impl Lowerer {
             VTy::I32 | VTy::U32 => from,
             _ => return Err(self.no_rule(format_args!("a shuffle of {}", ty.text()))),
         };
-        let theirs = self.shuffled_word(shuffle, bits, lanes, mask);
+        let theirs = self.b.reg(Bank::B32);
+        let operands = vec![
+            bits.into(),
+            Operand::Int(lane),
+            Operand::Int(clamp),
+            mask.clone(),
+        ];
+        let inst = Inst::new(Opcode::Shfl(shuffle), Ty::B32, vec![theirs], operands);
+        self.b.emit(inst);
         Ok(match ty {
             VTy::F32 => {
                 let to = self.b.reg(Bank::F32);
@@ -393,26 +401,6 @@ impl Lowerer {
             VTy::F16 | VTy::Bf16 => moved(self, Opcode::Cvt(Ty::U32), Ty::U16, theirs),
             _ => theirs,
         })
-    }
-
-    /// The 32 bits of `bits` in the lane the shuffle picks.
-    fn shuffled_word(
-        &mut self,
-        shuffle: Shuffle,
-        bits: Reg,
-        (lane, clamp): (i64, i64),
-        mask: &Operand,
-    ) -> Reg {
-        let theirs = self.b.reg(Bank::B32);
-        let operands = vec![
-            bits.into(),
-            Operand::Int(lane),
-            Operand::Int(clamp),
-            mask.clone(),
-        ];
-        let inst = Inst::new(Opcode::Shfl(shuffle), Ty::B32, vec![theirs], operands);
-        self.b.emit(inst);
-        theirs
     }
 
     /// The lane count of a warp statement: a power of two up to the warp.

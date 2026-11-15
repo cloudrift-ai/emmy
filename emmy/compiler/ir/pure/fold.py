@@ -7,6 +7,10 @@ closed inputs, each an edge bound positionally to a lift param. Every reading (t
 map at zero axes, the bilinear :class:`ContractionView`, the :class:`SlabView` leaf, the serial
 step) is DERIVED from those params; nothing else is stored.
 
+The term and everything it answers live in the ``emmy-pure`` crate (``emmy.emmy_ir.Fold``): the fields and
+formation, every reading and view, ``merge`` / ``step``, ``fuse`` (the recipe matching), the tree normalization
+(``normalized``) and the lowering (``lower``). Python adds one member, ``rewrite``, which takes Python functions.
+
 The fold's algebra is the twisted monoid of :mod:`~emmy.compiler.ir.pure.twist`, spelled in one
 vocabulary with the recipes: ``lift`` is the per-element contribution to the BASE state, ``base``
 the base monoid's componentwise ⊕, and ``twist`` the recipe carrying the bijection ``psi`` onto the
@@ -31,18 +35,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
 
 import emmy.emmy_ir as _ir
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.pure._fields import MISSING, declare
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.pure.twist import Recipe, Twist
+from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Load, OutputSpec
-from emmy.utils import cached_method
 
 #: The symbolic extents of the program being compiled. The launch binds them, so a term reads one free — like a
 #: coordinate the grid binds — and never as a value some level defines: a scatter's guard compares its index with its
@@ -60,471 +58,11 @@ def binding_extents(names):
         EXTENTS.reset(token)
 
 
-@dataclass(frozen=True)
-class SlabView:
-    """A Fold's reading as one gmem read — a leaf evaluated over the coordinates it indexes.
-
-    ``load`` is the read itself. No operands, no monoid, a body of one ``Load``: what
-    ``isinstance(edge, Load)`` used to ask, back when a statement could sit in ``operands``.
-    Placement never offers one as a seam — there is nothing to materialize that the load does not
-    already do.
-    """
-
-    load: Load
-
-
-@dataclass(frozen=True)
-class ContractionView:
-    """A Fold's BILINEAR reading, as geometry: the axis its operands share and the free axis each
-    one contributes.
-
-    ``a[m,k] × b[n,k]`` reads as ``axis=k, left=m, right=n``. That is the whole of the recognition
-    — no algebra walk, no product-argument matching, no canonical form to compare against. Which
-    of ``left`` / ``right`` is physically M or N is the PLACEMENT's answer, not the term's.
-    """
-
-    axis: str
-    left_axes: frozenset[str]
-    """The free axes A carries and B does not — the output role it strides, plus any broadcast
-    batch coordinate riding A alone (``x[b, m, k]`` against ``w[n, k]``): which of them is the
-    row is the placement's answer, the others are grid offsets."""
-    right_axes: frozenset[str]
-    """The free axes the streamed operand carries alone. Empty for a MATVEC, whose B is a vector
-    over the reduction alone: a contraction does not stop being one for want of a second output
-    axis; whether the pair can be ORIENTED as (m, n) is the placement's question, not
-    recognition's. A pair with NO output role on either side (a row's dot product with itself,
-    the RMS statistic spelled as two casts of one load) is not a contraction at all: it reads as a
-    planar reduce."""
-    shared_axes: frozenset[str] = frozenset()
-    """The free axes BOTH operands read besides the reduction: a batch the pair rides (attention's
-    ``b, h``), a split-K partition coordinate, a value-dead reshape residue — or, when a side
-    carries no role of its own, the row that side's every element moves with. Which of those a
-    shared axis is takes the kernel's extents to tell, so it is the tile's question
-    (:meth:`TileOp.contracts`), not the term's."""
-    product: ElementwiseImpl | None = None
-    """The ⊗ this contraction multiplies its operand pair with."""
-    plus: ElementwiseImpl | None = None
-    """The commutative-monoid ⊕ the products fold through. Together with :attr:`product` this is
-    the semiring INSTANCE — the mma tier gates on ``(multiply, add)``, and a new instance reads
-    back here without change."""
-    b_trans: bool = False
-    """Whether the streamed operand is stored N-major — its reduction axis LAST, ``B[n, k]``,
-    against the canonical ``B[k, n]``. A gmem LAYOUT fact, so it is meaningful only for a
-    materialized slab; a computed B answers ``False``. A stored on the same side is not a
-    question: ``operands[0]`` is A by canonical form, k-last, which formation guarantees by
-    orienting the pair."""
-    channel: int = 0
-    """Which carried state the products fold into — the position of this reading among the term's
-    results. ``0`` for a plain contraction, whose only state IS the accumulator; a twisted
-    carrier's expectation sits past the states its pivot and denominator carry, and the emission
-    that accumulates into it needs the position to name it."""
-
-    @property
-    def left(self) -> str | None:
-        """A's one own axis, or ``None`` when it carries none or several (a broadcast batch)."""
-        return next(iter(self.left_axes)) if len(self.left_axes) == 1 else None
-
-    @property
-    def right(self) -> str | None:
-        """B's one own axis, or ``None`` when it carries none or several."""
-        return next(iter(self.right_axes)) if len(self.right_axes) == 1 else None
-
-
-@dataclass(frozen=True)
-class ReductionView:
-    """A Fold's reading as a MONOID fold — the algebra its combine spells, read off the lambda.
-
-    ``states`` are the carried state's names (the combine's results), ``other`` the names the
-    combine binds its second operand to, ``terms`` the injection singleton (the lift's results,
-    one per component). ``ops`` is the componentwise op vector when the combine has that shape —
-    every result ``sᵢ = ⊕ᵢ(sᵢ, sᵢ′)`` independently, a PLANAR fold (sum, max, mean) — and ``None``
-    for a TWISTED one (online softmax's rescaling program): the one discrimination every partition
-    legality question asks. No family name: the program itself is the reading, and
-    :meth:`Fold.merge` applies it.
-    """
-
-    axis: str
-    states: tuple[str, ...]
-    other: tuple[str, ...]
-    terms: tuple[str, ...]
-    ops: tuple[ElementwiseImpl, ...] | None
-
-    @property
-    def twisted(self) -> bool:
-        return self.ops is None
-
-
-@dataclass(frozen=True)
-class AffineView:
-    """A carried state's step read as AFFINE in the state, acting column-wise: every carrier read
-    keeps the cell's own coordinate at every position but ``mixed``, so the step is ``S ← A·S + b``
-    with ``A`` a matrix over the mixed axis alone, applied to every column of the block alike, and
-    two steps compose as affine maps. ``kept`` is the own position a probe packs basis vectors
-    along — the last one — so ``A`` is read off one walk of the step from the identity seed. A step
-    that reads its own cell alone has no mixed position (``None``): ``A`` is diagonal, and one walk
-    from a seed of ones reads it."""
-
-    state: str
-    mixed: int | None
-    kept: int | None
-
-
-class _Fold:
-    """What Python still adds to the crate's :class:`Fold` (``emmy.emmy_ir.Fold``), installed on the class below:
-    ``fuse`` (the recipe matching a pass decides with), ``rewrite`` (whose ``Sigma`` may carry a Python ``after``
-    hook) and the memo over the crate's lowering. Everything else — the fields and formation, every reading and view,
-    ``merge`` / ``step``, the tree normalization (``normalized``) and the lowering itself (``_lower``) — is
-    ``emmy-pure``'s.
-
-    The ONE reduce term — ``reduce(⊕) ∘ map(f)``, the typed successor of the annotated reduce
-    ``Loop``. It splits the reduce's **algebra** (the base monoid ``base``, plus the ``twist``
-    recipe whose ``psi`` conjugates it into the rescaling program online-softmax / flash folds
-    with — :attr:`combine` derives that ⊕, and a planar ``sum`` / ``max`` / ``mean`` is the
-    identity case) from its **structure** (the axis the lift binds and the per-element ``step`` it
-    folds). Every reading is **derived** from the stored params (:attr:`combine`,
-    :meth:`as_contraction`, :meth:`as_slab`, :meth:`as_reduction`, :meth:`step`), never stored, and the loop nest is
-    **synthesized on demand** (:meth:`lower`), never stored — so the same term tiles under any
-    :class:`~emmy.compiler.ir.schedule.Reduce`, which is not a field here: the reduce partition is
-    a site choice in ``TileOp.schedule``, read through ``ops.Sched``.
-
-    Everything a term reads arrives through its ``operands``, bound POSITIONALLY to the lift's
-    params (:attr:`bindings`) — a gmem read as a slab, a nested reduce as the term itself, a
-    projection as a zero-axis term — so a reduce that reads another (flash's ``Σ Q·K`` score ahead
-    of its ``Σ_j P·V``) is one term with the other among its operands, and its position in the
-    emitted nest is :meth:`lower`'s to place. A term holds no projection of its own: a bare reduce
-    (``sum`` / ``max``) is the kernel root, and a reduce with a post-fold sweep (softmax / RMSNorm)
-    is an operand of the zero-axis term whose lift is that projection.
-
-    The reduce PARTITION (:class:`Reduce` — GRID split / BLOCK coop / REG ILP) is the schedule's,
-    not the term's: it is selected for the term's site in ``TileOp.schedule`` and read through
-    ``ops.Sched``, which is why ``lower`` cannot see it and ``identity_key(with_io=True, with_knobs=True)``
-    stays byte-identical whichever partition the fork picked."""
-
-    def fuse(self, recipe: Recipe, axes) -> Fold | None:
-        """This reduce fused onto the reduce it reads, by ``recipe`` — one fold carrying both
-        states under the recipe's twisted ⊕ — or ``None`` when no channel of the recipe clicks.
-        The ONE generic algorithm over the declarative recipes (:mod:`~emmy.compiler.ir.pure.twist`).
-        The pivot is found among this term's operands: a reduce folding the recipe's pivot ⊕, or a
-        fold this recipe already fused (whose channel 0 is the pivot). The pivot's state is the
-        lift param bound to it, positionally; the score is the sub-cone of the lift alpha-equal to
-        the pivot's own per-element map, operand for operand (a projection's component by its own
-        cone); and what remains of the lift with that cone cut out, its params in role order, must
-        equal a channel's pattern by canonical form. A click gives the role-to-name map, and the
-        fused fold is the recipe instantiated by renaming: the pivot's operands plus what the
-        extras bind, the pivot's lift with the channel's injection appended, the states
-        concatenated, the recipe's ⊕ program over them. The same recipe fuses online softmax and
-        flash attention alike; the caller rewrites the tree's operands onto the result.
-        """
-        view = self.as_reduction()
-        if view is None or self.observe is not None or view.ops is None or len(view.states) != 1:
-            return None
-        for pivot in self.operands:
-            pview = pivot.as_reduction()
-            if pview is None or pivot.observe is not None:
-                continue
-            if pview.ops is not None:
-                if len(pview.states) != 1 or pview.ops[0].reduce_canon != recipe.pivot:
-                    continue
-            elif pivot.twist is None or pivot.twist.recipe is not recipe:
-                continue  # a twisted pivot must already carry THIS recipe: another one's carrier is not its pivot
-            if axes[self.axis].extent != axes[pivot.axis].extent or axes[self.axis].window != axes[pivot.axis].window:
-                continue
-            fused = self._twist(pivot, recipe, axes)
-            if fused is not None:
-                return fused
-        return None
-
-    def _twist(self, pivot: Fold, recipe, axes) -> Fold | None:
-        view, pview = self.as_reduction(), pivot.as_reduction()
-
-        def cone(fold: Fold, name: str) -> tuple:
-            # The closed cone defining ``name`` in the lift, and the VALUE each of its params binds
-            # (``None`` for a coordinate: a reduce's state binds that term, a projection's result
-            # binds its own cone).
-            for param, edge, index in fold.bindings:
-                # A param this term only PASSES THROUGH is the edge's own cone: the value is the
-                # same whether the statements sit in the lift or in the operand a factoring moved
-                # them to, and a match on the score must not turn on which side of that line it is.
-                if param == name and edge.axis is None:
-                    return cone(edge, edge.exposes[index])
-            by_param = {param: edge for param, edge, _ in fold.bindings}
-            fn = fold.lift.cone(name)
-            values = tuple(
-                None if (edge := by_param.get(param)) is None else edge if edge.axis is not None else cone(edge, param)
-                for param in fn.params
-            )
-            return fn, values
-
-        def alike(x: Fold, y: Fold) -> bool:
-            """Compare values under their actual coordinate scopes, independently of a lift's
-            coordinate-parameter order and the names of the axes its operands bind."""
-            from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415
-
-            if self.axis != pivot.axis:
-                x = x.rewrite(lambda name: name, Sigma({self.axis: Var(pivot.axis)}))
-            scope = tuple(axes.values())
-            return canonicalize_identity(x.lower(axes=scope)) == canonicalize_identity(y.lower(axes=scope))
-
-        def same(a: tuple, b: tuple) -> bool:
-            if a[0].canonical() != b[0].canonical() or len(a[1]) != len(b[1]):
-                return False
-            for x, y in zip(a[1], b[1], strict=True):
-                if (x is None) != (y is None) or isinstance(x, tuple) != isinstance(y, tuple):
-                    return False
-                if x is not None and (not same(x, y) if isinstance(x, tuple) else not alike(x, y)):
-                    return False
-            return True
-
-        bound = tuple((param, edge) for param, edge, _ in self.bindings)
-        by_param = dict(bound)
-        g = next(param for param, edge in bound if edge is pivot)
-        pivot_params = {param for param, edge in bound if edge is pivot}
-        score = cone(pivot, pivot.lift.results[0])
-        candidates = [p for p in self.lift.params[1:] if p not in pivot_params] + [n for s in self.lift.body for n in s.defines()]
-        for x in candidates:
-            found = cone(self, x)
-            # The cone may read coordinates free (the causal mask's ``key <= query``): this fold's
-            # own axis is the pivot's once fused, so it is COMPARED under the pivot's name, while
-            # the residual below is cut by the cone's own statements.
-            spelled = found if self.axis == pivot.axis else (found[0].rename({self.axis: pivot.axis}), found[1])
-            if not same(spelled, score):
-                continue
-            # What remains of the lift with the score cut out, closed over what it still reads —
-            # ``(score, pivot, *extras)`` in role order, the extras operand-bound values.
-            residual = tuple(stmt for stmt in self.lift.body if stmt not in found[0].body)
-            fn = Lambda.closing((x, g), Body(residual), self.lift.results)
-            extras = fn.params[2:]
-            if any(p not in by_param or p in pivot_params for p in extras):
-                continue
-            # A channel whose base ⊕ is this fold's and whose pattern is what remains.
-            plus = view.ops[0].reduce_canon
-            channel = next(
-                (
-                    c
-                    for index, c in enumerate(recipe.channels)
-                    if c.pattern is not None and recipe.base[1 + index] == plus and fn.canonical() == c.pattern.canonical()
-                ),
-                None,
-            )
-            if channel is None:
-                continue
-            # Instantiate: every operand an extra binds joins, its axis spelled as the pivot's.
-            old, new = self.axis, pivot.axis
-            extra_edges = tuple(dict.fromkeys(edge for p, edge in bound if p in extras))
-            extra_params = tuple(p for edge in extra_edges for p, e in bound if e is edge)
-            if old != new:
-                extra_edges = tuple(
-                    edge.rewrite(
-                        lambda n: n,
-                        Sigma({old: Var(new)}),
-                        lambda a, old=old, new=new: replace(a, name=new) if a.name == old else a,
-                    )
-                    for edge in extra_edges
-                )
-            # The carrier's states: the pivot's, then every channel in recipe order — the matched
-            # one is this fold's own state, one without a pattern a state the recipe adds. Each
-            # takes the recipe's BASE contribution for it (``lift``'s own result), instantiated at
-            # the score and this channel's extras. STABLE coordinates throughout: the contribution
-            # stored is the recipe's authored INJECTION — the singleton in the carrier's own state
-            # space, where the pivot IS the score and softmax's ``exp(s)·v`` has already simplified
-            # to ``v``. The base contribution is a derived reading (:meth:`based`) a matcher asks
-            # for and nothing emits. Seeds are the carrier's, as the states are.
-            state = view.states[0]
-            score = pivot.lift.results[0]
-            added = [
-                (state if c is channel else f"{state}__{c.name}", index, self.init[0] if c is channel else c.init)
-                for index, c in enumerate(recipe.channels)
-                if c is channel or c.pattern is None
-            ]
-            roles = {recipe.lift.params[0]: score, **dict(zip(channel.pattern.params[2:], extras, strict=True))}
-            arity = sum(len(edge.exposes) for edge in pivot.operands)
-            held = [
-                *zip(pivot.operands, _slots(pivot.lift.params[1 : 1 + arity], pivot.operands), strict=True),
-                *zip(extra_edges, _slots(extra_params, extra_edges), strict=True),
-            ]
-            body, results, inits = list(pivot.lift.body), list(pivot.lift.results), list(pivot.init)
-            for name, index, init in tuple(added):
-                taken = {n for stmt in body for n in stmt.defines()} | {p for _, slot in held for p in slot}
-                injection = recipe.channels[index].injection
-                names = {param: roles[param] for param in injection.params}
-                # Statement by statement, so a channel BINDS what the body already computes rather
-                # than spelling it again: softmax's denominator and its expectation share the whole
-                # weight prefix, and instantiating each cone whole put two ``exp(s)`` in one lift.
-                have = {stmt.value: stmt.name for stmt in body if isinstance(stmt, Assign)}
-                for stmt in injection.body:
-                    spelled = stmt.rewrite(lambda read, names=names: names.get(read, read))
-                    if isinstance(spelled, Assign) and (prior := have.get(spelled.value)) is not None:
-                        names[stmt.name] = prior
-                        continue
-                    fresh = stmt.name if stmt.name not in taken else f"{name}__{stmt.name}"
-                    names[stmt.name] = fresh
-                    spelled = spelled.replace(name=fresh)
-                    body.append(spelled)
-                    taken.add(fresh)
-                    if isinstance(spelled, Assign):
-                        have[spelled.value] = fresh
-                if name in pview.states:
-                    slot = pview.states.index(name)
-                    bound_roles = {**roles, recipe.lift.params[0]: x}
-                    injected = injection.rename(lambda read, bound_roles=bound_roles, name=name: bound_roles.get(read, f"{name}__{read}"))
-                    candidate = self.replace(
-                        lift=Lambda.closing(self.lift.params, Body((*found[0].body, *injected.body)), injected.results)
-                    )
-                    contribution = cone(candidate, injected.results[0])
-                    if old != new:
-                        contribution = (contribution[0].rename({old: new}), contribution[1])
-                    # A shared dependent can reach the pivot again through another score cone.
-                    # Reuse its state only when both copies inject the same value into the same channel.
-                    if (
-                        slot == 0
-                        or pivot.twist.channels[slot - 1] != index
-                        or pivot.init[slot] != init
-                        or not same(cone(pivot, pivot.lift.results[slot]), contribution)
-                    ):
-                        raise ValueError(f"conflicting definitions of twisted state {name!r}")
-                    added.remove((name, index, init))
-                    continue
-                results.append(names[injection.results[0]])
-                inits.append(init)
-            if not added:
-                return pivot
-            # An operand the lift no longer names is nobody's — the recipe's own contribution
-            # replaced the statements that read it.
-            read = {name for stmt in body for name in stmt.deps()} | set(results)
-            held = [entry for entry in held if not read.isdisjoint(entry[1])]
-            # B SECOND. A leads by canonical form; a bilinear channel's other factor must follow it,
-            # because staging and both atom tiers take B from ``operands[1]`` rather than asking the
-            # channel. An operand with no free coordinates — attention's scale — is no channel's
-            # factor at all, so it sorts behind the streamed value instead of between the pair.
-            held = [held[0], *sorted(held[1:], key=lambda entry: not entry[0].free_axes)]
-            # The carrier is the RECIPE's own vector: the pivot, then the channels it holds in the
-            # order the recipe declares them, whatever order the tree happened to fuse them in.
-            # Softmax's is (m, D, O) whether the denominator or the expectation clicked first, so a
-            # state's position and its channel agree with ``Recipe.base`` and ``Recipe.lift``.
-            channels = (*(() if pivot.twist is None else pivot.twist.channels), *(index for _, index, _ in added))
-            order = sorted(range(len(channels)), key=lambda slot: channels[slot])
-
-            def by_channel(pivot_slot, tail, order=order):
-                """The pivot's slot, then the channel slots in the recipe's declared order."""
-                return (pivot_slot, *(tail[slot] for slot in order))
-
-            states = by_channel(pview.states[0], (*pview.states[1:], *(name for name, _, _ in added)))
-            base_ops = pivot.base.components()
-            ops = by_channel(base_ops[0], (*base_ops[1:], *(recipe.base[1 + index] for _, index, _ in added)))
-            init = by_channel(inits[0], tuple(inits[1:]))
-            channelled = by_channel(results[0], tuple(results[1:]))
-            lift = Lambda(
-                params=(pivot.axis, *(p for _, slot in held for p in slot), *pivot.lift.params[1 + arity :]),
-                body=Body(tuple(Body(tuple(body)).backward_cone(tuple(dict.fromkeys(channelled))).members)),
-                results=tuple(channelled),
-            )
-            return Fold(
-                operands=tuple(edge for edge, _ in held),
-                lift=lift,
-                init=tuple(init),
-                base=Lambda.componentwise(ops, states),
-                twist=Twist(recipe=recipe, channels=tuple(channels[slot] for slot in order)),
-            )
-        return None
-
-    @cached_method
-    def lower(self, bound: frozenset[str] | None = None, stores: tuple[OutputSpec, ...] = (), axes: tuple[Axis, ...] = ()) -> Body:
-        """Flatten this term to the Loop IR nest the materializer expands, the kernel's boundary
-        ``stores`` placed in it.
-
-        ``bound`` names the coordinates the CALLER binds — the kernel grid, an enclosing loop's
-        scope; ``None`` binds every free coordinate (the open body a term spells inside an
-        enclosing scope) and ``frozenset()`` the closed program; ``axes`` is the kernel's axis table
-        — the extent and window of every axis the tree binds or reads, which a term carries none
-        of: a reduce loop takes its axis from it, and the closed program the coordinates it opens
-        loops for. One rule then places every term
-        of the tree, read straight off the representation: a term is materialized at the
-        SHALLOWEST scope on its path that binds all of its :attr:`free_axes`, a value of the tree it
-        reads by name (the expert a gathered row belongs to) standing for the coordinates of the term
-        that defines it. The scopes are the
-        plain loops this term opens for the free coordinates left unbound — outermost the
-        coordinate the most terms are evaluated over, so what siblings share is hoisted above
-        them, ties in declaration order — and the reduce loop of each term on the way down. That
-        is the whole of the hoist: a declaration compared against the scopes above, not a body
-        walked for free names. An operand that does not index its reader's reduce axis lands
-        ahead of that loop; one that reads no coordinate a deeper loop binds lands ahead of every
-        such loop, past the term that reads it.
-
-        A boundary store follows the term that DEFINES the value it writes, at that term's scope:
-        a projection's result after its step, a reduce's carried state after its loop, an observed
-        per-step value inside the loop after the observer. A store alone evaluated over a
-        coordinate no term declares (a broadcast, ``o[j] = acc``) opens that coordinate under its
-        term, the spec's ``sweep`` naming the axis. Nothing is walked for the place a store goes:
-        the term defining its value was just placed.
-
-        The free loops form a TREE, not a chain. A term's operands sit on ITS path — the shallowest
-        prefix of its own loops that binds them — so what a term reads is always in scope; only a
-        wrapper with no step of its own leaves its operands free to take their own paths, which is
-        how two output sweeps no term shares become sibling loops. Operands are placed before
-        the statements that read them, a reduce term's step follows its operands inside the loop
-        that binds its axis, and a SHARED term — one object reached through several operand
-        positions — defines its names once per scope.
-
-        The ONE lowering spelling — every consumer of a term's statements calls this. Memoized on
-        the term per binding.
-        """
-        return self._lower(bound, stores, axes)
-
-    def rewrite(self, rename, sigma: Sigma = Sigma.IDENTITY, axis_fn=lambda axis: axis) -> Fold:  # noqa: ANN001
-        """This term with every SSA name through ``rename``, every expression through ``sigma`` and every axis through
-        ``axis_fn``, the way ``Statement.rewrite`` rewrites a statement: the lift and the monoid rename in lockstep
-        (params track the operand names positionally, the combine's results ARE the accumulator names), and σ is
-        applied hygienically to the term's own binder — the reduce axis this term binds is a different variable from
-        any σ key spelled alike, so its mapping is dropped for the subtree. At zero axes there is no iteration var to
-        rename and no monoid to thread. Operand edges are terms and rewrite through this same entry."""
-        if self.axis is not None and self.axis in sigma.mapping:
-            sigma = Sigma({name: value for name, value in sigma.mapping.items() if name != self.axis})
-        operands = tuple(edge.rewrite(rename, sigma, axis_fn) for edge in self.operands)
-        lead = (rename(self.axis),) if self.axis is not None else ()  # the iteration var — a slab has none
-
-        def _param(name: str) -> str:
-            # The environment tail may hold AXIS names, which rename through sigma (the body's own
-            # coordinate substitution), not through the SSA renamer. Taking sigma's answer when it has
-            # one keeps a param and every use of it in the body spelled the same way.
-            mapped = sigma.get(name)
-            return mapped.name if isinstance(mapped, Var) else rename(name)
-
-        bound_count = len(lead) + len(self.bindings)
-        substitutions = {
-            p: mapped for p in self.lift.params[bound_count:] if (mapped := sigma.get(p)) is not None and not isinstance(mapped, Var)
-        }
-        needed = set().union(*(expression.free_vars() for expression in substitutions.values()))
-        params = (*lead, *(_param(p) for p in self.lift.params[len(lead) : bound_count]))
-        params += tuple(_param(p) for p in self.lift.params[bound_count:] if p not in substitutions or p in needed)
-        body = Body(tuple(st.rewrite(rename, sigma, axis_fn) for st in self.lift.body))
-        results = tuple(rename(r) for r in self.lift.results)
-        # Only an expression substitution can introduce a coordinate absent from the original tail.
-        # A self-referential substitution still keeps its old binder in its original position.
-        lift = Lambda.closing(params, body, results) if substitutions else Lambda(params, body, results)
-        base = self.base.rename(rename) if self.base is not None else None
-        cells = tuple(_param(cell) for cell in self.cells)  # coordinates, like the environment tail
-        observe = None
-        if self.observe is not None:
-            # The observer renames in lockstep: param 0 tracks the axis, the state params track the
-            # combine's renamed results, the body/results are ordinary SSA material.
-            observe = Lambda(
-                params=(*lead, *(rename(p) for p in self.observe.params[1:])),
-                body=Body(tuple(st.rewrite(rename, sigma, axis_fn) for st in self.observe.body)),
-                results=tuple(rename(r) for r in self.observe.results),
-            )
-        return self.replace(operands=operands, lift=lift, base=base, observe=observe, cells=cells)
-
-
-def _slots(params: tuple[str, ...], edges) -> list[tuple[str, ...]]:
-    """``params`` cut into one group per edge — the positional binding, one param per result component."""
-    out, cursor = [], 0
-    for edge in edges:
-        out.append(tuple(params[cursor : cursor + len(edge.exposes)]))
-        cursor += len(edge.exposes)
-    return out
-
-
 Fold = _ir.Fold
+SlabView = _ir.SlabView
+ContractionView = _ir.ContractionView
+ReductionView = _ir.ReductionView
+AffineView = _ir.AffineView
 declare(
     Fold,
     (
@@ -539,22 +77,26 @@ declare(
 )
 
 
-def _install(owner: type, members: type) -> None:
-    """Put every member ``members`` defines on ``owner``: the Python half of a crate class, as the statement glue
-    installs its members."""
-    for name, member in vars(members).items():
-        if name.startswith("__") and name not in ("__doc__",):
-            continue
-        if name == "__doc__":
-            continue
-        setattr(owner, name, member)
-        if hasattr(member, "__set_name__"):
-            member.__set_name__(owner, name)
+def _rewrite(self: Fold, rename, sigma: Sigma = Sigma.IDENTITY, axis_fn=None) -> Fold:  # noqa: ANN001
+    """This term with every SSA name through ``rename`` (a mapping or a function), every expression through ``sigma``
+    and every axis through ``axis_fn``, the way ``Statement.rewrite`` rewrites a statement: the lift and the monoid
+    rename in lockstep (params track the operand names positionally, the combine's results ARE the accumulator names),
+    and σ is applied hygienically to the term's own binder — the reduce axis this term binds is a different variable
+    from any σ key spelled alike, so its mapping is dropped for the subtree. Operand edges are terms and rewrite
+    through this same entry. A term takes a substitution's mapping and its folding; one that does more is refused."""
+    if type(sigma).after is not Sigma.after:
+        raise TypeError(f"a term takes a substitution's mapping and folding alone, got {type(sigma).__name__}")
+    names = dict(rename) if hasattr(rename, "get") else {name: rename(name) for name in self._names()}
+    axes = None if axis_fn is None else [(axis, axis_fn(axis)) for axis in self._bound_axes()]
+    return self._rewrite(names, sigma.mapping, sigma.folding, axes)
 
 
-_install(Fold, _Fold)
+Fold.rewrite = _rewrite
 
 __all__ = [
-    "ReductionView",
+    "AffineView",
+    "ContractionView",
     "Fold",
+    "ReductionView",
+    "SlabView",
 ]

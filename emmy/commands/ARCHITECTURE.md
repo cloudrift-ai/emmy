@@ -260,7 +260,8 @@ take width 1, with the standard M=1 row, whatever M=1 the trunk serves: every Mo
 for the fixed-slot tier. They take width 256 too, with an M=256 row per any-width lane: a boot with an any-width
 program also compiles that static expert prefill program. Expert twins are traced at the slice of every expert that
 each rank of the config's `--tensor-parallel-size` holds, and on more than one rank the fixed-slot program is also
-traced at the decode bucket's rows (`expert-slots8`), the program a decode step of several rows runs, and, for a
+traced at the decode bucket's rows and its halvings down to two (`expert-slots2`, `-slots4`, `-slots8`), the
+programs a decode step of several rows runs, the narrowest that holds it, and, for a
 config with an any-width program, the grouped prefill programs (`expert-group32x8` and `expert-group32x256`), which
 a prefill step's experts run 32 at a time, blocks of the decode bucket's rows or of 256. They are symbolic by name
 and take the dynamic rows. The audit expects the same split per twin. A

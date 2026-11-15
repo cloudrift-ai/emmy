@@ -64,9 +64,9 @@ def _attention(rows, cache=torch.bfloat16, grouped=True):
     return module, trace_module(module, examples, dynamic_shapes=shapes)
 
 
-def _lifted(graph):
+def _lifted(graph, ctx=CTX):
     """The lifted kernel and its twisted carrier."""
-    tiled = Pipeline.build(["tile/lift"]).run(Pipeline.build(LOOP_PASSES).run(graph), ctx=CTX)
+    tiled = Pipeline.build(["tile/lift"]).run(Pipeline.build(LOOP_PASSES).run(graph), ctx=ctx)
     (root,) = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
 
     def folds(node):
@@ -101,6 +101,15 @@ def test_the_rows_groups_of_a_key_value_head_are_the_fold_s_rows(rows, cache) ->
     per_head, folded = _lifted(_attention(rows, CACHES[cache], grouped=False)[1])
     (heads,) = [axis for axis in per_head.place.free if axis.extent == Dim(HEADS)]
     assert all(heads.name in load.index[1].free_vars() for load in _cache_reads(folded))
+
+
+def test_an_fp8_cache_takes_a_16_bit_cell_on_a_card_with_no_fp8_cell() -> None:
+    """sm_80 has no FP8 tensor-core cell, but the chunk tier converts each value into a 16-bit cell's fragment, so
+    the twist over an FP8 cache is offered that cell there too, the integer position beside the value
+    notwithstanding."""
+    ampere = Context.from_target((8, 0))
+    root, twist = _lifted(_attention(1, torch.float8_e4m3fn)[1], ampere)
+    assert "mma_m16n8k16_bf16_f32" in refusals._warp_atoms(root, ampere, twist)
 
 
 @pytest.mark.parametrize("rows", [1, 3])

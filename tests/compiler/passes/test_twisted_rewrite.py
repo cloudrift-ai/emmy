@@ -137,7 +137,7 @@ def test_softmax_rewrites_to_twisted_pair() -> None:
     carrier's own ⊕ folds — and ψ⁻¹ brings back ``(score, exp score)`` for a matcher to read."""
     fold = _twisted("torch.softmax(torch.randn(4, 8, dtype=torch.float16), dim=-1)")
 
-    assert fold.twist.recipe is SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
+    assert fold.twist.recipe == SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
     assert len(fold.init) == 2 and fold.init[1] == 0.0
     assert [edge.as_slab() is not None for edge in fold.operands] == [True], "the score slab is its one operand"
     assert [stmt.value.value for stmt in fold.lift.body if isinstance(stmt, Let)] == [1.0], "the stable singleton is (score, 1)"

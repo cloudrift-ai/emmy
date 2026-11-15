@@ -518,9 +518,11 @@ def test_the_step_is_the_merge_at_the_injected_singleton() -> None:
 
 def test_lowering_is_memoized_per_binding() -> None:
     mm = _matmul(slab("l", "x", "m", "k"), slab("r", "w", "k", "n"))
-    assert mm.lower(axes=SCOPE) is mm.lower(axes=SCOPE)
-    assert mm.lower(frozenset(), axes=SCOPE) is mm.lower(frozenset(), axes=SCOPE)
-    assert mm.lower(axes=SCOPE) is not mm.lower(frozenset(), axes=SCOPE)
+    # The term answers a repeated request with the body it built: one body, so one object per statement.
+    opened, closed = mm.lower(axes=SCOPE), mm.lower(frozenset(), axes=SCOPE)
+    assert mm.lower(axes=SCOPE)[0] is opened[0]
+    assert mm.lower(frozenset(), axes=SCOPE)[0] is closed[0]
+    assert opened != closed
 
 
 # --- the binding: positional, the consumer's names; rendering spells the operands ---------------- #

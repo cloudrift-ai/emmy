@@ -3,9 +3,11 @@
 //! and never executes: it reaches a statement position only by being rendered to statements.
 
 pub mod fold;
+pub mod fuse;
 pub mod lambda;
 pub mod lower;
 pub mod readings;
+pub mod rewrite;
 pub mod tree;
 pub mod twist;
 
