@@ -281,11 +281,29 @@ impl Lowerer {
         }
     }
 
-    /// A float value at another float type: a half widens exactly, a narrowing rounds to nearest, and between the
-    /// two half types the value goes through f32.
+    /// A value at another type: a half widens exactly, a narrowing rounds to nearest, and between the two half
+    /// types the value goes through f32. A float truncates toward zero into an integer, as a C cast does, and an
+    /// integer rounds to nearest into a float: an integer state crosses a float slab that way.
     pub(super) fn converted(&mut self, val: Val, to: VTy) -> Operand {
         if val.ty == to {
             return val.op;
+        }
+        if val.ty.is_float() != to.is_float() {
+            let from = self.register(&val);
+            let operands = vec![from.into()];
+            let inst = Inst::new(
+                Opcode::Cvt(val.ty.arith()),
+                to.arith(),
+                Vec::new(),
+                operands,
+            );
+            let inst = match to.is_float() {
+                true => inst.rounded(Round::Rn),
+                false => inst
+                    .flushing(self.precision.ftz && val.ty == VTy::F32)
+                    .rounded(Round::Rzi),
+            };
+            return self.b.value(inst, to.bank()).into();
         }
         if val.ty != VTy::F32 && to != VTy::F32 {
             let wide = self.converted(val, VTy::F32);

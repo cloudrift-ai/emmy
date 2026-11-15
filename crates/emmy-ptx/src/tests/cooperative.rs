@@ -1349,6 +1349,33 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
     }
 }
 
+/// An integer state whose slab holds f32 reads its root truncated toward zero, as the C assignment did.
+#[test]
+fn an_integer_state_reads_a_float_slab_truncated() {
+    let module = row_module(
+        "
+        i64 best = (i64)t
+        Smem(name=bs, extents=(32), dtype=f32)
+        f32 bw = (f32)best
+        f32 bs[t] = bw
+        Sync
+        TreeHalve(bufs=(bs), state=(best), state_b=(best__o), length=32, tid_var=t):
+            combine_states:
+                best = maximum(best, best__o)
+        i64 m[t] = best
+        ",
+        SUMS,
+        32,
+        &[],
+    );
+    let code = row_code(&module);
+    let reads: Vec<_> = code
+        .iter()
+        .filter(|line| line.starts_with("cvt.") && line.contains(".s64.f32"))
+        .collect();
+    assert_eq!(reads, ["cvt.rzi.s64.f32 %rd6, %f16"], "{code:#?}");
+}
+
 /// A selection held at a half beside a reduction at f32 combines at the f32, as the renderer's merge did: the half
 /// moves through a 32-bit register at its own width and is read widened, the program runs at f32, and the update
 /// of the half is narrowed back. A tree reduction whose slabs hold f32 gives the half its root narrowed.
