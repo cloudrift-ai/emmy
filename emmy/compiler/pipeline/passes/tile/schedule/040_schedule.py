@@ -25,9 +25,20 @@ remains a skip rather than a guessed schedule.
 
 from __future__ import annotations
 
+from math import prod
+
 from emmy.compiler.dim import paged_declarations
+from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCodec, ClassicScheduleContext, materialize_classic
+from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.schedule.choices import Stage
+from emmy.compiler.ir.schedule.classic import (
+    ClassicProblem,
+    ClassicScheduleCodec,
+    ClassicScheduleContext,
+    classic_state_keys,
+    materialize_classic,
+)
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -39,7 +50,7 @@ from emmy.compiler.pipeline.fork import Fork, exact_schedule_leaf, iter_leaves
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import family_pins, kernel_pin, schedule_pin_fingerprint
 from emmy.compiler.pipeline.passes.tile._cut import PIECE
-from emmy.compiler.pipeline.passes.tile._fromloop import serial_form
+from emmy.compiler.pipeline.passes.tile._fromloop import carried_program, serial_form
 from emmy.compiler.pipeline.schedule import fork_schedule
 from emmy.compiler.structural import digest
 
@@ -87,6 +98,21 @@ def cpu_forks(tile: TileOp, knobs: dict, ctx) -> list[Fork]:
     )
 
 
+def _shared_state_fits(tile: TileOp, ctx) -> bool:
+    """Whether the one state ``tile`` carries can be kept in shared memory: one CTA owns each state whole
+    (:func:`carried_program`), and the two padded buffers the steps alternate between fit beside nothing else.
+    What only the lowered kernel shows is the kernel lowering's to decline."""
+    program = carried_program(tile)
+    if program is None:
+        return False
+    _, carry, owned = program
+    cells = [tile.axis_of(cell.name).extent for cell in carry.index if isinstance(cell, Var) and cell.name not in owned]
+    if not cells or any(not extent.is_static for extent in cells):
+        return False
+    *rows, columns = (extent.as_static() for extent in cells)
+    return 2 * prod(rows) * (columns + 1) * F32.nbytes <= ctx.max_dynamic_smem
+
+
 def classic_forks(
     tile: TileOp,
     knobs: dict,
@@ -111,29 +137,42 @@ def classic_forks(
     row = pin_row(tile.name, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
     catalog = () if published else ("catalog",)  # a pool without the published pins is another pool
     register = []
-    if tile.register_program is not None and not any(value for key, value in row.items() if key not in ("WORK", "TILE", "STAGE")):
+    # A kernel that carries a state has a ``STAGE`` site for it: direct is the serial form (a buffer in global
+    # memory, one launch per step), ``d1/smem`` the serial form with the steps inside one launch, ``d1/reg``
+    # register storage. One key names it on every tier.
+    carrying, state_key, state_stages = tile, None, ()
+    if tile.carries:
+        tile = serial_form(carrying, node)
+        state_key = next(iter(classic_state_keys(tile)), None) if len(tile.state_routes) == 1 else None
+        if state_key is not None and _shared_state_fits(carrying, ctx):
+            state_stages = (Stage(transport="smem"),)
+    stored = row.get(state_key, row.get("STAGE")) if state_key is not None else None
+    register_keys = ("WORK", "TILE", "STAGE", state_key)
+    if carrying.register_program is not None and not any(value for key, value in row.items() if key not in register_keys):
         context = RegisterContext(
             RegisterProblem(
-                tile,
+                carrying,
                 ctx,
-                row={key: value for key, value in row.items() if key in ("WORK", "TILE", "STAGE")},
+                row={
+                    **{key: value for key, value in row.items() if key in ("WORK", "TILE")},
+                    **({state_key: stored} if stored == "d1/reg" else {}),
+                },
                 allow_f16=precision_pin(F16_MMA_F32_ACC) is True,
+                state_key=state_key,
             )
         )
         register = fork_schedule(
             context,
             codec=RegisterCodec(context),
             inherited_knobs=knobs,
-            materialize=lambda schedule, selected, tile=tile: materialize_register(tile, schedule, selected),
+            materialize=lambda schedule, selected, tile=carrying: materialize_register(tile, schedule, selected),
             pool_id=digest(
-                tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint(tile.name), *catalog
+                carrying.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint(carrying.name), *catalog
             ),
             sample=getattr(ctx, "pool_sample", None),
         )
-    if row.get("STAGE") == "d1/reg" and tile.carries:
+    if stored == "d1/reg":
         return register
-    if tile.carries:
-        tile = serial_form(tile, node)
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band). A finalize that cannot take that row keeps its own
@@ -158,6 +197,7 @@ def classic_forks(
         validate_pins=ctx.validate_pins and not kernel_set,
         tolerate_kernel_pins=peer,
         paged=paged or {},
+        state_stages=state_stages,
         _strict_row_keys=named,
     )
     context = ClassicScheduleContext(tile, ctx, problem)

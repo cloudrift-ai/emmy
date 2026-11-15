@@ -427,6 +427,16 @@ def knob_features(knobs: dict) -> dict[str, float]:
     return feats
 
 
+def _state_key(kernel: Op, knobs: Mapping) -> str | None:
+    """The key ``knobs`` spells the storage of ``kernel``'s one carried state under, or ``None``: the carrying
+    fold's route, or the bare ``STAGE`` of a kernel whose step stages no operand."""
+    tile = next((op for op in kernel.source_chain() if hasattr(op, "state_routes")), None)
+    routes = tile.state_routes if tile is not None else ()
+    if len(routes) != 1:
+        return None
+    return next((key for key in (f"STAGE@{routes[0]}", "STAGE") if key in knobs), None)
+
+
 class Featurizer:
     """The one featurizer every prior reads: a candidate's row is the card's ``H_*`` features, the decided kernel's
     stamps (:func:`stamps`), whether its schedule space holds a warp plan, and the candidate's knobs
@@ -451,6 +461,10 @@ class Featurizer:
         base = {**self.base, **stamps(kernel)}
         if pieces is None and self.warp_eligible(kernel):
             base["S_warp_eligible"] = 1.0
+        if (key := _state_key(kernel, knobs)) is not None and knobs[key] in ("", "d1/smem"):
+            # A carried state in shared memory is no operand fill: the row prices it as its own fact.
+            base["D_state_shared"] = float(knobs[key] == "d1/smem")
+            knobs = {name: value for name, value in knobs.items() if name != key}
         left = [(kernel, None)] if pieces is None else kernel_pieces(pieces)
         of_pieces = piece_features(left)
         if base.get("S_ext_trips"):

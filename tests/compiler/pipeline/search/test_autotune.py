@@ -88,23 +88,24 @@ def test_featureless_candidates_survive_the_bayesian_phase_without_repeats():
     assert tuner.propose(8) == []
 
 
-def test_candidates_cross_every_schedule_row_with_the_carried_state_storage_arms():
-    """A kernel whose carried state fits shared memory offers ``SHARED_CARRY`` after its schedule; the tune ranks
-    both arms of every schedule row, or no tune could ever propose the storage the greedy's tie-break skips."""
+def test_candidates_spell_the_carried_states_storage_on_every_row_that_can_hold_it():
+    """A kernel that carries a state has a ``STAGE`` site for it. Every schedule row offers the state in global
+    memory; the rows a one-dimensional cooperative thread tile runs offer it in shared memory too, and no other."""
     with pinned_knobs({"FAST_MATH": True}):
         _, rows = schedule_space(_carried_state_graph(), Context.from_target((7, 0)))
     arms: dict[tuple, set] = {}
     for row in rows:
-        arms.setdefault(tuple(sorted((k, v) for k, v in row.items() if k != "SHARED_CARRY")), set()).add(row["SHARED_CARRY"])
+        arms.setdefault(tuple(sorted((k, v) for k, v in row.items() if k != "STAGE")), set()).add(row["STAGE"])
     assert arms and all("WORK" in dict(schedule) for schedule in arms)
-    assert all(offered == {0, 1} for offered in arms.values())
-    assert len(rows) == 2 * len(arms)
+    shared = {dict(schedule)["WORK"] for schedule, offered in arms.items() if offered == {"", "d1/smem"}}
+    assert shared and all(work.startswith("t") and "x" not in work for work in shared)
+    assert all(offered == {""} for schedule, offered in arms.items() if dict(schedule)["WORK"] not in shared)
 
 
-def test_a_zero_one_knob_keeps_its_arms_apart_and_the_other_arm_is_proposed_next():
-    """A 0 is not a 1 to the process: the two arms are distinct points, and once the 0 arm measures the 1 arm is a
-    one-part neighbour of the best row, so the next proposal reaches it."""
-    rows = [{"WORK": f"t{t}", "SHARED_CARRY": s} for t in (128, 256, 512) for s in (0, 1)]
+def test_a_two_valued_knob_keeps_its_arms_apart_and_the_other_arm_is_proposed_next():
+    """Global storage is not shared storage to the process: the two arms are distinct points, and once one measures
+    the other is a one-part neighbour of the best row, so the next proposal reaches it."""
+    rows = [{"WORK": f"t{t}", "STAGE": s} for t in (128, 256, 512) for s in ("", "d1/smem")]
     _, points = _encode(rows)
     assert not np.allclose(points[0], points[1])
     tuner = Autotuner(rows, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])

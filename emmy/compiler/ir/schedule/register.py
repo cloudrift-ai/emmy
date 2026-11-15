@@ -151,13 +151,16 @@ class RegisterSchedule:
 @dataclass(frozen=True)
 class _RegisterSite(Site):
     problem: RegisterProblem
-    keys = ("WORK", "TILE", "STAGE")
+
+    @property
+    def keys(self):
+        return ("WORK", "TILE", self.problem.state_key)
 
     @cached_property
     def options(self):
         p = self.problem
         program = p.tile.register_program
-        if program is None or set(p.row) - set(self.keys) or p.row.get("STAGE", "d1/reg") != "d1/reg":
+        if program is None or set(p.row) - set(self.keys) or p.row.get(p.state_key, "d1/reg") != "d1/reg":
             return ()
         if not p.allow_f16 and "TILE" not in p.row:
             return ()
@@ -186,6 +189,9 @@ class RegisterProblem(ScheduleProblem):
     target: Context | None
     row: frozendict[str, str] = field(default_factory=frozendict)
     allow_f16: bool = False
+    #: The key of the carried state's storage: the kernel's one ``STAGE`` site, or the carrying fold's route
+    #: where the step stages operands of its own (:func:`~.classic.classic_state_keys`).
+    state_key: str = "STAGE"
 
     def __post_init__(self):
         object.__setattr__(self, "row", frozendict(self.row))
@@ -218,8 +224,8 @@ class RegisterProblem(ScheduleProblem):
         # A descent narrows every offered tier with the kernel's whole row. A row naming a family
         # this tier does not own (a classic row's REDUCE, its site-scoped keys) describes another
         # tier, so this one offers no leaf for it; only a strict row must be this tier's own.
-        if strict and set(row) - set(_RegisterSite.keys):
-            raise ValueError("register schedule accepts only WORK, TILE and STAGE")
+        if strict and set(row) - set(self.sites[0].keys):
+            raise ValueError("register schedule accepts only WORK, TILE and the carried state's STAGE")
         return replace(self, row=frozendict(row))
 
 
@@ -260,18 +266,18 @@ class RegisterCodec:
         self.context = context
 
     def keys(self):
-        return _RegisterSite.keys
+        return self.context.problem.sites[0].keys
 
     def _encode(self, schedule):
         choice = schedule.kernel
-        return {"WORK": choice.work.spell(), "TILE": choice.tile.spell(), "STAGE": "d1/reg"}
+        return {"WORK": choice.work.spell(), "TILE": choice.tile.spell(), self.context.problem.state_key: "d1/reg"}
 
     def encode(self, schedule):
         return self._encode(self.context.extend(schedule).schedule)
 
     def decode(self, row):
         if set(row) != set(self.keys()):
-            raise ValueError("a register schedule needs exactly WORK, TILE and STAGE")
+            raise ValueError("a register schedule needs exactly WORK, TILE and the carried state's STAGE")
         context = self.context.narrowed(row, strict=True)
         choices = tuple(context.extensions())
         if len(choices) != 1:
@@ -290,7 +296,8 @@ class RegisterMaterialization:
         if workers is not None or not place.is_mapped:
             raise ValueError("register storage needs a mapped, uniform warp inventory")
         problem = RegisterProblem(source, None, allow_f16=True)
-        RegisterContext(problem).extend(schedule)
+        if not problem.accepts(schedule.kernel) or schedule.nodes or schedule.edges:
+            raise ValueError("register schedule is outside this loop's domain")
 
 
 def materialize_register(tile: TileOp, schedule: Schedule, knobs: dict) -> TileOp:

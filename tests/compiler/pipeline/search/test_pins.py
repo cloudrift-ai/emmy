@@ -154,7 +154,7 @@ def test_a_family_pinned_off_is_realized_by_a_kernel_that_never_stamps_it() -> N
 @pytest.mark.parametrize("pin", [{"WORK": "t1024"}, {"TILE": "f4"}, {"REDUCE": "coop"}, {"STAGE": "d2/smem"}])
 def test_a_schedule_pin_no_kernel_stamps_is_reported(pin: dict) -> None:
     """A kernel that took no schedule stamps none of its families: the pin did not realize."""
-    assert "unreproducible pin" in unreproducible_pin_flag(pin, [{"SHARED_CARRY": "0"}])
+    assert "unreproducible pin" in unreproducible_pin_flag(pin, [{"LOOPIFY": "0"}])
 
 
 @pytest.mark.parametrize("original", ("PLACE@place_abc123/map.1/inner", "PLACE@place_abc123", "PLACE@step.1"))

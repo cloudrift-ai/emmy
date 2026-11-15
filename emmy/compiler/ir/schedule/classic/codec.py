@@ -20,6 +20,7 @@ from .schedule import (
     classic_keys,
     classic_node_key,
     classic_stage_key,
+    classic_state_keys,
     node_id_spelling,
 )
 
@@ -29,7 +30,8 @@ class ClassicScheduleCodec:
 
     Kernel families are bare. A node family is bare when it has one applicable site and carries
     its site's route (``@map.1/twist.1/inner``) only when the family is ambiguous. STAGE is one
-    transport decision per consumer node and follows the same rule. Decoding accepts no aliases, missing direct values,
+    transport decision per consumer node and one storage decision per carried state, under the same rule.
+    Decoding accepts no aliases, missing direct values,
     or unknown fields.
     """
 
@@ -65,6 +67,8 @@ class ClassicScheduleCodec:
             if len(stages) != 1:
                 raise ValueError(f"{node_id_spelling(site)}: one STAGE value must cover every operand edge")
             row[classic_stage_key(self.tile_op, edges[0])] = stages.pop().spell()
+        for key in classic_state_keys(self.tile_op):
+            row[key] = schedule.kernel.state.spell()
         return row
 
     def delta(self, before: ClassicScheduleContext, after: ClassicScheduleContext) -> dict[str, str]:
@@ -117,8 +121,12 @@ class ClassicScheduleCodec:
                 else Tile()
             )
             nodes[site] = ProjectionSchedule(tile) if reduce is None else ReductionSchedule(tile, reduce)
+        # One state takes the row's value; several are kept direct, the only storage a kernel offers them.
+        states = {Stage.parse(row[key]) for key in classic_state_keys(self.tile_op)} or {Stage.direct()}
+        if len(states) != 1:
+            raise ValueError("a kernel that carries several states keeps each of them direct")
         return Schedule(
-            KernelSchedule(work, Raster.parse(row["RASTER"])),
+            KernelSchedule(work, Raster.parse(row["RASTER"]), states.pop()),
             nodes,
             {
                 edge: EdgeSchedule(Stage.parse(row[classic_stage_key(self.tile_op, edge)]))

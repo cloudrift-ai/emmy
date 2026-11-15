@@ -460,6 +460,17 @@ class TileOp(Op):
         the register schedule as a loop inside each CTA."""
         return any(site.node.carries for site in self.sites)
 
+    @cached_property
+    def state_routes(self) -> tuple[str, ...]:
+        """The route of every fold whose carried state this kernel keeps between steps: the carrying folds of the
+        kernel itself, or, for its serial form (:attr:`Placement.serial`), of the carrying kernel that form was
+        lifted from. A state is a value its fold reads again at every step, so each route is a ``STAGE`` site."""
+        carrying = self
+        if not self.carries:
+            ancestors = (op for op in self.source_chain() if isinstance(op, TileOp) and op.carries)
+            carrying = next(ancestors, None) if self.place.serial else None
+        return tuple(site.path for site in carrying.sites if site.node.carries) if carrying is not None else ()
+
     def _own_axes(self) -> None:
         """The kernel owns its axis table, COMPLETE by construction: the free axes' extents are the
         placement's and join the table here; every reduce axis the term binds and every store

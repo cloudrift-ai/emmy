@@ -6,7 +6,7 @@ what they are and how each one is spelled."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
@@ -55,14 +55,17 @@ def _is_edge_site(edge: EdgeSite) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class KernelSchedule:
-    """Kernel-scoped choices."""
+    """Kernel-scoped choices: the worker inventory, the raster, and where the state the kernel carries between
+    steps is kept — direct (a buffer in global memory, one launch per step) or shared memory (``d1/smem``: the
+    steps run inside one launch)."""
 
     work: Work
     raster: Raster
+    state: Stage = field(default_factory=Stage.direct)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.work, Work) or not isinstance(self.raster, Raster):
-            raise TypeError("classic kernel choices must be Work and Raster values")
+        if not isinstance(self.work, Work) or not isinstance(self.raster, Raster) or not isinstance(self.state, Stage):
+            raise TypeError("classic kernel choices must be Work, Raster and Stage values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +124,8 @@ def classic_node_key(sites, family: str, site: NodeId) -> str:
 
 def classic_keys(tile_op) -> tuple[str, ...]:
     """The row keys a kernel's classic schedule spells, in canonical encoding order: the kernel's ``WORK`` and
-    ``RASTER``, one ``TILE`` and one ``REDUCE`` key per site of the family, one ``STAGE`` key per staged consumer."""
+    ``RASTER``, one ``TILE`` and one ``REDUCE`` key per site of the family, one ``STAGE`` key per staged consumer and
+    one per carried state."""
     stage_consumers = tuple(dict.fromkeys(edge[0] for edge in tile_op.stage_edges))
     return (
         "WORK",
@@ -129,6 +133,7 @@ def classic_keys(tile_op) -> tuple[str, ...]:
         *(classic_node_key(tile_op, "TILE", site) for site in tile_op.family_sites["TILE"]),
         *(classic_node_key(tile_op, "REDUCE", site) for site in tile_op.family_sites["REDUCE"]),
         *(classic_stage_key(tile_op, next(edge for edge in tile_op.stage_edges if edge[0] == site)) for site in stage_consumers),
+        *classic_state_keys(tile_op),
     )
 
 
@@ -137,7 +142,25 @@ def classic_stage_key(sites, edge: EdgeSite) -> str:
     if edge not in sites.stage_edges:
         raise ValueError(f"{edge_site_spelling(edge)} is not a STAGE edge")
     consumers = tuple(dict.fromkeys(candidate[0] for candidate in sites.stage_edges))
-    return "STAGE" if len(consumers) == 1 else f"STAGE@{sites.sites[edge[0]].path}"
+    return "STAGE" if len(consumers) == 1 and not sites.state_routes else f"STAGE@{sites.sites[edge[0]].path}"
+
+
+def classic_state_keys(sites) -> tuple[str, ...]:
+    """The canonical key of each carried state's storage, by the rule every ``STAGE`` site follows: bare when it
+    is the kernel's one ``STAGE`` site, else the route of the fold that carries it."""
+    routes = sites.state_routes
+    if len(routes) == 1 and not sites.stage_edges:
+        return ("STAGE",)
+    keys = tuple(f"STAGE@{route}" for route in routes)
+    if taken := {f"STAGE@{sites.sites[edge[0]].path}" for edge in sites.stage_edges} & set(keys):
+        raise ValueError(f"a carried state and a staged consumer share the key {sorted(taken)[0]}")
+    return keys
+
+
+def holds_state(work: Work, raster: Raster) -> bool:
+    """Whether a kernel under this inventory can keep its carried state in shared memory: one CTA owns a state
+    whole and its threads stripe every cell copy, which the one-dimensional cooperative thread tile is."""
+    return work.kind == "thread" and work.units[1] == 1 and work.units[0] > 1 and raster.is_direct
 
 
 def binds_root(choice: ProjectionSchedule | ReductionSchedule) -> bool:

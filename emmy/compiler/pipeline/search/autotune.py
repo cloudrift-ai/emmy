@@ -30,14 +30,12 @@ _PART = re.compile(r"^([a-z_]*?)(\d+)(?:x(\d+))?$")
 
 def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
     """The one scheduled kernel of ``graph`` and every complete row its forks offer, under the kernel set the greedy
-    compile takes: each schedule row crossed with every combination of the knobs the kernel lowering decides afterwards
-    (``SHARED_CARRY``; :func:`~.ranking.later_arms`, the crossing the dataset's pools take too). A program with
+    compile takes. A program with
     several scheduled kernels is refused: a bare pin reaches them all."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.greedy import _schedule_fork, greedy_decide  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.ranking import later_arms  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
 
     greedy = greedy_decide(db=db)
@@ -52,7 +50,7 @@ def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
     if len(pools) != 1:
         raise ValueError(f"--tune tunes a program with one scheduled kernel; this one has {len(pools)}")
     ((op, rows),) = pools.values()
-    return op, [{**row, **arm} for row in rows for arm in later_arms()]
+    return op, rows
 
 
 def _parts(row: dict) -> dict:

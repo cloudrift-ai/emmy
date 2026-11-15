@@ -68,6 +68,8 @@ from .schedule import (
     ReductionSchedule,
     classic_node_key,
     classic_stage_key,
+    classic_state_keys,
+    holds_state,
     node_id_spelling,
     output_sweep_works,
     packed_works,
@@ -154,6 +156,10 @@ class _LocalSupport:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "edges", frozendict(self.edges))
+
+
+#: Every non-direct storage a carried state has a spelling for.
+_STATE_STAGES = (Stage(transport="smem"), Stage(transport="reg"))
 
 
 def _producers(tile_op) -> frozenset[NodeId]:
@@ -687,18 +693,41 @@ class ClassicNodeSite(Site[ClassicSchedule]):
 
 @dataclass(frozen=True, eq=False)
 class ClassicKernelSite(Site[ClassicSchedule]):
-    """The kernel-level factor: the worker inventory and raster, spelled bare (``WORK``,
-    ``RASTER``). Its catalog is what the node sites' choices imply, so it is the last site."""
+    """The kernel-level factor: the worker inventory and raster, spelled bare (``WORK``, ``RASTER``), and the
+    storage of the state the kernel carries between steps (``STAGE`` at the carrying fold's route). Its catalog
+    is what the node sites' choices imply, so it is the last site."""
 
     problem: ClassicProblem
 
-    @property
+    @cached_property
     def keys(self) -> tuple[str, ...]:
-        return ("WORK", "RASTER")
+        return ("WORK", "RASTER", *classic_state_keys(self.problem.tile))
 
     @cached_property
     def kernels(self) -> tuple[KernelSchedule, ...]:
-        return tuple(KernelSchedule(work, raster) for work in self._works() for raster in self._rasters())
+        return tuple(
+            KernelSchedule(work, raster, state)
+            for work in self._works()
+            for raster in self._rasters()
+            for state in self._states()
+            if state.is_direct or holds_state(work, raster)
+        )
+
+    def _states(self) -> tuple[Stage, ...]:
+        """Where the carried state may be kept: direct, and the storage its ownership proof admits."""
+        keys = classic_state_keys(self.problem.tile)
+        catalog = (Stage.direct(), *self.problem.state_stages) if len(keys) == 1 else (Stage.direct(),)
+        if not keys:
+            return catalog
+        named = self.problem.row.get(keys[0])
+        if named is None and keys[0] != "STAGE":
+            named = self.problem.bare_pins.get("STAGE")
+        spelled = {stage.spell(): stage for stage in catalog}
+        if named in spelled:
+            return (spelled[named],)
+        # A value no state takes (an operand transport published to every kernel) names another site.
+        addressed = named in {stage.spell() for stage in _STATE_STAGES}
+        return () if addressed and self.problem.strict(keys[0]) else catalog
 
     def _inventories(self) -> Iterator[Work]:
         for site in self.problem.node_sites:
@@ -800,6 +829,9 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: such an operand, so the stage catalog keeps the transports that need one off it
     #: (:func:`~.refusals._stage_candidates`).
     paged: Mapping[str, tuple[int, int]] = field(default_factory=frozendict)
+    #: The storage, beside direct, the kernel's one carried state may take — what the proof that one CTA owns
+    #: each state whole admits. Empty for a kernel that carries no state, or whose state the proof leaves global.
+    state_stages: tuple[Stage, ...] = ()
     #: Row keys whose values must be accepted exactly. Strict replay adds only the keys it supplies,
     #: leaving unrelated inherited pins under their original published-row reading.
     _strict_row_keys: frozenset[str] = frozenset()
@@ -900,7 +932,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
         spells the family at several sites. Such a pin names ONE site — some site carries the
         value and every other is OFF — so each site offers the value beside OFF, and
         :meth:`unrealized_bare_pin` asks the completed schedule which site carried it."""
-        keys = [key for site in self.node_sites for key in site.keys]
+        keys = [*(key for site in self.node_sites for key in site.keys), *classic_state_keys(self.tile)]
         return frozendict(
             {
                 family: value
@@ -949,7 +981,10 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
                 for site in tile.family_sites["REDUCE"]
                 if isinstance(node := schedule.nodes[site], ReductionSchedule)
             }
-        return {classic_stage_key(tile, edge): schedule.edges[edge].stage.spell() for edge in tile.stage_edges}
+        return {
+            **{classic_stage_key(tile, edge): schedule.edges[edge].stage.spell() for edge in tile.stage_edges},
+            **dict.fromkeys(classic_state_keys(tile), schedule.kernel.state.spell()),
+        }
 
     @cached_property
     def warp_eligible(self) -> bool:

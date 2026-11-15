@@ -30,7 +30,7 @@
  ],
  "rows": [
   {"name":"gdn1-dense-linear@fp8.k_conv1d_linear_mean_reduce_c9e236.m1","kernel":0,"pins":{"FAST_MATH":false},"knobs":{}},
-  {"name":"gdn16-dense-linear@fp8.k_cumsum_reduce.m16","kernel":1,"pins":{"FAST_MATH":false},"knobs":{"WORK":"","REDUCE":"","LOOPIFY":"0","RASTER":"","SHARED_CARRY":"0"},"measurements":{"emmy_us":7.359146140515804,"reference_us":7.35762994736433,"reference_backend":"same-input-greedy","tried":1},"latency":{"NVIDIA Tesla V100 SXM3 32GB":{"emmy_us":1.6749714268371463,"tcompile_us":1.6676571752343858,"eager_us":4.059428402355739,"kernels":[1]}}},
+  {"name":"gdn16-dense-linear@fp8.k_cumsum_reduce.m16","kernel":1,"pins":{"FAST_MATH":false},"knobs":{"WORK":"","REDUCE":"","LOOPIFY":"0","RASTER":""},"measurements":{"emmy_us":7.359146140515804,"reference_us":7.35762994736433,"reference_backend":"same-input-greedy","tried":1},"latency":{"NVIDIA Tesla V100 SXM3 32GB":{"emmy_us":1.6749714268371463,"tcompile_us":1.6676571752343858,"eager_us":4.059428402355739,"kernels":[1]}}},
   {"name":"gdn16-dense-linear@fp8.k_conv1d_linear_mean_reduce_742591.m16","kernel":2,"pins":{"FAST_MATH":false},"knobs":{}},
   {"name":"gdn16-dense-linear@fp8.k_linear_matmul_mean_reduce_dd26a9.m16","kernel":3,"pins":{"FAST_MATH":false},"knobs":{}},
   {"name":"gdn16-dense-linear@fp8.k_matmul_6a53bf.m16","kernel":4,"pins":{"FAST_MATH":false},"knobs":{}},
@@ -43,8 +43,8 @@
   {"name":"pre-sym-dense-full@fp8.k_linear_mean_reduce_8426fe.dynamic","kernel":11,"bindings":{"num_tokens":512},"pins":{"FAST_MATH":false},"knobs":{}},
   {"name":"pre16-dense-full@fp8.k_linear_mean_reduce_31ac7e.m16","kernel":12,"pins":{"FAST_MATH":false},"knobs":{}},
   {"name":"pre64-dense-full@fp8.k_linear_mean_reduce_0e9867.m64","kernel":13,"pins":{"FAST_MATH":false},"knobs":{}},
-  {"name":"gdn16-dense-linear@fp8.k_slice_unsqueeze_reduce_f670fb.m16.62ea5c524b43","kernel":5,"pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false},"knobs":{"WORK":"t32","REDUCE":"coop-t","LOOPIFY":"0","RASTER":"","SHARED_CARRY":"0"}},
-  {"name":"gdn16-dense-linear@fp8.k_matmul_6a53bf.m16.897bb9e9d704","kernel":4,"pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false},"knobs":{"REDUCE@map.2/inner":"","REDUCE@map.1/reduce":"","REDUCE@map.3/inner":"","WORK":"t16x8","TILE":"f1x4","STAGE":"d1/smem","LOOPIFY":"0","RASTER":"","SHARED_CARRY":"0"}},
-  {"name":"gdn16-dense-linear@fp8.k_cumsum_reduce.m16.60648be4171e","kernel":1,"pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false},"knobs":{"WORK":"t16x8","REDUCE":"coop","LOOPIFY":"0","RASTER":"","SHARED_CARRY":"0"},"measurements":{"emmy_us":1.4731779228895903,"reference_us":1.6895999433472753,"reference_backend":"same-input-greedy","tried":10}},
-  {"name":"gdn16-dense-linear@fp8.k_slice_unsqueeze_reduce_f670fb.m16.62ea5c524b43","kernel":5,"pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false},"knobs":{"WORK":"t256","REDUCE":"coop-t/v2","LOOPIFY":"0","RASTER":"","SHARED_CARRY":"1"}}
+  {"name":"gdn16-dense-linear@fp8.k_slice_unsqueeze_reduce_f670fb.m16.62ea5c524b43","kernel":5,"pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false},"knobs":{"WORK":"t32","REDUCE":"coop-t","LOOPIFY":"0","RASTER":""}},
+  {"name":"gdn16-dense-linear@fp8.k_matmul_6a53bf.m16.897bb9e9d704","kernel":4,"pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false},"knobs":{"REDUCE@map.2/inner":"","REDUCE@map.1/reduce":"","REDUCE@map.3/inner":"","WORK":"t16x8","TILE":"f1x4","STAGE":"d1/smem","LOOPIFY":"0","RASTER":""}},
+  {"name":"gdn16-dense-linear@fp8.k_cumsum_reduce.m16.60648be4171e","kernel":1,"pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false},"knobs":{"WORK":"t16x8","REDUCE":"coop","LOOPIFY":"0","RASTER":""},"measurements":{"emmy_us":1.4731779228895903,"reference_us":1.6895999433472753,"reference_backend":"same-input-greedy","tried":10}},
+  {"name":"gdn16-dense-linear@fp8.k_slice_unsqueeze_reduce_f670fb.m16.62ea5c524b43","kernel":5,"pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false},"knobs":{"WORK":"t256","REDUCE":"coop-t/v2","LOOPIFY":"0","RASTER":"","STAGE":"d1/smem"}}
  ]}

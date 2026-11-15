@@ -1,4 +1,5 @@
-"""Keep an independently owned carried state in two padded shared buffers across ordered steps."""
+"""Realize a carried state the schedule keeps in shared memory (``STAGE=d1/smem`` at the carrying fold): two
+padded shared buffers across the ordered steps, which run inside one launch."""
 
 from __future__ import annotations
 
@@ -14,10 +15,8 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import BinaryExpression, Builtin, Literal, SimplifyCtx, TernaryExpression, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
 from emmy.compiler.ir.stmt import (
-    Accum,
     Assign,
     Body,
-    Carry,
     Cond,
     Let,
     Load,
@@ -29,102 +28,14 @@ from emmy.compiler.ir.stmt import (
     dtype_promote,
     free_names,
 )
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.types import value_dtypes
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import DeferredFork
-from emmy.compiler.pipeline.passes.tile._fromloop import seed_index, stored_states
-from emmy.compiler.pipeline.search.space import SHARED_CARRY
+from emmy.compiler.pipeline.passes.tile._fromloop import carried_program, conjuncts, seed_index, stored_states
 
 PATTERN = [Pattern("root", KernelOp)]
 _resolve = import_module("emmy.compiler.pipeline.passes.lowering.kernel.045_merge_select_loads")._resolve
 _materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
-
-
-def _conjuncts(expression):
-    return (
-        _conjuncts(expression.left) | _conjuncts(expression.right)
-        if isinstance(expression, BinaryExpression) and expression.op == "&&"
-        else frozenset((expression,))
-    )
-
-
-def _owned(body, carry):
-    """The leading cells every live state read addresses in its own independent batch.
-
-    Coordinate selects can clamp a discarded branch to another batch. Each use contributes
-    its predicate separately; a coordinate is owned only when every consuming path proves it.
-    """
-    demand = {}
-
-    def need(name, predicates):
-        demand.setdefault(name, set()).update(predicates)
-
-    for stmt in reversed(tuple(body.iter())):
-        wanted = demand.get(getattr(stmt, "name", ""), {frozenset()})
-        if isinstance(stmt, Select):
-            remaining = wanted
-            for i, branch in enumerate(stmt.branches):
-                if i == len(stmt.branches) - 1:
-                    need(branch.value, remaining)
-                else:
-                    need(branch.value, {path | _conjuncts(branch.select) for path in remaining})
-                    remaining = {path | {BinaryExpression("==", branch.select, Literal(0, "int"))} for path in remaining}
-        elif isinstance(stmt, (Assign, Accum)):
-            for name in stmt.deps():
-                if name != stmt.name:
-                    need(name, wanted)
-        elif isinstance(stmt, (Carry, Write)):
-            need(stmt.value, {frozenset()})
-    reads = tuple(stmt for stmt in body.iter() if isinstance(stmt, Pre))
-    owned = []
-    for dim, cell in enumerate(carry.index):
-        if not isinstance(cell, Var):
-            continue
-        for read in reads:
-            if read.carrier != carry.name:
-                return ()
-            coordinate = read.index[dim]
-            for path in demand.get(read.name, {frozenset()}):
-                value = coordinate
-                while isinstance(value, TernaryExpression) and _conjuncts(value.cond) <= path:
-                    value = value.if_true
-                if value != cell:
-                    return tuple(owned)
-        owned.append(cell.name)
-    return tuple(owned)
-
-
-def _program(op):
-    """Recover the carried loop whose materialization produced this serial kernel."""
-    source = op.source
-    while source is not None:
-        body = getattr(source, "loop_body", None)
-        if body is not None:
-            loops = [s for s in body.iter() if isinstance(s, Loop) and s.carries]
-            if loops:
-                if len(loops) != 1:
-                    return None
-                loop = loops[0]
-                carries = tuple(s for s in loop.body.iter() if isinstance(s, Carry))
-                if len(carries) != 1 or any(
-                    not isinstance(s, (Loop, Let, Load, Pre, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
-                ):
-                    return None
-                carry = carries[0]
-                if any(s.atomic for s in loop.body.iter() if isinstance(s, Write)):
-                    return None
-                # A store keeps every step, at the step and the cell, or the cell alone: the state the loop ends with.
-                cells = tuple(e for e in carry.index if isinstance(e, Var))
-                if any(
-                    tuple(e for e, n in zip(s.index, source.outputs[s.output].shape, strict=True) if n != 1)
-                    not in ((Var(loop.axis.name), *cells), cells)
-                    for s in loop.body.iter()
-                    if isinstance(s, Write)
-                ):
-                    return None
-                return loop, carry, _owned(loop.body, carry)
-        source = source.source
-    return None
 
 
 def _resident(op, program, retained=frozenset()):
@@ -215,7 +126,7 @@ def _resident(op, program, retained=frozenset()):
     for axis in reversed(grid):
         start, end = Literal(0, "int"), axis.extent_expression()
         if predicate is not None:
-            for condition in _conjuncts(predicate):
+            for condition in conjuncts(predicate):
                 if not isinstance(condition, BinaryExpression):
                     continue
                 if condition.op == "<" and condition.left == Var(axis.name) and condition.right.free_vars() <= {*batch, loop.axis.name}:
@@ -439,7 +350,7 @@ def _bounds(predicate, name, free):
     """``(low, high)`` with ``low <= name < high`` wherever ``predicate`` holds, each over ``free`` names alone
     or ``None`` where no conjunct bounds that side."""
     low = high = None
-    for condition in _conjuncts(predicate):
+    for condition in conjuncts(predicate):
         if not isinstance(condition, BinaryExpression):
             continue
         if condition.op == "<" and condition.left == Var(name) and condition.right.free_vars() <= free:
@@ -451,23 +362,17 @@ def _bounds(predicate, name, free):
 
 def rewrite(match: Match, root: Node, ctx=None):
     op = root.op
-    if not op.serial or SHARED_CARRY.name in op.knobs:
-        raise RuleSkipped("shared carry already decided or no serial state")
-    program = _program(op)
+    scheduled = next((s for s in op.source_chain() if isinstance(s, TileOp) and s.schedule is not None), None)
+    state = getattr(getattr(scheduled.schedule, "kernel", None), "state", None) if scheduled is not None else None
+    if not op.serial or state is None or state.is_direct:
+        raise RuleSkipped("the schedule keeps this kernel's state in global memory, or it carries none")
+    program = carried_program(op)
     retained = frozenset(t.name for t in root.outputs if t.name in match.graph.outputs or match.graph.buffer_users(t.name))
-    if program is None or _resident(op, program, retained) is None:
-        raise RuleSkipped("this kernel has no CTA-owned state that fits shared memory")
-    variants = []
-    for enabled in SHARED_CARRY.narrow((0, 1)):
-        selected = _resident(op, program, retained) if enabled else op
-        if selected.smem_bytes() > ctx.max_dynamic_smem:
-            continue
-        selected = replace(selected, source=op, knobs={**op.knobs, SHARED_CARRY.name: enabled})
-        variants.append(
-            DeferredFork(lambda selected=selected: _materialize._drop_private_ports(match, root, selected, "shared"), knobs=selected.knobs)
-            if enabled
-            else selected
-        )
-    if not variants:
-        raise RuleSkipped("the requested carried-state storage exceeds shared memory")
-    return variants
+    selected = _resident(op, program, retained) if program is not None else None
+    # The schedule offers shared storage on what it can prove before lowering; what only the lowered kernel
+    # shows (its stores, the room beside the schedule's own scratch) declines the row here, and the pick moves on.
+    if selected is None:
+        raise RuleSkipped("this kernel has no CTA-owned state the row's shared storage can hold", reject=True)
+    if selected.smem_bytes() > ctx.max_dynamic_smem:
+        raise RuleSkipped("the carried state and the schedule's scratch exceed shared memory", reject=True)
+    return _materialize._drop_private_ports(match, root, replace(selected, source=op, knobs=op.knobs), "shared")

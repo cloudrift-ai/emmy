@@ -925,6 +925,93 @@ def seed_index(cell: tuple[Expression, ...], shape: tuple) -> tuple[Expression, 
     return tuple(Literal(0, "int") if dim in units else next(rest) for dim in range(len(shape)))
 
 
+def conjuncts(expression):
+    return (
+        conjuncts(expression.left) | conjuncts(expression.right)
+        if isinstance(expression, BinaryExpression) and expression.op == "&&"
+        else frozenset((expression,))
+    )
+
+
+def owned_cells(body, carry):
+    """The leading cells every live state read addresses in its own independent batch.
+
+    Coordinate selects can clamp a discarded branch to another batch. Each use contributes
+    its predicate separately; a coordinate is owned only when every consuming path proves it.
+    """
+    demand = {}
+
+    def need(name, predicates):
+        demand.setdefault(name, set()).update(predicates)
+
+    for stmt in reversed(tuple(body.iter())):
+        wanted = demand.get(getattr(stmt, "name", ""), {frozenset()})
+        if isinstance(stmt, Select):
+            remaining = wanted
+            for i, branch in enumerate(stmt.branches):
+                if i == len(stmt.branches) - 1:
+                    need(branch.value, remaining)
+                else:
+                    need(branch.value, {path | conjuncts(branch.select) for path in remaining})
+                    remaining = {path | {BinaryExpression("==", branch.select, Literal(0, "int"))} for path in remaining}
+        elif isinstance(stmt, (Assign, Accum)):
+            for name in stmt.deps():
+                if name != stmt.name:
+                    need(name, wanted)
+        elif isinstance(stmt, (Carry, Write)):
+            need(stmt.value, {frozenset()})
+    reads = tuple(stmt for stmt in body.iter() if isinstance(stmt, Pre))
+    owned = []
+    for dim, cell in enumerate(carry.index):
+        if not isinstance(cell, Var):
+            continue
+        for read in reads:
+            if read.carrier != carry.name:
+                return ()
+            coordinate = read.index[dim]
+            for path in demand.get(read.name, {frozenset()}):
+                value = coordinate
+                while isinstance(value, TernaryExpression) and conjuncts(value.cond) <= path:
+                    value = value.if_true
+                if value != cell:
+                    return tuple(owned)
+        owned.append(cell.name)
+    return tuple(owned)
+
+
+def carried_program(op):
+    """The one loop ``op`` carries a state across, as ``(loop, carry, owned cells)``, read off the Loop IR of the
+    first op of its rewrite chain that holds one — or ``None`` where the loop is none shared storage can hold: several
+    states, an atomic store, a per-step output off the state's own cells."""
+    for source in op.source_chain():
+        body = getattr(source, "loop_body", None)
+        if body is not None:
+            loops = [s for s in body.iter() if isinstance(s, Loop) and s.carries]
+            if loops:
+                if len(loops) != 1:
+                    return None
+                loop = loops[0]
+                carries = tuple(s for s in loop.body.iter() if isinstance(s, Carry))
+                if len(carries) != 1 or any(
+                    not isinstance(s, (Loop, Let, Load, Pre, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
+                ):
+                    return None
+                carry = carries[0]
+                if any(s.atomic for s in loop.body.iter() if isinstance(s, Write)):
+                    return None
+                # A store keeps every step, at the step and the cell, or the cell alone: the state the loop ends with.
+                cells = tuple(e for e in carry.index if isinstance(e, Var))
+                if any(
+                    tuple(e for e, n in zip(s.index, source.outputs[s.output].shape, strict=True) if n != 1)
+                    not in ((Var(loop.axis.name), *cells), cells)
+                    for s in loop.body.iter()
+                    if isinstance(s, Write)
+                ):
+                    return None
+                return loop, carry, owned_cells(loop.body, carry)
+    return None
+
+
 def lift_serial(op: LoopOp, *, prefix: str) -> tuple[TileOp, dict[str, tuple]]:
     """A kernel that carries a state lifted as a serial kernel: its carried states become state
     buffers (:func:`states_as_buffers`, named under ``prefix``) and the loop that carries them the
@@ -943,15 +1030,19 @@ def serial_form(tile: TileOp, prefix: str) -> TileOp:
     formed, _ = lift_serial(LoopOp(body=tile.loop_body, inputs=tile.inputs), prefix=prefix)
     # The kernel's own knobs and its BOUND I/O: a standalone loop op seeds placeholder tensors, and
     # the schedule reads operand dtypes, output shapes and the ``with_io`` identity off these maps.
-    return replace(formed, knobs=tile.knobs, inputs=tile.inputs, outputs=tile.outputs)
+    # Its source is the carrying kernel: the serial form reads the routes of the states it keeps off it.
+    return replace(formed, knobs=tile.knobs, inputs=tile.inputs, outputs=tile.outputs, source=tile)
 
 
 __all__ = [
+    "carried_program",
     "carrying_loops",
+    "conjuncts",
     "fold_from_loop",
     "lift_body",
     "lift_loop_op",
     "lift_serial",
+    "owned_cells",
     "seed_index",
     "serial_form",
     "states_as_buffers",
