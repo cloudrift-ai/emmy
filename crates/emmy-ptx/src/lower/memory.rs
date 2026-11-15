@@ -461,7 +461,7 @@ impl Lowerer {
             }
         }
         for (name, reg) in load.names.iter().zip(regs) {
-            if elem.is_byte() {
+            if elem.is_byte() || elem.ty.is_byte_float() {
                 ctx.ranges.insert(*name, Interval::new(0, 0xff));
             }
             if again {
@@ -491,26 +491,47 @@ impl Lowerer {
             )));
         }
         let flat = self.flat_index(load.input, &load.index)?;
-        let int = |value: i64| Expression::int(value);
-        let binary = Expression::binary;
+        // The index is `2 * row + place` wherever the table is indexed by a byte: the row is that byte, and the
+        // place picks its low code or its high one by a constant shift.
+        let row = match pair_row(&flat) {
+            Some((row, first)) => {
+                let row = self.int(&row, ctx)?;
+                let op = self.as_int(&row, VTy::U32);
+                Some((self.register(&Val { op, ty: VTy::U32 }), first))
+            }
+            None => None,
+        };
         for (k, name) in load.names.iter().enumerate() {
-            let at = binary(Operation::Add, flat.clone(), int(k as i64));
-            let byte = binary(Operation::RightShift, at.clone(), int(1));
-            let shift = binary(
-                Operation::LeftShift,
-                binary(Operation::BitwiseAnd, at, int(1)),
-                int(2),
-            );
-            let code = binary(
-                Operation::BitwiseAnd,
-                binary(Operation::RightShift, byte, shift),
-                int(15),
-            );
-            let code = self.int(&code, ctx)?;
-            let op = self.as_int(&code, VTy::U32);
-            let code = self.register(&Val { op, ty: VTy::U32 });
-            let value = self.e2m1_value(code);
-            let value = self.converted(Val::reg(value, VTy::F32), ty);
+            let code = match row {
+                Some((row, first)) => {
+                    let at = first + k as i64;
+                    let byte = match at >> 1 {
+                        0 => row,
+                        ahead => self.word_of(Opcode::Add, Ty::S32, row, ahead),
+                    };
+                    match at & 1 {
+                        0 => byte,
+                        _ => self.word_of(Opcode::Shr, Ty::U32, byte, 4),
+                    }
+                }
+                None => {
+                    let int = |value: i64| Expression::int(value);
+                    let binary = Expression::binary;
+                    let at = binary(Operation::Add, flat.clone(), int(k as i64));
+                    let byte = binary(Operation::RightShift, at.clone(), int(1));
+                    let nibble = binary(Operation::BitwiseAnd, at, int(1));
+                    let shift = binary(Operation::LeftShift, nibble, int(2));
+                    let code = self.int(&binary(Operation::RightShift, byte, shift), ctx)?;
+                    let op = self.as_int(&code, VTy::U32);
+                    self.register(&Val { op, ty: VTy::U32 })
+                }
+            };
+            let value = if ty == VTy::F16 {
+                self.e2m1_half(code).into()
+            } else {
+                let value = self.e2m1_value(code);
+                self.converted(Val::reg(value, VTy::F32), ty)
+            };
             self.bind(*name, Val { op: value, ty });
         }
         Ok(())
@@ -885,5 +906,19 @@ impl Lowerer {
         let val = self.named(Val::reg(now, ty));
         self.bind(pre.name, val);
         Ok(())
+    }
+}
+
+/// A flat index into the pair table of the shape `2 * row + place`, as its row and its place.
+fn pair_row(flat: &Expression) -> Option<(Expression, i64)> {
+    let (even, place) = match flat.operation() {
+        Some((Operation::Add, [even, place])) => (even, place.int_literal().filter(|at| *at >= 0)?),
+        _ => (flat, 0),
+    };
+    match even.operation() {
+        Some((Operation::Multiply, [two, row] | [row, two])) if two.int_literal() == Some(2) => {
+            Some((row.clone(), place))
+        }
+        _ => None,
     }
 }

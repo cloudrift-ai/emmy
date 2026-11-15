@@ -17,7 +17,7 @@ use std::sync::Arc;
 use emmy_ir::body::Body;
 use emmy_ir::dtype::DType;
 use emmy_ir::elementwise::Operation;
-use emmy_ir::expr::{Expression, SimplifyCtx};
+use emmy_ir::expr::{Expr, Expression, SimplifyCtx};
 use emmy_ir::normalize::{inner_ctx, launch_ctx};
 use emmy_ir::protocol::shared::carried_cells;
 use emmy_ir::statement::{
@@ -956,8 +956,15 @@ impl Lowerer {
                 .ok_or_else(|| self.refuse("a value carries no dtype"))?,
         };
         let val = self.typed(value, ty, ctx)?;
+        // The byte of an 8-bit float or of a pair of codes, cast to an integer, keeps the byte's range.
+        let range = match &**value {
+            Expr::Cast(_, inner) => inner
+                .range(ctx)
+                .filter(|range| range.lo >= 0 && range.hi <= 0xff),
+            _ => value.range(ctx),
+        };
         if ty.is_int()
-            && let Some(range) = value.range(ctx)
+            && let Some(range) = range
         {
             ctx.ranges.insert(name, range);
         }

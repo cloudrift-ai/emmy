@@ -112,7 +112,9 @@ assembles without complaint and can give a right answer at one optimization leve
   the kernel lowering (`118_unroll_by_size`); a loop no unroll pass took stays unmarked, and ptxas decides its copies.
 - **Integers.** An expression is computed at the narrowest of `i32`, `u32` and `i64` that holds its range. A sum, a
   product or a bitwise operation runs at the type its own range needs; a division, a shift right, a minimum or a
-  comparison at the first type that holds both operands unchanged.
+  comparison at the first type that holds both operands unchanged. A loaded byte, an 8-bit float's or a pair of
+  codes' included, is known to be 0 to 255, and an index wrapped from below zero (`i < 0 ? i + n : i`) whose value is
+  never below zero is that value.
 - **Division.** Integer `/` and `%` floor. By a power of two they are a shift and a mask; by another constant under a
   32-bit dividend, a multiply-high and a shift; else the divide instruction, unsigned where neither side can be
   negative (a grid value, a size, and their sums and products are not), and a 64-bit one branches to the 32-bit
@@ -252,7 +254,9 @@ needs, and refuses a target that lacks it with a message naming both. The cards 
 A paged buffer is bound as a table of its pages (`Param.page`). One page that holds the whole buffer is read from the
 table once and is the buffer's base; otherwise every access reads its page's address from the table and addresses the
 remainder inside that page, one element at a time. The e2m1 pair table an NVFP4 weight decodes through is named by the
-interface (`Param.pair_table`), and a load of it computes its value from the index and reads nothing.
+interface (`Param.pair_table`), and a load of it computes its value from the index and reads nothing: the row is the
+weight's byte, a code is that byte as it stands or shifted by four, and a half is the code's bits times one exact half
+multiply, which the card runs two at a time. An f32 is the same in f32.
 
 ## Tests
 
