@@ -137,7 +137,7 @@ warp holds 4 x 8 instructions of 16 x 8, and the K step is two atoms of 16.
 | Attention, `tcgen05` | FlashAttention-4 | Gap |
 | Attention, decode | Flash-Decoding, FlashInfer | Better than FlashAttention-2 |
 | Attention over a paged cache | FlashInfer | Gap: async copies of a paged operand |
-| Recurrence with a matrix state | FlashInfer Gated DeltaNet | Gap |
+| Recurrence with a matrix state | FlashInfer Gated DeltaNet | Gap: blocked inverse, one launch; the rest is evidence |
 | Recurrence, one channel per thread | Mamba, RWKV | Reproduces RWKV; no evidence for Mamba |
 | Small triangular inverse | FlashInfer `CollectiveInverse` | Gap |
 
@@ -660,13 +660,26 @@ store(out, S)
 `WORK=w<M>x1`, an f16 atom with `f1x<N>` covering the state's columns, and `STAGE=d1/reg`, which keeps the state in
 registers across all steps of one launch. Any other recurrence is one launch per step over a state buffer.
 
-**Verdict: gap.** The recurrence of a 27B-class layer (48 heads, head size 128), RTX 5090, 256 rows: FlashInfer 38
-(80 the way vLLM calls it); Emmy partly tuned 2,338; eager PyTorch 309; `torch.compile` 216. Three parts are missing.
-The reference alone, one sequence, by CUDA events: 63 at 64 rows, 87 at 256, 145 at 512, 157 at 1,024.
-The chunk's work is nine kernels where the reference fuses one launch per head. The solve is traced as a 63-step
-forward substitution in f32, not a blocked inverse on tensor cores. And warp groups with different roles inside one
-CTA have no spelling beyond the load warp. At 64 rows the program does not compile: the cut pass fails on one body
-whose normal form does not settle, a compiler bug.
+**Verdict: gap, and most of it is evidence.** The recurrence of a 27B-class layer (48 heads, head size 128), RTX 5090,
+256 rows: FlashInfer 38 to 87 depending on how the call is timed (80 the way vLLM calls it); Emmy partly tuned 2,310;
+eager PyTorch 309; `torch.compile` 216.
+
+The state update is not the gap. The chunk loop is one serial launch that takes the register schedule above, and it
+runs 25 for four chunks of 64 and 35 for sixteen chunks of 16. The time is in the kernels around it: the output
+product 1,388, the setup of the triangular system 605, the product of its inverse with the values 142, and the
+substitution 140. Each is a fused region whose cut was never picked. With no evidence in scope the pick keeps a
+product nested inside another product's operand, on a thread tile.
+
+Pinned in one session: the same rule with every pointwise scale moved onto the small 64 x 64 matrices, so the queries,
+keys and values stay plain bf16 operands, five cuts and the shared carry on the substitution run 268, correct against
+eager. The products take `mma_m16n8k16_bf16_f32` tiles and cost 5 to 18 each; the substitution is 140 of the 268.
+Without the inverse the rest runs 119.
+
+What is left to match the reference: the solve is a 63-step forward substitution in f32, not a blocked inverse on
+tensor cores, and the reference's one launch per head has no spelling, since warp groups with different roles inside
+one CTA do not exist beyond the load warp. Two faults block the shorter routes. An inverse written as repeated
+squaring is rolled into a serial kernel whose compile takes 25 GB at a chunk of 64. And a bare `PLACE=cut` on this
+program gives wrong results, where each cut pinned alone is correct.
 
 ## Recurrence, one channel per thread
 

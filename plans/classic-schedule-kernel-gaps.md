@@ -127,6 +127,39 @@ Steps:
 - **R6. The decode step.** The reference streams the state in tiles through a two-stage pipeline. Check whether the
   width-3 step needs more than R3 plus an existing `STAGE` row before adding anything.
 
+### What the first steps found (2026-11-15)
+
+Dev-box RTX 5090, 48 heads x 128, 256 rows, one session. FlashInfer's whole kernel is 87 µs on this shape.
+
+- **R0 done.** The 64-row program compiles. The fault was in the value numbering: it told `a - b` from `-b + a`,
+  which the term order picks between. A sum is now one node over its terms and offset.
+- **R1 answered: the boundaries are picks.** Every seam fused gives 9 kernels, every seam cut 17. No refusal.
+- **The state update is already fast.** The chunk loop is one serial launch on the register schedule: 25 µs for
+  four chunks of 64, 35 µs for sixteen chunks of 16. R3 as written (a carried state in shared memory) is not needed
+  for the 3x gate.
+- **The time is in four products around it** (1,388, 605, 142 and 140 µs), each a fused region whose cut is never
+  picked. A cut pinned on a slow kernel by its name is correct alone, and its pieces take bf16 tensor-core tiles.
+- **A respelled rule plus five cuts runs 268 µs**, correct against eager. The respelling moves every pointwise scale
+  onto the small 64 x 64 matrices, so q, k and v stay plain bf16 operands; it matches Transformers' rule in PyTorch
+  (state within 9e-8). The substitution is 140 of the 268. Without the inverse the rest is 119.
+- **Chunk 16 did not pay as traced.** The stacked start states become a 16-way select copy (169 µs), and reading
+  the output inside the chunk loop leaves fifteen separate products in one kernel.
+
+Faults found on the way, each a compiler bug to raise:
+
+- An inverse written as repeated squaring is rolled into a serial kernel; at a chunk of 64 its compile takes 25 GB.
+- A bare `PLACE=cut` on the respelled program gives wrong results. Each cut pinned alone is correct.
+- A cut pinned on a serial kernel does nothing and is not reported.
+
+What follows, in order:
+
+1. Move the respelling into the trace wrapper. It re-keys every Gated DeltaNet program at every width, so it
+   lands with a record run on each card that holds such a golden; the dev box covers the RTX 5090.
+2. Record the cut rows for the 64-, 256- and three-row programs in the recipe golden. This is what turns 2,310 into
+   268 for a compile that pins nothing.
+3. The substitution, 140 µs: a tuned row first (it ran 31 µs in blocks of 16 alone), then R2's blocked inverse.
+4. R5 only for what is left against 87 µs.
+
 ## Order
 
 - **No card:** the FlashInfer baseline in the bench; R0 and R1; the trace of the recurrence at a chunk of 16; R3's
