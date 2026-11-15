@@ -24,6 +24,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.trace.torch import trace_module
+from emmy.compiler.wire import kernel_bindings, kernel_tile
 from emmy.serving.native.prepare import WINDOW, attend_module
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
@@ -105,7 +106,8 @@ def test_the_rows_groups_of_a_key_value_head_are_the_fold_s_rows(rows, cache) ->
 @pytest.mark.parametrize("rows", [1, 3])
 def test_a_key_split_combines_the_slices_partials_not_the_window(rows) -> None:
     """Split across the window, a partial per key-value head and slice reads its slice of the head's cache once for
-    every row's group; the finalize reads the partials alone and never the window, which is no extent of it."""
+    every row's group; the finalize reads the partials alone and never the window, which is no extent of it, so its
+    rows record no size: an export prices the split's pieces at each range's window projected onto their own sizes."""
     _, graph = _attention(rows)
     with pinned_knobs(_pins(torch.bfloat16, rows, SLICES)):
         lowered, kernel_ir = compile_with_kernels(graph, ctx=CTX)
@@ -118,6 +120,7 @@ def test_a_key_split_combines_the_slices_partials_not_the_window(rows) -> None:
     assert np.prod([extent for axis in partial.op.grid for extent in axis]) == KV * SLICES
     assert list(finalize.inputs) == [partial.id]
     assert WINDOW not in finalize.op.runtime_args and WINDOW not in text(kernel_ir[finalize.id])
+    assert kernel_bindings(kernel_tile(finalize.op)) == {} and WINDOW in kernel_bindings(kernel_tile(partial.op))
 
 
 @requires_cuda
