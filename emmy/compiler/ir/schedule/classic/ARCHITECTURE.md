@@ -225,12 +225,12 @@ thread t: store_vector(out + t*V, exp(row_smem[t*V ..] - m) / d)
 **Row.** The statistics are reduce sites and the map is fused, so the row is the row reduction's:
 `WORK=t512 REDUCE=coop`.
 
-**Verdict: reproduces, within 1.1 times the reference.** RTX 5090: `softmax.k8192` is recorded at 8.1
-(`WORK=t512 REDUCE=coop`) against `torch.compile` 7.3, and `rms_norm.k8192` at 8.5 (`WORK=t512 REDUCE=coop/r4`)
-against 7.6. Quack's softmax ran 9.0 and FlashInfer's RMSNorm 11.0 on the same shape, so the compiled reference is
-the one to beat here. No faster row was found. In one run on the softmax, a vector run per lane was slower (`coop/v4` 10.1,
-`coop/v8` 9.3, against 8.2 for the recorded row), and so were 256 threads (11.2) and one warp per row (`WORK=t32x4`,
-10.8), which belongs to narrow rows.
+**Verdict: reproduces, within 1.1 times the reference.** RTX 5090: `softmax.k8192` is recorded at 8.1 (`WORK=t512
+REDUCE=coop`) against `torch.compile` 7.3, and `rms_norm.k8192` at 8.5 (`WORK=t512 REDUCE=coop/r4`) against 7.6.
+Quack's softmax ran 9.0 and FlashInfer's RMSNorm 11.0 on the same shape, so the compiled reference is the one to beat
+here. No faster row was found. In one run on the softmax, a vector run per lane was slower (`coop/v4` 10.1, `coop/v8`
+9.3, against 8.2 for the recorded row), and so were 256 threads (11.2) and one warp per row (`WORK=t32x4`, 10.8),
+which belongs to narrow rows.
 
 **Gap: the row in shared memory.** A `STAGE` pin on a cooperative reduce does not realize, so every statistic and the
 final map read the row from global memory again. This is the likely remainder on both programs. A reduction across a
@@ -279,10 +279,10 @@ for digit from most significant:                # one launch; passes separated b
 
 **Row.** None. The index of a maximum compiles as two maximum reductions in one kernel, which covers greedy decoding.
 
-**Verdict: gap.** The times to reach are in the table of reference kernels: 23 for the top 50 of 8 rows of
-151,936, 39 for a top-p sample. Selection needs a histogram (a scatter-add, which has no lowering), a loop whose trip count depends
-on the data, and a barrier across CTAs inside one launch. None is a schedule choice; the first is tracer and lowering
-work, the other two would be new kernel forms.
+**Verdict: gap.** The times to reach are in the table of reference kernels: 23 for the top 50 of 8 rows of 151,936, 39
+for a top-p sample. Selection needs a histogram (a scatter-add, which has no lowering), a loop whose trip count
+depends on the data, and a barrier across CTAs inside one launch. None is a schedule choice; the first is tracer and
+lowering work, the other two would be new kernel forms.
 
 ## Gather, scatter, cache append
 
