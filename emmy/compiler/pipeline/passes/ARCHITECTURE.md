@@ -816,7 +816,10 @@ distinction, not a size or speed threshold. A reduction whose extent grows with 
 widest in the rolled body and folds its identity past the step's own bound — the mask the tracer itself spells a
 partial reduction with. Only then does one kernel replace the chain. It carries the state (`Carry`,
 `ir/ARCHITECTURE.md`) and stores what each step kept —
-the state and any other buffer read outside that step — with the step as its leading axis. Ordinary fusion then
+the state and any other buffer read outside that step — with the step as its leading axis. A state nothing reads but
+the next step (a triangular inverse's row substitutions, a Sinkhorn iteration) is stored for no one until the last:
+its store has the state's shape and no step axis, each step stores over the last one's, and the one reader reads the
+whole of it. Ordinary fusion then
 inlines one slice of those stores per replaced buffer into its reader. A chain whose states alternate two
 bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
 alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion

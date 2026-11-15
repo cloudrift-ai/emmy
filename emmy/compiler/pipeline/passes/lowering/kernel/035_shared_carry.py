@@ -113,9 +113,11 @@ def _program(op):
                 carry = carries[0]
                 if any(s.atomic for s in loop.body.iter() if isinstance(s, Write)):
                     return None
+                # A store keeps every step, at the step and the cell, or the cell alone: the state the loop ends with.
+                cells = tuple(e for e in carry.index if isinstance(e, Var))
                 if any(
                     tuple(e for e, n in zip(s.index, source.outputs[s.output].shape, strict=True) if n != 1)
-                    != (Var(loop.axis.name), *(e for e in carry.index if isinstance(e, Var)))
+                    not in ((Var(loop.axis.name), *cells), cells)
                     for s in loop.body.iter()
                     if isinstance(s, Write)
                 ):
@@ -201,6 +203,21 @@ def _resident(op, program, retained=frozenset()):
         copying, step, predicate = snapshot
     else:
         copying, predicate = (), None
+    # A store that does not read the step is stored over by the next one: only the last step's is kept.
+    final = {s.output for s in snapshots if Var(loop.axis.name) not in s.index}
+    last = BinaryExpression("==", Var(loop.axis.name), Literal(loop.axis.extent.as_static() - 1, "int"))
+
+    def at_the_last_step(body):
+        out = []
+        for stmt in body:
+            if isinstance(stmt, Write) and stmt.output in final:
+                stmt = Cond(last, Body((stmt,)), Body())
+            elif stmt.nested():
+                stmt = stmt.with_bodies(tuple(at_the_last_step(child) for child in stmt.nested()))
+            out.append(stmt)
+        return Body(out)
+
+    copying, step = tuple(at_the_last_step(Body(copying))), at_the_last_step(step)
     step = Body((*step, Sync()))
     for axis in reversed(grid):
         start, end = Literal(0, "int"), axis.extent_expression()
@@ -396,7 +413,9 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
     stores = [Write(shared, (Literal(1, "int") - parity, *indices), ("_carry_old",), value_dtype=dtype)]
     coordinates = (*(Var(name) for name in batch), *indices)
     for store in outputs:
-        index = (Var(loop.axis.name), *seed_index(coordinates, op.outputs[store.output].shape[1:]))
+        stored = op.outputs[store.output].shape
+        every = Var(loop.axis.name) in store.index
+        index = (Var(loop.axis.name), *seed_index(coordinates, stored[1:])) if every else seed_index(coordinates, stored)
         stores.append(Write(store.output, index, ("_carry_old",), value_dtype=dtype))
     copying = StridedLoop(Axis("_carry_copy", prod(shape)), Builtin("thread_idx.x"), Literal(threads, "int"), (load, *stores))
     return (copying, Sync()), changed, selected.branches[0].select
