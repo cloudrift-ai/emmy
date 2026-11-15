@@ -400,13 +400,14 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
 
 def test_sliced_experts_run_a_decode_step_through_the_decode_bucket_slot_program():
     """On experts sliced across ranks a decode step up to the bucket rides the fixed slots, and every row's picks go
-    through ONE launch of the slot program built at the bucket's width (``slot_rows``), each row against its own picks,
-    instead of one launch per row. The rows past the step's keep an earlier step's picks and inputs and no row reads
+    through ONE launch of a slot program (``slot_rows``), each row against its own picks, instead of one launch per row:
+    the narrowest of the slot widths that holds the step. The rows past the step's keep an earlier step's picks and inputs and no row reads
     their partials: steps of several widths, back to back, each match the routed oracle."""
     import torch
 
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
     from emmy.serving.gen_runner import EmmyGenRunner
+    from emmy.serving.release import slot_widths
 
     make_model, kwargs = helpers.RUNNERS["olmoe.l2.b16"]
     model = make_model()
@@ -417,7 +418,7 @@ def test_sliced_experts_run_a_decode_step_through_the_decode_bucket_slot_program
     bucket, k = kwargs["decode_bucket"], model.config.num_experts_per_tok
     assert runner.moe_slot_width == bucket
     assert runner._slot_rows_partials.shape == (bucket, k, model.config.hidden_size)
-    assert all(m["slot_rows"] is not None for m in runner._moe)
+    assert all(tuple(m["slot_rows"]) == slot_widths(bucket) for m in runner._moe)
 
     torch.manual_seed(1)
     for layer, rows in ((0, bucket), (0, 3), (1, 5), (1, 2)):
