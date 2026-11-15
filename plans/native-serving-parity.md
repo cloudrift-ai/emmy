@@ -516,6 +516,39 @@ What the session changes for the milestones:
    (they need the per-window records the 64-row ones have), one `post` kernel whose pick hangs, and then the
    strict export and the first token at 256 rows.
 
+   Recorded and timed on a rented RTX 5090 on 2026-11-15 (the 27B DISCOVERY's section of that date has the table).
+   The last three targets are in the golden, a native pack exports at 256 rows under strict evidence from the golden
+   alone, and the strict serving audit passes at both widths (67 of 67 twins; 80 of 80 with the 256-row chunk). The
+   first token, 64-row pack against 256-row pack in one session: 0.147 -> 0.068 s at 256 tokens, 4.46 -> 2.44 s at
+   7,680, 172 -> 113 s at 197,632; TPOT and memory at rest do not move (8.6-8.7 ms, 11.5 ms at 197,632; 28.9 GiB
+   against 28.6). The 197,632-token first token is inside the bar (136 s); the 7,680-token one is not (1.51 s, and
+   this milestone's 1.28 s). GSM8K is 0.675 / 0.695 at 256 rows against 0.690 / 0.735 for the 64-row pack of the same
+   build (standard error 0.033): strict inside one standard error, flexible 1.2 below. No recipe uses the width yet.
+
+   What the session found:
+
+   - **The `post` kernel that hung does not hang on main.** Its gate and up projection piece takes 191 us under the
+     64-row row's schedule and 150 us tuned (`f4x4/k4`, `smem-async`); the root is 184 us.
+   - **Attention at 256 rows was a search problem too.** As the priors pick it the 256-row fold takes 3.8 ms at a
+     4,096 window and 117 ms at 131,072. Under the 64-row rows' tiles it takes 207 us (a 2-way key split) and 4.96 ms
+     (16-way): 2.6x and 3.1x the 64-row cost for four times the rows. The split's fold costs about 4.8 ms at 131,072
+     whatever the split (8- to 64-way), so a wider split buys nothing there.
+   - **Timings taken while other benches run are wrong.** The same kernel under the same schedule read 9.4 ms beside
+     parallel streams and 4.8 ms alone. Tunes can run in parallel; every record is made alone.
+   - **Three faults on main, fixed in the same PR.** No native pack exported since the PTX compiler replaced nvcc:
+     token selection carries an i64 through a warp shuffle and through an f32 slab, and the compiler had a rule for
+     neither. And a record of one named twin matched its family on the rows' pins as written, so a seed row that
+     spells only `FAST_MATH` found no narrower twin among rows that spell every gate; the 256-row drafter programs were
+     recorded with no layout settled, as kernels an export never builds, and are recorded again.
+   - **The plugin's any-width `pre` program is recorded,** the one twin the strict audit failed on when the session
+     began.
+
+   Where an 81 ms chunk goes, from the golden's rows: the 48 Gated DeltaNet layers about 51 ms (1.06 ms each), the 64
+   MLPs about 25 ms (0.39 ms each), attention and its projections about 8 ms at a 4,096 window. The 7,680-token cell
+   needs about 45 ms a chunk, so what is left of this milestone is its second piece, the row cost of the Gated
+   DeltaNet layers, and the MLP at 256 rows (its gate and up projection is 3.2x the 64-row kernel for four times the
+   rows).
+
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
 

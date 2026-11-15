@@ -173,11 +173,13 @@ Each flushes to zero when the kernel's decision says (`tanh.approx` has no such 
 
 - **The combine program.** `WarpShuffle` and `TreeHalve` carry a program of statements over their state names; it goes
   through the same statement rules.
-- **Shuffles.** A shuffle moves 32 bits. A butterfly halves its stride; a prefix doubles it and steps the state under a
-  predicate guard, so the warp does not split.
+- **Shuffles.** A shuffle moves 32 bits, so a 64-bit integer state crosses as its two halves. A butterfly halves its
+  stride; a prefix doubles it and steps the state under a predicate guard, so the warp does not split.
 - **The tree reduction.** Where each thread has a slot of its own, a halving step is a condition over the low half and
   a barrier. Where the lanes of a warp share a slot, the block's first lanes take one slot each and fold them by a
-  butterfly under the mask of exactly those lanes, so no slot is read by one lane and written by another.
+  butterfly under the mask of exactly those lanes, so no slot is read by one lane and written by another. A state
+  held at another type than its slab is converted at the read: an integer state takes a float slab's value truncated
+  toward zero, as a C assignment does.
 - **What is decided of a block's threads.** An integer or bool register whose value is an expression over the thread
   index alone is evaluated for every thread of a block. From that the lowering knows which threads may reach a
   statement, which have left the kernel, and whether a loop runs a trip count that differs between threads.
