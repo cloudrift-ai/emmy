@@ -94,7 +94,7 @@ fn names_tuple<'py>(py: Python<'py>, names: &[Name]) -> PyResult<Bound<'py, PyTu
     str_tuple(py, names)
 }
 
-fn sigma_from_py(value: &Bound<'_, PyAny>) -> PyResult<HashMap<Name, Expression>> {
+pub(crate) fn sigma_from_py(value: &Bound<'_, PyAny>) -> PyResult<HashMap<Name, Expression>> {
     if value.cast::<PyDict>().is_ok() {
         return mapping_from_py(value);
     }

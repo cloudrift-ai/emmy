@@ -120,7 +120,7 @@ def _rewrite(self: Statement, rename_ssa, sigma: Sigma = Sigma.IDENTITY, axis_fn
         bound = [axis for stmt in Body((self,)).iter() for axis in stmt.bound_axes()]
         axes = [(axis, axis_fn(axis)) for axis in bound]
     rewritten = self._rewrite(names, mapping, axes)
-    if isinstance(sigma, Sigma) and type(sigma) is not Sigma:
+    if isinstance(sigma, Sigma) and not sigma.lands_only:
         rewritten = _apply_sigma(rewritten, sigma)
     return rewritten
 

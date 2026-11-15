@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use emmy_ir::elementwise::ElementwiseOp;
 use emmy_ir::expr::Expr;
@@ -37,11 +37,9 @@ impl Seed {
             Seed::Buffer(_) => None,
         }
     }
-}
 
-impl PartialEq for Seed {
-    /// Python's equality: a number equals the same number of the other kind, a buffer name only itself.
-    fn eq(&self, other: &Seed) -> bool {
+    /// Whether two seeds hold one value, whatever kind spells the number.
+    pub fn same_value(&self, other: &Seed) -> bool {
         match (self, other) {
             (Seed::Buffer(a), Seed::Buffer(b)) => a == b,
             (Seed::Buffer(_), _) | (_, Seed::Buffer(_)) => false,
@@ -50,24 +48,38 @@ impl PartialEq for Seed {
     }
 }
 
-impl Hash for Seed {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Seed::Buffer(name) => name.hash(state),
-            _ => {
-                let value = self.number().unwrap_or_default();
-                (if value == 0.0 { 0.0f64 } else { value })
-                    .to_bits()
-                    .hash(state);
-            }
+impl PartialEq for Seed {
+    /// Exact: a number equals the same number of the same kind, bit for bit. Two terms that differ in a seed's kind
+    /// lower to different literals, so they are two terms.
+    fn eq(&self, other: &Seed) -> bool {
+        match (self, other) {
+            (Seed::Buffer(a), Seed::Buffer(b)) => a == b,
+            (Seed::Int(a), Seed::Int(b)) => a == b,
+            (Seed::Float(a), Seed::Float(b)) => a.to_bits() == b.to_bits(),
+            _ => false,
         }
     }
 }
 
-/// One reduce term. Immutable and shared: a clone is the same term, and sharing (one term reached through several
-/// operand positions) is meaningful: the placement reads one value where it sees one term.
+impl Eq for Seed {}
+
+impl Hash for Seed {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Seed::Buffer(name) => name.hash(state),
+            Seed::Int(value) => value.hash(state),
+            Seed::Float(value) => value.to_bits().hash(state),
+        }
+    }
+}
+
+/// One reduce term. Immutable, shared and INTERNED: two terms with the same stored parts are one term, so equality is
+/// identity, and one term reached through several operand positions is one value, which is what the placement reads.
 #[derive(Clone)]
 pub struct Fold(Arc<Data>);
+
+/// Every live term by the hash of its stored parts. A term leaves when its last handle drops.
+static TERMS: Mutex<Option<HashMap<u64, Vec<Weak<Data>>>>> = Mutex::new(None);
 
 /// One operand-bound lift param: the param, the operand it binds (an index into `operands`) and which of that
 /// operand's exposed components.
@@ -86,7 +98,7 @@ pub struct Data {
     base: Option<Lambda>,
     twist: Option<Twist>,
     observe: Option<Lambda>,
-    hash: OnceLock<u64>,
+    hash: u64,
     exposes: OnceLock<Vec<Name>>,
     bindings: OnceLock<Vec<Binding>>,
     applied: OnceLock<Lambda>,
@@ -95,7 +107,8 @@ pub struct Data {
     free_axes: OnceLock<HashSet<Name>>,
     canonical: OnceLock<Fold>,
     readings: crate::readings::Memos,
-    normal: std::sync::Mutex<Vec<Vec<Name>>>,
+    normal: Mutex<Vec<Vec<Name>>>,
+    lowered: Mutex<Vec<(crate::lower::Request, emmy_ir::body::Body)>>,
 }
 
 /// The stored parts of a term, what [`Fold::new`] forms one from.
@@ -112,18 +125,35 @@ pub struct Parts {
 
 impl PartialEq for Fold {
     fn eq(&self, other: &Fold) -> bool {
-        if Arc::ptr_eq(&self.0, &other.0) {
-            return true;
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Data {
+    /// Whether two terms store the same parts; the operands are interned already, so they compare by identity.
+    fn same_parts(&self, other: &Data) -> bool {
+        self.hash == other.hash
+            && self.operands == other.operands
+            && self.lift == other.lift
+            && self.init == other.init
+            && self.cells == other.cells
+            && self.base == other.base
+            && self.twist == other.twist
+            && self.observe == other.observe
+    }
+}
+
+impl Drop for Data {
+    fn drop(&mut self) {
+        let mut terms = emmy_ir::locked(&TERMS);
+        if let Some(table) = terms.as_mut()
+            && let Some(bucket) = table.get_mut(&self.hash)
+        {
+            bucket.retain(|held| held.strong_count() > 0);
+            if bucket.is_empty() {
+                table.remove(&self.hash);
+            }
         }
-        let (a, b) = (&*self.0, &*other.0);
-        self.structural_hash() == other.structural_hash()
-            && a.lift == b.lift
-            && a.init == b.init
-            && a.cells == b.cells
-            && a.base == b.base
-            && a.twist == b.twist
-            && a.observe == b.observe
-            && a.operands == b.operands
     }
 }
 
@@ -163,318 +193,341 @@ fn binary_assign(stmt: &Statement) -> bool {
     matches!(stmt, Statement::Assign(assign) if matches!(&*assign.value, Expr::Apply(_, args) if args.len() == 2))
 }
 
-impl Fold {
-    /// The term over `parts`, formed: a shadowed operand of a zero-axis term leaves with its params, the positional
-    /// binding and the monoid arity are checked, a carried state's carrier reads index every cell axis, a bilinear term
-    /// takes its A operand first, and an observer binds the iteration var then the carried state.
-    pub fn new(parts: Parts) -> Result<Fold> {
-        let Parts {
-            mut operands,
-            lift,
-            init,
-            cells,
-            base,
-            twist,
-            observe,
-        } = parts;
-        let mut lift = lift.ok_or_else(|| Error::Type("a Fold takes a lift".into()))?;
-        let Some(base) = base else {
-            if !init.is_empty() || twist.is_some() {
-                return Err(Error::Value(
-                    "a zero-axis Fold carries no monoid to seed or twist".into(),
-                ));
-            }
-            if observe.is_some() {
-                return Err(Error::Value(
-                    "a zero-axis Fold carries no per-step state to observe".into(),
-                ));
-            }
-            // An operand another operand is built OVER and passes through whole is that operand's shadow: the maximal
-            // one stays, its params go with it, and the body reads the pass-through by the same name.
-            let mut slots: Vec<Vec<Name>> = Vec::new();
-            let mut cursor = 0;
-            for edge in &operands {
-                let width = edge.exposes().len();
-                slots.push(
-                    lift.params()
-                        .get(cursor..cursor + width)
-                        .unwrap_or(&[])
-                        .to_vec(),
-                );
-                cursor += width;
-            }
-            let shadowed: HashSet<usize> = (0..operands.len())
-                .filter(|&index| {
-                    let edge = &operands[index];
-                    slots[index] == edge.exposes()
-                        && operands.iter().enumerate().any(|(position, other)| {
-                            !other.ptr_eq(edge)
-                                && other.0.operands.iter().any(|held| held.ptr_eq(edge))
-                                && {
-                                    let mine: HashSet<&Name> = edge.exposes().iter().collect();
-                                    let theirs: HashSet<&Name> = other.exposes().iter().collect();
-                                    mine.len() < theirs.len() && mine.is_subset(&theirs)
-                                }
-                                && slots[position] == other.exposes()
-                        })
+/// Whether a componentwise ⊕ is the action `next` on every component: what a carried state folds with.
+fn is_action(ops: &[ElementwiseOp]) -> bool {
+    !ops.is_empty() && ops.iter().all(|op| op.name() == "next")
+}
+
+/// The lift params one operand each, in order: the positional binding past `lead` params.
+fn operand_slots<'a>(operands: &[Fold], params: &'a [Name]) -> Vec<&'a [Name]> {
+    let mut cursor = 0;
+    operands
+        .iter()
+        .map(|edge| {
+            let width = edge.exposes().len();
+            let slot = params.get(cursor..cursor + width).unwrap_or(&[]);
+            cursor += width;
+            slot
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The canonical rewrites formation makes: the same term whichever spelling it was built from.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// A zero-axis term without its SHADOWED operands. An operand another operand is built OVER and passes through
+/// whole is that operand's shadow: the maximal one stays, its params go with it, and the body reads the pass-through
+/// by the same name.
+fn without_shadowed(operands: Vec<Fold>, lift: Lambda) -> Result<(Vec<Fold>, Lambda)> {
+    let slots = operand_slots(&operands, lift.params());
+    let whole = |index: usize| slots[index] == operands[index].exposes();
+    let shadowed: Vec<bool> = operands
+        .iter()
+        .enumerate()
+        .map(|(index, edge)| {
+            whole(index)
+                && operands.iter().enumerate().any(|(position, other)| {
+                    other != edge
+                        && other.operands().contains(edge)
+                        && other.exposes().len() > edge.exposes().len()
+                        && edge.exposes().iter().all(|name| other.exposes().contains(name))
+                        && whole(position)
                 })
-                .collect();
-            if !shadowed.is_empty() {
-                let mut kept = Vec::new();
-                let mut params = Vec::new();
-                let mut cursor = 0;
-                for (index, edge) in operands.iter().enumerate() {
-                    let width = edge.exposes().len();
-                    if !shadowed.contains(&index) {
-                        kept.push(edge.clone());
-                        params.extend_from_slice(&lift.params()[cursor..cursor + width]);
-                    }
-                    cursor += width;
-                }
-                params.extend_from_slice(&lift.params()[cursor..]);
-                operands = kept;
-                lift = Lambda::new(params, lift.body(), lift.results().to_vec())?;
-            }
-            let arity: usize = operands.iter().map(|edge| edge.exposes().len()).sum();
-            if lift.params().len() < arity {
-                return Err(Error::Value(format!(
-                    "lift binds {} params for {arity} operand result components",
-                    lift.params().len()
-                )));
-            }
-            return Ok(Fold::formed(Parts {
-                operands,
-                lift: Some(lift),
-                init,
-                cells,
-                base: None,
-                twist,
-                observe,
-            }));
-        };
-        let n = init.len();
-        if base.params().len() != 2 * n || base.results().len() != n || base.components().is_none()
-        {
-            return Err(Error::Value(format!(
-                "Fold base must be the componentwise ⊕ at arity {n}: params={:?} results={:?}",
-                base.params(),
-                base.results()
-            )));
+        })
+        .collect();
+    if !shadowed.contains(&true) {
+        return Ok((operands, lift));
+    }
+    let bound: usize = slots.iter().map(|slot| slot.len()).sum();
+    let params: Vec<Name> = slots
+        .iter()
+        .zip(&shadowed)
+        .filter(|(_, shadowed)| !**shadowed)
+        .flat_map(|(slot, _)| slot.iter().copied())
+        .chain(lift.params()[bound..].iter().copied())
+        .collect();
+    let lift = Lambda::new(params, lift.body(), lift.results().to_vec())?;
+    let kept = operands
+        .into_iter()
+        .zip(shadowed)
+        .filter(|(_, shadowed)| !shadowed)
+        .map(|(edge, _)| edge)
+        .collect();
+    Ok((kept, lift))
+}
+
+/// Whether a slab's last index coordinate reads `axis`.
+fn k_last(edge: &Fold, axis: Name) -> Result<bool> {
+    let Some(load) = edge.as_slab() else {
+        return Ok(false);
+    };
+    let Statement::Load(load) = &**load else {
+        return Ok(false);
+    };
+    let last = load
+        .index
+        .last()
+        .ok_or_else(|| Error::Value("a slab with no index has no last coordinate".into()))?;
+    Ok(last.free_vars().contains(&axis))
+}
+
+/// The operand of a bilinear lift that is A, the one every product multiplies, or `None` when the lift names none.
+/// With several channels A is the argument the products share; with one product the layout decides (A reads
+/// `[…, k]`).
+fn a_operand(operands: &[Fold], lift: &Lambda) -> Result<Option<usize>> {
+    let axis = lift.params()[0];
+    let by_name: HashMap<Name, usize> = bindings_of(operands, lift.params(), true)
+        .iter()
+        .map(|b| (b.param, b.operand))
+        .collect();
+    let arguments: Vec<Vec<Name>> = lift
+        .body()
+        .stmts()
+        .iter()
+        .map(|stmt| operand_names(stmt))
+        .collect();
+    if arguments.len() > 1 {
+        let shared: Vec<usize> = arguments[0]
+            .iter()
+            .filter(|name| arguments[1..].iter().all(|args| args.contains(name)))
+            .filter_map(|name| by_name.get(name).copied())
+            .collect();
+        return Ok((shared.len() == 1).then(|| shared[0]));
+    }
+    let pair: Vec<usize> = arguments[0]
+        .iter()
+        .filter_map(|name| by_name.get(name).copied())
+        .collect();
+    if pair.len() != 2 {
+        return Ok(None);
+    }
+    let loaded: Vec<usize> = pair
+        .iter()
+        .copied()
+        .filter(|&e| operands[e].as_slab().is_some())
+        .collect();
+    // One slab, and it does not read k last: the computed operand is A.
+    if loaded.len() == 1 && !k_last(&operands[loaded[0]], axis)? {
+        return Ok(pair
+            .iter()
+            .copied()
+            .find(|&e| operands[e] != operands[loaded[0]]));
+    }
+    if loaded.len() != 2 {
+        return Ok(None);
+    }
+    let mut candidates = Vec::new();
+    for &e in &pair {
+        if k_last(&operands[e], axis)? {
+            candidates.push(e);
         }
-        if lift.params().is_empty() {
+    }
+    // Both slabs read k last: A is the one whose own row is named first.
+    let (a, b) = (operands[pair[0]].free_axes(), operands[pair[1]].free_axes());
+    let row = |e: &usize| -> String {
+        operands[*e]
+            .free_axes()
+            .iter()
+            .filter(|name| a.contains(*name) != b.contains(*name))
+            .map(|name| name.trim_start_matches('_').to_string())
+            .min()
+            .unwrap_or_default()
+    };
+    candidates.sort_by_key(row);
+    Ok(candidates.first().copied())
+}
+
+/// A bilinear term with its A operand FIRST: the canonical orientation. A term whose lift is not all binary
+/// operations over two operands or more is left as it stands.
+fn a_first(operands: Vec<Fold>, lift: Lambda) -> Result<(Vec<Fold>, Lambda)> {
+    let bilinear = operands.len() >= 2
+        && !lift.body().is_empty()
+        && lift.body().stmts().iter().all(|stmt| binary_assign(stmt));
+    let a = match bilinear {
+        true => a_operand(&operands, &lift)?,
+        false => None,
+    };
+    let Some(a) = a.filter(|a| operands[*a] != operands[0]) else {
+        return Ok((operands, lift));
+    };
+    let a_term = operands[a].clone();
+    let reordered: Vec<Fold> = std::iter::once(a_term.clone())
+        .chain(operands.iter().filter(|edge| **edge != a_term).cloned())
+        .collect();
+    let bindings = bindings_of(&operands, lift.params(), true);
+    let arity: usize = operands.iter().map(|edge| edge.exposes().len()).sum();
+    let params: Vec<Name> = std::iter::once(lift.params()[0])
+        .chain(reordered.iter().flat_map(|edge| {
+            bindings
+                .iter()
+                .filter(|b| operands[b.operand] == *edge)
+                .map(|b| b.param)
+        }))
+        .chain(lift.params()[1 + arity..].iter().copied())
+        .collect();
+    let lift = Lambda::new(params, lift.body(), lift.results().to_vec())?;
+    Ok((reordered, lift))
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The formation checks: what a term must hold. They refuse; they never repair.
+// ---------------------------------------------------------------------------------------------------------------
+
+fn check_zero_axis(parts: &Parts, lift: &Lambda) -> Result<()> {
+    if !parts.init.is_empty() || parts.twist.is_some() {
+        return Err(Error::Value(
+            "a zero-axis Fold carries no monoid to seed or twist".into(),
+        ));
+    }
+    if parts.observe.is_some() {
+        return Err(Error::Value(
+            "a zero-axis Fold carries no per-step state to observe".into(),
+        ));
+    }
+    let arity: usize = parts.operands.iter().map(|edge| edge.exposes().len()).sum();
+    if lift.params().len() < arity {
+        return Err(Error::Value(format!(
+            "lift binds {} params for {arity} operand result components",
+            lift.params().len()
+        )));
+    }
+    Ok(())
+}
+
+fn check_reduce(parts: &Parts, lift: &Lambda, base: &Lambda) -> Result<()> {
+    let n = parts.init.len();
+    let Some(ops) = base
+        .components()
+        .filter(|_| base.params().len() == 2 * n && base.results().len() == n)
+    else {
+        return Err(Error::Value(format!(
+            "Fold base must be the componentwise ⊕ at arity {n}: params={:?} results={:?}",
+            base.params(),
+            base.results()
+        )));
+    };
+    if lift.params().is_empty() {
+        return Err(Error::Value(
+            "a reducing lift binds its iteration var first".into(),
+        ));
+    }
+    let arity: usize = parts.operands.iter().map(|edge| edge.exposes().len()).sum();
+    if lift.params().len() < 1 + arity {
+        return Err(Error::Value(format!(
+            "lift binds {} params after the axis for {arity} operand result components",
+            lift.params().len() - 1
+        )));
+    }
+    if !is_action(&ops) {
+        if lift.results().len() != n {
+            return Err(Error::Value("one lift result per monoid component".into()));
+        }
+        if !parts.cells.is_empty() {
             return Err(Error::Value(
-                "a reducing lift binds its iteration var first".into(),
+                "cell axes belong to a carried state: a fold whose ⊕ is `next`".into(),
             ));
         }
-        let arity: usize = operands.iter().map(|edge| edge.exposes().len()).sum();
-        if lift.params().len() < 1 + arity {
+        return Ok(());
+    }
+    if lift.results().len() < n {
+        return Err(Error::Value(
+            "a carried state's lift defines every state's next value first".into(),
+        ));
+    }
+    if parts.twist.is_some() || parts.observe.is_some() {
+        return Err(Error::Value(
+            "a carried state streams its step's own results; it is neither twisted nor observed".into(),
+        ));
+    }
+    // Every read of the carried state, anywhere under it, indexes every cell axis.
+    let mut pending: Vec<Fold> = parts.operands.clone();
+    let mut seen: HashSet<usize> = HashSet::new();
+    while let Some(edge) = pending.pop() {
+        if !seen.insert(edge.address()) {
+            continue;
+        }
+        if let Some(read) = edge.as_carrier_read()
+            && let Statement::Pre(pre) = &**read
+            && base.results().contains(&pre.carrier)
+            && pre.index.len() != parts.cells.len()
+        {
             return Err(Error::Value(format!(
-                "lift binds {} params after the axis for {arity} operand result components",
-                lift.params().len() - 1
+                "carrier read {}[{}] against a state with {} cell axes",
+                pre.carrier,
+                pre.index.len(),
+                parts.cells.len()
             )));
         }
-        let ops = base.components().unwrap_or_default();
-        let carries = !ops.is_empty() && ops.iter().all(|op| op.name() == "next");
-        if carries {
-            if lift.results().len() < n {
-                return Err(Error::Value(
-                    "a carried state's lift defines every state's next value first".into(),
-                ));
-            }
-            if twist.is_some() || observe.is_some() {
-                return Err(Error::Value(
-                    "a carried state streams its step's own results; it is neither twisted nor observed".into(),
-                ));
-            }
-            let states: HashSet<Name> = base.results().iter().copied().collect();
-            let mut pending: Vec<Fold> = operands.clone();
-            let mut seen: HashSet<usize> = HashSet::new();
-            while let Some(edge) = pending.pop() {
-                if !seen.insert(edge.address()) {
-                    continue;
-                }
-                if let Some(read) = edge.as_carrier_read()
-                    && let Statement::Pre(pre) = &**read
-                    && states.contains(&pre.carrier)
-                    && pre.index.len() != cells.len()
-                {
-                    return Err(Error::Value(format!(
-                        "carrier read {}[{}] against a state with {} cell axes",
-                        pre.carrier,
-                        pre.index.len(),
-                        cells.len()
-                    )));
-                }
-                pending.extend(edge.0.operands.iter().cloned());
-            }
-        } else {
-            if lift.results().len() != n {
-                return Err(Error::Value("one lift result per monoid component".into()));
-            }
-            if !cells.is_empty() {
-                return Err(Error::Value(
-                    "cell axes belong to a carried state: a fold whose ⊕ is `next`".into(),
-                ));
-            }
+        pending.extend(edge.operands().iter().cloned());
+    }
+    Ok(())
+}
+
+impl Fold {
+    /// An observer binds the iteration var then the carried state, and defines fresh names.
+    fn check_observer(&self, observe: &Lambda) -> Result<()> {
+        let combine = self
+            .combine()?
+            .ok_or_else(|| Error::Value("an observed fold has a combine".into()))?;
+        if combine.components().is_none() {
+            return Err(Error::Value(
+                "a twisted carrier does not support a per-step observer: its state is rescaled, never a stream of \
+                 partials"
+                    .into(),
+            ));
         }
-        let axis = lift.params()[0];
-        // CANONICAL ORIENTATION of a bilinear term: A, the operand every product multiplies, comes first. With several
-        // channels A is the argument the products share; with one product the layout decides (A reads `[…, k]`).
-        if operands.len() >= 2
-            && !lift.body().is_empty()
-            && lift.body().stmts().iter().all(|stmt| binary_assign(stmt))
+        let expected: Vec<Name> = self
+            .axis()
+            .into_iter()
+            .chain(combine.results().iter().copied())
+            .collect();
+        if observe.params() != expected.as_slice() {
+            return Err(Error::Value(format!(
+                "observer params {:?} must bind the iteration var then the carried state {expected:?} positionally",
+                observe.params()
+            )));
+        }
+        if !observe
+            .results()
+            .iter()
+            .all(|result| observe.body().defined().contains(result))
         {
-            let bindings = bindings_of(&operands, lift.params(), true);
-            let by_name: HashMap<Name, usize> =
-                bindings.iter().map(|b| (b.param, b.operand)).collect();
-            let arguments: Vec<Vec<Name>> = lift
-                .body()
-                .stmts()
-                .iter()
-                .map(|stmt| operand_names(stmt))
-                .collect();
-            let a_edge: Option<usize> = if arguments.len() > 1 {
-                let shared: Vec<usize> = arguments[0]
-                    .iter()
-                    .filter(|name| {
-                        by_name.contains_key(name)
-                            && arguments[1..].iter().all(|args| args.contains(name))
-                    })
-                    .map(|name| by_name[name])
-                    .collect();
-                if shared.len() == 1 {
-                    Some(shared[0])
-                } else {
-                    None
-                }
-            } else {
-                let pair: Vec<usize> = arguments[0]
-                    .iter()
-                    .filter_map(|name| by_name.get(name).copied())
-                    .collect();
-                let k_last_of = |edge: &Fold| -> Result<bool> {
-                    let Some(load) = edge.as_slab() else {
-                        return Ok(false);
-                    };
-                    let Statement::Load(load) = &**load else {
-                        return Ok(false);
-                    };
-                    let last = load.index.last().ok_or_else(|| {
-                        Error::Value("a slab with no index has no last coordinate".into())
-                    })?;
-                    Ok(last.free_vars().contains(&axis))
-                };
-                let slabs =
-                    pair.len() == 2 && pair.iter().all(|&e| operands[e].as_slab().is_some());
-                let mut k_last: Vec<usize> = Vec::new();
-                if slabs {
-                    for &e in &pair {
-                        if k_last_of(&operands[e])? {
-                            k_last.push(e);
-                        }
-                    }
-                }
-                let rows: HashSet<Name> = if slabs {
-                    let (a, b) = (operands[pair[0]].free_axes(), operands[pair[1]].free_axes());
-                    a.symmetric_difference(b).copied().collect()
-                } else {
-                    HashSet::new()
-                };
-                let key = |e: &usize| -> String {
-                    operands[*e]
-                        .free_axes()
-                        .iter()
-                        .filter(|name| rows.contains(name))
-                        .map(|name| name.trim_start_matches('_').to_string())
-                        .min()
-                        .unwrap_or_default()
-                };
-                k_last.sort_by_key(key);
-                let mut a_edge = if pair.len() == 2 && !k_last.is_empty() {
-                    Some(k_last[0])
-                } else {
-                    None
-                };
-                let loaded: Vec<usize> = pair
-                    .iter()
-                    .copied()
-                    .filter(|&e| operands[e].as_slab().is_some())
-                    .collect();
-                if pair.len() == 2 && loaded.len() == 1 && !k_last_of(&operands[loaded[0]])? {
-                    a_edge = pair
-                        .iter()
-                        .copied()
-                        .find(|&e| !operands[e].ptr_eq(&operands[loaded[0]]));
-                }
-                a_edge
-            };
-            if let Some(a) = a_edge
-                && !operands[0].ptr_eq(&operands[a])
-            {
-                let a_term = operands[a].clone();
-                let mut reordered = vec![a_term.clone()];
-                reordered.extend(
-                    operands
-                        .iter()
-                        .filter(|edge| !edge.ptr_eq(&a_term))
-                        .cloned(),
-                );
-                let mut bound = vec![axis];
-                for edge in &reordered {
-                    for binding in &bindings {
-                        if operands[binding.operand].ptr_eq(edge) {
-                            bound.push(binding.param);
-                        }
-                    }
-                }
-                bound.extend_from_slice(&lift.params()[1 + arity..]);
-                operands = reordered;
-                lift = Lambda::new(bound, lift.body(), lift.results().to_vec())?;
-            }
+            return Err(Error::Value(
+                "observer results must be FRESH names its body defines — never the carried state itself".into(),
+            ));
         }
-        let fold = Fold::formed(Parts {
-            operands,
-            lift: Some(lift),
-            init,
-            cells,
-            base: Some(base),
-            twist,
-            observe,
-        });
-        if let Some(observe) = &fold.0.observe {
-            let combine = fold
-                .combine()?
-                .ok_or_else(|| Error::Value("an observed fold has a combine".into()))?;
-            if combine.components().is_none() {
-                return Err(Error::Value(
-                    "a twisted carrier does not support a per-step observer: its state is rescaled, never a stream of \
-                     partials"
-                        .into(),
-                ));
+        Ok(())
+    }
+
+    /// The term over `parts`: put in its canonical spelling (a zero-axis term loses its shadowed operands, a
+    /// bilinear one takes its A operand first), then checked. The checks refuse rather than repair.
+    pub fn new(parts: Parts) -> Result<Fold> {
+        let mut parts = parts;
+        let lift = parts
+            .lift
+            .take()
+            .ok_or_else(|| Error::Type("a Fold takes a lift".into()))?;
+        let operands = std::mem::take(&mut parts.operands);
+        let (operands, lift) = match &parts.base {
+            None => without_shadowed(operands, lift)?,
+            Some(base) => {
+                // The orientation reads the binding, so the checks that make it readable come first.
+                parts.operands = operands;
+                check_reduce(&parts, &lift, base)?;
+                a_first(std::mem::take(&mut parts.operands), lift)?
             }
-            let mut expected = vec![axis];
-            expected.extend_from_slice(combine.results());
-            if observe.params() != expected.as_slice() {
-                return Err(Error::Value(format!(
-                    "observer params {:?} must bind the iteration var then the carried state {expected:?} positionally",
-                    observe.params()
-                )));
-            }
-            let defined: HashSet<Name> = observe
-                .body()
-                .stmts()
-                .iter()
-                .flat_map(|stmt| stmt.defines())
-                .collect();
-            if !observe
-                .results()
-                .iter()
-                .all(|result| defined.contains(result))
-            {
-                return Err(Error::Value(
-                    "observer results must be FRESH names its body defines — never the carried state itself".into(),
-                ));
-            }
+        };
+        parts.operands = operands;
+        if parts.base.is_none() {
+            check_zero_axis(&parts, &lift)?;
+        }
+        parts.lift = Some(lift);
+        let fold = Fold::formed(parts);
+        // What the term exposes is read off its applied lift: a lift that does not apply is refused here.
+        fold.applied()?;
+        if let Some(observe) = fold.observe() {
+            fold.check_observer(observe)?;
         }
         Ok(fold)
     }
@@ -490,15 +543,32 @@ impl Fold {
             twist,
             observe,
         } = parts;
-        Fold(Arc::new(Data {
+        let lift = lift.expect("a formed Fold has a lift");
+        let hash = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            lift.hash(&mut hasher);
+            init.hash(&mut hasher);
+            cells.hash(&mut hasher);
+            base.hash(&mut hasher);
+            twist
+                .as_ref()
+                .map(|t| (t.recipe.name.clone(), t.channels.clone()))
+                .hash(&mut hasher);
+            observe.hash(&mut hasher);
+            for edge in &operands {
+                edge.0.hash.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let data = Data {
             operands,
-            lift: lift.expect("a formed Fold has a lift"),
+            lift,
             init,
             cells,
             base,
             twist,
             observe,
-            hash: OnceLock::new(),
+            hash,
             exposes: OnceLock::new(),
             bindings: OnceLock::new(),
             applied: OnceLock::new(),
@@ -507,8 +577,26 @@ impl Fold {
             free_axes: OnceLock::new(),
             canonical: OnceLock::new(),
             readings: crate::readings::Memos::default(),
-            normal: std::sync::Mutex::new(Vec::new()),
-        }))
+            normal: Mutex::new(Vec::new()),
+            lowered: Mutex::new(Vec::new()),
+        };
+        // A handle upgraded under the lock is dropped after it: a term's drop takes the lock.
+        let mut live: Vec<Arc<Data>> = Vec::new();
+        let found = {
+            let mut terms = emmy_ir::locked(&TERMS);
+            let bucket = terms.get_or_insert_with(HashMap::new).entry(hash).or_default();
+            live.extend(bucket.iter().filter_map(Weak::upgrade));
+            match live.iter().find(|held| held.same_parts(&data)) {
+                Some(held) => Err(held.clone()),
+                None => {
+                    let term = Arc::new(data);
+                    bucket.push(Arc::downgrade(&term));
+                    Ok(term)
+                }
+            }
+        };
+        // The duplicate's parts drop here, outside the lock.
+        Fold(found.unwrap_or_else(|held| held))
     }
 
     /// The parts this term was formed from, for a rebuild that changes some of them.
@@ -545,6 +633,11 @@ impl Fold {
         if !normal.contains(&key) {
             normal.push(key);
         }
+    }
+
+    /// The lowerings this term has answered, by request.
+    pub(crate) fn lowered(&self) -> &Mutex<Vec<(crate::lower::Request, emmy_ir::body::Body)>> {
+        &self.0.lowered
     }
 
     /// The memo table of the derived readings.
@@ -590,23 +683,7 @@ impl Fold {
     }
 
     fn structural_hash(&self) -> u64 {
-        *self.0.hash.get_or_init(|| {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            self.0.lift.hash(&mut hasher);
-            self.0.init.hash(&mut hasher);
-            self.0.cells.hash(&mut hasher);
-            self.0.base.hash(&mut hasher);
-            self.0
-                .twist
-                .as_ref()
-                .map(|t| (t.recipe.name.clone(), t.channels.clone()))
-                .hash(&mut hasher);
-            self.0.observe.hash(&mut hasher);
-            for edge in &self.0.operands {
-                edge.structural_hash().hash(&mut hasher);
-            }
-            hasher.finish()
-        })
+        self.0.hash
     }
 
     /// The name of the axis this term BINDS — its lift's iteration var — or `None` for a zero-axis term.
@@ -643,22 +720,22 @@ impl Fold {
         Ok(self.0.applied.get_or_init(|| applied))
     }
 
+    /// The applied lift of a formed term: formation refused a lift that does not apply.
+    fn applied_checked(&self) -> &Lambda {
+        self.applied().expect("formation applied the lift")
+    }
+
     /// The result names this term defines for its consumer, one per produced component: a reducing term its carried
     /// state (an observed one its observer's values beside it, a carried one its per-step outputs), a zero-axis term
     /// its applied lift's results.
     pub fn exposes(&self) -> &[Name] {
         self.0.exposes.get_or_init(|| match &self.0.base {
-            None => self
-                .applied()
-                .map(|a| a.results().to_vec())
-                .unwrap_or_default(),
+            None => self.applied_checked().results().to_vec(),
             Some(base) => {
                 let state = base.results();
                 if self.carries() {
                     let mut out = state.to_vec();
-                    if let Ok(applied) = self.applied() {
-                        out.extend_from_slice(applied.results().get(state.len()..).unwrap_or(&[]));
-                    }
+                    out.extend_from_slice(&self.applied_checked().results()[state.len()..]);
                     out
                 } else if let Some(observe) = &self.0.observe {
                     let mut out = state.to_vec();
@@ -674,13 +751,7 @@ impl Fold {
     /// Whether this fold CARRIES A STATE: its ⊕ is the action `next` on every component.
     pub fn carries(&self) -> bool {
         *self.0.carries.get_or_init(|| {
-            let ops = self
-                .0
-                .base
-                .as_ref()
-                .and_then(|base| base.components())
-                .unwrap_or_default();
-            !ops.is_empty() && ops.iter().all(|op| op.name() == "next")
+            is_action(&self.ops().unwrap_or_default())
         })
     }
 
