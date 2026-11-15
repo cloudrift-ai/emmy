@@ -351,8 +351,7 @@ def _chunk_rule_scan_then_read(
     upper = torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device).triu(1)
     cum = g.cumsum(dim=3)
     pairwise = (cum.unsqueeze(4) - cum.unsqueeze(3)).masked_fill(upper, float("-inf")).exp()
-    keys_t = key.transpose(-1, -2)
-    system = (key @ keys_t) * (pairwise * beta.unsqueeze(4))
+    system = (key @ key.transpose(-1, -2)) * (pairwise * beta.unsqueeze(4))
     eye = torch.eye(chunk_size, dtype=system.dtype, device=system.device)
     if not scope["is_torchdynamo_exporting"]():
         inverse = torch.linalg.solve_triangular(system, eye.expand_as(system), upper=False, unitriangular=True)
@@ -365,7 +364,7 @@ def _chunk_rule_scan_then_read(
         inverse = inverse + eye
     new_values = (inverse * beta.unsqueeze(3)) @ value
     k_cumdecay = (inverse * (beta * cum.exp()).unsqueeze(3)) @ key
-    intra = (query @ keys_t) * (pairwise * scale)
+    intra = (query @ key.transpose(-1, -2)) * (pairwise * scale)
     state = new_values.new_zeros((batch, v_heads, k_dim, v_dim)) if initial_state is None else initial_state.to(new_values)
     query_row = (cum.exp() * scale).unsqueeze(4)
     key_row = (cum[..., -1:] - cum).exp().unsqueeze(4)
@@ -374,7 +373,7 @@ def _chunk_rule_scan_then_read(
     for i in range(chunks):
         starts.append(state)
         news.append(new_values[:, :, i] - k_cumdecay[:, :, i] @ state)
-        state = state * chunk_decay[:, :, i] + keys_t[:, :, i] @ (news[-1] * key_row[:, :, i])
+        state = state * chunk_decay[:, :, i] + key[:, :, i].transpose(-1, -2) @ (news[-1] * key_row[:, :, i])
     out = (query @ torch.stack(starts, dim=2)) * query_row + intra @ torch.stack(news, dim=2)
     out = out.reshape(batch, v_heads, -1, v_dim)[:, :, :length]
     return out.transpose(1, 2).to(dtype, memory_format=torch.contiguous_format), state if output_final_state else None
