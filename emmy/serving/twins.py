@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
 from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph, nvfp4_head_stored
-from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M
+from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, slot_widths
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -434,11 +434,12 @@ def capture_twin_graphs(
             spell(f"expert{name}{suffix}", trace_split(expert_w, examples, argnames))
         # The fixed-slot decode program: the row's k picks gathered from the E-stacked expert tensors
         # (``build_moe_slots_wrapper``), spelled like the per-expert twins with the expert axis leading. On sliced
-        # experts a decode step up to the slot width rides the slots too, every row against its own picks at once
-        # (``expert-slots8``); the one-row program stays the one-token step's.
+        # experts a decode step up to the slot width rides the slots too, every row against its own picks at once, in
+        # the narrowest of the slot widths that holds it (``expert-slots2``, ``-slots4``, ``-slots8``); the one-row
+        # program stays the one-token step's.
         top_k = int(getattr(text, "num_experts_per_tok", 0) or 0)
         chunk = slot_width if expert_slices > 1 and slot_width > 1 and not transposed else 1
-        for rows in sorted({1, chunk}) if top_k else ():
+        for rows in (1, *slot_widths(chunk)) if top_k else ():
             count = int(parts[1].gate_up_proj.shape[0])
             one = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
             sel = torch.zeros((top_k,) if rows == 1 else (rows, top_k), dtype=torch.int64)

@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 
-from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M
+from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, slot_widths
 from emmy.serving.twins import LayoutConflict, LayoutScope, fork_less_weights, plan_layouts
 
 logger = logging.getLogger(__name__)
@@ -1676,7 +1676,7 @@ class EmmyGenRunner:
                 "one": None,
                 "m256": None,
                 "slots": None,
-                "slot_rows": None,
+                "slot_rows": {},
                 "group": {},
                 "ind_names": ind_names,
             }
@@ -1760,10 +1760,12 @@ class EmmyGenRunner:
                         "weight_inputs": ind_names,
                     }
                     wrapper = build_moe_slots_wrapper(expert_w)
-                    # One row's k picks; on experts sliced across ranks (resident, in the ``F.linear`` form) also the
-                    # decode bucket's rows at once, each against its own picks: a decode step of several tokens then
-                    # runs one launch set instead of one per row.
-                    widths = (1, decode_bucket) if expert_slices > 1 and decode_bucket > 1 and paging is None and not transposed else (1,)
+                    # One row's k picks; on experts sliced across ranks (resident, in the ``F.linear`` form) also
+                    # several rows at once, each against its own picks, at every slot width up to the decode bucket: a
+                    # decode step of several tokens then runs one launch set, of the narrowest program that holds it,
+                    # instead of one per row.
+                    sliced = expert_slices > 1 and paging is None and not transposed
+                    widths = (1, *slot_widths(decode_bucket or 0)) if sliced else (1,)
                     for rows in widths:
                         name = pre + ("slots" if rows == 1 else f"slots{rows}")
                         picks = (moe_top_k,) if rows == 1 else (rows, moe_top_k)
@@ -1782,7 +1784,7 @@ class EmmyGenRunner:
                                     **stacked_kw,
                                 )
                             reads[name] = loaded[name].reads if stored(name) is not None else frozenset(read)
-                            tiers["slots" if rows == 1 else "slot_rows"] = {
+                            tier = {
                                 "wrapper": wrapper,
                                 "plan": slot_plan,
                                 "examples": slot_examples,
@@ -1792,6 +1794,10 @@ class EmmyGenRunner:
                                 "arena": slot_arena,
                                 "paged": paging,
                             }
+                            if rows == 1:
+                                tiers["slots"] = tier
+                            else:
+                                tiers["slot_rows"][rows] = tier
                             plans[name] = slot_plan
                         except Exception as ex:  # noqa: BLE001 — any compile failure → routed fallback, loudly
                             logger.warning(
@@ -2667,19 +2673,22 @@ class EmmyGenRunner:
                         raise RuntimeError("fixed-slot expert groups must agree on their output precision")
                     partial_dtype = torch.float32 if slot_precision.pop() else act_dtype
                     self._slot_partials = torch.empty(k, h, dtype=partial_dtype, device="cuda")
-                    # The decode bucket's rows at once, when every group has that program: its selector and partials,
-                    # shared by every layer as the one-row pair is.
-                    shared = {"slots": (self._slot_sel, self._slot_partials)}
-                    if all(t["slot_rows"] is not None for t in self._expert_tiers):
-                        rows = self._expert_tiers[0]["slot_rows"]["examples"][0].shape[0]
-                        self._slot_rows_sel = torch.zeros(rows, k, dtype=torch.int64, device="cuda")
-                        self._slot_rows_partials = torch.empty(rows, k, h, dtype=partial_dtype, device="cuda")
-                        shared["slot_rows"] = (self._slot_rows_sel, self._slot_rows_partials)
+                    # Several rows at once, at the slot widths every group has a program for: one selector and
+                    # partials pair of the widest, shared by every layer as the one-row pair is, and a narrower
+                    # program works on its leading rows.
+                    shared = [(1, self._slot_sel, self._slot_partials)]
+                    widths = set.intersection(*(set(t["slot_rows"]) for t in self._expert_tiers))
+                    if widths:
+                        self._slot_rows_sel = torch.zeros(max(widths), k, dtype=torch.int64, device="cuda")
+                        self._slot_rows_partials = torch.empty(max(widths), k, h, dtype=partial_dtype, device="cuda")
+                        shared += [(rows, self._slot_rows_sel[:rows], self._slot_rows_partials[:rows]) for rows in sorted(widths)]
                     for m in self._moe:
                         if m is None:
                             continue
-                        for tier, (sel, partials) in shared.items():
-                            slots = self._expert_tiers[m["group"]][tier]
+                        m["slot_rows"] = {}
+                        for rows, sel, partials in shared:
+                            tiers = self._expert_tiers[m["group"]]
+                            slots = tiers["slots"] if rows == 1 else tiers["slot_rows"][rows]
                             # A plan from a serving pack keeps the slots it was compiled with.
                             if {spec[2] for spec in slots["plan"].paged.values()} != ({m["paging"][0]} if "paging" in m else set()):
                                 raise RuntimeError("the fixed-slot program was compiled for another expert budget than the device holds")
@@ -2705,7 +2714,10 @@ class EmmyGenRunner:
                                     pager.declare(device(), name, homes, (m["num_experts"], m["bytes"][name], *m["paging"]))
                                     pager.bind(p.executor, name)
                                 m["pager"] = pager
-                            m[tier] = prog
+                            if rows == 1:
+                                m["slots"] = prog
+                            else:
+                                m["slot_rows"][rows] = prog
                     torch.cuda.empty_cache()
                 # One instance of each grouped prefill program per layer over its own experts, as the fixed-slot ones;
                 # each launch is lent its rows, output and selector (:meth:`_launch_experts`), so the instances share
@@ -3182,11 +3194,11 @@ class EmmyGenRunner:
         self._record_routing(moe, indices)
         capturing = torch.cuda.is_current_stream_capturing()
         stream = torch.cuda.current_stream()
-        if xn.shape[0] > 1 and (rows := moe.get("slot_rows")) is not None:
-            # Every row's picks at once through the decode bucket's program: the rows past this step's keep the
-            # picks and inputs of an earlier one, whose partials no row reads.
-            t = xn.shape[0]
-            p = rows.program
+        t = xn.shape[0]
+        if t > 1 and (width := min((rows for rows in moe.get("slot_rows", ()) if rows >= t), default=0)):
+            # Every row's picks at once through the narrowest slot program that holds the step: the rows past this
+            # step's keep the picks and inputs of an earlier one, whose partials no row reads.
+            p = moe["slot_rows"][width].program
             with gpu_lock():
                 self._slot_rows_sel[:t].copy_(indices)
                 with p.on_stream(stream):

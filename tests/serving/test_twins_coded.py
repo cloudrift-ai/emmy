@@ -530,7 +530,7 @@ def test_qwen4_exp_nvfp4_sliced_experts_add_the_grouped_prefill_twins(tmp_path, 
 
     graphs = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, {"moe_intermediate_size": 64}, expert_slices=4, slot_width=4)
     name = f"expert-group{EXPERT_GROUP}x{rows}@nvfp4"
-    assert {name, "expert-slots4@nvfp4"} <= set(graphs)
+    assert {name, "expert-slots2@nvfp4", "expert-slots4@nvfp4"} <= set(graphs)
     group, slots = graphs[name], graphs["expert-slots4@nvfp4"]
     shapes = {i: (tuple(group.nodes[i].output.shape), group.nodes[i].output.dtype.name) for i in group.inputs}
     stacked = {i: (tuple(slots.nodes[i].output.shape), slots.nodes[i].output.dtype.name) for i in slots.inputs}
