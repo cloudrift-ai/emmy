@@ -360,7 +360,8 @@ require CloudRift organization access.
     - [ir/](emmy/compiler/ir/) — per-dialect op definitions (torch / tensor / loop / kernel / cuda) (see
       [ARCHITECTURE.md](emmy/compiler/ir/ARCHITECTURE.md))
       - [schedule/](emmy/compiler/ir/schedule/) — schedule interfaces, reusable choices, and classic scheduling (see
-        [ARCHITECTURE.md](emmy/compiler/ir/schedule/ARCHITECTURE.md))
+        [ARCHITECTURE.md](emmy/compiler/ir/schedule/ARCHITECTURE.md); the classic schedule is compared with the best
+        known hand-written kernels in [classic/ARCHITECTURE.md](emmy/compiler/ir/schedule/classic/ARCHITECTURE.md))
     - [trace/](emmy/compiler/trace/) — PyTorch/HuggingFace → Graph IR capture (see
       [ARCHITECTURE.md](emmy/compiler/trace/ARCHITECTURE.md))
     - [pipeline/](emmy/compiler/pipeline/) — rewrite engine + passes + dump hooks (see
