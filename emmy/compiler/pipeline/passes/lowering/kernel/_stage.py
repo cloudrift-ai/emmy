@@ -941,7 +941,9 @@ class SyncTransport:
         ctx = SimplifyCtx.empty()
         plans: list[str] = []
         for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
-            step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
+            # A read of a 0-d buffer (a calibrated scale) has no last-dim index: it is the same at every col.
+            loads = isinstance(a, Load) and isinstance(b, Load) and a.index and b.index
+            step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if loads else None
             if (
                 isinstance(a, Load)
                 and a.is_scalar
