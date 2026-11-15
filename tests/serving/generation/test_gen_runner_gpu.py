@@ -62,8 +62,8 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.plan import plan_from_graph
     from emmy.compiler.dtype import encode_bf16
-    from emmy.serving.gen_runner import EmmyGenRunner
     from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
+    from emmy.serving.gen_runner import EmmyGenRunner
     from emmy.serving.twins import LayoutScope, capture_twin_graphs, plan_layouts
 
     config = Qwen3Config(
