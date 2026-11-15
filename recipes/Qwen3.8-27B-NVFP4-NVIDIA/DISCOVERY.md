@@ -1,5 +1,49 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## The FP8 layers as W8A8, measured root by root (2026-11-15)
+
+The checkpoint declares its FP8 leaves' activations static: a modelopt `config_groups` entry with 8-bit float
+weights and inputs that are not dynamic, and an `input_scale` beside each linear. The loader read static FP8 only
+from `quant_method: fp8`, so these linears ran as W8A16. It now reads the group too, and every attention q/k/v/o and
+every Gated DeltaNet in_proj_qkv, in_proj_z and out_proj is a W8A8 product on the e4m3 tensor-core instruction, the
+checkpoint's own arithmetic and stock vLLM's. The MLPs and the head stay NVFP4. Measured on a rented RTX 5090
+(CUDA 13.3, 14 vCPUs), each root recorded under strict evidence, before main's block-scaled FP8 instruction (#1418).
+
+- **The product.** The 256-row in-projection qkv (256 x 5,120 x 10,240) takes 81 us as W8A8 untuned against 175 us
+  as W8A16 (131 tuned); at 512 rows 148.5 against 323.
+- **Attention halves, a layer, warm:** `pre` 41.7 / 75.2 / 162.4 / 252 us at 16 / 64 / 256 / 512 rows (W8A16
+  `pre256` about 255), `post` 26.2 / 40.0 / 72.5 / 117.4.
+- **Gated DeltaNet roots, a layer**, against the cheapest W8A16 route the golden held (warm):
+
+  | root | W8A16 warm | W8A8 warm | W8A8 cold |
+  |---|---|---|---|
+  | 1 row | 82.3 us | 75.1 | 143.3 |
+  | 2 rows, `pre` / `post` | 105.4 / 183.9 | 32.8 / 45.7 | 64.6 / 96.0 |
+  | 3 rows, `pre` / `post` | 49.7 / 119.2 | 28.4 / 53.7 | 62.2 / 97.6 |
+  | 16 rows, `pre` / `post` | 369.0 / 488.4 | 29.3 / 100.2 | 64.3 / 153.1 |
+  | 64 rows, `pre` / `post` | 200.8 / 166.2 | 48.9 / 145.7 | 72.6 / 202.3 |
+  | 256 rows, `pre` / `post` | 219.6 / 296.8 | 108.8 / 234.2 | 131.0 / 289.6 |
+
+  The large drops at 2 to 16 rows are partly schedules the old routes never tried, not only the FP8 operand.
+- **The route that works.** Cut the contraction seams first, so one piece holds every projection, then the FP8
+  seams inside it: one kernel writes the codes, one piece is pure e4m3 products. Cutting the FP8 seams first
+  recomputes the projections (480 us for `pre256` against the W8A16 route's 255). K chunks of 2 win at 256 rows and
+  up (the `pre256` q product 229 -> 111 us; the prior picks 8). The chunk-output contractions want `t16x8` or
+  `t16x16` tiles (3 to 28 us) where the prior picks a cooperative reduce (0.1 to 3.5 ms).
+- **in_proj_z.** It shares in_proj_qkv's calibrated scale. One shared decoded value crossed the recurrence's kernel
+  boundary as a 16-bit buffer, so z ran on the bf16 instruction. Each linear now decodes the shared codes itself:
+  the 256-row z product 102.1 -> 57.3 us cold, the `post` root 290.1 -> 248.6.
+- **The triangular inverse.** At 256 rows it is a 61-step rolled scan that stored every step's 64 x 64 matrices
+  (192 MB a layer) while only the last was read. It now stores the last alone: 129 -> 39 us cold.
+- **Not measured end to end.** The golden here still holds the W8A16 programs. A fresh trace now gives the W8A8 ones,
+  so the next strict export of this recipe needs those roots recorded first. Summed from the rows, a 256-row chunk
+  would drop from 67 ms to about 51 ms, about 1.5 s to the first token at 7,680 tokens (2.0 s measured with
+  W8A16 on this card, the bar 1.51 s); an estimate from isolated rows, not a measurement.
+- **Left open.** One FP8 activation is offered as one seam per reader, and those seams do not group, so the kernel
+  that writes the codes writes two identical copies. Every `post` bench warns that its wrong-answer reference is
+  unusable. A verify step's state copy into the program's output costs about 8 us a layer (0.38 ms a step); removing
+  it re-forms the scan's routes in three goldens and is left for its own change.
+
 ## A 256-row prefill chunk, recorded and timed (2026-11-15)
 
 Native generation can run a prompt in 256-row chunks (`--prefill-size 256`, `SERVE_NATIVE_PREFILL=256`), keeping the
