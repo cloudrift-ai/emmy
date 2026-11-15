@@ -671,8 +671,22 @@ impl Lowerer {
                 "a slab laid out as {mode} is indexed by row and column"
             )));
         };
-        volta_slab_index(mode, row, column, extent)
-            .ok_or_else(|| self.no_rule(format_args!("a slab laid out as {mode}")))
+        // The crosswise layout moves a row 32 further on by 32 rows of four elements, so a term of the row that is
+        // a multiple of 32 (the half of the slab a loop's trip fills) is added after the layout: what is left of
+        // the row does not change in the loop, and its layout is computed once ahead of it.
+        let (row, ahead) = match mode {
+            "V70A" => split_multiples(row, 32),
+            _ => (row.clone(), None),
+        };
+        let index = volta_slab_index(mode, &row, column, extent)
+            .ok_or_else(|| self.no_rule(format_args!("a slab laid out as {mode}")))?;
+        Ok(match ahead {
+            Some(ahead) => {
+                let ahead = Expression::binary(Operation::Multiply, Expression::int(4), ahead);
+                Expression::binary(Operation::Add, index, ahead)
+            }
+            None => index,
+        })
     }
 
     /// Zero the 32-bit words of another launch's accumulator, every thread of the grid a stride of them:
@@ -920,5 +934,29 @@ fn pair_row(flat: &Expression) -> Option<(Expression, i64)> {
             Some((row.clone(), place))
         }
         _ => None,
+    }
+}
+
+/// `sum` without its terms that are a product by a literal multiple of `period`, and the sum of those terms.
+fn split_multiples(sum: &Expression, period: i64) -> (Expression, Option<Expression>) {
+    let multiple = |factor: &Expression| {
+        factor
+            .int_literal()
+            .is_some_and(|by| by != 0 && by % period == 0)
+    };
+    match sum.operation() {
+        Some((Operation::Add, [a, b])) => {
+            let ((a, moved_a), (b, moved_b)) =
+                (split_multiples(a, period), split_multiples(b, period));
+            let moved = match (moved_a, moved_b) {
+                (Some(a), Some(b)) => Some(Expression::binary(Operation::Add, a, b)),
+                (a, b) => a.or(b),
+            };
+            (Expression::binary(Operation::Add, a, b), moved)
+        }
+        Some((Operation::Multiply, [a, b])) if multiple(a) || multiple(b) => {
+            (Expression::int(0), Some(sum.clone()))
+        }
+        _ => (sum.clone(), None),
     }
 }

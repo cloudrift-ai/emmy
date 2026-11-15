@@ -138,7 +138,9 @@ assembles without complaint and can give a right answer at one optimization leve
 - **Memory access.** A `Load` of several names or a `Write` of several values is one access of 4, 8 or 16 bytes. An
   atomic `Write` is one `atom.add`. A `CpAsyncCopy` is one `cp.async`, writing zeros where `valid` fails. A shared slab
   can be stored under a swizzle (`B128`, `B64`, `B32`: 16-byte chunks exchanged over the flat index) or one of Volta's
-  two layouts (`fragment::volta_slab_index` in `emmy-ir`).
+  two layouts (`fragment::volta_slab_index` in `emmy-ir`). The crosswise layout repeats every 32 rows, so a term of
+  the row that is a multiple of 32, the half of the slab a trip of the loop fills, is added after the layout, and the
+  layout of the rest is computed once ahead of the loop.
 - **Carried states.** A cell of a carried state at a literal index is two registers, seeded ahead of the loop and moved
   at the end of each trip. A cell at an index known only where the kernel runs has no rule.
 

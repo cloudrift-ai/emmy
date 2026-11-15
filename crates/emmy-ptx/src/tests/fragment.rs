@@ -420,6 +420,31 @@ fn a_paired_read_in_a_loop_moves_its_address_by_a_sum() {
     );
 }
 
+/// A store in a loop that fills the slab's halves in turn moves its address by one sum a trip as well: the layout
+/// is of the row without the half, ahead of the loop.
+#[test]
+fn a_paired_store_in_a_loop_moves_its_address_by_a_sum() {
+    let module = kernel(
+        "
+        Smem(name=sa, extents=(64, 32), dtype=f16, align=16)
+        for s in 0..4:
+            f16 x0, x1, x2, x3, x4, x5, x6, x7 = load a[r * 256 + t * 8]
+            f16 sa[t / 4 + 32 * (s % 2) + 8, 8 * (t % 4)] = (x0, x1, x2, x3, x4, x5, x6, x7) swizzle=V70A
+        ",
+        HALVES,
+        80,
+    )
+    .unwrap();
+    let lines = listing(&module);
+    let head = lines.iter().rposition(|line| line.ends_with(':')).unwrap();
+    let body = &lines[head..];
+    assert_eq!(count(&module, "st.shared.v4.b16"), 2, "{lines:#?}");
+    assert!(
+        body.iter().all(|line| !line.starts_with("xor")),
+        "{body:#?}"
+    );
+}
+
 /// A swizzled destination of an async copy or a store takes the exchange of 16-byte chunks over its flat index.
 #[test]
 fn a_swizzled_slab_exchanges_its_chunks() {
