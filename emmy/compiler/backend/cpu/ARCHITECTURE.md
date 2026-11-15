@@ -73,7 +73,7 @@ straight-line vectorizer, not its loop vectorizer, which packs the lanes into ve
   is one tree, evaluated node by node, and rounds once at its definition.
 - Only the accumulating instruction carries `reassoc nsz`, so the vectorizer can split a sum into lanes while every
   other operation keeps IEEE rounding. It and a product feeding it carry `contract`, so they fuse into one FMA, as
-  nvcc fuses them.
+  the PTX compiler fuses an f32 product with its sum.
 - `exp` is a Cephes polynomial and `from_f8e4m3` integer arithmetic, so they vectorize; `erf`, `tanh`, `sin`,
   `cos`, `log1p` call libm.
 - A lookup into the e2m1 pair table an NVFP4 weight decodes through — a constant the loader builds from

@@ -311,7 +311,7 @@ def paged_declarations(hint, graph=None) -> dict[str, tuple[int, int, int | None
 
 def spans_one_page(shape, axis: int, page: int) -> bool:
     """Whether a paged buffer's declared shape fits in one page along its paged axis — then one base
-    address stands behind it, which the renderer resolves once; a symbolic extent never does."""
+    address stands behind it, which the PTX compiler resolves once; a symbolic extent never does."""
     try:
         return as_static(shape[axis]) <= page
     except (TypeError, ValueError):

@@ -49,7 +49,14 @@ pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<
                 dtype,
             })))
         }
-        Statement::Select(s) => Ok(Arc::new(Statement::Select(decided(s)))),
+        Statement::Select(s) => {
+            let kept = Statement::Select(decided(s));
+            Ok(if kept.same(&stmt) {
+                stmt
+            } else {
+                Arc::new(kept)
+            })
+        }
         _ => {
             let nested = stmt.nested();
             if nested.is_empty() {

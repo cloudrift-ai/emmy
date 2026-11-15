@@ -22,7 +22,7 @@ def add_dataset_args(parser) -> None:
     )
     parser.add_argument(
         "--kernel",
-        help="Filter by substring: the pool's kernel C name for --pools golden; the op label (e.g. 'matmul', 'reduce', "
+        help="Filter by substring: the pool's kernel name for --pools golden; the op label (e.g. 'matmul', 'reduce', "
         "'free=512') for --pools measured.",
     )
 

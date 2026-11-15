@@ -3,8 +3,8 @@
   {"inputs":["x","w"],"outputs":["o"],"nodes":[{"id":"w","op":"input","outputs":[["w","f32",[1024]]]},{"id":"x","op":"input","outputs":[["x","f32",[1,32,1024]]]},{"id":"o","op":"torch.rms_norm","inputs":["x","w"],"outputs":[["o","f32",[1,32,1024]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["x","w"],"outputs":["o"],"nodes":[{"id":"w","op":"input","outputs":[["w","f32",[1024]]]},{"id":"x","op":"input","outputs":[["x","f32",[1,32,1024]]]},{"id":"o","op":"loop","attrs":{"body":"let f32 v0 = 1024.0\nlet f32 v1 = 9.999999974752427e-07\nfor a0 in 0..32:\n    for a1 in 0..1024:\n        in0 = load x[0, a0, a1]\n        v2 = multiply(in0, in0)\n        acc0 <- add(acc0, v2) over a1\n    v3 = divide(acc0, v0)\n    v4 = add(v1, v3)\n    v5 = rsqrt(v4)\n    for a2 in 0..1024:\n        in1 = load x[0, a0, a2]\n        v6 = multiply(in1, v5)\n        in2 = load w[a2]\n        v7 = multiply(in2, v6)\n        o[0, a0, a2] = v7","name":"k_rms_norm_41879a"},"inputs":["x","w"],"outputs":[["o","f32",[1,32,1024]]]}]},"name":"k_rms_norm_41879a","formed":true,"traced":0,"origins":["o"]}
+  {"loop_ir":{"inputs":["x","w"],"outputs":["o"],"nodes":[{"id":"w","op":"input","outputs":[["w","f32",[1024]]]},{"id":"x","op":"input","outputs":[["x","f32",[1,32,1024]]]},{"id":"o","op":"loop","attrs":{"body":"let f32 v0 = 1024.0\nlet f32 v1 = 9.999999974752427e-07\nfor a0 in 0..32:\n    for a1 in 0..1024:\n        in0 = load x[0, a0, a1]\n        v2 = multiply(in0, in0)\n        acc0 <- add(acc0, v2) over a1\n    v3 = divide(acc0, v0)\n    v4 = add(v1, v3)\n    v5 = rsqrt(v4)\n    for a2 in 0..1024:\n        in1 = load x[0, a0, a2]\n        v6 = multiply(in1, v5)\n        in2 = load w[a2]\n        v7 = multiply(in2, v6)\n        o[0, a0, a2] = v7"},"inputs":["x","w"],"outputs":[["o","f32",[1,32,1024]]]}]},"formed":true,"traced":0,"origins":["o"]}
  ],
  "rows": [
-  {"name":"k_rms_norm_284002","kernel":"k_rms_norm_41879a","pins":{"FAST_MATH":false},"knobs":{"WORK":"t128","REDUCE":"coop","RASTER":""}}
+  {"name":"k_rms_norm_284002","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"t128","REDUCE":"coop","RASTER":""}}
  ]}

@@ -297,7 +297,6 @@ impl Launch {
 #[derive(Debug, Clone)]
 pub struct Kernel {
     pub binary_key: Option<String>,
-    pub arch_specific: bool,
     pub source: Option<String>,
     /// The kernel waits on the grid ahead of it before touching memory, so it may launch as a
     /// programmatic dependent launch.
@@ -366,8 +365,6 @@ struct RawBuffer {
 struct RawKernel {
     #[serde(default)]
     binary_key: Option<String>,
-    #[serde(default)]
-    arch_specific: bool,
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
@@ -634,7 +631,6 @@ impl Program {
                         name,
                         Kernel {
                             binary_key: k.binary_key,
-                            arch_specific: k.arch_specific,
                             source: k.source,
                             dependent_launch: k.dependent_launch,
                         },
@@ -1227,7 +1223,7 @@ mod tests {
                 {"name":"w", "shape":[1], "dtype":"f32", "role":"constant"}
             ],
             "constants": {"w": 2.0}, "runtime_constants": {}, "weights": {},
-            "kernels": {"add": {"binary_key":"ab", "arch_specific":false}},
+            "kernels": {"add": {"binary_key":"ab"}},
             "symbols": {"bindings":{},"hints":{},"caps":{}},
             "launches": [{"node_id":"y", "kernel":"add", "args":["x","w","y"],
                 "grid":[[1],[1],[1]],"block":[[32],[1],[1]],"smem":0,
@@ -1283,7 +1279,7 @@ mod tests {
                 {"name":"w", "shape":[1], "dtype":"f32", "role":"constant"}
             ],
             "constants": {"w": 2.0}, "runtime_constants": {}, "weights": {},
-            "kernels": {"k0": {"arch_specific":false}},
+            "kernels": {"k0": {}},
             "symbols": {"bindings":{"n":["x",0]},"hints":{"n":4},"caps":{}},
             "launches": [{"node_id":"y", "kernel":"k0", "args":["x","w","y"], "writes":["y"],
                 "zero_outputs":["y"], "runtime_args":["n"],
@@ -1367,7 +1363,7 @@ mod tests {
             ],
             "constants": {}, "runtime_constants": {}, "weights": {},
             "paged": {"k": {"axis": 2, "page": 8}},
-            "kernels": {"fill": {"binary_key":"ab", "arch_specific":false}},
+            "kernels": {"fill": {"binary_key":"ab"}},
             "symbols": {"bindings":{},"hints":{},"caps":{}},
             "launches": [{"node_id":"k", "kernel":"fill", "args":["x","k__pages"], "writes":["k"],
                 "grid":[[1],[1],[1]],"block":[[32],[1],[1]],"smem":0,
@@ -1402,7 +1398,7 @@ mod tests {
                 {"name":"t", "shape":[8, 4], "dtype":"f32", "role":"output", "alias":"s"}
             ],
             "constants": {}, "runtime_constants": {}, "weights": {},
-            "kernels": {"k": {"binary_key":"k", "arch_specific":false}},
+            "kernels": {"k": {"binary_key":"k"}},
             "symbols": {"bindings":{},"hints":{},"caps":{}},
             "launches": [
                 {"node_id":"s", "kernel":"k", "args":["x","s"], "grid":[[1],[1],[1]],"block":[[32],[1],[1]],"smem":0,

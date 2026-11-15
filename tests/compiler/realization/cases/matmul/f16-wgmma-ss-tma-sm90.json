@@ -4,8 +4,8 @@
   {"inputs":["x0","x1"],"outputs":["matmul"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","f16",[128,128]]]},{"id":"x1","op":"input","outputs":[["x1","f16",[128,64]]]},{"id":"matmul","op":"torch.matmul","inputs":["x0","x1"],"outputs":[["matmul","f16",[128,64]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["x1","x0"],"outputs":["matmul"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","f16",[128,128]]]},{"id":"x1","op":"input","outputs":[["x1","f16",[128,64]]]},{"id":"matmul","op":"loop","attrs":{"body":"for a0 in 0..128:\n    for a1 in 0..64:\n        for a2 in 0..128:\n            in0 = load x0[a0, a2]\n            in1 = load x1[a2, a1]\n            f32 v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        matmul[a0, a1] = acc0","name":"k_matmul_442d08"},"inputs":["x1","x0"],"outputs":[["matmul","f16",[128,64]]]}]},"name":"k_matmul_442d08","formed":true,"traced":0,"origins":["matmul"]}
+  {"loop_ir":{"inputs":["x1","x0"],"outputs":["matmul"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","f16",[128,128]]]},{"id":"x1","op":"input","outputs":[["x1","f16",[128,64]]]},{"id":"matmul","op":"loop","attrs":{"body":"for a0 in 0..128:\n    for a1 in 0..64:\n        for a2 in 0..128:\n            in0 = load x0[a0, a2]\n            in1 = load x1[a2, a1]\n            f32 v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        matmul[a0, a1] = acc0"},"inputs":["x1","x0"],"outputs":[["matmul","f16",[128,64]]]}]},"formed":true,"traced":0,"origins":["matmul"]}
  ],
  "rows": [
-  {"name":"k_matmul_df52fc","kernel":"k_matmul_442d08","pins":{"FAST_MATH":false},"knobs":{"WORK":"w8x1","TILE":"wgmma_m64n64k16_f16_f32/f1x8/k4","REDUCE":"","STAGE":"d2/smem-tma","RASTER":""}}
+  {"name":"k_matmul_df52fc","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"w8x1","TILE":"wgmma_m64n64k16_f16_f32/f1x8/k4","REDUCE":"","STAGE":"d2/smem-tma","RASTER":""}}
  ]}

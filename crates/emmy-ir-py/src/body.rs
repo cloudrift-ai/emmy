@@ -23,25 +23,34 @@ use crate::statement::{PyStatement, statement_type_of, statements_from_py, wrap_
 /// Python object. An entry outlives its body only until the next purge.
 type Wrappers = Arc<[OnceLock<Py<PyAny>>]>;
 
-/// How many entries a table grows by between two purges of its dead ones.
+/// The fewest inserts between two purges of a table's dead entries.
 const PURGE_EVERY: usize = 1024;
 
 /// A table of per-object state on this side of the boundary, keyed by the shared object's address while it lives:
 /// a body's statement wrappers, a subroutine's one Python object. An entry outlives its object only until the next
-/// purge, every `PURGE_EVERY` inserts or from Python's `clear_memos`; the table is not bounded (a live object keeps
-/// its one wrapper).
-struct Tables<T, V> {
+/// purge; the table is not bounded (a live object keeps its one wrapper). A purge walks every entry, so the next one
+/// waits for as many inserts as the purge left entries alive, never fewer than `PURGE_EVERY`: an insert costs a
+/// constant share of the walks whatever the table holds. (A purge due at every length that was a multiple of
+/// `PURGE_EVERY` walked the whole table on every insert that took a dead object's address, which a body made and
+/// dropped in a loop does every time.)
+pub(crate) struct Tables<T, V> {
     entries: HashMap<usize, (std::sync::Weak<T>, V)>,
+    /// Inserts since the last purge.
+    inserts: usize,
+    /// Inserts the next purge waits for.
+    budget: usize,
 }
 
 impl<T, V> Tables<T, V> {
     fn new() -> Tables<T, V> {
         Tables {
             entries: HashMap::new(),
+            inserts: 0,
+            budget: PURGE_EVERY,
         }
     }
 
-    fn get<R>(&mut self, object: &Arc<T>, read: impl FnOnce(&V) -> R) -> Option<R> {
+    pub(crate) fn get<R>(&mut self, object: &Arc<T>, read: impl FnOnce(&V) -> R) -> Option<R> {
         self.entries
             .get(&(Arc::as_ptr(object) as usize))
             .and_then(|(alive, value)| {
@@ -54,7 +63,7 @@ impl<T, V> Tables<T, V> {
 
     /// Remember `value` for `object`: the value a dead object at the same address left, for the caller to drop
     /// outside the lock, and whether the table is due for a purge.
-    fn insert(&mut self, object: &Arc<T>, value: V) -> (Option<V>, bool) {
+    pub(crate) fn insert(&mut self, object: &Arc<T>, value: V) -> (Option<V>, bool) {
         let old = self
             .entries
             .insert(
@@ -62,21 +71,29 @@ impl<T, V> Tables<T, V> {
                 (Arc::downgrade(object), value),
             )
             .map(|(_, old)| old);
-        (old, self.entries.len().is_multiple_of(PURGE_EVERY))
+        self.inserts += 1;
+        let due = self.inserts >= self.budget;
+        if due {
+            self.inserts = 0;
+        }
+        (old, due)
     }
 
     /// The values of every entry whose object is gone, removed from the table.
     fn dead(&mut self) -> Vec<V> {
-        self.entries
+        let dead = self
+            .entries
             .extract_if(|_, (alive, _)| alive.strong_count() == 0)
             .map(|(_, (_, value))| value)
-            .collect()
+            .collect();
+        self.budget = self.entries.len().max(PURGE_EVERY);
+        dead
     }
 }
 
 /// Drop the dead entries of `tables`, outside its lock: a value may hold Python objects whose finalizers come back
 /// here, and the objects it held may have kept other entries alive, so the purge runs again while it frees any.
-fn purge<T, V>(table: &Table<T, V>) {
+pub(crate) fn purge<T, V>(table: &Table<T, V>) {
     loop {
         let dead = table.lock().dead();
         if dead.is_empty() {
@@ -87,16 +104,16 @@ fn purge<T, V>(table: &Table<T, V>) {
 }
 
 /// A table behind its lock: what the statics hold.
-struct Table<T, V>(Mutex<Tables<T, V>>);
+pub(crate) struct Table<T, V>(Mutex<Tables<T, V>>);
 
 impl<T, V> Table<T, V> {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Tables<T, V>> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Tables<T, V>> {
         emmy_ir::locked(&self.0)
     }
 }
 
 /// The one table under `cell`, built on first use.
-fn tables<T: Send + Sync + 'static, V: Send + 'static>(
+pub(crate) fn tables<T: Send + Sync + 'static, V: Send + 'static>(
     cell: &'static OnceLock<Table<T, V>>,
 ) -> &'static Table<T, V> {
     cell.get_or_init(|| Table(Mutex::new(Tables::new())))
@@ -400,6 +417,38 @@ impl PyBody {
     #[getter]
     fn ssa_uses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
         frozenset(py, self.body.ssa_uses().iter().cloned())
+    }
+
+    /// Every name a statement of this body defines, at any depth.
+    #[getter]
+    fn defined<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.defined().iter().copied())
+    }
+
+    /// Every name this body reads from the scope around it, less what it defines or binds.
+    #[getter]
+    fn free<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.free().iter().copied())
+    }
+
+    /// ``(reads, writes)``: the external buffers this body reads and writes, first use order, less its kernel-local
+    /// declarations.
+    #[getter]
+    fn buffers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let (reads, writes) = self.body.buffers();
+        PyTuple::new(py, [str_tuple(py, reads)?, str_tuple(py, writes)?])
+    }
+
+    /// This body cut to what ``roots`` need, nested bodies cut too; a statement that writes a buffer stays.
+    fn pruned<'py>(
+        &self,
+        py: Python<'py>,
+        roots: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let roots: PyResult<Vec<Name>> =
+            roots.try_iter()?.map(|item| name_from_py(&item?)).collect();
+        let result = self.body.pruned(&roots?).py()?;
+        PyBody::wrap(py, &result)
     }
 
     /// Each SSA definition to the axes its value depends on.
@@ -850,25 +899,30 @@ pub fn one_operation_per_definition<'py>(
     )
 }
 
-/// A fragment's statements in the canonical order, its names as they stand, a read of an `outer` name ahead of its
-/// first binding reading the outer one; an error when they wait on each other.
+/// Lambda normalization: a pure body's statements in the canonical order with its names as they stand (a read of a
+/// `params` name ahead of its first binding reading the parameter; an error when the statements wait on each other),
+/// then every value expression in its canonical spelling under those names.
 #[pyfunction]
-#[pyo3(signature = (body, outer=None))]
-pub fn fragment_order<'py>(
+#[pyo3(signature = (body, params=None))]
+pub fn normalize_lambda_body<'py>(
     body: &Bound<'py, PyAny>,
-    outer: Option<&Bound<'py, PyAny>>,
+    params: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyBody>> {
-    let outer: HashSet<Name> = match outer {
+    let params: HashSet<Name> = match params {
         Some(names) => names
             .try_iter()?
             .map(|item| name_from_py(&item?))
             .collect::<PyResult<_>>()?,
         None => HashSet::new(),
     };
-    PyBody::wrap(
-        body.py(),
-        &emmy_ir::normalize::fragment_order(&PyBody::from_iterable(body)?, &outer).py()?,
-    )
+    let py = body.py();
+    let body = PyBody::from_iterable(body)?;
+    let ordered = if body.len() > 1 {
+        emmy_ir::normalize::fragment_order(&body, &params).py()?
+    } else {
+        body
+    };
+    PyBody::wrap(py, &emmy_ir::normalize::canonical_values(&ordered))
 }
 
 /// A kernel body with its index divisions and remainders by a power of two over a non-negative dividend as shifts and
@@ -877,15 +931,6 @@ pub fn fragment_order<'py>(
 pub fn reduce_strength<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
     let out = emmy_ir::strength::reduce_strength(&PyBody::from_iterable(body)?);
     PyBody::wrap(body.py(), &out.py()?)
-}
-
-/// Every value expression in its canonical spelling under the names as they stand.
-#[pyfunction]
-pub fn canonical_values<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
-    PyBody::wrap(
-        body.py(),
-        &emmy_ir::normalize::canonical_values(&PyBody::from_iterable(body)?),
-    )
 }
 
 /// Every name the whole subtree of `stmt` reads from its enclosing scope.
@@ -907,22 +952,6 @@ pub fn exposed_defines_py<'py>(
 ) -> PyResult<Bound<'py, PySet>> {
     let names = exposed_defines(&*statement_from_py(stmt)?);
     PySet::new(py, names.iter().map(|name| PyString::new(py, name)))
-}
-
-/// A rename under an alias map, made hygienic.
-#[pyfunction]
-pub fn rename_free<'py>(
-    py: Python<'py>,
-    stmt: &Bound<'py, PyAny>,
-    alias: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let alias = renames_from_py(alias)?;
-    let original = statement_from_py(stmt)?;
-    let renamed = emmy_ir::normalize::rename_free(&original, &alias);
-    if Arc::ptr_eq(&renamed, &original) {
-        return Ok(stmt.clone());
-    }
-    Ok(wrap_statement(py, &renamed)?.into_bound(py))
 }
 
 /// The mask branch of an ordered two-way comparison, or `None`.
@@ -984,24 +1013,12 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;
-    m.add_function(wrap_pyfunction!(canonical_values, m)?)?;
-    m.add_function(wrap_pyfunction!(fragment_order, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_lambda_body, m)?)?;
     m.add_function(wrap_pyfunction!(reduce_strength, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
-    m.add_function(wrap_pyfunction!(rename_free, m)?)?;
     m.add_function(wrap_pyfunction!(mask_select_predicate, m)?)?;
     m.add_function(wrap_pyfunction!(ordering_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_promote, m)?)?;
-    m.add_function(wrap_pyfunction!(clear_memos, m)?)?;
     Ok(())
-}
-
-/// Forget every memoized normal form and identity and purge the wrapper tables: what a test worker or a process
-/// pool does to start clean.
-#[pyfunction]
-fn clear_memos() {
-    emmy_ir::memo::clear_all();
-    purge(wrapper_tables());
-    purge(subroutines());
 }

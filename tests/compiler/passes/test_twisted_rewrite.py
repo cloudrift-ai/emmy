@@ -10,7 +10,6 @@ slow kernel, and no numerics assert downstream would attribute the wrong answer 
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from textwrap import indent
 
 import pytest
@@ -97,7 +96,7 @@ def test_a_weight_may_read_only_its_own_operand_coordinates(coordinate, contract
         ev = multiply(e, v)
         """
     )
-    carrier = replace(carrier, lift=Lambda.closing(carrier.lift.params, body, carrier.lift.results))
+    carrier = carrier.replace(lift=Lambda.closing(carrier.lift.params, body, carrier.lift.results))
     assert (carrier.as_contraction() is not None) == contracts
 
 
@@ -138,7 +137,7 @@ def test_softmax_rewrites_to_twisted_pair() -> None:
     carrier's own ⊕ folds — and ψ⁻¹ brings back ``(score, exp score)`` for a matcher to read."""
     fold = _twisted("torch.softmax(torch.randn(4, 8, dtype=torch.float16), dim=-1)")
 
-    assert fold.twist.recipe is SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
+    assert fold.twist.recipe == SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
     assert len(fold.init) == 2 and fold.init[1] == 0.0
     assert [edge.as_slab() is not None for edge in fold.operands] == [True], "the score slab is its one operand"
     assert [stmt.value.value for stmt in fold.lift.body if isinstance(stmt, Let)] == [1.0], "the stable singleton is (score, 1)"
@@ -214,7 +213,7 @@ def test_twist_compares_operand_values_independently_of_coordinate_parameter_ord
         # The same load can close its captured coordinates in either order. Neither order is
         # an index permutation; changing the actual coordinates must still reject the recipe.
         if suffix:
-            weights = replace(weights, lift=replace(weights.lift, params=tuple(reversed(weights.lift.params))))
+            weights = weights.replace(lift=weights.lift.replace(params=tuple(reversed(weights.lift.params))))
         values = slab(f"x{suffix}", "x", "k" if suffix and different == "coordinate" else "row", "d")
         return contraction("d", values, (weights, f"score{suffix}"))
 
@@ -410,7 +409,7 @@ def _row(*parts: str) -> LoopOp:
 def _rewrite(*parts: str) -> tuple[Fold, tuple]:
     """Lift the statements under one row and rewrite: the second loop's read of ``acc0`` arrives as
     an operand edge, which is what the recipe matches on. Returns the tree and the kernel's axis table."""
-    tile = lift_loop_op(_row(*parts), name="k_pair")
+    tile = lift_loop_op(_row(*parts))
     return rewrite_twisted(tile.op, tile.axes), tile.axes
 
 
@@ -446,7 +445,7 @@ def test_an_invariant_factor_hoists_out_of_the_fold(spelling: str) -> None:
     Loop IR may already have split the divide into a reciprocal ahead of the loop, so the epilogue
     applies the factor by whichever ⊗ reached the term."""
     weight = "inv = reciprocal(d)\np = multiply(in1, inv)" if spelling == "reciprocal" else "p = divide(in1, d)"
-    tile = lift_loop_op(_row("d = load den[a0]", _reduce_loop(f"in1 = load x[a0, a1]\n{weight}\nacc1 <- add(acc1, p)")), name="k_hoist")
+    tile = lift_loop_op(_row("d = load den[a0]", _reduce_loop(f"in1 = load x[a0, a1]\n{weight}\nacc1 <- add(acc1, p)")))
     fold = next(term for term in _folds(tile.op) if term.axis is not None)
     (state,) = fold.as_reduction().states
     inner, epilogue = _hoist_invariant(fold)

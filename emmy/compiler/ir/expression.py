@@ -12,7 +12,7 @@ the affine-form helpers. On the wire an expression is its C-like text, ``((a5 / 
 ``a5 / 128 * 128 + a6`` with parentheses only where precedence needs them (:func:`parse` reads it back), and that text
 is also its structural identity. The members
 that take a Python function or evaluate against host values — ``rename`` by a function, ``rebuild``, ``eval`` — are
-written here over the Rust reads; rendering to C / CUDA lives in :mod:`emmy.compiler.ir.render`.
+written here over the Rust reads; rendering to host C++ lives in :mod:`emmy.compiler.ir.loop.render`.
 """
 
 from __future__ import annotations

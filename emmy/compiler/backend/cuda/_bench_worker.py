@@ -5,10 +5,9 @@ the dirty CUDA stream (or a non-terminating kernel) dies with the child.
 Protocol (length-prefixed pickle on stdin/stdout):
 
 - Parent writes ``<8-byte little-endian length><pickled request>``.
-- One request shape, handled by :func:`_run_job`: ``{"graph": Graph, "nvcc_flags": str|None,
-  "torch_spec": None | (...), ...}``. ``torch_spec`` selects the work — ``None`` is a pure
-  emmy bench (the autotune sweep and ``run --bench``'s pinned golden / ``--ab`` rows; ``kwargs``
-  carries warmup / num_iters / timeouts, an optional ``run_inputs`` ndarray dict adds one
+- One request shape, handled by :func:`_run_job`: ``{"graph": Graph, "torch_spec": None | (...), ...}``.
+  ``torch_spec`` selects the work — ``None`` is a pure emmy bench (the autotune sweep and ``run --bench``'s
+  pinned golden / ``--ab`` rows; ``kwargs`` carries warmup / num_iters / timeouts, an optional ``run_inputs`` ndarray dict adds one
   pre-bench execution on those inputs with the outputs returned — the wrong-answer gate's
   measurement side), otherwise the deployable eager / torch.compile / emmy comparison
   (``tune --bench`` / ``run --bench``'s greedy row), rebuilt and run *here* so a hung kernel
@@ -128,20 +127,17 @@ async def _run_job(req: dict) -> dict:
     - ``("frontend_graph", Graph | None)`` → ``bench_lowered_vs_torch`` (per-kernel reproducer).
 
     Rebuilding the torch side **here** (not pickling a live module) means a hung emmy kernel
-    hangs *this* child, which the parent SIGKILLs — recovering the device. ``nvcc_flags`` re-points
-    the compile at a given opt level (the cubin cache key folds it in)."""
+    hangs *this* child, which the parent SIGKILLs — recovering the device."""
     if req.get("worker_warmup"):
         from emmy.compiler.backend.cuda.device import device
 
         device().synchronize()
         return {"warmed": True}
 
-    from emmy import config
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     with (
         pinned_knobs({**req.get("precision", {}), "COLD_CACHE": req.get("cold_cache", False)}),
-        config.nvcc_flags_override(req.get("nvcc_flags")),
         _reference_precision(req.get("strict_accuracy", False)),
     ):
         spec = req.get("torch_spec")

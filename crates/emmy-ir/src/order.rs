@@ -273,6 +273,9 @@ pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
 /// motion can produce, keeps its lexical reading: the reads between the two bindings stay between them. A scope whose
 /// bindings and reads wait on each other is an error.
 pub fn topological_sort(body: &Body) -> Result<Body> {
+    if body.is_sorted() {
+        return Ok(body.clone());
+    }
     let sorted = body.try_map_each(&mut |stmt| {
         let nested = stmt.nested();
         if nested.is_empty() {
@@ -281,7 +284,9 @@ pub fn topological_sort(body: &Body) -> Result<Body> {
         let bodies: Result<Vec<Body>> = nested.iter().map(topological_sort).collect();
         Ok(Statement::rebuild_bodies(stmt, bodies?))
     })?;
-    sorted.topological_order(&ordering_constraints(&sorted, false))
+    let sorted = sorted.topological_order(&ordering_constraints(&sorted, false))?;
+    sorted.mark_sorted();
+    Ok(sorted)
 }
 
 #[cfg(test)]

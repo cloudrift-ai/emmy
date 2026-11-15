@@ -1,7 +1,7 @@
 """The canonical Tile IR tree — what formation states about a term and what only the whole tree
 can: ``TileOp.__post_init__`` (an elided unit row recovered from the stores, a shared store sweep
 promoted to a free axis, the identity projection dissolved), the bilinear form the lift builds
-(cone operands, orientation, one shared A), and ``_share_common_cones`` restoring one object per
+(cone operands, orientation, one shared A), and the cone-sharing pass restoring one object per
 value."""
 
 from __future__ import annotations
@@ -15,8 +15,7 @@ from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write, parse_body
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.normalize import _share_common_cones
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, normalize_fold_tree
 from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
@@ -415,7 +414,7 @@ def test_unit_row_requires_every_output_root_to_be_rowless(second_has_row, mirro
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
     """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
     tile = case_target_tile("attention/rmsnorm-gqa-b-cut.json")
-    reconstructed = TileOp(op=tile.op, name=tile.name, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
+    reconstructed = TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
 
     assert tuple(axis.extent for axis in tile.place.free) == (Dim(4), Dim(4), Dim(16))
     assert all(spec.sweep == () for spec in tile.output_specs)
@@ -506,7 +505,7 @@ def test_normalization_prunes_an_operand_component_no_reader_reads() -> None:
         results=("scale", "v10"),
     )
     root = projection((epilogue,), parse_body("out = multiply(v10, v10)"))
-    tile = TileOp(op=root, name="k_epilogue", place=Placement(free=(M8,)), axes=(M8,), output_specs=(_spec("o[m] = out"),))
+    tile = TileOp(op=root, place=Placement(free=(M8,)), axes=(M8,), output_specs=(_spec("o[m] = out"),))
     (edge,) = tile.op.operands
     assert edge.exposes == ("v10",)  # ``scale`` went with the param nothing bound
     assert tile.op.lift.params == ("v10",)
@@ -558,7 +557,6 @@ def test_unread_planar_state_drops_its_independent_coordinate(stored_second) -> 
 
 
 def test_planar_state_pruning_does_not_depend_on_operand_object_sharing() -> None:
-    from dataclasses import replace
 
     stat = reduction(
         K32,
@@ -578,7 +576,7 @@ def test_planar_state_pruning_does_not_depend_on_operand_object_sharing() -> Non
         root = projection((left, right), parse_body("out = add(left, right)"), ("out",))
         return _tile(root, K32, free=(M8,)).op
 
-    assert normalized(stat) == normalized(replace(stat))
+    assert normalized(stat) == normalized(stat.replace())
 
 
 def test_readers_of_independent_shared_statistics_keep_only_their_own_coordinates() -> None:
@@ -611,7 +609,7 @@ def test_normalization_keeps_a_component_only_a_boundary_store_reads() -> None:
     cell = projection((slab("acc", "workspace", "m"),), parse_body("v = exp(acc)"), results=("acc", "v"))
     root = projection((cell,), parse_body("out = rsqrt(acc)"))
     specs = (_spec("o[m] = out"), _spec("tap[m] = v"))
-    tile = TileOp(op=root, name="k_tap", place=Placement(free=(M8,)), axes=(M8,), output_specs=specs)
+    tile = TileOp(op=root, place=Placement(free=(M8,)), axes=(M8,), output_specs=specs)
     (edge,) = tile.op.operands
     assert edge.exposes == ("acc", "v")  # ``v`` survives on the store's word alone
 
@@ -923,7 +921,7 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
 
     def rooted(second: Fold) -> Fold:
         root = projection((consumer(cone("l1", "p1"), "u"), consumer(second, "v")), parse_body("w = add(u, v)"), ("w",))
-        return _share_common_cones(root)
+        return normalize_fold_tree(root)
 
     unified = rooted(cone("l2", "p2"))
     assert unified.operands[0].operands[0] is unified.operands[1].operands[0]

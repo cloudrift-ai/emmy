@@ -133,28 +133,39 @@ def _init_defaults(cls: type) -> dict[str, object]:
 
 def _fields_to_wire(obj: Wire):
     cls = type(obj)
-    hints, declared = _hints(cls), _wire_fields(cls)
+    hints = _hints(cls)
+    return declared_to_wire(obj, [(f.name, hints[f.name], _default_of(cls, f)) for f in _wire_fields(cls)])
+
+
+def declared_to_wire(obj: object, declared) -> dict:
+    """``obj``'s wire data over ``declared``, its fields as ``(name, annotation, default)`` with ``MISSING`` for no
+    default: what a class that is no dataclass (a crate class with a Python half) writes itself as."""
+    name = type(obj).__name__
     out = {}
-    for f in declared:
-        item = getattr(obj, f.name)
-        default = _default_of(cls, f)
+    for field_name, hint, default in declared:
+        item = getattr(obj, field_name)
         if default is not MISSING and item == default:
             continue
-        out[f.name] = _to_wire(item, hints[f.name], f"{cls.__name__}.{f.name}")
+        out[field_name] = _to_wire(item, hint, f"{name}.{field_name}")
     return out
 
 
 def _fields_from_wire(cls: type, value: object, where: str):
-    hints, declared = _hints(cls), _wire_fields(cls)
+    hints = _hints(cls)
+    return declared_from_wire(cls, value, where, [(f.name, hints[f.name], _default_of(cls, f)) for f in _wire_fields(cls)])
+
+
+def declared_from_wire(cls: type, value: object, where: str, declared):
+    """An instance of ``cls`` from its wire data over ``declared`` (:func:`declared_to_wire`'s inverse)."""
     if not isinstance(value, Mapping):
         raise ValueError(f"{where} must be a mapping")
-    names = {f.name: f for f in declared}
+    names = {field_name: (hint, default) for field_name, hint, default in declared}
     if unknown := set(value) - set(names):
         raise ValueError(f"{where}: unknown field(s): {', '.join(sorted(unknown))}")
-    required = {name for name, f in names.items() if _default_of(cls, f) is MISSING}
+    required = {field_name for field_name, (_, default) in names.items() if default is MISSING}
     if missing := required - set(value):
         raise ValueError(f"{where} missing {', '.join(sorted(missing))}")
-    kwargs = {name: _from_wire(hints[name], item, f"{where}.{name}") for name, item in value.items()}
+    kwargs = {field_name: _from_wire(names[field_name][0], item, f"{where}.{field_name}") for field_name, item in value.items()}
     try:
         return cls(**kwargs)
     except (TypeError, ValueError) as exc:
@@ -347,7 +358,7 @@ def kernel_tile(op):
     another term (a carried state's serial form) does not change which tile that is. Every fact about a kernel is
     computed off this one tile: its exact identity (:func:`kernel_identity`), its ``S_*`` stamps, the definition a
     ``kernel`` row stores. Every kernel the tuner and ``run --bench`` measure has one, the kernel-cache replay
-    included (a cached kernel keeps its chain)."""
+    included (a cached kernel's chain starts at the tile it was fetched for)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     tiles = [ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)]
@@ -360,6 +371,21 @@ def kernel_identity(op) -> str | None:
     kernel no tile stands behind, which nothing can name."""
     tile = kernel_tile(op)
     return tile.identity_key(structural=False, with_io=True) if tile is not None else None
+
+
+def kernel_name(op) -> str:
+    """The name of the kernel ``op`` realizes: ``k_`` and 12 hex of its exact identity (:func:`kernel_identity`), so
+    every kernel of one identity has one name and kernels of two identities have two. An op no tile stands behind
+    is named by its own exact identity, and one with no body at all (a placeholder) by a digest of the op. Computed,
+    never stored: pins, launches and every tool address a kernel by it."""
+    from emmy.compiler.structural import digest  # noqa: PLC0415
+
+    return name_of(kernel_identity(op) or op.identity_key(structural=False, with_io=True) or digest(repr(op)))
+
+
+def name_of(identity: str) -> str:
+    """The name of the kernel of exact identity ``identity``: ``k_`` and its first 12 hex."""
+    return f"k_{identity[:12]}"
 
 
 def formed_from(tile):
@@ -421,7 +447,7 @@ def kernel_wire(tile) -> dict:
     formed = formed_from(tile)
     body = formed.body if formed is not None else tile.loop_body
     outputs = tuple(tile.outputs[name] for name in declared_outputs(tile))
-    graph.add_node(LoopOp(body=body, name=tile.name), list(tile.inputs), outputs=outputs, node_id=primary)
+    graph.add_node(LoopOp(body=body), list(tile.inputs), outputs=outputs, node_id=primary)
     graph.inputs = list(tile.inputs)
     graph.outputs = [tensor.name for tensor in outputs]
     return graph.to_wire()

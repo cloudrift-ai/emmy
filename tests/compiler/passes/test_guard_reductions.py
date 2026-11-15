@@ -80,3 +80,25 @@ def test_guard_does_not_skip_effects_or_use_an_unavailable_predicate(unsafe):
         ]
     candidate = Body((outer.replace(body=(reduction, *tail)),))
     assert guard._guard(candidate)[0].body[0] == reduction
+
+
+def test_a_select_of_many_branches_leaves_its_reduction_unguarded():
+    """A select of hundreds of branches nests its demand past the expression depth limit; the demand is then the
+    whole domain, so the reduction it reads runs every iteration instead of failing the pass."""
+    branches = "\n".join(f"                neg when i == {b}" for b in range(300))
+    body = parse_body(
+        f"""
+        for i in 0..6:
+            for k in 0..7:
+                value = load x[i, k]
+                sum <- add(sum, value)
+            other = load fallback[i]
+            neg = negative(sum)
+            selected = select:
+{branches}
+                other when true
+            out[i] = selected
+        """
+    )
+    changed = guard._guard(body)
+    assert changed[0].body[0] == body[0].body[0]

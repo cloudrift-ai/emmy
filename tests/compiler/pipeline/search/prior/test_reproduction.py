@@ -89,12 +89,7 @@ def _placement_pools(path: Path):
     return placement_pools(db, _pools(path)["schedule"])
 
 
-KNOWN_MISSES = {
-    ("rtx5090_sm120.json", "placement", 13): (
-        "PR #1365: the refit prior cuts k_linear_mean_reduce_949ce4 at 512 tokens at map.4/inner where the golden"
-        " cuts at map.2/map (24 of 25 reproduced); accepted by the user, dropped by the refit that reproduces it"
-    ),
-}
+KNOWN_MISSES: dict[tuple[str, str, int], str] = {}
 
 
 def _marks(path: Path, space: str, k: int) -> tuple:

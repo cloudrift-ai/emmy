@@ -128,8 +128,8 @@ def test_an_fp8_cache_takes_a_16_bit_cell_whose_value_load_converts() -> None:
 @pytest.mark.parametrize(
     ("cache", "target", "score", "slab", "wgmma"),
     [
-        (torch.float8_e4m3fn, (12, 0), "mma_m16n8k16_bf16_f32", "__nv_fp8_e4m3", False),
-        (torch.bfloat16, (9, 0), "wgmma_m64n64k16_bf16_f32", "__nv_bfloat16", True),
+        (torch.float8_e4m3fn, (12, 0), "mma_m16n8k16_bf16_f32", "f8e4m3", False),
+        (torch.bfloat16, (9, 0), "wgmma_m64n64k16_bf16_f32", "bf16", True),
         (torch.float8_e4m3fn, (9, 0), "wgmma_m64n64k16_bf16_f32", None, False),
     ],
     ids=["fp8-mma", "bf16-wgmma", "fp8-wgmma"],
@@ -144,7 +144,7 @@ def test_a_staged_key_is_read_only_by_a_cell_that_converts_it(cache, target, sco
         _, kernels = compile_with_kernels(graph, ctx=Context.from_target(target))
     (kernel,) = kernels.values()
     if slab is not None:  # the key's slab at the element type its reader takes, filled on cp.async
-        assert [key.dtype for key in statements(kernel, Smem) if key.name == "_a_smem"] == [slab]
+        assert [key.dtype.name for key in statements(kernel, Smem) if key.name == "_a_smem"] == [slab]
         assert statements(kernel, CpAsyncCopy)
     assert bool(statements(kernel, WgmmaMma)) == wgmma
 

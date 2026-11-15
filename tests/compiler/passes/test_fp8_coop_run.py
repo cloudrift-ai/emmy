@@ -49,7 +49,7 @@ def _graph() -> Graph:
     graph.add_node(InputOp(), [], Tensor("w_scale", (N // 128, K // 128), "f32"), node_id="w_scale")
     graph.add_node(InputOp(), [], Tensor("x", (K,), "f16"), node_id="x")
     graph.add_node(
-        LoopOp(body=body, name="k_fp8_matvec"),
+        LoopOp(body=body),
         ["w_bits", "w_scale", "x"],
         Tensor("out", (N,), "f32"),
         node_id="out",

@@ -62,8 +62,9 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.plan import plan_from_graph
     from emmy.compiler.dtype import encode_bf16
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
     from emmy.serving.gen_runner import EmmyGenRunner
-    from emmy.serving.twins import capture_twin_graphs
+    from emmy.serving.twins import LayoutScope, capture_twin_graphs, plan_layouts
 
     config = Qwen3Config(
         vocab_size=32,
@@ -82,7 +83,12 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
     config.save_pretrained(tmp_path)
     twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False, dtype="bfloat16")
     for name, program in (("pre4", pre), ("post4", post)):
-        twin_plan = plan_from_graph(CudaBackend(tune_db="auto").compile(twins[name]))
+        # The runner's narrower twin settles each weight's layout before this one compiles; the twin alone compiles
+        # under the same layouts, else a weight read in the other layout is another kernel.
+        scope = LayoutScope()
+        scope.record(name, plan_layouts(program.plan))
+        with settled_layouts(scope.settled()):
+            twin_plan = plan_from_graph(CudaBackend(tune_db="auto").compile(twins[name]))
         assert set(program.plan.kernels) == set(twin_plan.kernels)
 
     for program in (pre, post):
@@ -400,13 +406,14 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
 
 def test_sliced_experts_run_a_decode_step_through_the_decode_bucket_slot_program():
     """On experts sliced across ranks a decode step up to the bucket rides the fixed slots, and every row's picks go
-    through ONE launch of the slot program built at the bucket's width (``slot_rows``), each row against its own picks,
-    instead of one launch per row. The rows past the step's keep an earlier step's picks and inputs and no row reads
+    through ONE launch of a slot program (``slot_rows``), each row against its own picks, instead of one launch per row:
+    the narrowest of the slot widths that holds the step. The rows past the step's keep an earlier step's picks and inputs and no row reads
     their partials: steps of several widths, back to back, each match the routed oracle."""
     import torch
 
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
     from emmy.serving.gen_runner import EmmyGenRunner
+    from emmy.serving.release import slot_widths
 
     make_model, kwargs = helpers.RUNNERS["olmoe.l2.b16"]
     model = make_model()
@@ -417,7 +424,7 @@ def test_sliced_experts_run_a_decode_step_through_the_decode_bucket_slot_program
     bucket, k = kwargs["decode_bucket"], model.config.num_experts_per_tok
     assert runner.moe_slot_width == bucket
     assert runner._slot_rows_partials.shape == (bucket, k, model.config.hidden_size)
-    assert all(m["slot_rows"] is not None for m in runner._moe)
+    assert all(tuple(m["slot_rows"]) == slot_widths(bucket) for m in runner._moe)
 
     torch.manual_seed(1)
     for layer, rows in ((0, bucket), (0, 3), (1, 5), (1, 2)):
@@ -428,10 +435,11 @@ def test_sliced_experts_run_a_decode_step_through_the_decode_bucket_slot_program
         torch.testing.assert_close(got, runner._moe_combine(moe, xn), rtol=1e-4, atol=1e-5)
 
 
-def test_sliced_experts_run_a_steps_wide_experts_through_the_grouped_prefill_program():
-    """On experts sliced across ranks, every expert a step routes more rows than the decode bucket runs through the
-    grouped prefill program, ``EXPERT_GROUP`` experts per launch in blocks of ``EXPERT_PREFILL_M`` rows, the last launch
-    padded. The step combines to what the per-expert tiers give, with experts past one block among them."""
+def test_sliced_experts_run_a_steps_experts_through_the_grouped_prefill_programs():
+    """On experts sliced across ranks, a step's experts run through the grouped prefill programs, ``EXPERT_GROUP``
+    experts per launch, each launch's last padded: an expert routed up to the decode bucket's rows in one block of that
+    many, a wider one in blocks of ``EXPERT_PREFILL_M`` rows. The step combines to what the per-expert tiers give, with
+    experts past one block among them."""
     import torch
 
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
@@ -444,11 +452,11 @@ def test_sliced_experts_run_a_steps_wide_experts_through_the_grouped_prefill_pro
         runner = EmmyGenRunner.from_model(model, plan_cache=PlanTemplateCache(), expert_slices=2, **kwargs)
     runner._ensure_device()
     moe = runner._moe[0]
-    assert moe["blocks"] is not None
+    assert set(moe["blocks"]) == {runner._decode_bucket, EXPERT_PREFILL_M}
     hidden = model.config.hidden_size
     torch.manual_seed(3)
-    # 300 alike rows: each of their experts takes all of them, more than one block.
-    xn = torch.cat([torch.randn(1, hidden).expand(EXPERT_PREFILL_M + 44, hidden), torch.randn(200, hidden)]).cuda()
+    # 300 alike rows: each of their experts takes all of them, more than one block; 40 more spread thin.
+    xn = torch.cat([torch.randn(1, hidden).expand(EXPERT_PREFILL_M + 44, hidden), torch.randn(40, hidden)]).cuda()
     got = runner._moe_combine(moe, xn)
     grouped = moe.pop("blocks")
     try:
@@ -1314,8 +1322,9 @@ def test_bf16_nvfp4_native_mma_matches_numpy_with_quantization_tolerance(tmp_pat
 
     monkeypatch.setattr(CudaBackend, "compile", capture)
     tile = "mma_m16n8k64_e2m1_f32/f1x2/k4"
-    # The activation encoder has its own reduction schedule; these pins name the matrix output.
-    with pinned_knobs({"TILE@node_add": tile, "WORK@node_add": "w2x2", "STAGE@node_add": "d2/smem-tma", "REDUCE@node_add": ""}):
+    # Bare pins: the matrix output is the one kernel a tile reaches, and the activation encoder realizes under them.
+    # A site pin names a path inside a kernel, never a node, so ``@node_add`` reached nothing.
+    with pinned_knobs({"TILE": tile, "WORK": "w2x2", "STAGE": "d2/smem-tma", "REDUCE": ""}):
         prog, _ = _compile_split(wrapper, list(examples), None, BF16, ckpt=(str(ckpt), id_to_key))
     assert any((getattr(node.op, "knobs", None) or {}).get("TILE") == tile for node in lowered[0].nodes.values())
 

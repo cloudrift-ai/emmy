@@ -49,7 +49,7 @@ MemTotal: 52613349376
 === AMD SMI ===
 N/A
 
-=== NVCC VERSION ===
+=== PTXAS VERSION ===
 13.0.88
 
 === CUBLAS VERSION ===
@@ -107,7 +107,7 @@ def test_system_information_extracts_common_hardware():
     assert system.gpus[0].uuid == "GPU-1234"
     assert system.gpus[0].power_limit_w == 575.0
     assert system.gpus[0].driver_version == "580.65.06"
-    assert system.software.nvcc_version == "13.0.88"
+    assert system.software.ptxas_version == "13.0.88"
     assert system.software.cublas_version == "13.1.1.3"
     assert system.root_filesystem.available_bytes == 600000000
     assert system.uptime_seconds == 1234.5
@@ -280,7 +280,7 @@ def test_strict_command_provenance_uses_typed_system_information(tmp_path):
     assert record.missing_command_provenance() == [
         "Git provenance",
         "GPU provenance",
-        "NVCC provenance",
+        "ptxas provenance",
         "cuBLAS provenance",
     ]
 

@@ -50,21 +50,17 @@ _ROW = {"TILE": "f2x2", "WORK": "t16x16"}
 # ---------------------------------------------------------------------------
 
 
-def test_reason_keeps_a_row_of_either_precision_regime(monkeypatch) -> None:
-    """A row's precision decisions alone decide its regime, spelled once and not read off this shell: the flags a
-    row was compiled with, and whatever ``EMMY_NVCC_FLAGS`` holds when the freeze runs, leave it where its context
-    put it."""
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "-lineinfo")
+def test_reason_keeps_a_row_of_either_precision_regime() -> None:
+    """A row's precision decisions alone decide its regime, spelled once and not read off this shell."""
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW), _STAMPS) is None
-    assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="--use_fast_math"), _STAMPS) is None
-    assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="-lineinfo --use_fast_math"), _STAMPS) is None
+    assert freeze_reason(_row("k", us=500.0, knobs=_ROW, precision={"FAST_MATH": True}), _STAMPS) is None
     following = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO")
     assert REGIME_PINS[""] == {**dict.fromkeys(following, False), "CONTRACT_FMA": True, "COLD_CACHE": False}
-    assert REGIME_PINS["--use_fast_math"] == {**dict.fromkeys(following, True), "CONTRACT_FMA": True, "COLD_CACHE": False}
-    assert regime_of(False, {"FAST_MATH": True}) == "--use_fast_math" and regime_of() == ""
+    assert REGIME_PINS["FAST_MATH"] == {**dict.fromkeys(following, True), "CONTRACT_FMA": True, "COLD_CACHE": False}
+    assert regime_of(False, {"FAST_MATH": True}) == "FAST_MATH" and regime_of() == ""
     # Contraction is on in both regimes, so only turning it off is an independent override.
     assert regime_of(False, {"FAST_MATH": False, "CONTRACT_FMA": True}) == ""
-    assert regime_of(False, {"FAST_MATH": True, "CONTRACT_FMA": False}) == "--use_fast_math CONTRACT_FMA=0"
+    assert regime_of(False, {"FAST_MATH": True, "CONTRACT_FMA": False}) == "FAST_MATH CONTRACT_FMA=0"
 
 
 def test_freeze_preserves_cold_and_hot_rows_of_the_same_kernel(tmp_path):
@@ -128,10 +124,6 @@ def test_reason_drops_a_card_the_registry_does_not_know() -> None:
     assert freeze_reason(row, _STAMPS).startswith("unknown card")
 
 
-def test_reason_drops_a_non_deployable_regime() -> None:
-    assert freeze_reason(_row("k", us=500.0, knobs=_ROW, opt=1), _STAMPS) == "non-deployable regime (H_opt=1)"
-
-
 def test_reason_drops_a_row_whose_kernel_no_longer_lowers() -> None:
     # A row's shape is computed from its kernel's definition; a definition the compiler stopped taking back has none.
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW), None) == "stale kernel: its definition no longer lowers"
@@ -158,7 +150,9 @@ def _measured(db: SearchDB) -> set[tuple]:
     """Every row as a freeze carries it: the kernel, its bindings, its schedule row, its median and its regime."""
 
     return {
-        (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.stats.median, r.flags) for r in db.iter_perf_rows() if r.status == "ok"
+        (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.stats.median, regime_of(r.cold_cache, r.precision))
+        for r in db.iter_perf_rows()
+        if r.status == "ok"
     }
 
 
@@ -267,24 +261,23 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     with pinned_knobs({"FAST_MATH": True}):
         ctx = Context.from_target((12, 0), gpu_name=CARDS[(12, 0)], precision={"FAST_MATH": True})
         db.record_perf(ctx, row.kernel, bindings=row.bindings, knobs=row.knobs, status="ok", stats=row.stats)
-    assert {r.flags for r in db.iter_perf_rows()} == {"", "--ftz=true"}
+    assert {r.precision["FAST_MATH"] for r in db.iter_perf_rows()} == {False, True}
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
     assert sorted(row.pins["FAST_MATH"] for row in document.rows) == [False, True]
-    assert all(row.pins == REGIME_PINS["--use_fast_math" if row.pins["FAST_MATH"] else ""] for row in document.rows)
+    assert all(row.pins == REGIME_PINS["FAST_MATH" if row.pins["FAST_MATH"] else ""] for row in document.rows)
     write_freeze(path, tmp_path / "freeze")
     db.close()
     again = SearchDB()
     import_file(again, (frozen := next((tmp_path / "freeze").glob("*.json"))), file_source("freeze", frozen))
-    lanes = sorted((r.flags, r.stats.median) for r in again.iter_perf_rows())
-    assert lanes == [("", row.stats.median), ("--ftz=true", row.stats.median)]
+    lanes = sorted((r.precision["FAST_MATH"], r.stats.median) for r in again.iter_perf_rows())
+    assert lanes == [(False, row.stats.median), (True, row.stats.median)]
 
 
 def test_a_kernel_benched_at_two_sizes_freezes_as_two_rows_of_one_kernel(tmp_path) -> None:
     """A row's sizes are the row's ``bindings``, the sizes its symbolic dims were benched at: the same symbolic kernel
     benched at two sizes is one kernel with two rows, and each row comes back at the size it was benched at."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.compiler.wire import symbolic_vars
     from tests.compiler.pipeline.search.helpers import CARDS
 
@@ -292,9 +285,8 @@ def test_a_kernel_benched_at_two_sizes_freezes_as_two_rows_of_one_kernel(tmp_pat
     db = tuned_db(path, ("reduce/combine-amax-ilp-symbolic.json",))
     [row] = list(db.iter_perf_rows())
     assert row.bindings == {"seq_len": 512}
-    with pinned_knobs({"FAST_MATH": row.flags != ""}):
-        ctx = Context.from_target((12, 0), gpu_name=CARDS[(12, 0)], compile_flags=row.flags)
-        db.record_perf(ctx, row.kernel, bindings={"seq_len": 128}, knobs=row.knobs, status="ok", stats=row.stats)
+    ctx = Context.from_target((12, 0), gpu_name=CARDS[(12, 0)], precision=row.precision)
+    db.record_perf(ctx, row.kernel, bindings={"seq_len": 128}, knobs=row.knobs, status="ok", stats=row.stats)
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
     assert sorted(row.bindings["seq_len"] for row in document.rows) == [128, 512]
@@ -367,7 +359,7 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
     tuned_path = tmp_path / "autotune.db"
     tuned = SearchDB(tuned_path)
     standard = [row for row in document.rows if regime_of(precision=row.pins) == ""]  # every spelling of the plain lane
-    ctx = Context.from_target((12, 0), gpu_name=GPU_5090, compile_flags="")
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090, precision={})
     assert import_rows(tuned, ctx, document, standard, source="measured") >= 30
     documents, dropped = freeze_documents(tuned)
     assert dropped == {} and list(documents) == ["nvidia_geforce_rtx_5090_sm120.json"]

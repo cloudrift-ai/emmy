@@ -524,6 +524,6 @@ def test_a_tree_spelling_and_its_chain_lift_to_one_fold_tree() -> None:
     op, spelled = LoopOp(body=tree), LoopOp(body=chain)  # normalized at construction
     assert op.body == spelled.body
     assert "acc0 <- add(acc0, v2) over a2" in str(op.body) and "v4 = in3 + v3" in str(op.body), str(op.body)
-    lifted, from_chain = lift_loop_op(op, name="k"), lift_loop_op(spelled, name="k", body=chain)
+    lifted, from_chain = lift_loop_op(op), lift_loop_op(spelled, body=chain)
     assert lifted.op.canonical() == from_chain.op.canonical()
     assert {seam.spelling for seam in cuttable_seams(lifted)} == {seam.spelling for seam in cuttable_seams(from_chain)}

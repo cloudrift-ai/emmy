@@ -25,12 +25,9 @@ Correctness:
   graph inputs / constants) is skipped — nothing precedes it in the capture.
 - **Static shapes only**: the word count bakes into the source; a symbolic-shaped accumulator
   keeps the runtime memset.
-- **Name re-suffix**: kernel names were content-stamped BEFORE this rewrite, and launches
-  resolve kernels by name (the one-name-one-source rule stated beside
-  ``backend/cuda/nvcc.load_cubin_function``; first source wins) — two same-named predecessors delegated
-  different-sized buffers would run one body with the other's baked word count. The suffix
-  carries the total word count, so equal-suffix collisions are positionally safe (params bind
-  by position; equal structure + equal counts).
+- **Other code, same name**: the predecessor keeps its name, the hash of its exact identity, while its source now
+  carries the prologue; the execution plan launches a source its name already holds under a symbol of its own
+  (``backend/plan.merge_kernels``), so no twin of it runs this body or this one the twin's.
 """
 
 from __future__ import annotations
@@ -41,7 +38,7 @@ from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs, launch_name
+from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -82,14 +79,9 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
     # fragment alternative would splice two kernels for a body prepend). The prologues go FIRST
     # in the body; the target buffers join ``outputs`` with placeholder Tensors — the next
     # match's ``populate_io`` swaps in the real graph tensors (the buffers are graph nodes).
-    total_words = sum(s.words for s in prologues) + sum(s.words for s in pnode.op.body.iter() if isinstance(s, ZeroPrologue))
-    # An unnamed kernel (a split piece) takes its launch name here: a bare ``__zp<words>`` would be
-    # shared by every unnamed predecessor zeroing as many words.
-    base = launch_name(pnode.op, pnode.id).rsplit("__zp", 1)[0]
     pnode.op = replace(
         pnode.op,
         body=Body((*prologues, *pnode.op.body)),
-        name=f"{base}__zp{total_words}",
         inputs=dict(pnode.op.inputs),
         outputs={**pnode.op.outputs, **{b: Tensor(b, (), "f32") for b in delegated}},
     )

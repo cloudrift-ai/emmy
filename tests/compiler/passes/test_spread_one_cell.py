@@ -31,12 +31,18 @@ def _compiled():
 
 
 def test_a_single_cell_kernel_strides_its_free_loop_and_keeps_its_reduce_serial() -> None:
-    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.ir.stmt import Accum, StridedLoop
+    from tests.compiler.helpers import recording_kernels, statements, text
 
-    (spec,) = plan_from_graph(_compiled()).kernels.values()
-    assert "a1 = threadIdx.x; a1 < 65; a1 += blockDim.x" in spec.source
-    assert "a0 = 0; a0 < 33; a0++" in spec.source
-    assert "threadIdx.x < 1" not in spec.source
+    with recording_kernels() as kernels_of:
+        compiled = _compiled()
+    (kernel,) = kernels_of(compiled).values()
+    (sweep,) = statements(kernel, StridedLoop)
+    assert (sweep.axis.name, str(sweep.start), str(sweep.step), sweep.axis.extent.as_static()) == ("a1", "thread_idx.x", "block_dim.x", 65)
+    # Every thread folds the reduce itself, serially, outside the sweep; no thread is turned away.
+    folds = statements(kernel, Accum)
+    assert len(folds) == 33 and not any(isinstance(stmt, Accum) for stmt in sweep.body.iter())
+    assert "thread_idx.x < 1" not in text(kernel)
 
 
 @requires_cuda

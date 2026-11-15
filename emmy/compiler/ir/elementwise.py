@@ -310,18 +310,17 @@ def _op_name(op) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Reduce render-spelling registry — the single op-keyed table behind the four
-# sites that used to switch on the reduce op name: ``Accum``'s render (CUDA
-# ``+=`` / ``*=`` / ``fmax`` / ``fmin``), ``kernel/ir._binary_combine_expression``
-# (the tree-combine binary expression), and ``ReduceOp.forward`` / ``ScanOp.forward``
-# (the numpy interpreter reductions). Keyed by canonical combine name.
+# Reduce spelling registry — the single op-keyed table behind the sites that
+# switch on the reduce op name: ``Accum``'s host C++ render (``+=`` / ``*=`` /
+# ``fmax`` / ``fmin``) and ``ReduceOp.forward`` / ``ScanOp.forward`` (the numpy
+# interpreter reductions). Keyed by canonical combine name.
 # ---------------------------------------------------------------------------
 
 
 class ReduceSpelling(NamedTuple):
     infix: str | None  # binary-expression operator (``a + b``), or None for a call form
     compound: str | None  # compound assignment (``name += rhs``), or None
-    intrinsic: str | None  # CUDA/abstract intrinsic (``fmax`` / ``fmin``), or None
+    intrinsic: str | None  # abstract intrinsic (``fmax`` / ``fmin``), or None
     np_reduce: Callable  # numpy axis reduction (keepdims)
     np_scan: Callable | None  # numpy cumulative (scan), or None if scan is undefined
 

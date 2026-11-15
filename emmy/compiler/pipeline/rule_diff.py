@@ -35,7 +35,6 @@ PASS_SHORTHAND = {
     "frontend/optimization": "o",
     "loop/lowering": "l",
     "loop/fusion": "f",
-    "loop/stamp": "s",
     "tile/lift": "t",
     "tile/cut": "p",
     "tile/schedule": "h",

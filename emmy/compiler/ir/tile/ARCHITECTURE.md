@@ -157,7 +157,7 @@ states over different free coordinates separate; statistics sharing the same coo
 
 Normalization ends by restoring OBJECT SHARING: same-value cones — alpha-equal with identical captures and exposed
 result names, so a copy differing only in internal binder spelling still qualifies — collapse onto one Fold object
-(`_share_common_cones`), so a value fusion inlined into several consumption sites — attention's softmax
+(the last pass of `Fold.normalized`), so a value fusion inlined into several consumption sites — attention's softmax
 statistics, read by the weight cone and by the epilogue — is one node again. This is an invariant, not an
 optimization: seam grouping and cut realization key on object identity, so severed sharing silently turns one value
 into per-site recompute that no schedule can undo (the class PR #679 measured at three orders of magnitude). A
@@ -281,7 +281,7 @@ no matter what kind: a projection evaluates its operands before its scalar body,
 that does not exist yet. The `closed` gate reads only the fold's own lift and cannot see a nested capture; the
 composed placement cut builds exactly this shape (the consumer piece's workspace loads and rsqrt chain feed the
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
-nvcc).
+the code generator).
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information, and the total lift
 restores it in TWO ways, and which one applies is decided by what the term can support.

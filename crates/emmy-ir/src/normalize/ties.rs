@@ -14,7 +14,7 @@ use crate::Result;
 use crate::body::Body;
 use crate::expr::{Expr, Expression, Num, python_repr};
 use crate::field::FieldType;
-use crate::numbering::{Key, Numbering};
+use crate::numbering::{Key, Numbering, params_key};
 use crate::statement::Statement;
 
 /// A statement's own shape with every name and buffer one placeholder: its statement type, then its fields in
@@ -221,7 +221,7 @@ pub(crate) fn operand_ranks(
                         Key::Int(rank),
                         Key::Int(-depth),
                         Key::Num(*number),
-                        Key::Tuple(params.clone()),
+                        params_key(params),
                     ]),
                 );
             }

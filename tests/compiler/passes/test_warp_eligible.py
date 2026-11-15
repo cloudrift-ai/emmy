@@ -92,7 +92,6 @@ def test_typed_literal_operands_preserve_the_tensor_core_feature():
 
     tile = TileOp(
         op=contraction(k, operand("a", "m", "k"), (operand("b", "k", "n"), "acc")),
-        name="out",
         place=Placement(free=(m, n)),
         axes=(m, n, k),
         inputs={name: Tensor(name, (32, 32), "f16") for name in ("a", "b")},

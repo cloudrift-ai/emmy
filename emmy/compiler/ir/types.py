@@ -11,7 +11,7 @@ Two steps, both pure ``Body -> Body`` and deciding nothing:
   decided here and nowhere else: natively where the target has the operation at the result's dtype and every operand
   is already there, over integers where every operand is one, else in f32 with the result converted once.
 
-The CUDA renderer and the Loop IR runner print what the body then says. ``check_types`` (the crate) is the property
+The PTX compiler and the Loop IR runner compile what the body then says. ``check_types`` (the crate) is the property
 as a check.
 """
 

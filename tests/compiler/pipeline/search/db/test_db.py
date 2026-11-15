@@ -23,8 +23,8 @@ def _stats(us: float) -> PerfStats:
     return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
 
 
-def _ctx(gpu_name: str, flags: str = "") -> Context:
-    return Context.from_target((12, 0), gpu_name=gpu_name, compile_flags=flags)
+def _ctx(gpu_name: str, *, fast_math: bool = False) -> Context:
+    return Context.from_target((12, 0), gpu_name=gpu_name, precision={"FAST_MATH": fast_math})
 
 
 def _db(*kernels: str, **symbolic: tuple[str, ...]) -> SearchDB:
@@ -81,18 +81,20 @@ def test_two_cards_sharing_a_capability_keep_their_own_rows() -> None:
     assert [r.stats.median for r in db.iter_perf(a)] == [100.0]
     rows = {r.gpu: r for r in db.iter_perf_rows()}
     assert set(rows) == {_5090, _PRO_6000}
-    assert (rows[_5090].cc, rows[_5090].opt, rows[_5090].flags, rows[_5090].backend) == (120, 3, "", "cuda")
+    assert (rows[_5090].cc, rows[_5090].backend) == (120, "cuda")
 
 
-def test_the_regime_is_spelled_in_columns_and_extra_flags_are_another_regime() -> None:
-    """``""`` and ``-Xcicc -O3`` are one regime and read each other's rows; a fast-math compile is
-    another context and reads none of them."""
+def test_the_regime_is_its_precision_decisions() -> None:
+    """A fast-math compile is another context and reads none of the plain rows; the umbrella and the decisions it
+    implies, spelled one by one, are one context."""
     db = _db("k")
     _record(db, _ctx(_5090), "k", 100.0)
-    assert db.lookup_perf(_ctx(_5090, "-Xcicc -O3"), "k", bindings={}, knobs=_ROW).stats.median == 100.0
-    assert db.lookup_perf(_ctx(_5090, "--use_fast_math"), "k", bindings={}, knobs=_ROW) is None
-    _record(db, _ctx(_5090, "--use_fast_math"), "k", 90.0)
-    assert {r.flags for r in db.iter_perf_rows()} == {"", "--use_fast_math"}
+    assert db.lookup_perf(_ctx(_5090, fast_math=True), "k", bindings={}, knobs=_ROW) is None
+    _record(db, _ctx(_5090, fast_math=True), "k", 90.0)
+    spelled = Context.from_target((12, 0), gpu_name=_5090, precision={"FAST_MATH": True, "FLUSH_TO_ZERO": True})
+    assert spelled.structural_key() == _ctx(_5090, fast_math=True).structural_key()
+    assert db.lookup_perf(spelled, "k", bindings={}, knobs=_ROW).stats.median == 90.0
+    assert {r.precision["FAST_MATH"] for r in db.iter_perf_rows()} == {False, True}
     assert db._conn.execute("SELECT COUNT(*) FROM context").fetchone() == (2,)
 
 
@@ -139,9 +141,6 @@ def test_independent_precision_regimes_never_replace_or_price_each_other(name, u
         with pinned_knobs({"FAST_MATH": umbrella, name: enabled}):
             contexts.append(Context.from_target((12, 0), gpu_name=_5090))
     ordinary, override = contexts
-    # The two whole-kernel decisions spell an nvcc flag; an approximate instruction is an operation of the kernel body.
-    flagged = name in ("FLUSH_TO_ZERO", "CONTRACT_FMA")
-    assert (ordinary.compile_flags != override.compile_flags) is flagged
     assert ordinary.structural_key() != override.structural_key()
     # Later ambient changes cannot change either captured regime.
     with pinned_knobs({"FAST_MATH": not umbrella, name: default}):
@@ -189,22 +188,21 @@ def test_a_placement_knob_is_refused_as_a_measurement() -> None:
 
 def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
     db = SearchDB()
-    db.record_kernel(kernel_row("k", name="k_first"))
-    db.record_kernel(kernel_row("k", name="k_second"))
-    assert db.kernel_names() == {"k": "k_first"}
+    db.record_kernel(kernel_row("k"))
+    db.record_kernel(kernel_row("k"))
     [row] = list(db.iter_kernels())
-    assert (row.name, row.exact_identity) == ("k_first", "k"), "the stored key is the row's identity; nothing lifts the wire to learn it"
+    assert (row.name, row.exact_identity) == ("k_k", "k"), "the stored key is the row's identity; nothing lifts the wire to learn it"
 
 
 #: Pins for the tune DB's identity computation: a formed kernel, a split's partial, a twisted softmax, attention,
 #: a contraction and a piece formed from no loop op. Re-pinning a changed corpus body does not change the DB version.
 _PINNED_IDENTITIES = {
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "aee18fd8b70ef8deb26b624698c57faa",
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "c6a11571d7ceafb35273b317542392b9",
-    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "39de2351761faf2231319b2251070968",
-    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "a66857bbc1699894ee65bb33b37fe170",
-    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "954a87376449a67967b4e7e30dd4575c",
-    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "db72314a5d4a426daa4d072c6fbfea82",
+    ("reduce/cross-cta-sum-kernel.json", 0): "aee18fd8b70ef8deb26b624698c57faa",
+    ("reduce/cross-cta-sum-kernel.json", 1): "c6a11571d7ceafb35273b317542392b9",
+    ("reduce/online-softmax-4x128.json", 0): "39de2351761faf2231319b2251070968",
+    ("attention/sdpa-hd128-softmax-v-mma.json", 0): "a66857bbc1699894ee65bb33b37fe170",
+    ("matmul/bf16-mma-sm120.json", 0): "954a87376449a67967b4e7e30dd4575c",
+    ("fused/nvfp4-gate-up-requant-place-cut.json", 2): "db72314a5d4a426daa4d072c6fbfea82",
 }
 
 
@@ -221,26 +219,27 @@ def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at()
 
 
 def test_context_keys_match_the_db_version_and_ignore_later_ambient_pins(monkeypatch) -> None:
-    from emmy.compiler.context import split_opt_level
+    from emmy.compiler.pipeline.search.space import precision_pins
     from emmy.compiler.structural import digest
 
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     monkeypatch.setenv("EMMY_FAST_EXP", "1")
     expected = {
-        None: "c05e1978f70ffeac79634331d54426ae1fc940289490421fbd29701e1e850cc1",
-        "FAST_EXP": "0f92e8f3044cfcd90c10d71bd452ef4cbbc0ce88d095ce9d2196bab6f88e34cd",
-        "F16_MMA_F32_ACC": "fa64cfbe993c3a6a9efc8f866de4f415239961a34621a31f9bfbfe17ccb92ba2",
-        "FP8_MMA": "d919089d897a7c27e9c1ddae5cec0cba98c13304fe792102368a470571b49d93",
+        None: "88164354e165a548540cb600c6ec7370c68fdaf7128e7df553d126e7913c205f",
+        "FAST_EXP": "0751a3a7fb81652aa924315afba0deda93ba340d222710760553cceebaea7196",
+        "F16_MMA_F32_ACC": "1c1ac935521c473ae17d6ad43de685532ec646477d4714b264c053d786cf441c",
+        "FP8_MMA": "38f52eb5cbb1150ba9c5b1d4e14be48df46453bcfd2fe19373193765aa85684f",
     }
     for name, key in expected.items():
-        ctx = Context.from_target((12, 0), compile_flags="", precision={name: True} if name else None)
+        ctx = Context.from_target((12, 0), precision={name: True} if name else {})
         assert ctx.structural_key() == key, "context identity changes require a DB version bump"
-    for flags in ("", "-Xcicc -O3", "--use_fast_math"):
+    for fast_math in (False, True):
         for cold in (False, True):
-            ctx = Context.from_target((12, 0), compile_flags=flags, cold_cache=cold)
-            old_key = digest("Context", (12, 0), *split_opt_level(flags), *(("cold-cache",) if cold else ()))
-            assert ctx.structural_key() == old_key, "unchanged regimes retain their existing pool keys"
-    assert Context.from_target((12, 0), compile_flags="", precision={"FAST_EXP": False}).structural_key() == expected[None]
+            ctx = Context.from_target((12, 0), precision={"FAST_MATH": fast_math}, cold_cache=cold)
+            pins = tuple(precision_pins({"FAST_MATH": fast_math}).items())
+            key = digest("Context", (12, 0), ("precision", pins), *(("cold-cache",) if cold else ()))
+            assert ctx.structural_key() == key, "a regime's key is its capability, precision decisions and cache mode"
+    assert Context.from_target((12, 0), precision={"FAST_EXP": False}).structural_key() == expected[None]
 
 
 def test_a_file_written_under_another_version_is_re_created(tmp_path) -> None:

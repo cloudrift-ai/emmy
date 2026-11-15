@@ -28,9 +28,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from emmy.compiler.backend.loop.render_target import LoopRenderTarget
 from emmy.compiler.ir.address import flat_accesses
-from emmy.compiler.ir.render import RenderCtx, render_body
+from emmy.compiler.ir.loop.render import RenderCtx, render_body
 from emmy.compiler.ir.types import explicit_conversions
 
 if TYPE_CHECKING:
@@ -47,7 +46,7 @@ logger = logging.getLogger(__name__)
 _INTRINSICS_CPP: dict[str, str] = {
     "divide_rn_f32": "emmy_divide_rn_f32",
     "exp": "expf",
-    "exp_fast": "expf",  # host reference stays libm-accurate; only the CUDA render takes __expf
+    "exp_fast": "expf",  # the host reference stays libm-accurate
     "rsqrt": "rsqrtf_",  # libm has no rsqrtf; PRELUDE provides one
     "sin": "sinf",
     "cos": "cosf",
@@ -90,7 +89,7 @@ def render_loopop_cpp(
     """
     output_names = tuple(loop.outputs)
     shapes: dict[str, tuple[int, ...]] = {**input_shapes, **output_shapes}
-    ctx = RenderCtx(target=LoopRenderTarget(), shapes=shapes, indent=1, intrinsics=_INTRINSICS_CPP)
+    ctx = RenderCtx(shapes=shapes, indent=1, intrinsics=_INTRINSICS_CPP)
 
     sig_parts = [f"const float* {n}" for n in loop.inputs]
     sig_parts.extend(f"float* {name}" for name in output_names)

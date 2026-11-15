@@ -106,7 +106,7 @@ def _graph(seed: float | str = 0.0, steps: int = STEPS, stored: str = "own") -> 
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
     names = [name for name, _ in inputs]
     graph.add_node(
-        LoopOp(body=_step("c, i, j", seed, steps=steps, stored=stored), name="k_step"),
+        LoopOp(body=_step("c, i, j", seed, steps=steps, stored=stored)),
         names,
         Tensor("out", (steps, N, N), "f32"),
         node_id="out",
@@ -124,7 +124,7 @@ def _batched_graph(batch: int = 2, steps: int = STEPS) -> Graph:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
     step = _step("b, c, i, j", u_index="b, c, i, j", steps=steps)
     body = parse_body(f"for b in 0..{batch}:\n" + "\n".join("    " + line for line in str(step).splitlines()))
-    graph.add_node(LoopOp(body=body, name="k_step"), ["D", "W", "U"], Tensor("out", (batch, steps, N, N), "f32"), node_id="out")
+    graph.add_node(LoopOp(body=body), ["D", "W", "U"], Tensor("out", (batch, steps, N, N), "f32"), node_id="out")
     graph.inputs, graph.outputs = ["D", "W", "U"], ["out"]
     return graph
 
@@ -166,7 +166,7 @@ def _unit_seeded_graph() -> Graph:
     for name, shape in inputs:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
     names = [name for name, _ in inputs]
-    step = LoopOp(body=parse_body(str(_step("c, i, j", "S0")).replace("S[", "S[0, ")), name="k_step")
+    step = LoopOp(body=parse_body(str(_step("c, i, j", "S0")).replace("S[", "S[0, ")))
     graph.add_node(step, names, Tensor("out", (STEPS, N, N), "f32"), node_id="out")
     graph.inputs, graph.outputs = names, ["out"]
     return graph
@@ -257,8 +257,8 @@ def test_the_classic_realization_is_filed_under_the_kernel_its_fork_was_offered(
     identity = tile.identity_key(structural=False, with_io=True)
     assert scheduled.identity_key(structural=False, with_io=True) != identity, "the serial form is another term"
     assert kernel_tile(op).schedule is None and kernel_identity(op) == kernel_identity(scheduled) == identity
-    row = kernel_row(kernel_tile(op), op.kernel_name)
-    assert KernelDef(loop_ir=row.loop_ir, name=row.name, formed=row.formed).exact_identity == identity
+    row = kernel_row(kernel_tile(op))
+    assert KernelDef(loop_ir=row.loop_ir, formed=row.formed).exact_identity == identity
 
 
 @requires_cuda

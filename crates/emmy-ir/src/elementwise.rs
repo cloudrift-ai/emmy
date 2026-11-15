@@ -92,8 +92,8 @@ impl OperationInfo {
     };
 }
 
-/// The finite stand-in a kernel initializes an unbounded neutral element with: the CUDA source spells `-1e+30f`,
-/// and two recipe goldens' bodies spell `-1e+30` (the hardware goldens and the corpus seed no maximum). A bounded
+/// The finite stand-in a kernel initializes an unbounded neutral element with: kernels spell `-1e+30`, as two
+/// recipe goldens' bodies do (the hardware goldens and the corpus seed no maximum). A bounded
 /// neutral element is itself.
 const SEED_BOUND: f64 = 1e30;
 

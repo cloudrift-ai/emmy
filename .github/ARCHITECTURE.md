@@ -12,7 +12,6 @@ skills and CloudRift inference endpoint.
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
 | **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` + `agent-runners` / `agents` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`, refreshes recipe lifecycle tags and onboarding shells on `main`, lists the compiler gaps, fills one hardware golden's missing measurements on a rented CloudRift card, and posts one summary to #emmy-robots. |
-| **Review pull requests** | Ready PR or new commit | GitHub-hosted | Posts a PR Agent review using the nightly CloudRift model. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Corpus timings** | Weekly schedule or manual dispatch | `agent-runners` / `agents` | Rents one CloudRift card and records its realization corpus timings on a rolling PR. |
@@ -102,17 +101,6 @@ The workflow ends with one GitHub-hosted notification job that waits for every o
 the golden fill, and the discovery outcome described below; a discovery agent that stopped short reports how many tool
 calls and notes it finished (`discovery_partial.jq`). Because that job is independent of the self-hosted ones, it still
 reports a failure, cancellation, or timeout.
-
-**Review pull requests** runs the pinned PR Agent image when a PR is opened, reopened, marked ready, or updated. It
-reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through
-the GitHub API without checking out PR code, and its token can read contents and write PR comments but cannot push.
-Only `/review` runs; PR descriptions and code suggestions are left to the author. New commits replace an in-progress
-review for the same PR. The model, endpoint, and credential are shared with the nightly agent workflows. PR Agent can
-use up to 128,000 tokens of model context. Recorded golden JSON is excluded from the review input; the repository's
-golden checks validate those files. A failed review gets one fresh attempt, and a second failure fails the job. A
-review with no actionable finding posts no empty review card. The check is advisory: completion does not establish
-that the model found every issue, and no comment is the expected result when it reports none. The patch includes ten
-unchanged lines before each change, the maximum PR Agent accepts, so it can check nearby imports and definitions.
 
 ## Package publication
 

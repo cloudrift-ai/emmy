@@ -142,7 +142,7 @@ def _golden_report(args, halves, dataset, source: str):
     each ranked among the candidates its kernel offers — the groups ``emmy fit`` trains on, over the FULL
     featurization rather than the fit's ``D_*`` view. The view is a property of the model being fitted, and this
     command scores the model the artifact names, which may read ``S_*`` / ``H_*`` columns a narrow view drops and would
-    otherwise be asked about a kernel with no shape. ``--kernel`` keeps the pools whose kernel's C name contains it
+    otherwise be asked about a kernel with no shape. ``--kernel`` keeps the pools whose kernel's name contains it
     — a view; each retained pool's rank is unchanged by it."""
     from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries  # noqa: PLC0415
 
@@ -270,7 +270,7 @@ def _metric(block: dict, key: str, fmt: str) -> str:
 # decision made here and not a side effect of dict insertion.
 _REPORT_TABLES = {
     "measured": (
-        ["half", "gpu", "H_opt"],
+        ["half", "gpu"],
         [
             ("rho", lambda c: _metric(c.metrics["spearman"], "median", "{:+.2f}")),
             ("regret@1", lambda c: _metric(c.metrics["regret1"], "median", "{:.2f}x")),

@@ -37,11 +37,12 @@ fn index(items: &[Expression]) -> Result<String> {
     ))
 }
 
-fn flags(unroll: bool, seed: bool) -> String {
+fn flags(unroll: bool, seed: bool, unrolled: bool) -> String {
     format!(
-        "{}{}:",
+        "{}{}{}:",
         if unroll { " unroll=true" } else { "" },
-        if seed { "" } else { " seed=false" }
+        if seed { "" } else { " seed=false" },
+        if unrolled { " unrolled=true" } else { "" }
     )
 }
 
@@ -159,7 +160,7 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             out.push(format!(
                 "{indent}for {}{}",
                 spell_axis(&s.axis, None)?,
-                flags(s.unroll, s.seed)
+                flags(s.unroll, s.seed, s.unrolled)
             ));
             return body_lines(&s.body, &inner, out);
         }
@@ -182,7 +183,7 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
                 step,
                 until,
                 spell_window(s.axis.window.as_ref())?,
-                flags(s.unroll, s.seed)
+                flags(s.unroll, s.seed, s.unrolled)
             ));
             return body_lines(&s.body, &inner, out);
         }

@@ -1,1 +1,1 @@
-"""CUDA backend: nvcc compiles, the runtime launches."""
+"""CUDA backend: ptxas assembles, the runtime launches."""

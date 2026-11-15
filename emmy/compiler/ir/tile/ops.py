@@ -399,7 +399,6 @@ def sched_of(tile) -> Sched:
 def scheduled(
     tile,
     *,
-    name: str,
     place,
     knobs: dict,
     schedule=None,
@@ -421,7 +420,6 @@ def scheduled(
         raise ValueError("encoded WORK does not agree with the accepted classic schedule")
     return replace(
         tile,
-        name=name,
         place=place,
         workers=workers,
         knobs=knobs,

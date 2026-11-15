@@ -56,10 +56,10 @@ echo "=== AMD SMI ==="
   --showdriverversion --showtemp --showuse --showclocks --showpower --json 2>/dev/null) || echo "N/A"
 
 echo ""
-echo "=== NVCC VERSION ==="
-nvcc_output=$(nvcc --version 2>/dev/null || /usr/local/cuda/bin/nvcc --version 2>/dev/null) || true
-nvcc_version=$(printf '%s\n' "$nvcc_output" | sed -n 's/.*V\([0-9][0-9.]*\).*/\1/p' | tail -n 1)
-[ -n "$nvcc_version" ] && printf '%s\n' "$nvcc_version" || echo "N/A"
+echo "=== PTXAS VERSION ==="
+ptxas_output=$(ptxas --version 2>/dev/null || /usr/local/cuda/bin/ptxas --version 2>/dev/null) || true
+ptxas_version=$(printf '%s\n' "$ptxas_output" | sed -n 's/.*V\([0-9][0-9.]*\).*/\1/p' | tail -n 1)
+[ -n "$ptxas_version" ] && printf '%s\n' "$ptxas_version" || echo "N/A"
 
 echo ""
 echo "=== CUBLAS VERSION ==="
@@ -185,7 +185,7 @@ class PciGpuDevice:
 
 @dataclass
 class SoftwareInformation:
-    nvcc_version: str | None = None
+    ptxas_version: str | None = None
     cublas_version: str | None = None
     docker_client: str | None = None
     docker_server: str | None = None
@@ -343,7 +343,7 @@ class SystemInformation:
             gpus=gpus,
             gpu_pci_devices=pci_gpus,
             software=SoftwareInformation(
-                nvcc_version=_tool_output(raw_text, "NVCC VERSION"),
+                ptxas_version=_tool_output(raw_text, "PTXAS VERSION"),
                 cublas_version=_tool_output(raw_text, "CUBLAS VERSION"),
                 docker_client=docker.get("ClientVersion"),
                 docker_server=docker.get("ServerVersion"),

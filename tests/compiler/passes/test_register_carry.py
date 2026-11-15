@@ -12,7 +12,6 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import apply
 from emmy.compiler.ir.kernel.ir import FragmentLoad, FragmentPromote, FragmentRepack, MmaSyncPtx, RegFragment, fragment_registers
-from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.base import ScheduleRefused
 from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register
@@ -81,10 +80,8 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
     (carrying,) = (site.node for site in tile.sites if site.node.carries)
     lift = carrying.lift
-    changed = replace(
-        carrying,
-        lift=replace(
-            lift,
+    changed = carrying.replace(
+        lift=lift.replace(
             body=Body(
                 (
                     *parse_body(f"phase = load D[{carrying.axis}]"),
@@ -100,7 +97,7 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
     )
 
     def substitute(term):
-        return changed if term is carrying else replace(term, operands=tuple(substitute(edge) for edge in term.operands))
+        return changed if term is carrying else term.replace(operands=tuple(substitute(edge) for edge in term.operands))
 
     program = replace(tile, op=substitute(tile.op)).register_program
     assert program is not None
@@ -127,15 +124,16 @@ def test_chunk_loop_is_inside_one_launch(target):
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
     (kernel,) = kernels.values()
     assert not op.serial and op.smem_bytes == 0
-    assert op.arg_order == ("D", "W", "U", "out")
+    assert sorted(op.arg_order) == ["D", "U", "W", "out"]  # in the order of the roles its identity names
     assert [t.name for t in graph.nodes["out"].outputs] == ["out"]
     # The state is an accumulator of floats in registers, and the step axis is a loop of the one launch.
     (state,) = [fragment for fragment in statements(kernel, RegFragment) if fragment.name == "_state0"]
     assert (state.role, state.dtype.name, fragment_registers(state)) == ("c", "f32", 8 if target == (7, 0) else 4)
     assert any(loop.axis.name == "a0" for loop in statements(kernel, Loop, StridedLoop))
     assert "out__acc1" not in text(kernel)
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "#include <cuda_fp16.h>" in op.kernel_source  # The buffers are FP32; the direct loader constructs FP16 operands.
+    # The buffers are FP32; the direct loader constructs FP16 operands.
+    loads = statements(kernel, FragmentLoad)
+    assert loads and all((load.src_dtype, load.dtype) == (F32, F16) for load in loads if load.role in ("a", "b"))
 
 
 def _with_output_batch_axis(graph, batch_extent):
@@ -185,7 +183,7 @@ def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
     classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
     with pinned_knobs({"FAST_MATH": True}):
-        forks = classic_forks(tile, tile.name, {}, Context.from_target((12, 0)))
+        forks = classic_forks(tile, {}, Context.from_target((12, 0)))
         register = next(leaf for leaf in iter_leaves(forks) if leaf.knobs.get("STAGE") == "d1/reg")
         (scheduled,) = register.expand()
     assert scheduled.carries and not scheduled.place.serial
@@ -309,31 +307,11 @@ def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
     np.testing.assert_allclose(result.outputs["out"], want, rtol=2e-3 if register else 1e-5, atol=2e-3 if register else 1e-6)
 
 
-def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
-    """A gmem-direct fragment's constant offset is added to the pointer, outside the ``int`` index.
-
-    CUDA 12.9's front end widens ``&k[base + 2048]`` to 64 bits before folding the constant, so
-    every offset became its own live pointer: the GDN step below took 255 registers and spilled
-    24 bytes there, while CUDA 13 folded the same source into 189 registers. ``&k[base] + 2048``
-    is one pointer and a load immediate on both (179 registers on CUDA 12.9)."""
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
-    from emmy.compiler.ir.render import RenderCtx
-
-    ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))})
-    row = BinaryExpression("+", BinaryExpression("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
-    index = (Var("a1"), row, Literal(8, "int"))
-    load = FragmentLoad(frag="r", src_buffer="k", src_index=index, role="b", ldm=128, src_dtype=F32, dtype=F16)
-    (line,) = render_stmt(load, ctx)
-    assert line.strip() == "emmy_mma_load_b_gmem<float, __half>(r, &k[a1 * 8192 + a0 * 64 * 128] + 2056, 128);"
-
-
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 @pytest.mark.parametrize("shape", [(17, 80, 35), (64, 128, 128)], ids=["tails", "gdn128"])
 @pytest.mark.parametrize("half", [False, True], ids=["f32-acc", "f16-acc"])
 def test_gdn_chunk_step_matches_loop_on_cuda(shape, half):
-    from emmy import config
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.backend.cuda.program import CompiledProgram, kernel_attributes
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -383,9 +361,8 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     lowered.validate()
     (op,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
     assert not op.serial
-    # The carried state's register residency is a property of the deployable build: at the
-    # correctness lane's `-Xcicc -O1` the fragment arrays stay in local memory.
-    with gpu_lock(), config.nvcc_flags_override(""):
+    # The carried state stays in registers.
+    with gpu_lock():
         program = CompiledProgram.build(lowered, arrays)
         program.iter_once()
         result = program.outputs()

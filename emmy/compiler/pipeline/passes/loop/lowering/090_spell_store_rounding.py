@@ -70,7 +70,7 @@ def rewrite(match: Match, root: Node) -> LoopOp:
     graph = match.graph
     op: LoopOp = root.op
     meta = op.analyze()
-    taken = {name for stmt in op.body.iter() for name in stmt.defines()}
+    taken = set(op.body.defined)
     edits: dict[int, tuple[Assign, Write]] = {}
 
     for write, _scope in meta.writes:

@@ -41,7 +41,7 @@ def test_a_symbolic_stream_splits_into_overhanging_masked_slices() -> None:
     assert {"", "g4k", "g32k"} <= offered
     with binding_extents({"keys"}):  # the launch binds the stream length, as the pipeline run does
         split = realize_split(match, node, 4, "kernel")
-    (partial,) = (n.op for n in split.nodes.values() if isinstance(n.op, TileOp) and n.op.name.endswith("__partial"))
+    (partial,) = (n.op for n in split.nodes.values() if isinstance(n.op, TileOp) and n.id.endswith("__partial"))
     fold = head(partial.op)
     # ⌈keys / 4⌉ positions a slice, and a lift that keeps a position only inside the stream.
     extent = partial.axis_of(fold.axis).extent
@@ -64,6 +64,6 @@ def test_a_split_symbolic_contraction_is_the_unsplit_one_on_the_gpu(length: int)
     a, b = rng.normal(size=(1, length)).astype(np.float32), rng.normal(size=(length, 96)).astype(np.float32)
     with gpu_lock():
         program = CompiledProgram.build(compiled, {"a": a, "b": b})
-        assert any("__partial" in launch.kernel_name for launch in program.plan.launches)
+        assert any(write.endswith("__partial") for launch in program.plan.launches for write in launch.writes)
         program.run_once()
         np.testing.assert_allclose(program.outputs()["o"], a @ b, rtol=1e-4, atol=1e-4)

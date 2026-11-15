@@ -195,12 +195,12 @@ def test_kernel_op_windowed_axis_roundtrip():
     parent = Axis(name="a0", extent=512)
     body = Tile(
         axes=(Axis(name="a0_b", extent=8, window=Window(parent=parent)),),
-        body=(Smem(name="_a_smem", extents=(128, 32), dtype="__half"),),
+        body=(Smem(name="_a_smem", extents=(128, 32), dtype="f16"),),
         block_threads=256,
     )
     g = Graph()
     x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (512, 4096), "f16"), node_id="x")
-    g.add_node(op=KernelOp(body=(body,), name="k_x"), inputs=[x], output=Tensor("out", (512, 4096), "f16"), node_id="out")
+    g.add_node(op=KernelOp(body=(body,)), inputs=[x], output=Tensor("out", (512, 4096), "f16"), node_id="out")
     g.inputs, g.outputs = [x], ["out"]
 
     dumped = g.to_dict()

@@ -19,7 +19,6 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
-from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp, ScanOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
@@ -238,14 +237,20 @@ def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
     _, kernels = compile_with_kernels(make_graph(), ctx=Context.from_target((8, 9)))
     kernel = next(kernel for kernel in kernels.values() if any(write.output == "out" for write in statements(kernel, Write)))
     # The kernel body's normal form drops the observer's copy of the accumulator: the store reads the updated value,
-    # inside the loop that updates it.
-    stored = False
-    for loop in statements(kernel, Loop, StridedLoop):
-        steps = list(loop.body)
-        for update, fold in enumerate(steps):
-            if isinstance(fold, Accum) and fold.op.name == "add":
-                stored |= any(isinstance(s, Write) and s.output == "out" and tuple(s.values) == (fold.name,) for s in steps[update + 1 :])
-    assert stored, "the prefix store must execute after each accumulator update"
+    # in the scope that updates it, ahead of the next update. The scope is the loop's body while it rolls, and the
+    # kernel's own once the unroll passes write the trips out.
+    folds = 0
+    for body in (kernel.body, *(nested for stmt in kernel.body.iter() for nested in stmt.nested())):
+        pending: set[str] = set()
+        for stmt in body:
+            if isinstance(stmt, Accum) and stmt.op.name == "add":
+                assert stmt.name not in pending, "the prefix store must execute after each accumulator update"
+                pending.add(stmt.name)
+                folds += 1
+            elif isinstance(stmt, Write) and stmt.output == "out":
+                pending -= {name for name in pending if tuple(stmt.values) == (name,)}
+        assert not pending, "the prefix store must execute after each accumulator update"
+    assert folds, "the scan folds its prefix"
 
 
 def test_matmul():

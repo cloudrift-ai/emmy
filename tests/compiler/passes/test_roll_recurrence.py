@@ -272,8 +272,7 @@ def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
     assert launches == 3 and axis in step.runtime_args
     assert not [loop for loop in statements(kernels[node_id], Loop, StridedLoop) if loop.axis.name == axis]
     assert axis in text(kernels[node_id]), "the body reads the step it runs"
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert f"(0 < {axis}) ? ({axis} - 1) : (0)" in step.kernel_source  # the comparison in its canonical form
+    assert f"0 < {axis} ? {axis} - 1 : 0" in text(kernels[node_id])  # the comparison in its canonical form
 
 
 @requires_cuda

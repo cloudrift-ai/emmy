@@ -684,10 +684,10 @@ impl Builtin {
 /// Names the reader gives a meaning of their own, so a variable of that name is written quoted.
 /// Words the text reader gives a meaning, in an expression or on a statement line, so a name spelled like one is
 /// written between backticks wherever it stands.
-const RESERVED: [&str; 27] = [
+const RESERVED: [&str; 28] = [
     "true", "false", "inf", "nan", "none", "for", "in", "if", "else", "let", "init", "zero",
     "load", "pre", "select", "when", "over", "seed", "step", "until", "window", "carried",
-    "swizzle", "words", "unroll", "sub", "call",
+    "swizzle", "words", "unroll", "unrolled", "sub", "call",
 ];
 
 pub const PLACEHOLDER_PREFIX: &str = "out_coord_";

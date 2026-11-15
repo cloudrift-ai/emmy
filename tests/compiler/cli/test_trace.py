@@ -255,7 +255,7 @@ def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
     assert first_doc == second_doc
     assert first_doc.programs == [original_wire]
     assert first_doc.programs and first_doc.kernels
-    stored = {"loop_ir", "name", "formed", "traced", "origins"}  # inputs only: nothing computed from the Loop IR
+    stored = {"loop_ir", "formed", "traced", "origins"}  # inputs only: nothing computed from the Loop IR
     assert all(set(kernel.to_wire()) == stored for kernel in first_doc.kernels)
     assert all(set(row.to_wire()) == {"name", "kernel", "pins"} for row in first_doc.rows)
 
@@ -344,7 +344,7 @@ def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> No
     (kernel,) = document.kernels
     (row,) = document.rows
     assert kernel.origins == ("scaled_dot_product_attention",)
-    assert row.name.startswith("k_sdpa")
+    assert row.name == kernel.name
 
 
 def test_trace_serializes_gather_target_with_a_torch_reference_mapping(tmp_path) -> None:

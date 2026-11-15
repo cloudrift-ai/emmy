@@ -7,7 +7,6 @@ from dataclasses import replace
 from importlib import import_module
 from math import prod
 
-from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
@@ -233,7 +232,7 @@ def _resident(op, program, retained=frozenset()):
         (seed, Write(shared, (Literal(0, "int"), *suffix), ("_carry_seed",), value_dtype=seed.dtype)),
     )
     # One padding column per row keeps column-strided reads of the state off one bank.
-    body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), cuda_name(tensor.dtype)), initialize, Sync(), *step)
+    body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), tensor.dtype), initialize, Sync(), *step)
     return replace(op, serial=(), body=Body((tile.replace(axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
 
 

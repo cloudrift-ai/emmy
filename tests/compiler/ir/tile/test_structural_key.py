@@ -126,8 +126,8 @@ def test_the_lowered_program_is_memoized_on_the_kernel() -> None:
 
 def test_tileop_content_identity_is_the_term_alone() -> None:
     term = _contraction()
-    a = _tile(term, k=256, name="k_a")
-    b = _tile(term, k=256, name="k_b", knobs={"TILE": "f4"})
+    a = _tile(term, k=256)
+    b = _tile(term, k=256, knobs={"TILE": "f4"})
     assert a.identity_key(structural=False) == b.identity_key(structural=False)
     assert TileOp().identity_key() is None  # placeholder
     assert not hasattr(term, "structural_key"), "a term carries no key of its own — the kernel keys on its lowered body"
@@ -135,11 +135,11 @@ def test_tileop_content_identity_is_the_term_alone() -> None:
 
 def test_deploy_identity_folds_the_knobs_back_in() -> None:
     term = _contraction()
-    plain, knobbed = _tile(term, k=256, name="k"), _tile(term, k=256, name="k", knobs={"TILE": "f4"})
+    plain, knobbed = _tile(term, k=256), _tile(term, k=256, knobs={"TILE": "f4"})
     assert plain.identity_key(with_io=True, with_knobs=True) is not None
     assert plain.identity_key(with_io=True, with_knobs=True) != knobbed.identity_key(
         with_io=True, with_knobs=True
     )  # fork variants must not collide
-    assert plain.identity_key(with_io=True, with_knobs=True) == _tile(_contraction(names="r"), k=256, name="renamed").identity_key(
+    assert plain.identity_key(with_io=True, with_knobs=True) == _tile(_contraction(names="r"), k=256).identity_key(
         with_io=True, with_knobs=True
     )  # α-equal terms share

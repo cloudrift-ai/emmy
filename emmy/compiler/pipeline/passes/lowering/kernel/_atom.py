@@ -30,9 +30,8 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from itertools import count
 
-from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import F32, INTEGER_NAMES
 from emmy.compiler.ir.address import BYTE_SLAB_PAD, clamp_bound, clamp_to, gmem_axis_step, unclamped
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
@@ -143,7 +142,7 @@ def _unshadowed(body, states: tuple[str, ...]) -> list:
 
     The tail replicates under the same ``__c{i}_{j}`` suffix the states take, so a tail that DEFINES
     a value spelled like one of them lands on that cell's accumulator: two declarations of one name
-    in one scope, which nvcc refuses (``acc0__c0_0 has already been declared``). It happens where the
+    in one scope (``acc0__c0_0`` defined twice), an SSA fault. It happens where the
     tail RECOMPUTES the carrier's own fold — one traced value whose two occurrences the tree could
     not share because they were formed differently — and however alike they look those are two
     values, so the tail's takes its own name. A tail that only READS a state is untouched, and still
@@ -209,8 +208,8 @@ def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
     What a loop-varying statement defines is read off its WHOLE tree, not its own head: a reduce
     over some other axis is one statement whose accumulator its body binds, and reading only the
     head left that accumulator invariant — so the projection above it hoisted ahead of the loop
-    that fills it, and the kernel read a name declared later (nvcc: *identifier "acc7__ar0" is
-    undefined*). A statement that reads the coordinate carries everything it binds with it.
+    that fills it, and the kernel read a name defined later (``acc7__ar0``, read before its
+    definition). A statement that reads the coordinate carries everything it binds with it.
     """
     varying = {k_name}
     hoisted: list[Statement] = []
@@ -924,8 +923,7 @@ def _slab_operands(
                 coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, sibling=sibling),
                 index=_stacked(index, bk_elems, block[1]) if atoms > 1 else index,
                 swizzle=swizzles[i],
-                dtype=cuda_name(elem) if elem is not None else None,
-                elem_bytes=elem.nbytes if elem is not None else None,
+                dtype=elem,
                 trans=i == 1 and b_trans,
                 atoms=atoms,
                 pad_cols=pads[i],
@@ -958,6 +956,16 @@ def _cta(mn: tuple[Side, Side], lanes: int, n_threads: int) -> CtaTile:
 def _stat_slab(name: str) -> str:
     """The smem row buffer bridging per-row statistic ``name`` from the sync prologue to the fill."""
     return f"_a_stat_{name}"
+
+
+def _stat_read(name: str, row: Expression, dtypes: dict) -> Load:
+    """The fill's read of statistic ``name`` back from its row (:func:`_stat_slab`), typed where it is created: an
+    integer row reads back as its integer — a shift amount or a modulus the cell's integer arithmetic reads, which the
+    float default would turn into float arithmetic with no spelling — and a float row at the cell's f32."""
+    dtype = dtypes.get(name)
+    return Load(
+        names=(name,), input=_stat_slab(name), index=(row,), dtype=dtype if dtype is not None and dtype.name in INTEGER_NAMES else None
+    )
 
 
 def _k_masked(stmts: list[Statement], value: str, k: Expression, k_ext: Expression | None) -> tuple[list[Statement], str]:
@@ -1031,6 +1039,8 @@ def _a_slab_operand(
     Returns ``(operand, copied, prologue)``."""
     pro, cell, stats, chunk = seam
     chunk_pro, chunk_stats, _block = chunk or ((), (), 0)
+    stat_dtypes = cone_stat_dtypes(pro, stats, inputs)
+    chunk_stat_dtypes = cone_stat_dtypes(chunk_pro, chunk_stats, inputs)
     m_name, k_name = mn[0].axis.name, k_axis.name
     a_slab = c.operands[0].as_slab()
     if a_slab is not None:
@@ -1070,8 +1080,8 @@ def _a_slab_operand(
         # σ is hygienic (:meth:`Statement.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
-        reads = Body(cell).ssa_uses - Body(cell).definitions.keys()
-        stmts: list[Statement] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in (*stats, *chunk_stats) if nm in reads]
+        reads = Body(cell).ssa_uses - Body(cell).defined
+        stmts: list[Statement] = [_stat_read(nm, row, {**stat_dtypes, **chunk_stat_dtypes}) for nm in (*stats, *chunk_stats) if nm in reads]
         stmts += [s.substitute(sigma) for s in cell]
         return _k_masked(stmts, c.operands[0].exposes[-1], k, k_ext)
 
@@ -1087,18 +1097,17 @@ def _a_slab_operand(
             row_body=row_body,
             cta=cta,
             stat=cone_stat(c.operands[0], k_name, axes),
-            dtypes={nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(pro, stats, inputs).items()},
+            dtypes=stat_dtypes,
         )
     before = None
     if chunk_stats:
-        chunk_dtypes = {nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(chunk_pro, chunk_stats, inputs).items()}
-        prologue += stat_rows(chunk_stats, _stat_slab, row_axis, dtypes=chunk_dtypes)
-        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).definitions.keys()]
+        prologue += stat_rows(chunk_stats, _stat_slab, row_axis, dtypes=chunk_stat_dtypes)
+        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).defined]
         stat = next(edge for edge in c.operands[0].operands if set(chunk_stats) & set(edge.exposes))
 
         def before(k0):
             sigma = Sigma({m_name: m_coord(Var(row_axis.name)), k_name: k_coord(k0)})
-            row_body = [Load(names=(nm,), input=_stat_slab(nm), index=(Var(row_axis.name),)) for nm in reads]
+            row_body = [_stat_read(nm, Var(row_axis.name), stat_dtypes) for nm in reads]
             row_body += [s.substitute(sigma) for s in chunk_pro]
             return sync_stat_fill(
                 stats=chunk_stats,
@@ -1107,7 +1116,7 @@ def _a_slab_operand(
                 row_body=row_body,
                 cta=cta,
                 stat=stat,
-                dtypes=chunk_dtypes,
+                dtypes=chunk_stat_dtypes,
                 declare=False,
             )
 
@@ -1186,7 +1195,7 @@ def _sync_operands(
     if pads[0]:
         a_op = replace(a_op, pad_cols=pads[0])
     if elems:
-        a_op = replace(a_op, dtype=cuda_name(elems[0]), elem_bytes=elems[0].nbytes)
+        a_op = replace(a_op, dtype=elems[0])
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
@@ -1226,7 +1235,7 @@ def _sync_operands(
 
             op = SyncOperand(tag=tag, shape=(bk_elems * b_atoms, mn[1].tile // b_atoms), value=b_value, swizzle=swizzles[1])
             if elems:
-                op = replace(op, dtype=cuda_name(elems[1]), elem_bytes=elems[1].nbytes)
+                op = replace(op, dtype=elems[1])
             sync_ops.append(op)
             drain.append(op)
             continue
@@ -1246,7 +1255,7 @@ def _sync_operands(
             pads=pads,
             roles=(1,),
         )
-        op = replace(op, tag=tag, dtype=cuda_name(elems[1]) if elems else op.dtype, elem_bytes=elems[1].nbytes if elems else op.elem_bytes)
+        op = replace(op, tag=tag, dtype=elems[1] if elems else op.dtype)
         async_ops.append(op)
         drain.append(op)
     return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
@@ -1334,7 +1343,7 @@ def _packed_operands(
 
     # A packed pair's scale slab rides the transport's fragment dtype; an fp8 byte's keeps the f32
     # its scale multiplies in, so the drain's product rounds once, exactly where the fill's does.
-    f32_scale = dict(dtype="float", elem_bytes=4) if per_byte == 1 else {}
+    f32_scale = dict(dtype=F32) if per_byte == 1 else {}
 
     def channel_operands(channel, edge, tag: str) -> tuple[SyncOperand, Operand]:
         """One channel's ``(scale slab, bits slab)``: the scale compute-filled off ITS decode cone's
@@ -1391,8 +1400,7 @@ def _packed_operands(
             index=bits_index,
             trans=True,
             pad_cols=pad,
-            dtype=cuda_name(bits_dtype),
-            elem_bytes=bits_dtype.nbytes,
+            dtype=bits_dtype,
             scale=(scale_op.slab, block, per_byte),
         )
         return scale_op, bits_op
@@ -1487,8 +1495,7 @@ def _block_scaled_operands(
             index=index,
             trans=trans,
             pad_cols=pad,
-            dtype=cuda_name(dtype),
-            elem_bytes=dtype.nbytes,
+            dtype=dtype,
             scale=scale,
         )
 
@@ -1701,7 +1708,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             pad=0 if tma else BYTE_SLAB_PAD,
             k_axis=k_axis,
         )
-        common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        common = dict(slab_dtype=elem, cta=cta)
         # Pure copies when both operands' codes are stored; a fill underneath them when this
         # matmul computes its own A codes, which is the same two-group shape the packed
         # byte-slab stage takes for its scale fill. ``staging._block_scaled_warp_stage`` offers
@@ -1788,7 +1795,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
                 pads=ops.slab_pads(),
                 elems=ops.slab_elems(),
             )
-        common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        common = dict(slab_dtype=elem, cta=cta)
         if stage.transport == "smem-tma":
             # TWO operand groups, not one. cp.async can ride inside the ``sync`` producer because
             # both are issued by the same threads under one CTA barrier; a TMA copy is armed on an
@@ -1858,8 +1865,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         operands = (a_op, *b_ops)
         common = dict(
             operands=operands,
-            slab_dtype=cuda_name(elem),
-            elem_bytes=elem.nbytes,
+            slab_dtype=elem,
             cta=cta,
         )
         transport = TmaTransport(**common) if stage.transport == "smem-tma" else CpAsyncTransport(**common)
@@ -1932,8 +1938,8 @@ def _cell_varying(body, side: Side | None) -> bool:
     A[m, k, n]``) — and then the row read is BOTH the wrong value for every column but the first and
     a reference to a coordinate the kernel does not define: after the tile split only the ``_b`` /
     ``_u`` split vars are bound, so the per-copy rename (:func:`copy_cell`) suffixes the surviving
-    axis name into an undefined identifier (nvcc: ``identifier "a1__ar9" is undefined``, the
-    whole-model qwen3-0.6b layer-0 o_proj on sm_89). Such an operand is read per CELL instead."""
+    axis name into a name nothing defines (``a1__ar9``, the whole-model qwen3-0.6b layer-0 o_proj on sm_89).
+    Such an operand is read per CELL instead."""
     return side is not None and any(side.name in free_names(stmt) for stmt in body)
 
 
@@ -3258,7 +3264,7 @@ class _FlashOps(_MmaOps):
         cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
 
         def group(operands: tuple, tag: str = ""):
-            common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+            common = dict(slab_dtype=elem, cta=cta)
             if self.stage.transport == "smem":
                 # Volta: the same slabs, filled by the blocking vector copy the CTA barrier closes; a
                 # two-slot ring splits that copy so the next chunk's loads fly under this one's softmax.
@@ -3430,9 +3436,7 @@ class _FlashOps(_MmaOps):
             name=query.tag,
             swizzle=query.swizzle,
         )
-        decl = slab_smem(
-            query.slab, query.shape[0], query.shape[1], cuda_name(elem), align=_fill_align(query.shape[1], elem.nbytes, query.swizzle)
-        )
+        decl = slab_smem(query.slab, query.shape[0], query.shape[1], elem, align=_fill_align(query.shape[1], elem.nbytes, query.swizzle))
         return [decl, *fill, *cp_async_commit(), *cp_async_wait(0)]
 
     def _wgmma_score(self, m, cols: int, key, slot) -> list[Statement]:

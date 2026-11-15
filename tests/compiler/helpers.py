@@ -119,8 +119,6 @@ def literal_classic_context(tile, target, *, kernel, nodes, edges, row=None, ord
 def case_target_tile(case: str):
     """Lift the target of a realization corpus case, named by its path under ``realization/cases``: the one kernel
     its traced program lowers to, as the cut pass is offered it."""
-    from dataclasses import replace
-
     from emmy.compiler.context import Context
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import Pipeline
@@ -130,8 +128,7 @@ def case_target_tile(case: str):
     [target] = document.targets()
     lifted = Pipeline.build(["tile/lift"]).run(target.program({}), ctx=Context.from_target(tuple(document.compute_cap)), db=None)
     [node] = [node for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
-    tile = node.op.with_io(lifted, node)
-    return replace(tile, name=next(iter(tile.outputs)))  # addressed by its primary output, as a graph node is
+    return node.op.with_io(lifted, node)
 
 
 def has_cuda_gpu() -> bool:
@@ -142,17 +139,17 @@ def has_cuda_gpu() -> bool:
 
 
 def has_cuda_toolchain() -> bool:
-    """Check that Emmy can both see a GPU and compile CUDA kernels."""
+    """Check that Emmy can both see a GPU and assemble kernels."""
     if not has_cuda_gpu():
         return False
-    from emmy.compiler.backend.cuda.nvcc import nvcc_path
+    from emmy.compiler.backend.cuda.ptxas import ptxas_path
 
-    return nvcc_path() is not None
+    return ptxas_path() is not None
 
 
 requires_cuda = pytest.mark.skipif(
     not has_cuda_toolchain(),
-    reason="CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)",
+    reason="CUDA not available (need the emmy.emmy_runtime extension + GPU + ptxas)",
 )
 
 
@@ -164,6 +161,24 @@ def device_compute_capability() -> tuple[int, int] | None:
     return compute_capability()
 
 
+def kernel_ptx(name: str, body: str, params) -> str:
+    """The PTX of a hand-written kernel for the live card: ``body`` is a Kernel IR body in the text form, its grid
+    stating the threads of a block, and ``params`` its parameters in call order, each ``(name, kind, dtype)`` with
+    ``kind`` an ``input``, an ``output`` or a ``descriptor``. Without a card the kernel is for ``sm_80``."""
+    from emmy.emmy_ir import compile_ptx, parse_body
+
+    from emmy.compiler.dtype import get
+    from emmy.compiler.ir.kernel.interface import Interface, Param
+
+    major, minor = device_compute_capability() or (8, 0)
+    interface = Interface(
+        tuple(Param(n, kind, None if dtype is None else get(dtype), "" if kind == "descriptor" else n) for n, kind, dtype in params),
+        {},
+        0,
+    )
+    return compile_ptx(name, parse_body(body), interface, sm=major * 10 + minor)[0]
+
+
 def requires_sm(major: int, minor: int = 0):
     """Skip an instruction-specific CUDA test below its minimum compute capability."""
     return pytest.mark.skipif(
@@ -173,7 +188,7 @@ def requires_sm(major: int, minor: int = 0):
 
 
 # Skip the mma.sync warp-tier tests below sm_90. On sm_80-89 the pin-only path is currently non-functional because
-# nvcc rejects the ``sm_NNa`` target and ``ldmatrix`` faults at runtime on at least Ada (sm_89).
+# ptxas has no ``sm_NNa`` target there and ``ldmatrix`` faults at runtime on at least Ada (sm_89).
 requires_sm90 = pytest.mark.skipif(
     (device_compute_capability() or (0, 0)) < (9, 0),
     reason="mma.sync warp tier needs sm_90+ (pin-only / non-functional on sm_80-89: ldmatrix fault + sm_NNa TMA compile)",
@@ -232,7 +247,7 @@ def grouped_raster_decode(kernel, group: int) -> list[str]:
 def skip_if_no_cuda() -> None:
     """Skip the current test when Emmy cannot compile CUDA kernels."""
     if not has_cuda_toolchain():
-        pytest.skip("CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)")
+        pytest.skip("CUDA not available (need the emmy.emmy_runtime extension + GPU + ptxas)")
 
 
 def matmul_graph(m: int, k: int, n: int):
@@ -325,17 +340,16 @@ def qwen3_embedding_model(config=None, auto_class=None):
 
 
 def render_typed(statements, ctx) -> list[str]:
-    """The rendered lines of hand-built ``statements`` once their types are complete: the renderer prints a typed body
-    (``ir.types.explicit_conversions``), and the names and buffers ``ctx`` already types are taken as declared."""
+    """The host C++ lines of hand-built ``statements`` once their types are complete: the renderer prints a typed body
+    (``ir.types.explicit_conversions``), and the names ``ctx`` already types are taken as declared."""
     from emmy.compiler.dtype import get
-    from emmy.compiler.ir.render import render_body
+    from emmy.compiler.ir.loop.render import render_body
     from emmy.compiler.ir.stmt import Body
     from emmy.compiler.ir.types import explicit_conversions
     from emmy.compiler.target import native_f16_ops
 
     known = {name: get(dtype) for name, dtype in ctx.ssa_dtypes.items()}
-    buffers = {name: get(dtype) for name, dtype in ctx.buffer_dtypes.items()}
-    return render_body(explicit_conversions(Body(statements), buffers, native_f16_ops(), known), ctx)
+    return render_body(explicit_conversions(Body(statements), {}, native_f16_ops(), known), ctx)
 
 
 def _kernel_recorder():

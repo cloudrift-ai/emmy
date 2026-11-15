@@ -1118,7 +1118,7 @@ mod tests {
                 {"name": "q", "shape": [4], "dtype": "f32", "role": "input"},
                 {"name": "y", "shape": [4], "dtype": "f32", "role": "output"}
             ],
-            "kernels": {"attend": {"binary_key": "ab", "arch_specific": false}},
+            "kernels": {"attend": {"binary_key": "ab"}},
             "launches": [attend("attend0", 1, 32767), attend("attend0-long", 32768, MAX_CONTEXT as i64)]
         });
         let program = crate::artifact::Program::parse(&plan.to_string()).unwrap();

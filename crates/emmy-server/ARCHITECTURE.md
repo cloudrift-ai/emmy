@@ -92,10 +92,10 @@ cannot finish. This does not promise recovery from a hung GPU inside the same pr
 
 `make native-dist` packages `emmy-server` and `emmy-runtime-worker` from the same locked workspace build in one
 platform-specific archive named with the source revision. Install both in the launcher's PATH. Server startup never
-invokes Cargo. A compatible NVIDIA driver is required; a prepared artifact needs neither Python nor NVCC on PATH.
+invokes Cargo. A compatible NVIDIA driver is required; a prepared artifact needs neither Python nor ptxas on PATH.
 
 Cargo tests cover HTTP validation, SSE, usage, failure visibility, admission, bounded output, and disconnect behavior.
 Opt-in Python tests accept `--native-checkpoint` for tokenizer/template parity and `--native-artifact` for HTTP GPU
-qualification. The latter starts the real server with Python and NVCC absent from PATH and checks seeded replay,
+qualification. The latter starts the real server with Python and ptxas absent from PATH and checks seeded replay,
 streaming parity, stop strings, limits, busy responses, cancellation recovery, and clean shutdown. These functionality
 checks establish neither a serving speedup nor production throughput.

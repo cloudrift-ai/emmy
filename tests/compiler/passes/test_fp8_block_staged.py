@@ -43,10 +43,10 @@ def _linear(tmp_path, *, m=16, k=256, n=256, dtype="bfloat16"):
 
 
 def _pins(place: str, stage: str, *, atom: str = K16_BF16, chunk: str = "k8") -> dict:
-    # The reduction is pinned unsplit: a split is the kernel-set pick's call, which a prior refit moves. The cut is
-    # the one at the frontier, numbered: a bare cut would go on to cut the remainder's statistic seam too.
+    # The reduction is pinned unsplit: a split is the kernel-set pick's call, which a prior refit moves. The bare cut
+    # cuts the root-most seam once, the one at the frontier.
     return {
-        "PLACE@step.0" if place == "cut" else "PLACE": place,
+        "PLACE": place,
         "REDUCE": "",
         "WORK": "w1x4",
         "TILE": f"{atom}/f1x1/{chunk}",
@@ -99,8 +99,8 @@ def test_the_cut_linear_lowers_to_the_fp8_byte_slab(tmp_path):
         for load in b_loads
     ), "one drain reads the e4m3 bytes and their scale"
     # tile_n = 32 rows of (128 bytes + the 16 B pad), two ring slots; one f32 scale per row.
-    slabs = {smem.name: (smem.dtype, math.prod(smem.extents)) for smem in statements(kernels, Smem)}
-    assert slabs["_b_smem"] == ("__nv_fp8_e4m3", 9216) and slabs["_bs_smem"] == ("float", 32)
+    slabs = {smem.name: (smem.dtype.name, math.prod(smem.extents)) for smem in statements(kernels, Smem)}
+    assert slabs["_b_smem"] == ("f8e4m3", 9216) and slabs["_bs_smem"] == ("f32", 32)
     assert not [load for load in statements(kernels, FragmentLoad) if load.src_dtype.name.startswith("f4")], "no packed-pair table"
 
 

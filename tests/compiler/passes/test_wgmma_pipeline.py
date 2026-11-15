@@ -16,7 +16,6 @@ from emmy.commands.trace import graph_from_code
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel.ir import Cond, CpAsyncCopy, CpAsyncWait, MbarrierArrive, RegStore, Sync, WgmmaWait
 from emmy.compiler.ir.stmt import Body, StridedLoop
@@ -84,7 +83,7 @@ def test_p1_waits_every_chunk_out() -> None:
 
 
 def test_the_producer_band_releases_the_previous_slot_under_p2() -> None:
-    compiled, kernel = _kernel(_code(256, 1024), {"WORK": "w4x1+p1", "TILE": _N128, "STAGE": "d4/smem-tma/p2"})
+    _compiled, kernel = _kernel(_code(256, 1024), {"WORK": "w4x1+p1", "TILE": _N128, "STAGE": "d4/smem-tma/p2"})
     assert 1 in _waits(statements(kernel))
     # The release waits for a previous slot: from the second chunk on (``1 <= chunk / 64`` in the normal form).
     (release,) = [
@@ -96,22 +95,13 @@ def test_the_producer_band_releases_the_previous_slot_under_p2() -> None:
     (consumer,) = [loop for loop in _chunk_loops(kernel) if release in loop.body]
     chunk = consumer.axis.name
     assert f"1 <= {chunk} / 64" in str(release.cond) and str(arrive.slot) == f"({chunk} / 64 + 3) % 4", (release.cond, arrive.slot)
-    # CUDA spelling: moves to the PTX compiler's tests (the slot index is a shift and a mask)
-    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert "+ 3 & 3]" in source[source.index("mbarrier_arrive(&_mbar_empty") :].split("\n")[0]
 
 
-def test_four_cells_store_one_16_byte_row_each_lane() -> None:
-    compiled, kernel = _kernel(_code(256, 256, "torch.relu"), {"WORK": "w4x1", "TILE": _N128, "STAGE": "d2/smem-tma"})
+def test_four_cells_store_as_one_run() -> None:
+    _compiled, kernel = _kernel(_code(256, 256, "torch.relu"), {"WORK": "w4x1", "TILE": _N128, "STAGE": "d2/smem-tma"})
     (grid,) = kernel.body
     stores = [stmt for stmt in grid.body if isinstance(stmt, RegStore)]
     assert [len(store.run) for store in stores] == [3] * (16 // 4), "the sixteen cells store as runs of four"
-    # CUDA spelling: moves to the PTX compiler's tests (a run of four cells as one 16-byte row per lane)
-    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    rows = source[source.index("wgmma.wait_group.sync.aligned 0") :]
-    assert rows.count("*reinterpret_cast<uint4*>") == 2 * 16 // 4, "two rows per group of four cells"
-    assert rows.count("__shfl_xor_sync") == 3 * 2 * 16 // 4
-    assert "__half2*>(&" not in rows
 
 
 @requires_cuda

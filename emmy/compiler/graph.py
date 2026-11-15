@@ -373,7 +373,9 @@ def _stmt_eval_scope() -> dict:
         "nan": _math.nan,
         # Rehydrate through normal Lambda formation so a dump cannot bypass purity or normalization.
         "Lambda": _pure_lambda,
-        "__builtins__": {},
+        # No builtin but the import hook: a Rust-backed IR class imports through the calling frame's builtins, and
+        # under eval that frame is this scope.
+        "__builtins__": {"__import__": __import__},
     }
     # The stored Fold term and ordinary IR descriptors round-trip through repr-string fields. The
     # classic schedule is deliberately excluded: ``_serialize_op_fields`` and
@@ -1576,39 +1578,47 @@ def _rename_buf_in_op(op, old: str, new: str):
         return replace(op, body=op.body.rename_buffers({old: new}), inputs=renamed_io(op.inputs), outputs=renamed_io(op.outputs))
     if isinstance(op, LoopOp):
         # ``LoopOp.rename_buffers`` is the spelling-preserving clone: fields carried whole
-        # (name / knobs / source identity preserved), io renamed, and NO ``__post_init__`` — a
+        # (knobs / source identity preserved), io renamed, and NO ``__post_init__`` — a
         # rename must never rerun canonical sibling ordering under the new buffer spelling.
         return op.rename_buffers({old: new})
-    else:
 
-        def rename_body(body):
-            return Body(rename_member(member) for member in body)
+    # The Tile IR walk keeps every part the rename leaves alone, so an untouched term stays the same object and
+    # keeps its memoized normal form: rebuilding it would re-normalize the whole tree at the TileOp construction.
+    def same(new_parts, old_parts) -> bool:
+        return all(a is b for a, b in zip(new_parts, old_parts, strict=True))
 
-        def rename_member(member):
-            if isinstance(member, Fold):
-                return rename_term(member)
-            nested = member.nested()
-            if nested:
-                member = member.with_bodies(tuple(rename_body(body) for body in nested))
-            return fn(member)
+    def rename_body(body):
+        members = tuple(rename_member(member) for member in body)
+        return body if same(members, body) else Body(members)
 
-        def rename_term(term):
-            if isinstance(term, Load):
-                return fn(term)
-            if not isinstance(term, Fold):
-                return term
-            return replace(
-                term,
-                operands=tuple(rename_term(edge) for edge in term.operands),
-                lift=replace(term.lift, body=rename_body(term.lift.body)),
-            )
+    def rename_member(member):
+        if isinstance(member, Fold):
+            return rename_term(member)
+        nested = member.nested()
+        if nested:
+            bodies = tuple(rename_body(body) for body in nested)
+            if not same(bodies, nested):
+                member = member.with_bodies(bodies)
+        return fn(member)
 
-        renamed = replace(
-            op,
-            op=rename_term(op.op),
-            output_specs=tuple(replace(store, write=fn(store.write)) for store in op.output_specs),
-        )
-    return replace(renamed, inputs=renamed_io(op.inputs), outputs=renamed_io(op.outputs))
+    def rename_term(term):
+        if isinstance(term, Load):
+            return fn(term)
+        if not isinstance(term, Fold):
+            return term
+        operands = tuple(rename_term(edge) for edge in term.operands)
+        body = rename_body(term.lift.body)
+        if same(operands, term.operands) and body is term.lift.body:
+            return term
+        return term.replace(operands=operands, lift=term.lift.replace(body=body))
+
+    return replace(
+        op,
+        op=rename_term(op.op),
+        output_specs=tuple(replace(store, write=fn(store.write)) for store in op.output_specs),
+        inputs=renamed_io(op.inputs),
+        outputs=renamed_io(op.outputs),
+    )
 
 
 # ---------------------------------------------------------------------------

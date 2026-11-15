@@ -81,17 +81,13 @@ format: setup
 	./venv/bin/ruff check --fix
 	@for file in tests/durations_*.json; do ./venv/bin/python -m json.tool --sort-keys --indent 1 "$$file" "$$file"; done
 
-# Compile CUDA kernels at -Xcicc -O1: the CORRECTNESS lane — -O1 changes runtime perf,
-# not a kernel's numerics (it can change a prior's pick; see AGENTS.md), and the
-# deployable perf tests (tests/perf, -m perf) run at -O3 via `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3. The saving is
-# ~12% cold / ~6% warm on a 5090 (923s vs 1031s cold), not the "~3x" this comment used
-# to claim — that predated the WMMA->mma.sync migration which removed the cicc unroll
-# blowup it rested on. See AGENTS.md for the measurement.
-# `EMMY_GOLDEN_FILE=` (set, empty) deploys no repository golden in this lane: the correctness lane never asks how
+# Every compile is the deployable one; the perf tests (tests/perf, -m perf) are skipped here and run via
+# `make bench-kernels`.
+# `EMMY_GOLDEN_FILE=` (set, empty) deploys no repository golden in this lane: the suite never asks how
 # fast a pick is, and importing a card's goldens is work every worker process would repeat. Tests that need golden
 # evidence scope it themselves (`--golden PATH`, `records_override`), which takes precedence.
 test: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup
+	EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup
 
 # Restamp the realization corpus's derived half (program wire, name, canonical knobs)
 # after a lowering or schedule-codec change. `make test` DETECTS staleness on any machine,
@@ -104,7 +100,7 @@ test-corpus-regen: setup
 # commits the result to main. xdist uses all available cores for the CPU suite; GPU
 # timings remain in their separate checked-in file.
 test-durations: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n auto --dist=loadgroup --write-durations
+	EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n auto --dist=loadgroup --write-durations
 
 # The name the docs reference; the stock (no tune DB) lane is the default.
 bench-kernels: bench-kernels-clean
@@ -266,7 +262,7 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg 'EXTRA_ARGS=$(SERVE_EXTRA_ARGS_VALUE)' \
 		--build-arg 'RUNTIME_ENV=$(SERVE_ENV_VALUE)' \
 		--build-arg RUNTIME_BASE=$(VLLM_BASE_IMAGE) \
-		--build-arg NVCC_VERSION="$$(docker run --rm --entrypoint nvcc $(VLLM_EMMY_TAG) --version | sed -n 's/.*, V\([0-9.]*\).*/\1/p')" \
+		--build-arg PTXAS_VERSION="$$(docker run --rm --entrypoint ptxas $(VLLM_EMMY_TAG) --version | sed -n 's/.*, V\([0-9.]*\).*/\1/p')" \
 		--build-arg EMBED_GPU=$(SERVE_EMBED_GPU) \
 		--build-arg VISION_GPU=$(SERVE_VISION_GPU) \
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \

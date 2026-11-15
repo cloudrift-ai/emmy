@@ -38,8 +38,8 @@ def _mma_kernel(kernels):
 
 
 def _slab(kernel, name: str) -> str | None:
-    """The element type of ``kernel``'s shared slab ``name``, or ``None`` when it declares none."""
-    return next((slab.dtype for slab in statements(kernel, Smem) if slab.name == name), None)
+    """The dtype name of ``kernel``'s shared slab ``name``, or ``None`` when it declares none."""
+    return next((slab.dtype.name for slab in statements(kernel, Smem) if slab.name == name), None)
 
 
 def _byte_drains(kernel, role: str) -> list:
@@ -296,7 +296,7 @@ def test_w8a16_staged_bit_identical_to_gmem_direct_cuda():
     assert _slab(base_kernel, "_b_smem") is None
     for pin in ("d1/smem-async", "d2/smem-async", "d2/smem-async/p2", *_tma_pins()):
         y, kernel = _run_w8a16(backend, pin, x, bits, scale, m, n, k)
-        assert _slab(kernel, "_b_smem") == "__nv_fp8_e4m3", pin
+        assert _slab(kernel, "_b_smem") == "f8e4m3", pin
         drains = _byte_drains(kernel, "b")
         assert drains and all(load.src_buffer == "_b_smem" for load in drains), pin
         assert np.array_equal(y.view(np.uint16), base.view(np.uint16)), pin

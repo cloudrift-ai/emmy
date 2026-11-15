@@ -167,6 +167,11 @@ def _channel_dtype(tile: TileOp, node, target):
     if len(dtypes) == 1:
         return next(iter(dtypes))
     eligible = {dtype for dtype in dtypes if dtype is not None and atoms_for(dtype, ctx=target)}
+    if not eligible:
+        # A dtype only another card multiplies still names the channel (an FP8 value beside an integer position on
+        # sm_80): the chunk tier converts a 1-byte value into a 16-bit cell, and every other caller refuses it by
+        # its own check against this target.
+        eligible = {dtype for dtype in dtypes if any(atom.operand_dtype("a") == dtype for atom in ATOM_REGISTRY.values())}
     return next(iter(eligible)) if len(eligible) == 1 else None
 
 

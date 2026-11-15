@@ -7,7 +7,10 @@ use pyo3::types::{PyDict, PyFrozenSet};
 mod body;
 mod convert;
 mod expression;
+mod fold;
 mod fragment;
+mod lambda;
+mod ptx;
 mod statement;
 
 /// The elementwise tables the Python `ElementwiseImpl` reads, each a view of the operations' properties.
@@ -68,6 +71,9 @@ fn emmy_ir_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::_statement_from_text, m)?)?;
     body::register(m)?;
     fragment::register(m)?;
+    lambda::register(m)?;
+    fold::register(m)?;
+    ptx::register(m)?;
     elementwise_tables(m)?;
     Ok(())
 }

@@ -8,7 +8,7 @@
 # Nothing is pushed. Usage: [PREPARE_IMAGE=IMAGE] docker/emmy-native/bake.sh RECIPE_DIR [GPU_NAME]
 #
 # With PREPARE_IMAGE (an Emmy serving image built from this checkout, `make vllm-emmy-image`) the preparation runs in
-# it, so the pack's cubins come from that image's nvcc, the toolchain the golden rows were recorded with; without it,
+# it, so the pack's cubins come from that image's ptxas, the toolchain the golden rows were recorded with; without it,
 # in this checkout's venv on the host. The checkpoint is read from (and downloaded into) HF_HOME.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)

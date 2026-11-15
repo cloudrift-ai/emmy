@@ -14,7 +14,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
 | `tile/ir`         | after `tile/schedule`           | `TileOp` holding the structural root `op`, output specifications, placement, workers, knobs, a typed classic schedule, and its materialization |
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
-| `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (rendered `__global__` source)                                                               |
+| `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (the kernel's PTX)                                                                           |
 
 ## Pure terms vs statements
 
@@ -25,6 +25,9 @@ scope, and — for a carrier — a seed the enclosing scope has to declare. A **
 (`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
 α-renaming, and has no position at all. `Lambda`, the `Fold` term and the twist recipes (`ir/pure/twist.py` — a
 twisted monoid as data, which `Fold.fuse` fuses a reduce and the reduce it reads into) all live on the term side.
+The terms are the `emmy-pure` crate's (`crates/emmy-pure/ARCHITECTURE.md`): Python holds a handle and asks whole
+questions — a reading, a rewrite, the recipe matching, the tree normalization, the lowering — and never walks a term
+node by node across the boundary. The recipe definitions stay in Python, as data.
 
 **A pure class is never a `Statement` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
@@ -52,24 +55,22 @@ cross-CTA finalize was numerically wrong as a result, and became correct when th
 arriving as ordinary statements.
 
 **Derived reads memoize on the immutable term; pickling carries only the stored params.** A term's
-expensive derived reads — the structural key, `Fold.deps`, `Lambda.free_names`, the synthesized
-`loop`, the normalize fixpoint stamp, the codec's spelling tables — ride the instance, which is what
-keeps a walk over a large fused tree linear instead of re-deriving every subtree per ancestor. They
-are declared members: a `cached_property` on the type that owns the value, or a field computed in
-`__post_init__`, per STYLE.md. `__getstate__` strips them: every memo recomputes after transport,
-and an id-keyed cache carried across processes could collide with a fresh object's id. A memo holds
-only values derivable from the term — never decisions, never mutable policy.
+expensive derived reads — a fold's readings, its canonical form, its step, the normalize fixpoint, a lambda's
+canonical form — are memoized on the crate's term, so a structural copy that keeps a subtree keeps its answers and a
+walk over a large fused tree stays linear instead of re-deriving every subtree per ancestor. Transport pickles the
+stored params only: every memo recomputes on the far side. A memo holds only values derivable from the term — never
+decisions, never mutable policy.
 
 The `structural.instance_memo` tables are a holdout predating that rule, not a second sanctioned
 form. STYLE.md forbids the undeclared memo slot they stash into; new derived reads take a declared
-member, and the existing tables are to be converted to one.
+member, and the remaining table (the path spellings) is to be converted to one.
 
 **Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term; the typed classic
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
-`ir/pure/fold.py` and is not a `Statement`.
+`ir/pure` and is not a `Statement`.
 
 **Lambda construction binds every read and orders definitions before uses.** Both checks use the scope-aware
-`free_names` analysis, including coordinates in predicates and indices. `Lambda.closing` appends unbound reads as
+`Body.free` reading, including coordinates in predicates and indices. `Lambda.closing` appends unbound reads as
 parameters; direct construction rejects them. Canonical ordering uses the same dependencies, so a predicate cannot
 move before its definition. The narrower `Body.ssa_uses` query follows statement `deps()` and does not include every
 expression read.
@@ -197,17 +198,19 @@ kernel it produced went on to read.
   ceil-div / clamp) and the `Dim` name is threaded as a runtime `int`
   arg. Cross-CTA reduction splits are structural choices in `030_cut`. A symbolic FREE axis
   (dynamic grid), strided rows, and the tensor-core `warp_tile` are reserved future tiers.
-- **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
-  `CudaOp` carrying rendered source.
+- **Kernel → PTX** (after `lowering/cuda`): `KernelOp` replaced by `CudaOp` carrying the kernel's PTX, from the
+  Kernel IR to PTX compiler (`kernel/ptx.py`, the Python entry of the `emmy-ptx` crate). A statement or an operation
+  it has no rule for is an error.
 - **Every buffer index spells every dim of its buffer**, `0` at a size-one dim, until it is flattened: one function,
   `address.flat_index`, sums the coordinates row-major over the buffer's shape (symbolic sizes included, each
   coordinate widened to 64 bits where the buffer can pass the 32-bit range) and refuses any other count, since
   without strides the coordinates cannot be summed into an address. A single coordinate is an already-flat address.
   A `Load`, a `Write` and a `CpAsyncCopy` take their flat index before anything prints them: a kernel body in
   `lowering/cuda` (`008_flat_indices`, after which the body's optimization simplifies the index under the launch's
-  ranges), a Loop IR body where the runner renders it. The renderer prints such an index as it is given. It still
-  flattens for the statements that keep one index per dimension: a paged access, a `Write` under a Volta slab
-  layout, the lane form of a `CpAsyncCopy`, the fragment statements, `TmaLoad`, and a carried state.
+  ranges), a Loop IR body where the runner renders it. The code generators take such an index as it is given. The
+  PTX compiler still flattens for the statements that keep one index per dimension: a paged access, a `Write`
+  under a Volta slab layout, the lane form of a `CpAsyncCopy`, the fragment statements and `TmaLoad`; the Loop
+  IR runner for a carried state.
 
 Multi-output ABI order always comes from `Node.buffer_names()`: matcher population reorders a body-carrying op's
 input/output maps to the graph ports after body normalization, Loop execution returns outputs in that order,
@@ -239,10 +242,10 @@ lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrou
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and nothing
 else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`,
-`check_input`),
-the text form (`pretty_body`, `parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
-`canonical_values`, `simplify_body`, `prepare_body`), the two statement types fusion's body assembly in `ir/loop/`
+`mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`, `check_input`),
+the text form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own
+(`one_operation_per_definition`, `simplify_body`, `prepare_body`), the lambda normalization (`normalize_lambda_body`),
+the two statement types fusion's body assembly in `ir/loop/`
 builds a region with (`Call`, `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement
 types, `Body`, the protocol, the text, the value numbering and the normalization are implemented in Rust — the
 `emmy-ir` crate, reached through the `emmy.emmy_ir` extension (`crates/emmy-ir/ARCHITECTURE.md`) — and the package is
@@ -258,7 +261,7 @@ it, and nothing else:
 
 | Group | Members |
 | --- | --- |
-| Traits | `pure`, `deps_deep`, `has_side_effects` |
+| Traits | `pure` |
 | Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `bound_axes`, `binds_axes` |
 | Structure | `nested` with `with_bodies`; `expressions` with `map_expressions` |
 | Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
@@ -294,9 +297,10 @@ member the roles cannot give is a missing role, not a hand-written member; the s
 buffers their fields do not name (inside an expression, through the subroutine), and a `StridedLoop` with an `end` binds
 one more name than its axis.
 
-Behaviour that is not on this list lives outside the module as a function over statements. CUDA rendering is the
-main case: `ir/render.py` holds the render context, the index flattening and one render function per statement type,
-dispatched on the statement's type; Kernel IR registers its own statement types beside their classes.
+Behaviour that is not on this list lives outside the module as a function over statements. The Loop IR runner's
+host C++ is the main case: `ir/loop/render.py` holds the render context, the index flattening and one render
+function per shared statement type, dispatched on the statement's type. A Kernel IR statement has no host
+rendering; its code is the PTX compiler's.
 
 **`Body`** is an immutable sequence of statements, built from any iterable. A slice or a sum of bodies is a `Body`;
 two bodies with equal statements are equal and hash alike; a statement placed in a body is the same object every
@@ -308,9 +312,15 @@ normal forms, the identities) are keyed by the body's exact form, which reads th
 number, never by equality or by text.
 Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,
 `loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_uses`, `axis_names`,
-`axis_dependencies`, `backward_cone`), its orders (`topological_order`, `coalesce`), `rename_buffers`, and its
-identity (`identity`, `structural_key`). The names a body defines are the keys of `definitions`; the names one
-statement makes visible are `exposed_defines`.
+`axis_dependencies`, `backward_cone`, `pruned`, `defined`, `free`), its buffers (`buffers`), its orders
+(`topological_order`, `coalesce`), `rename_buffers`, and its identity (`identity`, `structural_key`).
+
+A name question is asked of a scope, so a body answers it once and keeps the answer: `defined` is every name a
+statement of it defines at any depth, `free` every name it reads from outside — SSA reads and coordinates — less what
+it defines or binds, `buffers` the external buffers it reads and writes, kernel-local declarations left out, and
+`pruned(roots)` the body cut to what the roots need, nested bodies cut too. A name the body defines anywhere is not
+free, wherever it is read. One statement's answers, `free_names` and `exposed_defines`, are built from its nested
+bodies' kept answers, so asking costs the statement's own fields, not a walk of its subtree.
 
 **A body has one text**, which is also its wire form. `str(body)` is it and `parse_body` reads it back to an equal
 body, so the text says
@@ -509,20 +519,20 @@ there is no type to dispatch on and no second place for a fact to live.
 
 `Fold.lower(bound, stores)` flattens the term to the loop nest: a plain loop for every free coordinate the caller left
 unbound, outermost the one the most terms share, the reduce loop of each term innermost, every term placed at the
-shallowest scope binding its free coordinates, and each boundary store right after the term defining its value. A value
-of the tree a term or a store reads by name, such as the expert a gathered row belongs to, counts as the coordinates of
-the term that defines it, since no loop binds a value. A term's coordinates there are those its own step reads, directly
-or through the operands it reads: an operand it only carries to a store — a multi-output root's per-page and per-slot
-results beside a count — takes its own loop beside the others, never one nested in another's. Loops carry NO algebra and
-no annotation, so the derived nest depends only on what is stored, which is what makes every identity of the term a
-digest of its lowered body — there is no separate term hasher. The `TileOp`'s body identity is the canonical digest of
-the nest `lower()` derives (the body is the term's normal form); the variant key (`identity_key(with_io=True,
-with_knobs=True)`) folds the schedule-free body identity with the knobs; and the deploy join key (the deploy identity
-(`identity_key(with_io=True)`), over `TileOp.loop_body`) types the roles the body reads its buffers through, so term
-re-spellings and cluster-sibling ops that lower alike share schedule evidence. A read walk STOPS at a statement whose
-**`deps_deep` trait** is set (a `Statement`-protocol member beside `pure`, conservative `False` default; `Call` opts
-in): its `deps()` already answers for the whole subtree, scope-correctly, so the walk does not re-walk `nested()`,
-whose flat namespace cannot see the subroutine's own params.
+shallowest scope binding its free coordinates, and each boundary store right after the term defining its value. A
+value of the tree a term or a store reads by name, such as the expert a gathered row belongs to, counts as the
+coordinates of the term that defines it, since no loop binds a value. A term's coordinates there are those its own
+step reads, directly or through the operands it reads: an operand it only carries to a store — a multi-output root's
+per-page and per-slot results beside a count — takes its own loop beside the others, never one nested in another's.
+Loops carry NO algebra and no annotation, so the derived nest depends only on what is stored, which is what makes
+every identity of the term a digest of its lowered body — there is no separate term hasher. The `TileOp`'s body
+identity is the canonical digest of the nest `lower()` derives (the body is the term's normal form); the variant key
+(`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body identity with the knobs; and the deploy
+join key (the deploy identity (`identity_key(with_io=True)`), over `TileOp.loop_body`) types the roles the body reads
+its buffers through, so term re-spellings and cluster-sibling ops that lower alike share schedule evidence. A read
+walk STOPS at a statement whose **`deps_deep` flag** is set (a protocol flag the crate keeps beside `pure`, unset by
+default; `Call` sets it): its `deps()` already answers for the whole subtree, scope-correctly, so the walk does not
+re-walk `nested()`, whose flat namespace cannot see the subroutine's own params.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
@@ -581,8 +591,8 @@ definitions of one state name are an error. **Example** — the online-softmax c
 
 **The λ-foldMap primitives** (`ir/pure/lam.py`) — the finished algebra vocabulary the tile IR
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
-binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
-`__post_init__` via the **`Statement.pure` trait** (declared on the `Statement` interface, conservative `False` default;
+binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated at
+construction via the **`Statement.pure` trait** (declared on the `Statement` interface, conservative `False` default;
 `Load`/`Assign`/`Select` and the structural `Fold` node opt in; `Accum`/`Write`/`Init`/`Loop`
 never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
@@ -639,18 +649,18 @@ Body walkers: `iter_body(body)` (pre-order; powers `for s in loop_op`),
 `str(stmt)` (the statement's text, the lines kernel dumps show; block stmts
 recurse via `pretty_body`).
 
-CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. It spells primitive operations only: a
-composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is its definition in the operations' table
-(`Expression.definition`), which kernel lowering writes into the body (`125_spell_composites`) and the renderer
-reads for the statements that keep one operation (`FragmentApply`, a carried program). An approximate instruction is
-an operation the body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`, `log_fast`, …, picked by
-`130_approximate_math`): CUDA's fast intrinsic where one exists (`__expf`, `__fdividef`), else a helper in inline PTX
-the kernel renderer emits, with `.ftz` when the kernel flushes to zero. Boolean masks retain the historical f32 SSA
-convention, so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values
-use the same semantics. Integer complement is not inferred from that name and fails closed until it has a typed
-consumer.
+Host scalar rendering goes through `op_to_expression` in `ir/loop/render.py`. It spells primitive operations only:
+a composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is its definition in the operations' table
+(`Expression.definition`), which kernel lowering writes into a kernel body (`125_spell_composites`) and the code
+generators read for the statements that keep one operation (`FragmentApply`, a carried program). An approximate
+instruction is an operation a kernel body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`,
+`log_fast`, …, picked by `130_approximate_math`): the PTX compiler writes the hardware's approximate instruction,
+with `.ftz` when the kernel flushes to zero, and the host reference computes it exactly. Boolean masks retain the
+historical f32 SSA convention, so Torch's `bitwise_not` spelling is a logical zero-test (`mask == 0`); explicitly
+bool-stamped values use the same semantics. Integer complement is not inferred from that name and fails closed until
+it has a typed consumer.
 
-The renderer decides no type. A body reaches it typed in full by `ir/types.py`, the one place the promotion and
+No code generator decides a type. A body reaches it typed in full by `ir/types.py`, the one place the promotion and
 conversion rules live. `stamp_types` gives each `Load`, `Assign`, `Accum` and `Write` its dtype by promotion.
 `explicit_conversions` then makes every operation take its operands at the dtype it computes at: natively at f16
 where the target has the operation there (`target.native_f16_ops`) and every operand is f16, over integers where
@@ -666,10 +676,10 @@ its source and of its fragment, and a `RegFragment` its own. A `RegStore` epilog
 `epilogue_conversions` over the f32 elements of its accumulators (a float load widened to f32 by a conversion, a
 select at f32) and checked like any. Two kinds of statement are exempt until they are typed too, and the check lists
 them: the cross-thread combine programs (`TreeHalve`, `WarpShuffle`, `WarpBroadcast`), and a `FragmentApply`
-operand's conversion to f32, which the renderer types where it prints it, because its operands are register elements
-only the renderer names. An
-index `Let` with no dtype is an integer whose width the renderer still takes from its expression.
-`check_input` (the crate's `input` module) is what `lowering/cuda` asks of every kernel before it renders one:
+operand's conversion to f32, which the PTX compiler types where it compiles it, because its operands are register
+elements only the compiler names; a combine takes the type its states are held at. An index `Let` with no dtype is
+an integer whose width the compiler takes from its expression.
+`check_input` (the crate's `input` module) is what `lowering/cuda` asks of every kernel before it compiles one:
 `check_types`, one flat index on every `Load`, `Write` and `CpAsyncCopy` that its dimensions do not define, no
 loop left asking for unrolling, and a layout and a role the lane-to-element table has on every fragment statement.
 
@@ -680,8 +690,8 @@ to FP32 would silently change the computation.
 A typed `Let` also declares its value's dtype. Operand-edge and cone-statistic readers preserve that declaration,
 including when a static scalar load becomes a literal binding. An untyped binding remains unknown; the readers do
 not infer a storage dtype from the Python literal. Cuts and schedules consume these facts without changing policy.
-Fragment epilogues retain these bindings through the shared statement renderer, including their coordinate
-substitution and storage dtype. An atomic split's projection may use a binding independent of the carried state;
+Fragment epilogues retain these bindings through the PTX compiler, including their coordinate substitution and
+storage dtype. An atomic split's projection may use a binding independent of the carried state;
 binding a state-dependent expression does not by itself prove that the projection distributes over addition.
 
 Dependence cones: `Body.backward_cone(roots)` builds a `Cone` —
@@ -728,7 +738,7 @@ its reads, while `Assign` / `Load` / `Select` names bound inside a `Loop` / `Con
 two are safe together only for a whole-subtree renumbering (`rename_ssa_sequential`). When the rename instead comes
 from *dropping* a binding — load dedup, CSE — an inner scope that merely re-uses the dropped name's spelling is a
 different variable, and renaming it both redeclares the survivor inside the scope and rewires the inner arithmetic to
-the outer value. `passes.rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
+the outer value. The crate's `rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
 scope re-binds before descending. It rewrites the wrapper with empty child bodies, then visits each child once;
 rewriting the full subtree first would repeat and discard work at every enclosing level.
 If an alias's destination is shadowed, the local binding is renamed before substitution to prevent capture.
@@ -805,8 +815,8 @@ from that CSE form. Subroutine boundaries never limit fusion.
   reassociates a sum, which every reduce schedule does already. It decides no rounding a knob owns: `x / 3.0` stays a
   division, since whether it becomes a product by a rounded reciprocal is the division knob's choice. A chain of named
   temps and one tree are one body up to the single-reader guard — a sum two statements read stays a definition — so
-  the readers of the normal form (the tile lift, the kernel passes, the renderer) read one operation per statement;
-  the renderer spells a nested value a kernel pass built as temps of its own.
+  the readers of the normal form (the tile lift, the kernel passes, the code generators) read one operation per
+  statement; the host renderer spells a nested value as temps of its own.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
@@ -841,16 +851,17 @@ from that CSE form. Subroutine boundaries never limit fusion.
   behind it, and a binding rebound later represents no other value. Division keeps its own rounding even when its
   denominator is invariant; reciprocal multiplication is not a normalization. Names are distinct across scopes when it
   runs, as the sequential renaming leaves them.
-- `merge_congruent_states` — two carried states whose seeds agree and whose updates compute one value once the
-  states are assumed equal hold one value at every step, and are one state. `congruent_states` in the numbering finds
-  them: candidates are accumulators updated directly in a seeded loop and carried states, each defined by one
-  statement; groups start from the update's statement type, operation, dtype and scope, and split by their members'
-  update numbers, every grouped state numbered by its group, until no group splits (optimistic value numbering; groups
-  never come from names, and a body with no two candidates in one scope is not numbered again). Placement numbers the
-  group alike, so it merges the cones the members compute: the twin pivots and denominators of two online softmaxes
-  over one row become one pair. A member then goes when nothing reads it in its own scope but its update (a carried
-  state, read through `pre` the step before wherever it sits, always goes), its reads after the loop reading the
-  group's first member. Two seeded reductions of one value, each read only after the loop, are the simplest case.
+- `merge_congruent_states` — two carried states whose seeds agree and whose updates compute one value once the states
+  are assumed equal hold one value at every step, and are one state. `congruent_states` in the numbering finds them:
+  candidates are accumulators updated directly in a seeded loop and carried states, each defined by one statement;
+  groups start from the update's statement type, operation, dtype and scope, and split by their members' update
+  numbers, every grouped state numbered by its group, until no group splits (optimistic value numbering; groups never
+  come from names, and a body with no two candidates in one scope is not numbered again). Placement numbers the group
+  alike (it takes the numbering that found the groups stable), so it merges the cones the members compute: the twin
+  pivots and denominators of two online softmaxes over one row become one pair. A member then goes when nothing reads
+  it in its own scope but its update (a carried state, read through `pre` the step before wherever it sits, always
+  goes), its reads after the loop reading the group's first member. Two seeded reductions of one value, each read only
+  after the loop, are the simplest case.
 - `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Scalar
@@ -1100,38 +1111,35 @@ row-reduce masks). The table also counts a fragment's registers, so no statement
 |--------------------|-------------------------------------------------------------------|
 | `KernelOp`         | Graph-op wrapper around a `Tile`-rooted body. One per kernel.     |
 | `Grid`             | A `Tile` with its decode spelled out, which the CUDA stage turns it into (`decode_tile`): it binds the same axes, each to an expression over `thread_idx.x` and `block_idx.x`, launches `ceil(∏extents / block_threads)` CTAs of `block_threads + aux_threads` threads, and masks the cells past the count with a `Cond` in its body where the launch overshoots. A thread's lane and warp, where the body reads them, are a `Let` each at the top of its body. It states its launch's ranges of the built-ins, which the simplifier reads for its decode and its body. |
-| `Smem`             | `__shared__` array allocation (name + dtype + extents + optional `align`). Swizzled TMA operand slabs align to their full swizzle atom (`8 × swizzle_width` B: B128→1024, B64→512, B32→256) — the coordinate-only `ldmatrix` XOR only reproduces the hardware's absolute-address swizzle when the base zeroes the swizzle's source-address bits; non-swizzled TMA keeps 128 B, fp16 16 B. `pack_smem` (the shared pool packer used by `smem_bytes` and the renderer) pads each buffer to `max(sizeof(dtype), align)` so the static-vs-dynamic gate and the launch-time dynamic-pool size agree. |
+| `Smem`             | Shared array allocation (name + dtype + extents + optional `align`). Swizzled TMA operand slabs align to their full swizzle atom (`8 × swizzle_width` B: B128→1024, B64→512, B32→256) — the coordinate-only `ldmatrix` XOR only reproduces the hardware's absolute-address swizzle when the base zeroes the swizzle's source-address bits; non-swizzled TMA keeps 128 B, fp16 16 B. `pack_smem` (the shared pool packer used by `smem_bytes` and the renderer) pads each buffer to `max(sizeof(dtype), align)` so the static-vs-dynamic gate and the launch-time dynamic-pool size agree. |
 | `Let` (a `stmt/` leaf) | Pure binding of one expression to an SSA name: a scalar literal, an integer index bound once outside a nested hot loop, or a flattened buffer coordinate (`FlatIndex`) reused across a copy's trips. |
-| `Sync`             | Thread barrier: CTA-wide `__syncthreads()`, warp-scope `__syncwarp()`, or a named `bar.sync` over a thread subset inside a warp-specialized branch. |
+| `Sync`             | Thread barrier: CTA-wide `bar.sync 0`, warp-scope `bar.warp.sync`, or a named `bar.sync` over a thread subset inside a warp-specialized branch. |
 | `TreeHalve`        | Cross-thread tree reduction over a smem buffer. With `lane` set the buffer holds one partial per warp, and warp 0 folds it in registers behind one barrier. |
 | `WarpShuffle`      | Lane butterfly reduction or inclusive prefix scan over an aligned lane group. |
 | `WarpBroadcast`    | Broadcast the last lane's scan state within each aligned lane group. |
 | `RegFragment`      | Declaration of one fragment, the registers each lane of a warp holds for an operand or an accumulator: its role (`a`, `b`, `c`, or `sfa` / `sfb` for a lane's register of block scales), its element dtype and its layout. The register count is its row of the lane-to-element table: 4/2/4 for the m16n8k16 A/B/C at 16-bit operands and a float accumulator (2 for packed halves; bytes pack four a register, so the k32 and k64 operands are 4/2 too), 2/2 for Volta's A/B and 8 floats or 4 packed registers for its C, because one instruction realizes four PTX cells arranged as one logical 16×16 tile. An accumulator is zero at its declaration. The opaque `nvcuda::wmma` nodes remain retired. |
 | `LdmatrixLoad`     | `ldmatrix.sync.aligned.m8n8.x{2,4}[.trans].shared.b16`: one operand fragment, or two B fragments side by side (`pair_frag`, set by `096_pair_ldmatrix_loads`), read from a shared slab of 16-bit elements by one instruction. Each lane addresses one row of eight elements at the tile base plus its own offset, through the slab's `swizzle`; `ldm` is the slab's row stride. `role`, `b_trans` (an N-major slab, which is the product's column-major B) and `pair_frag` pick the form: `x4` for A, `x2.trans` for B, `x2` for a transposed B, `x4` or `x4.trans` for a pair. |
-| `FragmentLoad`     | One operand fragment gathered element by element, where `ldmatrix` does not apply: each lane reads the elements its row of the lane-to-element table gives it, converts each from `src_dtype` to `dtype` and packs them. From global memory, `clamp` holds the lanes past a masked M or N bound on the last element in range and `k_zero` zero-fills the K elements past theirs; `ldm` is the source's row stride, `None` for the extent of its last dimension. From a staged slab (`staged`): a slab of bytes, which `ldmatrix` has no form for below sm_100a, and every slab under Volta's layout, since SM70 has no `ldmatrix`. A materialized canonical-B Volta tile with even M/N fragment counts stores its slabs under the paired crosswise-A and B-congruous layouts (`slab_layout`), and each 128-bit load drains two logical fragments (`pair_frag`). A slab of bytes with a `scale_buffer` holds a weight stored as bytes with one scale per K block in that companion slab — PACKED PAIRS (an NVFP4 weight: one byte, two K elements, decoded through the value table) or fp8 bytes (one element each, converted by the hardware cvt and multiplied by an f32 scale before the round to the fragment). `b_trans=True` marks a `[N, K]` source. Until the PTX compiler expands it from the table, the renderer prints one call of a C++ loader picked from these fields. |
-| `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.{col,row}.{f32,f16}.f16.f16.{f32,f16}` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. Paired B-congruous loads select row/row; the other Volta paths retain row/col. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. The BLOCK-SCALED fp4 form (`m16n8k64`, `kind::mxf4nvf4`) additionally carries `sfa_frag` / `sfb_frag`: both multiplicands are packed e2m1 pairs and the instruction applies one ue4m3 scale per 16 K elements itself, so the call passes those two scale registers where the others repeat the accumulator. Its data fragments reuse the fp8 byte loaders — the k64 4-bit lane map is the k32 8-bit one, over a row of K/2 bytes — leaving only the scale loaders new. It assembles only for the arch-suffixed consumer-Blackwell target, which the plan requests through `KernelSpec.arch_specific` (the flag TMA also sets). |
-| `WgmmaDescriptor`  | The 64-bit shared-memory matrix descriptor a `wgmma` operand is read through: start address, leading and stride byte offsets and the swizzle mode, built by `emmy_wgmma_desc` from the slab address the same swizzled TMA or cp.async fill deposited. |
-| `WgmmaMma`         | One `wgmma.mma_async.sync.aligned.m64nNk16` cell over N/8 of the per-warp 16×8 C fragments (instruction register d[4j+k] is fragment j, register k); A from a descriptor or a 4-register fragment, B always from a descriptor; the transpose bits are template arguments of the generated wrapper. |
+| `FragmentLoad`     | One operand fragment gathered element by element, where `ldmatrix` does not apply: each lane reads the elements its row of the lane-to-element table gives it, converts each from `src_dtype` to `dtype` and packs them. From global memory, `clamp` holds the lanes past a masked M or N bound on the last element in range and `k_zero` zero-fills the K elements past theirs; `ldm` is the source's row stride, `None` for the extent of its last dimension. From a staged slab (`staged`): a slab of bytes, which `ldmatrix` has no form for below sm_100a, and every slab under Volta's layout, since SM70 has no `ldmatrix`. A materialized canonical-B Volta tile with even M/N fragment counts stores its slabs under the paired crosswise-A and B-congruous layouts (`slab_layout`), and each 128-bit load drains two logical fragments (`pair_frag`). A slab of bytes with a `scale_buffer` holds a weight stored as bytes with one scale per K block in that companion slab — PACKED PAIRS (an NVFP4 weight: one byte, two K elements, decoded through the value table) or fp8 bytes (one element each, converted by the hardware cvt and multiplied by an f32 scale before the round to the fragment). `b_trans=True` marks a `[N, K]` source. The PTX compiler expands it per lane from the table. |
+| `MmaSyncPtx`       | The PTX instruction for either `mma.sync.aligned.m8n8k4.row.{col,row}.{f32,f16}.f16.f16.{f32,f16}` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. Paired B-congruous loads select row/row; the other Volta paths retain row/col. The BLOCK-SCALED fp4 form (`m16n8k64`, `kind::mxf4nvf4`) additionally carries `sfa_frag` / `sfb_frag`: both multiplicands are packed e2m1 pairs and the instruction applies one ue4m3 scale per 16 K elements itself, so the call passes those two scale registers where the others repeat the accumulator. Its data fragments reuse the fp8 byte loaders — the k64 4-bit lane map is the k32 8-bit one, over a row of K/2 bytes — leaving only the scale loaders new. It assembles only for the arch-suffixed consumer-Blackwell target, which the PTX compiler writes as the module's target. |
+| `WgmmaDescriptor`  | The 64-bit shared-memory matrix descriptor a `wgmma` operand is read through: start address, leading and stride byte offsets and the swizzle mode, built from the slab address the same swizzled TMA or cp.async fill deposited. |
+| `WgmmaMma`         | One `wgmma.mma_async.sync.aligned.m64nNk16` cell over N/8 of the per-warp 16×8 C fragments (instruction register d[4j+k] is fragment j, register k); A from a descriptor or a 4-register fragment, B always from a descriptor; the transpose bits are immediates of the instruction. |
 | `WgmmaFence` / `WgmmaCommit` / `WgmmaWait` | The asynchronous discipline around a chunk of `WgmmaMma` cells: fence before the first cell after the accumulators were touched, commit after the chunk, wait before any accumulator read and before the ring slot is released. |
-| `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element, with warp shuffles on Volta to align its distinct f16 and f32 C layouts) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
+| `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (PTX `cvt.f32.f16` + add per element, with warp shuffles on Volta to align its distinct f16 and f32 C layouts) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
 | `FragmentApply`    | The one pointwise node over a C fragment. Each argument resides in another fragment, a per-row register pair, a cell-uniform scalar, a predicate over the element's absolute coordinates (`COORD`), or a global-memory load template at those coordinates (`GMEM`). A coordinate mask is a `where` over a `COORD` predicate — the masked branch takes the carrier's finite identity, avoiding `-inf - -inf` in an all-masked chunk, and an additive mask applies its keep op first; an additive bias is an `add` of a `GMEM` operand. The atom's fragment-layout descriptor supplies the element count and row mapping, so the same leaf serves m16n8k16 and Volta m8n8k4. |
-| `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `__shfl_xor` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
+| `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `shfl.sync.bfly` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
 | `FragmentRepack`   | Convert C fragments into a 16-bit operand in registers. The m16n8k16 f16 B form exchanges packed column pairs across the warp; the A form uses the existing lane layout. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects a four-column A slice or four-row B slice from one logical 16×16 C fragment with warp shuffles of packed FP16 pairs. |
 | `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure term over the projection tail's own `Load` / `Assign` / `Select` stmts, stored as its body with the names bound to the store's fragments and the name of the stored value; it is evaluated at each element's own coordinates. The type pass types it over f32 params: a floating load widens to f32 by a conversion of its own, while an integer load keeps its type so shifts and bitwise operations on packed codes stay integer operations. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
 
-Volta direct A and transposed-B loads use the shared four-value loader when the flattened base and row stride
-are provably four-element aligned and K needs no mask. FP16 uses one 64-bit load. FP32 uses two 64-bit loads,
-each coupled to FP16 conversion in inline PTX, keeping temporary float lifetimes inside the packed load. The
-alignment proof reuses the expression-divisibility check used by swizzled addresses. M/N clamps preserve aligned
-rows; K tails, unknown alignment, other source types, and strided canonical B retain the scalar gather. No schedule
-field or model-specific choice is involved.
+A fragment load reads the elements of a register in one access where they stand in memory in a row, as the register
+holds them, and the address is provably aligned; otherwise it gathers them one by one. The PTX compiler decides this
+from the statement alone. No schedule field or model-specific choice is involved.
 
 ## `cuda/ir.py`
 
 | Symbol    | Role                                                                        |
 |-----------|-----------------------------------------------------------------------------|
-| `CudaOp`  | Graph-op carrying `kernel_source`, `kernel_name`, `arg_order`, `grid`, `block`, `smem_bytes`, `zero_outputs`, `comment`. Produced by `pipeline/passes/lowering/cuda` (renders the `KernelOp` body to a `__global__` source string). |
+| `CudaOp`  | Graph-op carrying `kernel_source`, `kernel_name`, `arg_order`, `grid`, `block`, `smem_bytes`, `zero_outputs`, `comment`. Produced by `pipeline/passes/lowering/cuda` (compiles the `KernelOp` body to PTX). |
 
 ## Graph as the single program form
 

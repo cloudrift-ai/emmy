@@ -1,8 +1,7 @@
 """Generic data-type identity used throughout the compiler.
 
-Holds only generic + numpy information. Backend-specific traits (CUDA C
-spelling, required headers) live in the respective backend
-modules (e.g. ``emmy/compiler/backend/cuda/dtype.py``).
+Holds only generic + numpy information. How a target spells a dtype is
+the code generator's (the PTX compiler's ``DType``).
 
 Naming convention: the class is ``DataType``; every argument, variable,
 and field that carries one is named ``dtype``.
@@ -83,8 +82,8 @@ class StructuredType(DataType):
     """A register-composite type — a packed vector like ``F16x2`` — as opposed
     to a plain scalar element.
 
-    It occupies a register with a hardware-specific layout (``__half2``); the
-    renderer / lowering keys on the concrete subtype rather than treating it as
+    It occupies a register with a hardware-specific layout (two packed halves); the
+    lowering keys on the concrete subtype rather than treating it as
     a scalar."""
 
     @property
@@ -99,14 +98,12 @@ F64 = DataType("f64", np.dtype(np.float64), 8)
 # split (8 / 7 vs 5 / 10). Used by the mma.sync bf16 atom kind (M9 of the MMA
 # fragment-factorization plan). NumPy has no first-class bf16; we map to
 # the closest carrier (uint16 with the bf16 bit-pattern) so Tensor.dtype
-# round-trips through serialization. CUDA-side spelling is
-# ``__nv_bfloat16`` (see ``backend/cuda/dtype.py``).
+# round-trips through serialization.
 BF16 = DataType("bf16", np.dtype(np.uint16), 2)
 # FP8 storage formats (e4m3 = 4 exponent / 3 mantissa bits, e5m2 = 5 / 2).
 # Same bits-carrier precedent as BF16: NumPy has no first-class fp8, so
 # uint8 carries the bit pattern; the loader decodes to real values at bind
-# time (M1) and CUDA-side conversion is a later milestone. CUDA spellings
-# are ``__nv_fp8_e4m3`` / ``__nv_fp8_e5m2`` (see ``backend/cuda/dtype.py``).
+# time (M1) and CUDA-side conversion is a later milestone.
 F8E4M3 = DataType("f8e4m3", np.dtype(np.uint8), 1)
 F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
 # NVFP4 storage format — e2m1 values (1 sign / 2 exponent / 1 mantissa bit; the
@@ -118,10 +115,10 @@ F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
 # e4m3 per 16 values + one f32 per tensor) are separate plain tensors — a
 # loader concern, not dtype information.
 F4E2M1x2 = StructuredType("f4e2m1x2", np.dtype(np.uint8), 1)
-# Two ``__half`` values packed into a 32-bit register, semantically a
+# Two f16 values packed into a 32-bit register, semantically a
 # 2-wide vector of fp16 — the first ``StructuredType``. Same numpy dtype as
 # F16 since numpy doesn't distinguish — packing is a CUDA-side storage detail;
-# the canonical IR token "f16x2" is what the renderer keys on.
+# the canonical IR token "f16x2" is what the code generators key on.
 F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4)
 
 
@@ -283,9 +280,8 @@ def encode_f8(values: np.ndarray, fmt: str) -> np.ndarray:
 #: The 16 e2m1 values in code order — the 8 non-negative ones first (exponent
 #: bias 1; code 1 is the lone subnormal, 0.5), then codes 8..15 mirroring them
 #: with the sign bit set. No inf/nan codes exist in the format, and every value
-#: is exact in f16, so this table IS the decode wherever the format is read:
-#: numpy here, and the CUDA fragment drain that emits it as an f16 constant
-#: table (``render._F4_STAGED_PRELUDE``) rather than keeping a second copy.
+#: is exact in f16, so this table IS the decode wherever the format is read on
+#: the host.
 F4_VALUES: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 _F4_LUT = np.array(F4_VALUES, dtype=np.float32)
 

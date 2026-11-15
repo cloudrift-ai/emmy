@@ -29,11 +29,10 @@ class _EmptyBranch(Fork):
 
 
 def _ballot(monkeypatch, pieces: dict[int, tuple[tuple[str, str], ...]], rows: list[dict], aliases=None):
-    """Fake leaves whose expansion is the ``(name, identity)`` pieces each arm leaves, read through ``kernel_pieces``."""
+    """Fake leaves whose expansion is the ``(piece, identity)`` kernels each arm leaves, read through
+    ``kernel_pieces``."""
     monkeypatch.setattr(
-        features,
-        "kernel_pieces",
-        lambda left: [(SimpleNamespace(name=name, identity_key=lambda key=key, **_: key), False) for name, key in left],
+        features, "kernel_pieces", lambda left: [(SimpleNamespace(identity_key=lambda key=key, **_: key), False) for _, key in left]
     )
     return [DeferredFork(lambda i=i: pieces.get(i, ()), knobs=row, aliases=aliases or {}) for i, row in enumerate(rows)]
 
@@ -41,7 +40,7 @@ def _ballot(monkeypatch, pieces: dict[int, tuple[tuple[str, str], ...]], rows: l
 @pytest.mark.parametrize("complete_offered", [False, True])
 @pytest.mark.parametrize("alias", ["PLACE@left", "PLACE@left_alias"])
 def test_placement_labels_prefer_the_complete_natural_arm(monkeypatch, complete_offered, alias):
-    """A golden that left ``left``, ``right`` and the remainder ``rest``: each single seam carving one of them is
+    """A golden that left ``left``, ``right`` and the piece ``rest``: each single seam carving one of them is
     positive, and a natural arm leaving exactly that kernel set is positive instead of them. An alias spells the
     same seam, and the label reads the seam."""
     rows = [{"PLACE": "fuse"}, {alias: "cut"}, {"PLACE@right": "cut"}]
@@ -52,7 +51,7 @@ def test_placement_labels_prefer_the_complete_natural_arm(monkeypatch, complete_
     leaves = _ballot(monkeypatch, pieces, rows, aliases={"PLACE@left_alias": "PLACE@left"})
     pending = Counter({"left": 1, "right": 1, "rest": 1})
 
-    positives, labels, carved = _place_ballot(leaves, rows, "k", "k", pending, frozenset())
+    positives, labels, carved = _place_ballot(leaves, rows, "k", pending, frozenset())
 
     assert labels == ["fuse", "left", "right", *(["left right"] if complete_offered else [])]
     assert positives == ([3] if complete_offered else [1, 2])
@@ -61,8 +60,8 @@ def test_placement_labels_prefer_the_complete_natural_arm(monkeypatch, complete_
 
 def test_placement_labels_require_pending_pieces_with_multiplicity(monkeypatch):
     """An arm is positive only when every piece it carves is still pending, as many times as it carves it — or is
-    a kernel the golden cut in its turn, whose own fork carries the chain on. The remainder is the kernel that
-    keeps the fork kernel's name, and a kernel that is itself a pending piece stays whole."""
+    a kernel the golden cut in its turn, whose own fork carries the chain on; the kernels it leaves outside the set
+    carry the walk on. A kernel that is itself a pending piece stays whole."""
     rows = [{"PLACE": "fuse"}, {"PLACE@a": "cut"}, {"PLACE@c": "cut"}, {"PLACE@a": "cut", "PLACE@a2": "cut"}, {"PLACE@p": "cut"}]
     pieces = {
         1: (("k__place_a", "a"), ("k", "k_a")),
@@ -73,13 +72,13 @@ def test_placement_labels_require_pending_pieces_with_multiplicity(monkeypatch):
     leaves = _ballot(monkeypatch, pieces, rows)
     pending = Counter({"a": 1, "b": 1, "rest": 1})
 
-    positives, _labels, _carved = _place_ballot(leaves, rows, "k", "k", pending, frozenset({"parent"}))
+    positives, _labels, _carved = _place_ballot(leaves, rows, "k", pending, frozenset({"parent"}))
     assert positives == [1, 4]
-    assert _place_ballot(leaves, rows, "k", "k", Counter({"a": 2, "rest": 1}), frozenset())[0] == [1, 3]
-    assert _place_ballot(leaves, rows, "k", "k", Counter({"c": 1}), frozenset())[0] == [2]
-    assert _place_ballot(leaves, rows, "rest", "k", pending, frozenset())[0] == [0], "a pending kernel stays whole"
-    assert _place_ballot(leaves, rows, "k", "k", None, frozenset())[0] == [0], "no cut recorded: fuse"
-    assert _place_ballot(leaves, rows, "k", "k", Counter({"z": 1}), frozenset())[0] == [], "the recorded set is out of reach"
+    assert _place_ballot(leaves, rows, "k", Counter({"a": 2, "rest": 1}), frozenset())[0] == [1, 3]
+    assert _place_ballot(leaves, rows, "k", Counter({"c": 1}), frozenset())[0] == [2]
+    assert _place_ballot(leaves, rows, "rest", pending, frozenset())[0] == [0], "a pending kernel stays whole"
+    assert _place_ballot(leaves, rows, "k", None, frozenset())[0] == [0], "no cut recorded: fuse"
+    assert _place_ballot(leaves, rows, "k", Counter({"z": 1}), frozenset())[0] == [], "the recorded set is out of reach"
 
 
 def test_enumeration_skips_an_empty_pinned_branch(monkeypatch) -> None:

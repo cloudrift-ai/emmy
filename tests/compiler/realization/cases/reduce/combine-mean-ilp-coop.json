@@ -3,8 +3,8 @@
   {"inputs":["x"],"outputs":["mean"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[4,1024]]]},{"id":"mean","op":"torch.mean","attrs":{"axis":1},"inputs":["x"],"outputs":[["mean","f32",[4,1]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["x"],"outputs":["mean"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[4,1024]]]},{"id":"mean","op":"loop","attrs":{"body":"let f32 v0 = 1024.0\nfor a0 in 0..4:\n    for a1 in 0..1024:\n        in0 = load x[a0, a1]\n        acc0 <- add(acc0, in0) over a1\n    v1 = divide(acc0, v0)\n    mean[a0, 0] = v1","name":"k_mean_e09901"},"inputs":["x"],"outputs":[["mean","f32",[4,1]]]}]},"name":"k_mean_e09901","formed":true,"traced":0,"origins":["mean"]}
+  {"loop_ir":{"inputs":["x"],"outputs":["mean"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[4,1024]]]},{"id":"mean","op":"loop","attrs":{"body":"let f32 v0 = 1024.0\nfor a0 in 0..4:\n    for a1 in 0..1024:\n        in0 = load x[a0, a1]\n        acc0 <- add(acc0, in0) over a1\n    v1 = divide(acc0, v0)\n    mean[a0, 0] = v1"},"inputs":["x"],"outputs":[["mean","f32",[4,1]]]}]},"formed":true,"traced":0,"origins":["mean"]}
  ],
  "rows": [
-  {"name":"k_mean_6e1b56","kernel":"k_mean_e09901","pins":{"FAST_MATH":false},"knobs":{"WORK":"t32","REDUCE":"coop/r2"}}
+  {"name":"k_mean_6e1b56","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"t32","REDUCE":"coop/r2"}}
  ]}

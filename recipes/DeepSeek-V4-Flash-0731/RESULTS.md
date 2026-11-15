@@ -342,7 +342,7 @@ passing rows and all 462 failing rows are distinct ops, so the trigger is struct
 
 ### Reproducing the compiler work
 
-Emmy needs `nvcc` on `PATH`, and the CUDA **12.9** toolkit specifically: CUDA 13 dropped Volta. Two further host
+Emmy needs `ptxas` on `PATH`, and the CUDA **12.9** toolkit specifically: CUDA 13 dropped Volta. Two further host
 conditions cost hours before they were found. PyYAML silently falls back to its pure-Python loader without `libyaml`,
 which alone cost more than 13 minutes per parse of this 3.4 MB golden. And `torch 2.13` installs
 `nvidia-cuda-nvrtc 13.0.88`, which `cupy-cuda12x` then resolves in preference to any CUDA 12 NVRTC; because CUDA 13

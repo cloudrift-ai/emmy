@@ -5,12 +5,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::ties;
-use super::{unify_siblings, with_bodies};
+use super::{refilled, unify_siblings, with_bodies};
 use crate::body::{Body, free_names, unique};
 use crate::elementwise::{AffineRole, Operation};
 use crate::expr::{Expr, ExprClass, Expression, LitType};
 use crate::field::Rewriter;
-use crate::numbering::{Chains, Key, Numbering, roles, statement_tree, value_numbers};
+use crate::numbering::{Chains, Key, Numbering, params_key, roles, statement_tree, value_numbers};
 use crate::order::ordering_constraints_within;
 use crate::statement::*;
 use crate::{Name, Result};
@@ -185,7 +185,7 @@ impl SequentialScope {
             self.sources.extend(scope.sources);
             renamed_children.push(child.rebuilt(members));
         }
-        with_bodies(&renamed, renamed_children)
+        refilled(stmt, &renamed, renamed_children)
     }
 }
 
@@ -288,7 +288,7 @@ fn ordered_within(body: &Body, numbering: &Numbering, outer: &HashSet<Name>) -> 
                     own.clone(),
                     spelled,
                     number,
-                    Key::Tuple(params),
+                    params_key(&params),
                 ])
             }
         })
@@ -344,7 +344,10 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         let bodies: Result<Vec<Body>> = nested.iter().map(unify_siblings).collect();
         Ok(Some(with_bodies(stmt, bodies?)))
     })?;
-    unify_siblings(&unified)
+    // Every scope was ordered under its dependencies and effects, and the renaming keeps each read's binding.
+    let canonical = unify_siblings(&unified)?;
+    canonical.mark_sorted();
+    Ok(canonical)
 }
 
 /// Every expression of `stmt` in canonical form, each in the coefficient domain its field's class declares

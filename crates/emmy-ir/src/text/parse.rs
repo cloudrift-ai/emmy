@@ -693,6 +693,7 @@ impl Line {
         });
         let unroll = self.flag("unroll")?.unwrap_or(false);
         let seed = self.flag("seed")?.unwrap_or(true);
+        let unrolled = self.flag("unrolled")?.unwrap_or(false);
         self.parser.require(":")?;
         if let Some(step) = step {
             let loop_ = StridedLoop {
@@ -703,6 +704,7 @@ impl Line {
                 unroll,
                 end,
                 seed,
+                unrolled,
             };
             return self.end(Arc::new(Statement::StridedLoop(loop_)));
         }
@@ -716,6 +718,7 @@ impl Line {
             body,
             unroll,
             seed,
+            unrolled,
         })))
     }
 }

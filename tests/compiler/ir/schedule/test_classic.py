@@ -132,9 +132,7 @@ def test_contraction_tiles_the_contiguous_output_axis_across_grid_orders(free_or
         {**direct.nodes, site: ReductionSchedule(Tile(units=(8, 8)), Reduce())},
         direct.edges,
     )
-    result = materialize_classic(
-        tile, name="layout", knobs=ClassicScheduleCodec(context).encode(schedule), target=target, schedule=schedule
-    )
+    result = materialize_classic(tile, knobs=ClassicScheduleCodec(context).encode(schedule), target=target, schedule=schedule)
     assert result.outputs == tile.outputs
     assert {axis.name for axis in result.materialization.tiles[site].axes} == {"row", "channel"}
     graph = Graph()
@@ -202,7 +200,7 @@ def test_attention_score_tiles_its_consumers_row_across_grid_orders(free_order, 
         knobs[f"TILE@{path}"] = f"mma_m16n8k16_f16_f32/{fragment}/k4"
         knobs[f"STAGE@{path}"] = stage
     schedule = codec.decode(knobs)
-    scheduled = materialize_classic(tile, name=tile.name, knobs=knobs, target=target, schedule=schedule)
+    scheduled = materialize_classic(tile, knobs=knobs, target=target, schedule=schedule)
     body = Body((factorize(scheduled, None),))
     assert list(body.iter_of_type(MmaSyncPtx))
 
@@ -917,7 +915,6 @@ def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:
     )
     tile = TileOp(
         op=root,
-        name="classic",
         place=Placement(free=(m, n), grid=(m, n), mapped=True),
         axes=(m, n, _K),
         schedule=schedule,

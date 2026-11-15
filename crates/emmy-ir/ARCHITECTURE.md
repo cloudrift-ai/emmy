@@ -4,9 +4,12 @@
 and their text, the forty-five statement types, `Body`, the body text, the statement protocol, value numbering,
 identity and body normalization. Pure Rust, no Python in it, so `cargo test -p emmy-ir` runs it alone, and the tests
 of the normalization steps sit beside the steps there. The extension beside it, `emmy-ir-py`, is the `emmy.emmy_ir`
-module those two Python packages re-export from; `make setup` builds it into the package like the runtime extension.
-It exports the driver, `normalize_body`, and the steps a pass calls on its own (`one_operation_per_definition`,
-`canonical_values`, `simplify_body`, `prepare_body`), no other step. Design: `ir/ARCHITECTURE.md` owns what a
+module those two Python packages re-export from (and `ir/pure`, from the `emmy-pure` crate beside this one, which
+holds the pure terms over this vocabulary: `crates/emmy-pure/ARCHITECTURE.md`); `make setup` builds it into the package
+like the runtime extension.
+It exports the driver, `normalize_body`, the steps a pass calls on its own (`one_operation_per_definition`,
+`simplify_body`, `prepare_body`) and the lambda normalization (`normalize_lambda_body`: `fragment_order`, then
+`canonical_values`), no other step. Design: `ir/ARCHITECTURE.md` owns what a
 statement, a body and the normal form ARE; this file says how the crate holds them.
 
 ## Layout
@@ -68,32 +71,32 @@ file imports what it uses by name; no child module takes its parent's imports.
   statement type has (`op`, `dtype`, `name`) are the `Field` trait's: a field type that is one answers, every other
   field's default is none. A test pins the digest of the declaration list, the names and field orders every stored text
   spells.
-- **Fields** (`field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by
-  role, spelled on a declared statement type's header and read back by its `FieldType`. A number where a name is
-  expected (`NumOr<T>`, a carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in
-  the same list with a layer of its own, a struct whose own fields play roles and a `Field` of the statement type that
-  holds it. Every closed set of spellings the crate branches on is an enum declared with `closed_set!` (one text per
+- **Fields** (`field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by role,
+  spelled on a declared statement type's header and read back by its `FieldType`. A number where a name is expected
+  (`NumOr<T>`, a carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same
+  list with a layer of its own, a struct whose own fields play roles and a `Field` of the statement type that holds
+  it. Every closed set of spellings the crate branches on is an enum declared with `closed_set!` (one text per
   variant, `Display` and `FromStr` over them, a test pinning every text, since each is a stored spelling or identity
   material): the dtypes (`DType`, `dtype.rs`, with the promotion rule; the extension exports the set as `DTYPES` and a
-  Python test holds it equal to the `DataType` registry), the literal types (`LitType`),
-  the GPU built-ins (`expr::Builtin`), the expression types (`ExprType`, generated from the one expression list; the
-  digest spells a node by it), the digest's other tags (`numbering::Tag`) and a fragment's layout and role
-  (`fragment::Layout`, `fragment::Role`, which the lane-to-element table is keyed on). A cast's target is `CastTarget`:
-  a literal type the simplifier folds through, or any other C type the renderer spells. A value the crate only carries
-  stays a name: a slab's swizzle, a tile's raster orientation, a slab's or an MMA wrapper's C type. An elementwise operation is `ElementwiseOp::Known(Operation)` or `ElementwiseOp::Other(name)`, a spelling only a
-  renderer knows. The known operations are one declaration (`operations!` in `elementwise.rs`): each variant with its
-  spelling and its properties, which generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum
-  indexes, one `OperationInfo` row per operation (commutative, associative, the neutral element, the cluster
-  representative, integer arithmetic, whether it copies or selects its operand, its affine role, its host evaluator,
-  its infix spelling and precedence, and for a composite function its definition in primitive operations, which
-  `Operation::definition` gives over an operand and kernel lowering writes into a body). An approximate instruction
-  is an operation of its own, named after the exact one (`exp_fast`, `divide_fast`, `sqrt_fast`, …): the same
-  function and the same host value, a faster instruction with a documented error on a device. Every reader
-  of an operation's nature (the affine fold, the alias reads of placement and the ties, the dtype promotion, the
-  clustered identity, the Python tables) reads a property; none matches a name. The neutral element is the real one
-  (`-inf` for a maximum) and `seed` is what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source
-  spells. A string of any of these sets exists where the text is read or written, at the Python boundary, and nowhere
-  else.
+  Python test holds it equal to the `DataType` registry), the literal types (`LitType`), the GPU built-ins
+  (`expr::Builtin`), the expression types (`ExprType`, generated from the one expression list; the digest spells a
+  node by it), the digest's other tags (`numbering::Tag`) and a fragment's layout and role (`fragment::Layout`,
+  `fragment::Role`, which the lane-to-element table is keyed on). A cast's target is `CastTarget`: a literal type the
+  simplifier folds through, or any other C type the renderer spells. A value the crate only carries stays a name: a
+  slab's swizzle, a tile's raster orientation. An elementwise operation is `ElementwiseOp::Known(Operation)` or
+  `ElementwiseOp::Other(name)`, a spelling only a renderer knows. The known operations are one declaration
+  (`operations!` in `elementwise.rs`): each variant with its spelling and its properties, which generates the enum,
+  its `Display`/`FromStr` pair and the table `OPS` the enum indexes, one `OperationInfo` row per operation
+  (commutative, associative, the neutral element, the cluster representative, integer arithmetic, whether it copies or
+  selects its operand, its affine role, its host evaluator, its infix spelling and precedence, and for a composite
+  function its definition in primitive operations, which `Operation::definition` gives over an operand and kernel
+  lowering writes into a body). An approximate instruction is an operation of its own, named after the exact one
+  (`exp_fast`, `divide_fast`, `sqrt_fast`, …): the same function and the same host value, a faster instruction with a
+  documented error on a device. Every reader of an operation's nature (the affine fold, the alias reads of placement
+  and the ties, the dtype promotion, the clustered identity, the Python tables) reads a property; none matches a name.
+  The neutral element is the real one (`-inf` for a maximum) and `seed` is what a kernel initializes with, the bounded
+  stand-in `±1e30`. A string of any of these sets exists where the text is read or written, at the Python boundary,
+  and nowhere else.
 - **Axes** (`axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window
   is provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
   holds a name (or an axis's parts) and the extension makes the object on first read.
@@ -114,13 +117,14 @@ fields (`validate`); `Statement::check` dispatches on the flag, and `finished` r
 Python's `__post_init__` made.
 
 `body.rs` is `Body`: the statements, a content hash, and every def-use reading computed once on first use and kept
-with the body (`definitions`, `defined_states`, `escaping_states`, `local_defs`, `free_ssa`, `axis_names`, `ssa_uses`, the filters by
-statement type), plus the walks (`try_map`, `try_map_stmts`, `walk`; `map` and `map_stmts` are the same walks with an
-error type that has no values, and the extension calls the fallible ones with a Python function and `PyErr`),
-`backward_cone` and the topological order, which ranks by any ordered priority. `rebuilt` returns the body itself when a
-step hands back its own statements, so a step that changed nothing keeps the readings. `StmtRef` names a statement by
-the body that holds it and its position, which is what the numbering and a Python-side cache key on. `Subroutine` is the
-shared reduction body a `Call` names, compared by object.
+with the body (`definitions`, `defined`, `free`, `buffers`, `defined_states`, `escaping_states`, `local_defs`,
+`free_ssa`, `axis_names`, `ssa_uses`, the filters by statement type), plus the walks (`try_map`, `try_map_stmts`,
+`walk`; `map` and `map_stmts` are the same walks with an error type that has no values, and the extension calls the
+fallible ones with a Python function and `PyErr`), `backward_cone`, `pruned` and the topological order, which ranks by
+any ordered priority. `rebuilt` returns the body itself when a step hands back its own statements, so a step that
+changed nothing keeps the readings. `StmtRef` names a statement by the body that holds it and its position, which is
+what the numbering and a Python-side cache key on. `Subroutine` is the shared reduction body a `Call` names, compared
+by object.
 
 ## Text
 
@@ -136,7 +140,8 @@ roles and the digest; `congruence.rs` the congruent carried states (`congruent_s
 state keyed by its group until the groups hold. Statements are keyed by their position in the body they sit in (a
 `StmtRef`), so a body that holds one statement object twice numbers it twice and nothing is copied first; digest
 material is a `Key` tree hashed with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total
-order. The operands of a commutative operation that share a number take the order whose layout key is least under a
+order. A value carries its parameters to every statement that reads it, so a `Param` is shared, not copied, and keeps a
+fingerprint; inside a key it hashes, compares and orders as the key it holds. The operands of a commutative operation that share a number take the order whose layout key is least under a
 bounded search: every order is tried while the groups allow at most 7! of them, generated in place, and a larger
 operation (an unrolled window sum over eight or more shifted reads, which the full search never finished) takes the
 order built position by position: canonical and independent of the input order like the full search's, but not always
@@ -152,7 +157,10 @@ identity stays the same whatever the buffers are called.
 
 The normal form is two kinds of step. The optimizing steps remove work: the exact simplifications, every value
 computed once and placed at the shallowest scope that holds its operands, congruent states merged, unread values
-dropped. The canonical steps make equal bodies one body: sibling reduce loops over one axis merged into one loop, the
+dropped (a statement kept whatever reads it, like a cross-thread combine, reads every name it updates in place). A
+kernel body's also put a condition its test decides in the place of the side it takes, and join the conditions side by
+side that test the same thing (a register tile's row of guarded stores) into one. The canonical
+steps make equal bodies one body: sibling reduce loops over one axis merged into one loop, the
 sibling order, the operand order its ranks spell, and the sequential names. An identity reads a Loop IR body, so
 `normalize_body` runs both until they settle. No identity reads a kernel body, so a `KernelOp` takes the optimizing
 steps alone, through `optimize_body`, at construction: its statements stand in the order and under the names the pass
@@ -184,10 +192,8 @@ per register and element the row and column offset in the tile as expressions ov
 of a per-row reduce, and for a register of block scales the lanes that supply it under the instruction's two
 selectors (`SCALE_SELECTOR_A`, `SCALE_SELECTOR_B`). `paired_accumulator_table` is the accumulator of Volta's paired
 tile. A `RegFragment` holds as many registers as its row (`RegFragment::registers`); no statement carries a count.
-The CUDA renderer reads the rows of an accumulator of floats through the extension (`FragmentApply`,
-`FragmentRowReduce`, `RegStore`); the operand rows, the packed accumulators and the block scales are what its C++
-loaders compute, written here for the PTX compiler and checked by a test that every element of a tile is held once
-(twice by Volta's operands), not against a card.
+The PTX compiler expands every fragment statement per lane from these rows. A test checks that every element of a
+tile is held once (twice by Volta's operands).
 
 `input.rs` is the check a code generator's input passes (`check_input`): typed in full (`types.rs`), one flat index
 per access outside the accesses their dimensions define, no loop asking for unrolling, and every fragment statement
@@ -201,21 +207,26 @@ of two over a dividend the ranges prove non-negative as a shift and a mask, the 
 
 What a process remembers across bodies is three `memo::Memo`s, the normal forms and the optimized forms
 (`normal_forms`, `optimized_forms` in the normalization driver) and the identities (`identities` in `identity.rs`),
-each bounded by the weight its entries hold between them:
-an entry weighs the statements of the bodies it holds, `BODY_MEMO_WEIGHT` between them, since a whole-layer body is
-thousands of statements and a bound by entry count let a process that lowers many goldens hold gigabytes of normal
-forms. The caches are `quick_cache`'s: evicting by its one policy (S3-FIFO), sharded so no lock is held across a
-computation, and one asker computes a missing value while a second asker of the same key waits for it (no
-normalization step recurses into `normalize_body`). A memo's key is the body's exact form, `body::MemoKey`: equal when
-the statements are and so is everything body equality leaves out, every axis's hint and window, every expression's
-literals and every number a field holds by their bits (a signed zero keys apart from zero, every NaN alike, as the
-digest keys them), with a hash computed once and kept with the body by one walk of the subtree; no key is a printed
-text. A body also keeps the one normal form it was given (`normal_form`, `remember_normal_form`, `is_normal`,
-`mark_normal` in `body.rs`), so a body normalized twice costs one lookup and a protocol rewrite that keeps a normal form
-says so through that API. `memo::clear_all` forgets the memos; Python's `emmy_ir.clear_memos()` calls it and purges
-the extension's wrapper tables (a body's statement wrappers, a subroutine's one Python object), which are not bounded,
-since a live object keeps its one wrapper, and otherwise drop their dead entries when their size reaches a multiple of
-1,024.
+each bounded by the weight its entries hold between them: an entry weighs the statements of the bodies it holds,
+`BODY_MEMO_WEIGHT` between them, since a whole-layer body is thousands of statements and a bound by entry count let a
+process that lowers many goldens hold gigabytes of normal forms. The caches are `quick_cache`'s: evicting by its one
+policy (S3-FIFO), sharded so no lock is held across a computation, and one asker computes a missing value while a
+second asker of the same key waits for it (no normalization step recurses into `normalize_body`). A memo's key is the
+body's exact form, `body::MemoKey`: equal when the statements are and so is everything body equality leaves out, every
+axis's hint and window, every expression's literals and every number a field holds by their bits (a signed zero keys
+apart from zero, every NaN alike, as the digest keys them), with a hash computed once and kept with the body by one
+walk of the subtree; no key is a printed text. A body also keeps the one normal form it was given (`normal_form`,
+`remember_normal_form`, `is_normal`, `mark_normal` in `body.rs`), so a body normalized twice costs one lookup and a
+protocol rewrite that keeps a normal form says so through that API. A normal form also enters `normal_forms` under its
+own form, since it is its own normal form: a body built again equal to one, which passes do often, reads it back
+instead of taking a round to learn it is final. It keeps, the same way, whether every scope of it is in dependency
+order (`is_sorted`, `mark_sorted`): the dependency sort's result and the canonical order's are, so the sort leaves
+such a body alone without working out its constraints. The extension's wrapper tables (a body's statement wrappers, a
+subroutine's, a term's and a recipe's one Python object) are not bounded, since a live object keeps its one wrapper.
+A purge of their dead entries walks the whole table, so the next one waits for as many inserts as the last left
+entries alive, never fewer than 1,024: an insert costs a constant share of the walks. (A purge due whenever the size
+was a multiple of 1,024 walked the table on every insert that reused a dead object's address, which a body made and
+dropped in a loop does every time: building one body took milliseconds once a few hundred thousand were alive.)
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation

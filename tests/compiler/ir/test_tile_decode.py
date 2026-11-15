@@ -10,55 +10,49 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.kernel.ir import KernelOp, Sync, Tile, decode_tile
-from emmy.compiler.ir.kernel.render import _BUILTIN_TO_CUDA
-from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.stmt import Body, Cond, Let, pretty_body
 
 
-def _render(axes, **kw) -> str:
-    return "\n".join(render_stmt(Tile(axes=axes, body=Body(()), **kw), RenderCtx(builtins=_BUILTIN_TO_CUDA)))
+def _decoded(axes, **kw) -> str:
+    """The grid ``axes`` decode to, in the text form: the grid's decode, then its guard."""
+    return "\n".join(pretty_body(Body((decode_tile(Tile(axes=axes, body=Body(()), **kw)),))))
 
 
 def test_a_grid_past_int32_reads_its_block_axes_from_the_cta_index():
-    src = _render((Axis("m", 4096), Axis("n", 3840), Axis("k_co", 256)), block_threads=256)
-    assert "int m = blockIdx.x / 3840;" in src
-    assert "int n = blockIdx.x % 3840;" in src
-    assert "int k_co = threadIdx.x;" in src
+    src = _decoded((Axis("m", 4096), Axis("n", 3840), Axis("k_co", 256)), block_threads=256)
+    assert "decode=(block_idx.x / 3840, block_idx.x % 3840, thread_idx.x)" in src
     # 256 divides the cells: no guard, and nothing left to pass 2^31 - 1.
-    assert "if (" not in src and "long long" not in src
+    assert "if " not in src and "long long" not in src
 
 
 def test_a_thread_axis_straddling_ctas_reads_both_indices():
-    src = _render((Axis("m", 64), Axis("n", 32)))
-    assert "int m = blockIdx.x * 8 + threadIdx.x / 32;" in src
-    assert "int n = threadIdx.x % 32;" in src
+    src = _decoded((Axis("m", 64), Axis("n", 32)))
+    assert "decode=(block_idx.x * 8 + thread_idx.x / 32, thread_idx.x % 32)" in src
     assert "long long" not in src
 
 
 def test_the_producer_band_wraps_onto_the_cells():
-    src = _render((Axis("m", 4096), Axis("n", 3840), Axis("k_co", 256)), block_threads=256, aux_threads=128)
-    assert "int m = blockIdx.x / 3840;" in src
-    assert "int k_co = threadIdx.x % 256;" in src
+    src = _decoded((Axis("m", 4096), Axis("n", 3840), Axis("k_co", 256)), block_threads=256, aux_threads=128)
+    assert "decode=(block_idx.x / 3840, block_idx.x % 3840, thread_idx.x % 256)" in src
 
 
 def test_a_guard_past_int32_is_64_bit():
-    src = _render((Axis("m", 4097), Axis("n", 3841), Axis("k", 255)), block_threads=256)
-    (guard,) = [line for line in src.splitlines() if line.lstrip().startswith("if (")]
-    assert "((long long)(blockIdx.x)) * 256" in guard
+    src = _decoded((Axis("m", 4097), Axis("n", 3841), Axis("k", 255)), block_threads=256)
+    (guard,) = [line for line in src.splitlines() if line.lstrip().startswith("if ")]
+    assert "(long long)block_idx.x * 256" in guard
 
 
 def test_a_symbolic_grid_guards_in_64_bits_and_decodes_its_block_axes_in_32():
-    src = _render((Axis("s", Dim(Var("seq_len"))), Axis("n", 6144), Axis("k_co", 256)), block_threads=256)
-    (guard,) = [line for line in src.splitlines() if line.lstrip().startswith("if (")]
-    assert "((long long)(seq_len))" in guard
-    assert "int s = blockIdx.x / 6144;" in src
-    assert "int n = blockIdx.x % 6144;" in src
+    src = _decoded((Axis("s", Dim(Var("seq_len"))), Axis("n", 6144), Axis("k_co", 256)), block_threads=256)
+    (guard,) = [line for line in src.splitlines() if line.lstrip().startswith("if ")]
+    assert "(long long)seq_len" in guard
+    assert "decode=(block_idx.x / 6144, block_idx.x % 6144, thread_idx.x)" in src
 
 
 def test_a_one_cta_grid_reads_the_thread_index_alone():
-    src = _render((Axis("m", 100),))
-    assert "if (threadIdx.x < 100) {" in src
-    assert "int m = threadIdx.x;" in src
+    src = _decoded((Axis("m", 100),))
+    assert "if thread_idx.x < 100:" in src
+    assert "decode=(thread_idx.x)" in src
 
 
 def test_the_decode_binds_the_thread_coordinates_the_body_reads():

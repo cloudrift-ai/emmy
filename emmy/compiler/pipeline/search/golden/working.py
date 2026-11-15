@@ -134,7 +134,7 @@ def _append(graph, *, ctx, document: GoldenFile, name_prefix: str | None = None,
             if isinstance(node.op, LoopOp)
         }
         for outputs, tile in lift_targets(program, ctx).items():
-            kernel = definition(tile, tile.name, traced=traced, origins=origins.get(outputs, ()), bindings=dict(bindings))
+            kernel = definition(tile, traced=traced, origins=origins.get(outputs, ()), bindings=dict(bindings))
             stored_before = len(document.kernels)
             stored = document.add_kernel(kernel)
             added += len(document.kernels) - stored_before
@@ -148,8 +148,6 @@ def _append(graph, *, ctx, document: GoldenFile, name_prefix: str | None = None,
                 name = f"{name_prefix}.{tile.name}" if name_prefix else tile.name
                 if template.get("name"):
                     name = f"{name}.{template['name']}"
-                if any(row.name == name and row.kernel != stored.ref for row in document.rows):
-                    name = f"{name}.{stored.exact_identity[:12]}"
                 if any(row.name == name and row.pins == pins and row.bindings != sizes for row in document.rows):
                     name = ".".join((name, *(f"{var}{size}" for var, size in sorted(sizes.items()))))
                 document.rows.append(Row(name=name, kernel=stored.ref, bindings=sizes, pins=pins))
@@ -271,8 +269,8 @@ def record_greedy_pick(
         timed = [path_to[0].parent if path_to else seed.kernel]
         routes = []
         for parent, arm, pieces in decisions:
-            stored = document.add_kernel(definition(parent, parent.name))
-            children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+            stored = document.add_kernel(definition(parent))
+            children = [document.add_kernel(definition(piece)) for piece in pieces]
             routes.append(RoutingRow(stored.ref, {str(k): str(v) for k, v in arm.items()}, tuple(c.ref for c in children)))
             document.add_routing(routes[-1])
             timed.extend(ref for ref in (stored.ref, *routes[-1].children) if ref not in timed)
@@ -282,9 +280,9 @@ def record_greedy_pick(
             tile = kernel_tile(op)
             if tile is None:
                 raise ValueError(f"kernel {op.kernel_name} lowered from no tile kernel, so no row can name it")
-            stored = document.add_kernel(definition(tile, op.kernel_name))
+            stored = document.add_kernel(definition(tile))
             row = Row(
-                name=f"{name}.{stored.exact_identity[:12]}",
+                name=f"{name}.{stored.name}",
                 kernel=stored.ref,
                 bindings=kernel_bindings(tile),
                 pins=regime,

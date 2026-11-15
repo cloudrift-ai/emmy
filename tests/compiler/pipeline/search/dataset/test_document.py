@@ -19,7 +19,7 @@ _STAMP = {"S_ext_n_symbolic_axis": 0.0}
 def _dataset() -> Dataset:
     """One golden group over one pool (a second row lacking a feature, so the matrix carries the NaN fill) and one
     measured group, with the bookkeeping an export writes beside them."""
-    pool = GoldenPool("gpuA", (12, 0), "", kernel_row("k1", name="k_one"), {"m": 512}, (GoldenRow({"TILE": "a"}, 1.5, "golden:x"),))
+    pool = GoldenPool("gpuA", (12, 0), "", kernel_row("k1"), {"m": 512}, (GoldenRow({"TILE": "a"}, 1.5, "golden:x"),))
     golden = GoldenGroup.over(
         "gpuA/k_one",
         "k_one",
@@ -31,9 +31,7 @@ def _dataset() -> Dataset:
         10,
         pools=(pool,),
     )
-    measured = MeasuredGroup.from_measured(
-        "gpuA/sig@O3", "gpuA", "sig", 3.0, [10.0, 20.0], [{"D_a": 1.0, **_STAMP}, {"D_a": 2.0, **_STAMP}]
-    )
+    measured = MeasuredGroup.from_measured("gpuA/sig", "gpuA", "sig", [10.0, 20.0], [{"D_a": 1.0, **_STAMP}, {"D_a": 2.0, **_STAMP}])
     provenance = {
         "source": "test.db",
         "sources": {"golden:x": 1},
@@ -68,7 +66,7 @@ def test_a_dataset_round_trips_through_its_directory(tmp_path):
         want.golden_ids,
     )
     assert np.array_equal(g.feats, want.feats, equal_nan=True) and g.pools == want.pools
-    assert m.latency_us.tolist() == [10.0, 20.0] and m.h_opt == 3.0 and m.key == "gpuA/sig@O3"
+    assert m.latency_us.tolist() == [10.0, 20.0] and m.key == "gpuA/sig"
     assert (back.skipped, back.dropped, back.provenance) == (dataset.skipped, dataset.dropped, dataset.provenance)
     manifest = json.loads((out / "manifest.json").read_text())
     assert len(manifest["kernels"]) == 1 and manifest["golden"][0]["pools"][0]["kernel"] == 0  # interned by identity

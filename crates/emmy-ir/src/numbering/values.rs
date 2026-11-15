@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{Key, Number, Param, Tag, expression_key, hash_parts};
+use super::{Key, Number, Param, Tag, expression_key, hash_parts, params_key};
 use crate::Name;
 use crate::body::{Body, StmtRef};
 use crate::elementwise::Operation;
@@ -61,6 +61,52 @@ impl Numbering {
 
 type Value = (Number, Vec<Param>);
 
+/// The values in scope, with every change since a scope opened undone when it closes: a journal of each changed
+/// name's previous value, so a block costs what it changes rather than a copy of every value defined ahead of it.
+#[derive(Default)]
+struct ScopedValues {
+    values: HashMap<Name, Value>,
+    journal: Vec<(Name, Option<Value>)>,
+}
+
+impl ScopedValues {
+    fn get(&self, name: &Name) -> Option<&Value> {
+        self.values.get(name)
+    }
+
+    fn contains_key(&self, name: &Name) -> bool {
+        self.values.contains_key(name)
+    }
+
+    fn insert(&mut self, name: Name, value: Value) {
+        let previous = self.values.insert(name, value);
+        self.journal.push((name, previous));
+    }
+
+    fn remove(&mut self, name: &Name) {
+        if let Some(previous) = self.values.remove(name) {
+            self.journal.push((*name, Some(previous)));
+        }
+    }
+
+    /// Where a scope opens: [`ScopedValues::close`] undoes every change made after it.
+    fn open(&self) -> usize {
+        self.journal.len()
+    }
+
+    fn close(&mut self, opened: usize) {
+        while self.journal.len() > opened {
+            let Some((name, previous)) = self.journal.pop() else {
+                break;
+            };
+            match previous {
+                Some(value) => self.values.insert(name, value),
+                None => self.values.remove(&name),
+            };
+        }
+    }
+}
+
 /// How a chain of one associative commutative operation is keyed: as one node over every term (`Flat`: two
 /// associations of one sum number alike, which the normal form's order needs, since it orders a sum's terms by the
 /// ranks the numbering gives), or as the tree it is spelled as (`Kept`: the clustered identity spells every FMA-class
@@ -75,7 +121,7 @@ struct Context<'a> {
     out: Numbering,
     resource_key: &'a dyn Fn(&Name) -> Key,
     chains: Chains,
-    env: HashMap<Name, Value>,
+    env: ScopedValues,
     axes: HashMap<Name, Key>,
     loops: Vec<Name>,
     path: Vec<usize>,
@@ -265,7 +311,7 @@ impl Context<'_> {
     ) -> Key {
         expression_key(e, &mut |e| {
             if self.reads_axis(e) && self.coordinate_only(e) {
-                let key = Key::tuple([Key::tag(Tag::Expr), self.by_depth(e)]);
+                let key = Param::new(Key::tuple([Key::tag(Tag::Expr), self.by_depth(e)]));
                 let index = match params.iter().position(|p| *p == key) {
                     Some(index) => index,
                     None => {
@@ -315,7 +361,7 @@ impl Context<'_> {
             return found.clone();
         }
         let mut found = Vec::new();
-        if let Key::Tuple(parts) = param
+        if let Key::Tuple(parts) = param.key()
             && parts.len() == 2
         {
             depths(&parts[1], &mut found);
@@ -398,13 +444,13 @@ impl Context<'_> {
                     // A bound composite still reads its free coordinates: they stay as bare parameters of the reduce.
                     for depth in self.param_depths(param) {
                         if !bound_depths.contains(&depth) {
-                            let bare = Key::tuple([
+                            let bare = Param::new(Key::tuple([
                                 Key::tag(Tag::Expr),
                                 Key::tuple([
                                     Key::str(ExprType::Var.text()),
                                     Key::Int(depth as i64),
                                 ]),
-                            ]);
+                            ]));
                             if !kept.contains(&bare) {
                                 kept.push(bare);
                             }
@@ -421,7 +467,7 @@ impl Context<'_> {
                         if let Some(position) = bound_depths.iter().position(|d| *d == depth) {
                             return Key::tuple([Key::tag(Tag::Bound), Key::Int(position as i64)]);
                         }
-                        let bare = Key::tuple([Key::tag(Tag::Expr), value.clone()]);
+                        let bare = Param::new(Key::tuple([Key::tag(Tag::Expr), value.clone()]));
                         let position = kept
                             .iter()
                             .position(|p| *p == bare)
@@ -441,7 +487,7 @@ impl Context<'_> {
                 reduced_indices
                     .iter()
                     .map(|&index| {
-                        let form = match &parent[index] {
+                        let form = match parent[index].key() {
                             Key::Tuple(parts) if parts.len() == 2 => &parts[1],
                             other => other,
                         };
@@ -779,7 +825,7 @@ impl Context<'_> {
                         .filter_map(|name| self.defined_by.get(name).copied())
                         .collect();
                     let bound = stmt.bound_axes();
-                    let saved_env = self.env.clone();
+                    let opened = self.env.open();
                     let saved_axes: Vec<(Name, Option<Key>)> = bound
                         .iter()
                         .map(|axis| (axis.name, self.axes.get(&axis.name).cloned()))
@@ -817,8 +863,10 @@ impl Context<'_> {
                             }
                         }
                     }
-                    self.env = saved_env;
-                    self.env.extend(exported);
+                    self.env.close(opened);
+                    for (name, value) in exported {
+                        self.env.insert(name, value);
+                    }
                     for (name, previous) in saved_axes {
                         match previous {
                             None => {
@@ -882,7 +930,7 @@ fn exhaustive_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
     for_each_arrangement(&mut groups, 0, &mut |arranged| {
         let order: Vec<Value> = arranged.iter().flatten().cloned().collect();
         let (parent, mapped) = Context::laid_out(&order, params);
-        let key = vec![Key::Tuple(mapped), Key::Tuple(parent)];
+        let key = vec![Key::Tuple(mapped), params_key(&parent)];
         if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
             best = Some((key, order));
         }
@@ -970,7 +1018,7 @@ pub fn value_numbers(
         out: Numbering::default(),
         resource_key,
         chains,
-        env: HashMap::new(),
+        env: ScopedValues::default(),
         axes: HashMap::new(),
         loops: Vec::new(),
         path: Vec::new(),
@@ -1014,13 +1062,12 @@ fn by_content(key: &Key, ops: &[Value], params: &[Param]) -> Key {
             [tag, Key::Int(index)] if *tag == Key::tag(Tag::Operand) => {
                 ops.get(*index as usize).map_or_else(
                     || key.clone(),
-                    |value| Key::tuple([Key::Num(value.0), Key::Tuple(value.1.clone())]),
+                    |value| Key::tuple([Key::Num(value.0), params_key(&value.1)]),
                 )
             }
             [tag, Key::Int(index)] if *tag == Key::tag(Tag::Coordinate) => params
                 .get(*index as usize)
-                .cloned()
-                .unwrap_or_else(|| key.clone()),
+                .map_or_else(|| key.clone(), |param| Key::Param(param.clone())),
             _ => Key::Tuple(
                 parts
                     .iter()
@@ -1076,7 +1123,7 @@ mod tests {
             number,
             params
                 .iter()
-                .map(|p| Key::tuple([Key::str(ExprType::Var.text()), Key::Int(*p)]))
+                .map(|p| Param::new(Key::tuple([Key::str(ExprType::Var.text()), Key::Int(*p)])))
                 .collect(),
         )
     }
@@ -1089,7 +1136,10 @@ mod tests {
             vec![operand(2, &[9])],
             coordinates.iter().map(|c| operand(7, &[*c])).collect(),
         ];
-        let params = vec![Key::tuple([Key::str(ExprType::Var.text()), Key::Int(9)])];
+        let params = vec![Param::new(Key::tuple([
+            Key::str(ExprType::Var.text()),
+            Key::Int(9),
+        ]))];
         let greedy = greedy_layout(&groups, &params);
         assert_eq!(greedy, exhaustive_layout(&groups, &params));
         assert_eq!(greedy, least_layout(&groups, &params));

@@ -1,7 +1,6 @@
 """``130_approximate_math`` picks the approximate form of each instruction class its knob turns on, in every place a
 kernel holds an operation, and only where the operation computes in f32."""
 
-import re
 from importlib import import_module
 from types import SimpleNamespace
 
@@ -150,16 +149,20 @@ def test_an_operation_a_statement_holds_is_picked_too(pins, exp, divide, recipro
 
 
 def _lowered(name: str, pins: dict) -> tuple[KernelOp, str]:
-    """A cooperative softmax corpus case lowered under its own schedule row and ``pins``: its kernel and CUDA source."""
+    """A cooperative softmax corpus case lowered under its own schedule row and ``pins``: its kernel and its PTX."""
     case = load_case(CASES_DIR / f"reduce/{name}.json")
     ctx = Context.from_target(case.compute_cap)
     with pinned_knobs({**pin_of(case, case.row), **pins}):
         lowered = Pipeline.build(KERNEL_PASSES).run(case.program(), ctx=ctx, db=None)
         (kernel,) = [node.op for node in lowered.nodes.values() if isinstance(node.op, KernelOp)]
         compiled = Pipeline.build([FINAL_LOWERING_PASS]).run(lowered, ctx=ctx)
-    # CUDA spelling: moves to the PTX compiler's tests
     (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     return kernel, source
+
+
+#: ``1.5 * 2^23 + 1`` as PTX writes an f32: the constant of the exact exponential's sequence, which the approximate one
+#: (a multiply and ``ex2.approx``) does not hold.
+_EXACT_EXP = "0f4B400001"
 
 
 def _exp_ops(stmt) -> set[str]:
@@ -169,28 +172,28 @@ def _exp_ops(stmt) -> set[str]:
 @pytest.mark.parametrize(("case", "combine"), [("combine-softmax-coop-warp", WarpShuffle), ("combine-softmax-coop-hier", TreeHalve)])
 def test_a_cooperative_merge_takes_the_fast_exponential(case, combine) -> None:
     """The online-softmax merge of a cooperative reduce is a statement field of its combine (``combine_states``), not
-    a body: under ``FAST_EXP`` with the umbrella off it takes ``__expf`` as the per-lane fold does, and no ``expf``."""
+    a body: under ``FAST_EXP`` with the umbrella off it takes the approximate exponential as the per-lane fold does, and
+    no exact one."""
     kernel, source = _lowered(case, {"FAST_MATH": False, "FAST_EXP": True})
     merges = [stmt for stmt in kernel.body.iter() if isinstance(stmt, combine)]
     assert merges, f"{case} must reach a {combine.__name__} merge"
     assert all(_exp_ops(merge) == {"exp_fast"} for merge in merges)
-    assert "__expf(" in source and not re.search(r"(?<!_)expf\(", source)
+    assert "ex2.approx.f32" in source and _EXACT_EXP not in source
 
 
 def test_the_merge_keeps_the_accurate_exponential_under_its_own_pin() -> None:
     kernel, source = _lowered("combine-softmax-coop-warp", {"FAST_MATH": True, "FAST_EXP": False})
     merges = [stmt for stmt in kernel.body.iter() if isinstance(stmt, WarpShuffle)]
     assert merges and all(_exp_ops(merge) == {"exp"} for merge in merges)
-    assert "__expf(" not in source
+    assert _EXACT_EXP in source
 
 
-def test_the_helpers_in_inline_ptx_flush_with_the_kernel() -> None:
-    """CUDA has no intrinsic for the approximate reciprocal: it is a helper in inline PTX, which nvcc's ``--ftz`` does
-    not reach, so the helper says ``.ftz`` when the kernel's flush-to-zero decision is on."""
+def test_the_approximate_instructions_flush_with_the_kernel() -> None:
+    """The approximate reciprocal says ``.ftz`` when the kernel's flush-to-zero decision is on, and not otherwise."""
     _, flushed = _lowered("combine-softmax-coop-warp", {"FAST_MATH": True})
     _, kept = _lowered("combine-softmax-coop-warp", {"FAST_MATH": True, "FLUSH_TO_ZERO": False})
-    assert '"rcp.approx.ftz.f32 %0, %1;"' in flushed and "emmy_rcp_approx(" in flushed
-    assert '"rcp.approx.f32 %0, %1;"' in kept
+    assert "rcp.approx.ftz.f32" in flushed and "rcp.approx.f32" not in flushed
+    assert "rcp.approx.f32" in kept and "rcp.approx.ftz.f32" not in kept
 
 
 def test_an_intrinsic_an_index_calls_passes_through() -> None:

@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from itertools import product
 
-from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
 from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, REGIME_KNOBS, precision_overrides, precision_pins
 from emmy.compiler.wire import Wire
@@ -20,7 +19,7 @@ from emmy.compiler.wire import Wire
 def regime_of(cold_cache: bool = False, precision: dict | None = None) -> str:
     """The recorded precision and cache regime, with independent overrides preserved and no ambient pins."""
     pins = precision_pins(precision or {})
-    parts = [FAST_MATH_FLAG] if pins[FAST_MATH.name] else []
+    parts = [FAST_MATH.name] if pins[FAST_MATH.name] else []
     parts.extend(f"{name}={int(value)}" for name, value in precision_overrides(pins).items())
     return " ".join([*parts, *(["cold-cache"] if cold_cache else [])])
 
@@ -63,10 +62,9 @@ class GoldenPool(Wire):
 
     @property
     def name(self) -> str:
-        """The pool's label in a report: the kernel's C name and the head of its exact identity — the name a freeze
-        gives its realizations — with the sizes when the kernel is symbolic."""
+        """The pool's label in a report: the kernel's name, with the sizes when the kernel is symbolic."""
         sizes = " ".join(f"{var}={size}" for var, size in sorted(self.bindings.items()))
-        return f"{self.kernel.name}.{self.kernel.exact_identity[:12]}" + (f" {sizes}" if sizes else "")
+        return self.kernel.name + (f" {sizes}" if sizes else "")
 
     @property
     def pins(self) -> dict:

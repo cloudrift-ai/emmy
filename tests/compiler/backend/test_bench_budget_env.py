@@ -182,7 +182,7 @@ def test_compile_budget_stops_between_kernels_instead_of_after_the_whole_load(mo
     unmeasurable under every schedule tried, and the one schedule nobody reached runs 9.9x eager.
 
     So the budget is checked between kernels. Here the second kernel's compile crosses it and the
-    third is never handed to nvcc; under a budget the same compile fits, all three are."""
+    third is never handed to ptxas; under a budget the same compile fits, all three are."""
     from emmy.compiler.backend.cuda import program
 
     compiled = []
@@ -195,7 +195,7 @@ def test_compile_budget_stops_between_kernels_instead_of_after_the_whole_load(mo
     _at(1.0, 9.0, 9.0)
     with pytest.raises(program.CompileBudgetExceeded) as exc:
         program._compile_kernels(_stub_plan("k_one", "k_two", "k_three"), deadline=5.0)
-    assert compiled == ["k_one", "k_two"], "the third kernel is never handed to nvcc"
+    assert compiled == ["k_one", "k_two"], "the third kernel is never handed to ptxas"
     assert "2 of 3 kernel(s)" in str(exc.value) and config.BENCH_COMPILE_TIMEOUT_S in str(exc.value)
 
     compiled.clear()

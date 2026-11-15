@@ -125,8 +125,8 @@ def reproduce_placement(
     pools: Sequence[GoldenPool], prior, *, kernel: str | None = None, among: Sequence[GoldenPool] | None = None
 ) -> list[Verdict]:
     """The placement verdicts of every pool with a kernel-set fork, one per fork of its own kernel — a placement
-    cut, then a split or a layout where the kernel stays whole — and, where the golden cut it, of each remainder
-    on the way to the recorded kernel set: at every fork of the golden's path, whether the placement ``prior``
+    cut, then a split or a layout where the kernel stays whole — and, where the golden cut it, of each kernel its
+    cuts leave on the way to the recorded kernel set: at every fork of the golden's path, whether the placement ``prior``
     ranks a recorded arm first, as a deploy would take it there. The recorded decisions in scope are those of
     ``among`` — every placement pool of the golden, where ``pools`` is a slice of them — or of ``pools`` itself."""
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement  # noqa: PLC0415

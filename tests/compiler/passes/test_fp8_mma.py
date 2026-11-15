@@ -205,7 +205,7 @@ def _f8_term(cap=(12, 0), *, a_dtype=F8E4M3, b_dtype=F8E4M3, k=512):
     node = contraction(ka, a, (b, "acc"))
     inputs = {"a_bits": Tensor("a_bits", (32, k), a_dtype), "w_bits": Tensor("w_bits", (k, 512), b_dtype)}
     free = (Axis("m", Dim(32)), Axis("n", Dim(512)))
-    tile = TileOp(op=node, name="lin", place=Placement(free=free), axes=(*free, ka), inputs=inputs)
+    tile = TileOp(op=node, place=Placement(free=free), axes=(*free, ka), inputs=inputs)
     return tile, Context.from_target(cap), node
 
 

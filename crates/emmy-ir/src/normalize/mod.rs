@@ -35,7 +35,7 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
 
 /// `ctx` under the ranges `stmt` states for the built-ins, which hold in its own expressions and in its child bodies
 /// (a `Grid`'s launch); `None` where it states none.
-pub(crate) fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<SimplifyCtx> {
+pub fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<SimplifyCtx> {
     let ranges = stmt.launch_ranges();
     (!ranges.is_empty()).then(|| {
         ranges
@@ -47,7 +47,7 @@ pub(crate) fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<Simplify
 }
 
 /// `ctx` inside `stmt`'s child bodies: under the ranges of the axes it binds for them.
-pub(crate) fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
+pub fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
     stmt.bound_axes()
         .iter()
         .fold(ctx.clone(), |inner, axis| extend_simplify_ctx(&inner, axis))
@@ -71,8 +71,14 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
     if let Some(normal) = body.normal_form() {
         return Ok(normal);
     }
-    let normal =
-        normal_forms().get_or_try_insert(&MemoKey(body.clone()), || normalize_uncached(body))?;
+    let normal = normal_forms().get_or_try_insert(&MemoKey(body.clone()), || {
+        let normal = normalize_uncached(body)?;
+        // A normal form is its own: a body built again equal to one reads it back instead of normalizing it.
+        if !normal.ptr_eq(body) {
+            normal_forms().insert(MemoKey(normal.clone()), normal.clone());
+        }
+        Ok(normal)
+    })?;
     body.remember_normal_form(&normal);
     Ok(normal)
 }
@@ -100,7 +106,8 @@ pub fn optimize_uncached(body: &Body) -> Result<Body> {
     let mut stmts = distinct_names(&topological_sort(body)?);
     for _ in 0..8 {
         let prepared = prepared(&stmts, false)?;
-        let next = one_operation_per_definition(&fold_trivial_selects(&prepared), &HashSet::new());
+        let folded = fold_conditions(&fold_trivial_selects(&prepared));
+        let next = one_operation_per_definition(&folded, &HashSet::new());
         if next == stmts {
             return Ok(next);
         }
@@ -173,11 +180,12 @@ fn prepared(body: &Body, canonical_loops: bool) -> Result<Body> {
         if placed.as_ref() == Some(&simplified) {
             return Ok(simplified);
         }
-        let groups = congruent_states(&simplified);
-        let next = merge_congruent_states(
-            &place_values_keyed(&simplified, &group_keys(&groups))?,
-            &groups,
-        );
+        let (groups, numbering) = congruent_states(&simplified);
+        let placed_values = match &numbering {
+            Some(numbering) => place_values_numbered(&simplified, numbering)?,
+            None => place_values_keyed(&simplified, &group_keys(&groups))?,
+        };
+        let next = merge_congruent_states(&placed_values, &groups);
         stmts = next.clone();
         placed = Some(next);
     }
@@ -196,6 +204,21 @@ fn unsettled(stmts: &Body, steps: &str) -> Result<Body> {
 
 pub(crate) fn with_bodies(stmt: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {
     Statement::rebuild_bodies(stmt, bodies)
+}
+
+/// `shell`, a rewrite of `stmt` with its bodies emptied, holding `bodies`: `stmt` itself when that is what it already
+/// holds, so a block rebuilt through an empty shell keeps its pointer where nothing changed.
+pub(crate) fn refilled(
+    stmt: &Arc<Statement>,
+    shell: &Arc<Statement>,
+    bodies: Vec<Body>,
+) -> Arc<Statement> {
+    let built = with_bodies(shell, bodies);
+    if built.same(stmt) {
+        stmt.clone()
+    } else {
+        built
+    }
 }
 
 fn substituted(stmt: &Arc<Statement>, name: &Name, value: Expression) -> Arc<Statement> {

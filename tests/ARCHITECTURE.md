@@ -135,10 +135,9 @@ the shared module already provides.
   `tests/compiler/helpers.py` runs the compile a test would run and returns, beside the compiled graph, each kernel's
   `KernelOp` as the last lowering pass read it (`recording_kernels` does the same for a compile the test does not run
   itself), and `statements` lists a kernel's statements by type. A launch fact (a runtime argument, the argument
-  order, a TMA descriptor) is read off the `CudaOp`. Only a check of how the code spells something (a helper in the
-  prelude, a type cast, a paged buffer's page table) reads the generated text, and each such read carries the comment
-  `# CUDA spelling: moves to the PTX compiler's tests`. A text search for a helper's name cannot tell a call from the
-  helper's definition in the prelude; a statement can.
+  order, a TMA descriptor) is read off the `CudaOp`. Only a check of which instructions the code holds (a vector
+  access, a rounding, a page table's read) reads the kernel's PTX; how one statement compiles is the PTX
+  compiler's own test (`crates/emmy-ptx/tests`, `tests/compiler/ptx`).
 - **Prefer combinatorial coverage matrices over per-capability test files.** The compiler e2e suite covers each
   regime with one parameterized matrix (`test_matmul_coverage.py`'s tile × stage × reduce × static/dynamic grid,
   `test_reduce_coverage.py`, `test_attention_coverage.py`, `test_fused_edge.py`'s producer × tier product) rather
@@ -217,8 +216,9 @@ minutes and belongs to the finalization stage of a PR — see the Contribution I
 ```bash
 pytest tests/deploy/test_recipe.py -v   # single file — the development lane
 pytest tests/deploy/ -k recipe -v      # a few tests — the development lane
-pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf` tests)
+pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf` and `sweep` tests)
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
+pytest tests/compiler/ptx/ -m sweep    # each math function over every f32 input, half a minute a function
 ```
 
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two
@@ -273,6 +273,9 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
+The `sweep` marker is gated the same way. It holds the tests that put every f32 bit pattern through a math function
+of the PTX compiler on the card (`tests/compiler/ptx/test_math.py`); the default suite samples the same functions.
+
 A lane whose torch has no CUDA hides the device from the compiler as well (`tests/conftest.py` empties
 `CUDA_VISIBLE_DEVICES`). The CI runners carry a GTX 1080 Ti that CPU-only torch cannot use, yet the runtime reached
 it through the driver and the prior featured its SM count, so an unpinned pick there diverged from every other host.
@@ -317,8 +320,8 @@ original tracing card does not restrict these unmeasured correctness cases, and 
 fixture publishes the golden's shared precision pins while building the runner, so its precise schedules remain valid
 when the compiler default is fast math. The mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport)
 auto-enumerates and is validated on **sm_90+**; on sm_80-89 it is pin-only and currently non-functional for two
-independent reasons — the `sm_NNa` arch-accelerated target the TMA path emits is rejected by nvcc (`Unsupported gpu
-architecture 'sm_89a'`), and `ldmatrix` itself faults at runtime on at least Ada (sm_89). Tests that **force** the
+independent reasons — the `sm_NNa` arch-accelerated target the TMA path emits does not exist below sm_90 (ptxas
+refuses `sm_89a`), and `ldmatrix` itself faults at runtime on at least Ada (sm_89). Tests that **force** the
 warp tier via a warp `TILE` codec (`<atom>/…`) + `STAGE` carry `requires_sm90` so they skip below sm_90 instead of
 faulting (a single warp-tier fault corrupts the shared `cuda` context and cascades `cudaErrorIllegalAddress` into
 every later test on the worker, CUDA or not). The warp-tier matmul coverage all lives in `test_matmul_coverage.py` —

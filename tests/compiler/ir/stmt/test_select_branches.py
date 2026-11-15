@@ -8,13 +8,13 @@ import pytest
 from emmy.compiler.dtype import F16, F32, U32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.render import RenderCtx
+from emmy.compiler.ir.loop.render import RenderCtx
 from emmy.compiler.ir.stmt import parse_body
 from tests.compiler.helpers import render_typed
 
 
 @pytest.mark.parametrize(
-    ("left", "right", "result", "ctype"), [(F16, F16, F16, "__half"), (F16, F32, F32, "float"), (U32, U32, U32, "unsigned int")]
+    ("left", "right", "result", "ctype"), [(F16, F16, F16, "float"), (F16, F32, F32, "float"), (U32, U32, U32, "unsigned int")]
 )
 def test_select_preserves_the_common_type_in_its_consumers(left, right, result, ctype):
     """A half concatenation must not promote a following product and drop its half rounding."""
@@ -32,7 +32,6 @@ def test_select_preserves_the_common_type_in_its_consumers(left, right, result, 
     selection = body[2]
     output = Tensor("out", (1,), result)
     op = KernelOp(
-        name="selected_product",
         inputs={"lhs": Tensor("lhs", (1,), left), "rhs": Tensor("rhs", (1,), right)},
         outputs={"out": output},
         body=body,

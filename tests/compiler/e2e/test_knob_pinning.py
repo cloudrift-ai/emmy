@@ -12,7 +12,7 @@ program under this pinned schedule computes the right answer" — moved to
 ``tests/compiler/realization/``, whose cases replay one program and one authored schedule through
 offered → realized → built → correct.
 
-Most tests here are compile-only; the two that reach nvcc are skipped without CUDA.
+Most tests here are compile-only; the two that run a kernel are skipped without CUDA.
 """
 
 from __future__ import annotations

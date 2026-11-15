@@ -18,7 +18,7 @@ only a log. An interrupted process may leave `running`, which is explicit incomp
 - task ID, stable row ID, experiment directory, kind, variant, and raw matrix parameters;
 - Git revision and dirty flag;
 - execution timestamps, stage, phase timings, error, and infrastructure lifecycle;
-- hostname, OS/kernel, CPU topology, memory, per-GPU identity/state and driver, NVCC and cuBLAS versions, Docker, root
+- hostname, OS/kernel, CPU topology, memory, per-GPU identity/state and driver, ptxas and cuBLAS versions, Docker, root
   filesystem, and uptime from the experiment host.
 
 The record contains no serving metrics, benchmark values, workload output, rendered command, compose document,
@@ -62,7 +62,7 @@ The orchestrator MUST NOT:
 Command records preserve timing, status, errors, and system information. For a staged command, Git provenance names
 the invoking worktree revision and the dirty state of the exact declared stage paths; neither the installed package
 nor a reused remote source tree supplies that provenance. `command.strict` requires those staged paths to be clean,
-every declared result file, GPU identity, NVCC, and cuBLAS. A failed command still attempts to retrieve declared
+every declared result file, GPU identity, ptxas, and cuBLAS. A failed command still attempts to retrieve declared
 results.
 
 The repository `run-experiment` skill validates row coverage, keeps the latest records inside the archived raw-run

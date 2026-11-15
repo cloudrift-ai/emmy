@@ -4,13 +4,13 @@ import json
 
 import pytest
 
-from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, canonical_values, free_names, normalize_body, parse_body
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, free_names, normalize_body, normalize_lambda_body, parse_body
 from tests.compiler.realization.helpers import CASES_DIR, case_files
 
 
 def _spelled(stmt):
     """``stmt`` with its value in the canonical spelling, so two spellings of one computation compare equal."""
-    return canonical_values(Body((stmt,)))[0] if isinstance(stmt, Assign) else stmt
+    return normalize_lambda_body(Body((stmt,)))[0] if isinstance(stmt, Assign) else stmt
 
 
 def _assert_scoped_cse(body, available=()):

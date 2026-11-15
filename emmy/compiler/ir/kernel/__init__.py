@@ -1,11 +1,11 @@
-"""Kernel IR — fully-scheduled kernel form, lowered directly to CUDA source.
+"""Kernel IR — fully-scheduled kernel form, compiled to PTX.
 
 - :mod:`.ir` — dataclass definitions: the ``KernelOp`` wrapper plus the hardware
   primitives (launch geometry, shared memory, barriers, the transports into shared
   memory, the cross-thread combines, the tensor-core fragment nodes). Shared leaves and
   structural types (``Load``, ``Assign``, ``Loop``, ``StridedLoop``, …) come from
   ``ir.stmt``.
-- :mod:`.render` — ``render_kernelop`` emitting CUDA source.
+- :mod:`.ptx` — ``compile_kernel`` emitting PTX text.
 """
 
 from emmy.compiler.ir.axis import Axis

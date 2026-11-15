@@ -105,7 +105,8 @@ cache key when a position-independent structural lookup genuinely needs one. A s
 tree breaks both guarantees, and the surrounding code cannot degrade gracefully without losing the optimization.
 
 If you need to "edit" a frozen Statement, return a new instance via `stmt.replace(field=value)`; outside `ir/stmt/`,
-`dataclasses.replace` is not called on a statement. If a
+`dataclasses.replace` is not called on a statement. The pure terms are the same: a `Lambda` or a `Fold` changes
+through its own `replace(field=value)`, which forms and checks the new term. If a
 `__post_init__` needs to coerce a field (e.g. `tuple → Body`), use `object.__setattr__(self, "field", coerced)` —
 that's the standard pattern for frozen dataclasses that still need light normalization at construction time. Don't
 add `try/except TypeError` fallbacks around structural caches to tolerate unhashable stmts; fix the unhashable stmt
@@ -141,7 +142,7 @@ own — takes `slots=True` as well. It drops the per-instance `__dict__`, which 
 access, and that is worth having on the leaf choice objects an enumeration builds in the millions (`Tile`, `Work`,
 `Reduce`, `Stage`, `Raster`).
 
-A BIGGER type — one that owns derived reads the rest of the compiler depends on (`Fold`, `TileOp`, `ClassicNodeSite`,
+A BIGGER type — one that owns derived reads the rest of the compiler depends on (`TileOp`, `ClassicNodeSite`,
 `ClassicScheduleContext`) — stays unslotted and declares those reads with `cached_property` or `cached_method`, per
 the next section. The two are mutually exclusive: both cache through the very `__dict__` that `slots=True` removes,
 so a slotted class raises `TypeError: No '__dict__' attribute on 'X' instance to cache 'y' property` on the first
@@ -269,6 +270,15 @@ A tree many objects hold (a body, a statement, an expression) is an `Arc`; a reb
 object it was given, so a caller can tell a change by pointer. A leaf is by value where sharing buys nothing: a name is
 an interned symbol, so a copy is a word and a compare an integer. Derived readings of an immutable value live beside it
 in a `OnceLock`, computed on first use, never in a table keyed off another object.
+
+### Exit early
+
+A transform first asks whether it has anything to do, and returns its input when it has not, before any costly
+analysis: a merge of two sibling loops leaves a scope with no such pair alone without working out its ordering
+constraints. A rebuild that goes through an emptied block compares the result with the block it started from and
+returns that block when the two hold the same values, so the pointer still says whether anything changed. A fixed-point
+loop reads that answer, and a value a computation already knows (a normal form is its own) is stored where the next
+asker finds it rather than computed again.
 
 ## Commit Messages
 

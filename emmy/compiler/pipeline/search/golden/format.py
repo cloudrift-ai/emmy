@@ -4,9 +4,9 @@ A file holds the DB's three tables for one card — the kernels (``Kernel``: a k
 target came from), the kernel-set decisions taken on them (``RoutingRow``) and the measurements (``Row``: a ``perf``
 row) — beside the traced programs the targets were lowered from, kept for the Torch twin a bench compares against
 and for re-recording. A file holds inputs only: the Loop IR, the decisions and the measurements. A kernel's exact
-identity — the key the DB files it under — is computed from its Loop IR when something asks
-(``KernelDef.exact_identity``), so rows and decisions name a kernel by a key local to the file
-(:attr:`Kernel.ref`). The classes declare the layout; their wire is :mod:`emmy.compiler.wire`'s, and
+identity — the key the DB files it under — and its name are computed from its Loop IR when something asks
+(``KernelDef.exact_identity``, ``KernelDef.name``), so rows and decisions point at a kernel by its position in the
+file's kernel list, and the file stores no name. The classes declare the layout; their wire is :mod:`emmy.compiler.wire`'s, and
 :meth:`GoldenFile.check` holds the rules that cross objects.
 """
 
@@ -65,18 +65,21 @@ class Kernel(KernelDef):
     """One kernel of the file: its definition — the ``kernel`` row the import writes — and, for a target, where it
     came from: the traced program (``traced``, an index into ``programs``) whose ops ``origins`` it computes whole,
     specialized at ``bindings``. A piece a cut or a split minted has no program of its own; a routing row reaches
-    it from its parent. ``key`` is what the file's rows and decisions call the kernel where its C name does not
-    tell it from another kernel of the file (:attr:`ref`)."""
+    it from its parent. ``ref`` is how the file's rows and decisions point at the kernel while it is loaded: its
+    position in the kernel list when read, a fresh number for a kernel added since, and its position again when
+    written (:meth:`GoldenFile.to_wire`). It never travels."""
 
-    key: str = ""
+    wire_skip = frozenset({"ref"})
+
     traced: int | None = None
     origins: tuple[str, ...] = ()
     bindings: dict[str, int] = field(default_factory=dict)
+    ref: int | None = field(default=None, compare=False)
 
-    @property
-    def ref(self) -> str:
-        """The name the file's rows and decisions know this kernel by: ``key``, or the C name where none is set."""
-        return self.key or self.name
+    def with_ref(self, ref: int) -> Kernel:
+        """This kernel under ``ref``, its identity kept where it is already known."""
+        out = replace(self, ref=ref)
+        return out.keyed(self.__dict__["exact_identity"]) if "exact_identity" in self.__dict__ else out
 
 
 @dataclass(frozen=True)
@@ -109,12 +112,12 @@ class Latency(Wire):
     emmy_us: float
     tcompile_us: float | None = None
     eager_us: float | None = None
-    kernels: tuple[str, ...] = ()
+    kernels: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         _require_positive(self, "emmy_us", "tcompile_us", "eager_us")
-        if any(not isinstance(ref, str) or not ref for ref in self.kernels):
-            raise ValueError("kernels must name kernels of the file")
+        if any(type(ref) is not int for ref in self.kernels):
+            raise ValueError("kernels must point at kernels of the file")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -126,7 +129,7 @@ class Row(Wire):
     for the reader — what a person found about the row, never a label the numbers decide."""
 
     name: str
-    kernel: str
+    kernel: int
     bindings: dict[str, int] = field(default_factory=dict)
     pins: dict[str, bool | int | str] = field(default_factory=dict)
     knobs: dict[str, bool | int | str] | None = None
@@ -137,8 +140,8 @@ class Row(Wire):
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("name must be a non-empty string")
-        if not self.kernel:
-            raise ValueError("kernel must name a kernel of the file")
+        if type(self.kernel) is not int:
+            raise ValueError("kernel must point at a kernel of the file")
         if any(not name or size <= 0 for name, size in self.bindings.items()):
             raise ValueError("bindings must map non-empty names to positive integers")
         if self.measurements is not None and self.knobs is None:
@@ -167,6 +170,21 @@ class GoldenFile(Wire):
     def __post_init__(self) -> None:
         if self.model_quant_digest is not None and not _hex(self.model_quant_digest, 16):
             raise ValueError("model_quant_digest must be a 16-character lowercase hexadecimal digest")
+        taken = {kernel.ref for kernel in self.kernels if kernel.ref is not None}
+        fresh = (ref for ref in range(len(self.kernels) + len(taken)) if ref not in taken)
+        self.kernels[:] = [kernel if kernel.ref is not None else kernel.with_ref(next(fresh)) for kernel in self.kernels]
+
+    def to_wire(self):
+        """The wire, each kernel pointed at by its position in the kernel list."""
+        at = {kernel.ref: position for position, kernel in enumerate(self.kernels)}
+        out = super().to_wire()
+        for route in out.get("routing", ()):
+            route["parent"], route["children"] = at[route["parent"]], [at[child] for child in route["children"]]
+        for row in out.get("rows", ()):
+            row["kernel"] = at[row["kernel"]]
+            for latency in (row.get("latency") or {}).values():
+                latency["kernels"] = [at[ref] for ref in latency.get("kernels", ())]
+        return out
 
     # --- files ------------------------------------------------------------------------------
 
@@ -229,7 +247,7 @@ class GoldenFile(Wire):
         return destination
 
     def check(self, *, repository: bool = False) -> None:
-        """The rules the declarations cannot say: every reference resolves, a kernel's ``ref`` names one kernel, a
+        """The rules the declarations cannot say: every reference resolves, a kernel's ``ref`` is its own, a
         row's pins name known knobs and its knobs spell a schedule and never a kernel-set decision — and, for a ``repository``
         golden, that the file names its card, every row spells a schedule, and a measurement carries its
         reference."""
@@ -239,7 +257,7 @@ class GoldenFile(Wire):
         for index, kernel in enumerate(self.kernels):
             where = f"kernels[{index}]"
             if kernel.ref in kernels:
-                raise ValueError(f"{where} is the second kernel the file calls {kernel.ref!r}")
+                raise ValueError(f"{where} shares its ref with another kernel")
             kernels[kernel.ref] = kernel
             if kernel.traced is not None and not 0 <= kernel.traced < len(self.programs):
                 raise ValueError(f"{where}.traced does not resolve in this document: {kernel.traced!r}")
@@ -290,11 +308,11 @@ class GoldenFile(Wire):
 
     # --- reading ---------------------------------------------------------------------------
 
-    def kernel(self, ref: str) -> Kernel:
-        """The kernel the file calls ``ref``."""
+    def kernel(self, ref: int) -> Kernel:
+        """The kernel ``ref`` points at."""
         return next(kernel for kernel in self.kernels if kernel.ref == ref)
 
-    def identities(self) -> dict[str, str]:
+    def identities(self) -> dict[int, str]:
         """Each kernel's exact identity by its ``ref`` — computed from the stored Loop IR (a lift per formed
         kernel, once per loaded file), which is why only an import, a restamp or a record asks. A kernel whose
         stored body the compiler no longer takes back has none and is left out: a stale kernel, whose rows describe
@@ -304,7 +322,7 @@ class GoldenFile(Wire):
             try:
                 out[kernel.ref] = kernel.exact_identity
             except Exception as exc:  # noqa: BLE001 — whatever the lift raises, the kernel is stale, the file is not broken
-                logger.warning("golden kernel %s no longer lowers (%s: %s); its rows are no evidence", kernel.ref, type(exc).__name__, exc)
+                logger.warning("golden kernel %d no longer lowers (%s: %s); its rows are no evidence", kernel.ref, type(exc).__name__, exc)
         return out
 
     def targets(self) -> list[Kernel]:
@@ -322,7 +340,7 @@ class GoldenFile(Wire):
         from emmy.compiler.wire import symbolic_vars  # noqa: PLC0415
 
         targets = {kernel.ref for kernel in self.targets()}
-        own: dict[str, set[str]] = {}  # each kernel's sizes, read for the rows that record any
+        own: dict[int, set[str]] = {}  # each kernel's sizes, read for the rows that record any
         out: dict[tuple, list[Row]] = {}
         sizeless: list[tuple[tuple, Row]] = []
         for row in self.rows:
@@ -346,7 +364,7 @@ class GoldenFile(Wire):
     def rows_of(self, name: str) -> list[Row]:
         return [row for row in self.rows if row.name == name]
 
-    def kernel_set(self, root: str) -> tuple[str, ...]:
+    def kernel_set(self, root: int) -> tuple[int, ...]:
         """``root`` and every kernel the file's decisions reach from it, each once, parents before their pieces: the
         kernels a compile of the target can deploy, whichever arms its decisions take."""
         out = [root]
@@ -409,11 +427,11 @@ class GoldenFile(Wire):
                 graph.inputs = [name for name in graph.inputs if name != node_id]
         return graph
 
-    def path_to(self, ref: str, preferred: Iterable[RoutingRow] = ()) -> list[RoutingRow]:
-        """The kernel-set decisions from a target down to the kernel ``ref`` names, in order: empty for a
+    def path_to(self, ref: int, preferred: Iterable[RoutingRow] = ()) -> list[RoutingRow]:
+        """The kernel-set decisions from a target down to the kernel ``ref`` points at, in order: empty for a
         target, the minting route and its ancestors for a piece. The first route that reaches a piece is its
         path, the ``preferred`` routes before the file's."""
-        parents: dict[str, RoutingRow] = {}
+        parents: dict[int, RoutingRow] = {}
         for route in (*preferred, *self.routing):
             for child in route.children:
                 parents.setdefault(child, route)
@@ -438,7 +456,7 @@ class GoldenFile(Wire):
     def add_kernel(self, kernel: Kernel) -> Kernel:
         """Store ``kernel`` unless a kernel of that identity is stored already; the stored one is returned, and
         takes ``kernel``'s provenance when it had none. A kernel stored here takes a ``ref`` no other kernel of the
-        file has: its C name, or the name numbered where that is taken."""
+        file has."""
         identity = kernel.exact_identity
         for index, stored in enumerate(self.kernels):
             if stored.exact_identity == identity:
@@ -446,10 +464,7 @@ class GoldenFile(Wire):
                     stored = replace(stored, traced=kernel.traced, origins=kernel.origins, bindings=kernel.bindings).keyed(identity)
                     self.kernels[index] = stored
                 return stored
-        taken = {stored.ref for stored in self.kernels}
-        ref = next(ref for ref in (kernel.name, *(f"{kernel.name}#{n}" for n in range(2, len(taken) + 3))) if ref not in taken)
-        if ref != kernel.ref:
-            kernel = replace(kernel, key="" if ref == kernel.name else ref).keyed(identity)
+        kernel = kernel.with_ref(max((stored.ref for stored in self.kernels), default=-1) + 1)
         self.kernels.append(kernel)
         return kernel
 

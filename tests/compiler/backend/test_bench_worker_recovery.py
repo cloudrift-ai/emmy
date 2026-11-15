@@ -169,7 +169,9 @@ def test_worker_exits_after_context_corruption() -> None:
             from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
             from emmy.compiler.dim import Dim
             from emmy.compiler.dtype import F32
-            source = r'extern "C" __global__ void oob(float* p){ p[268435456] = 1.0f; }'
+            from tests.compiler.helpers import kernel_ptx
+            body = "Grid(axes=(t in 0..1), decode=(thread_idx.x), block_threads=1):\\n    f32 one = 1.0\\n    f32 p[268435456] = one"
+            source = kernel_ptx("oob", body, (("p", "output", "f32"),))
             plan = ExecutionPlan(
                 "cuda", [], ["p"], [BufferSpec("p", (Dim(8),), F32, "output")], {}, {},
                 [LaunchSpec("p", "oob", ("p",), ((1,), (1,), (1,)), ((1,), (1,), (1,)), 0, ())],

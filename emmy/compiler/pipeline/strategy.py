@@ -72,8 +72,7 @@ class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods:
 class RunStartEvent:
     """A loop (``Run.resolve``) starts driving ``graph``. ``passes`` names the
     pipeline's pass list — a strategy keyed to a pass boundary reads it to handle partial
-    pipelines that enter after its boundary (e.g. a loop-stage IR resume never runs
-    ``loop/stamp``, so identity stamps at entry instead)."""
+    pipelines that enter after its boundary."""
 
     graph: Graph
     ctx: Context

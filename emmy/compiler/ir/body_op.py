@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 
 from frozendict import frozendict
 
@@ -19,11 +20,10 @@ from emmy.compiler.tensor import Tensor
 @dataclass(frozen=True)
 class BodyOp(Op):
     """Shared base for IR ops that carry a structured :class:`Body` of
-    stmts plus a kernel name — ``LoopOp`` (loop IR), ``KernelOp`` (kernel
-    IR). Provides:
+    stmts — ``LoopOp`` (loop IR), ``KernelOp`` (kernel IR). Provides:
 
-    - ``body`` / ``name`` fields, plus a ``__post_init__`` that coerces
-      tuple-bodies to :class:`Body`,
+    - the ``body`` field, plus a ``__post_init__`` that coerces tuple-bodies to :class:`Body`,
+    - ``name``, computed from the kernel's exact identity,
     - ``__iter__`` over the body's deep stmt iterator,
     - ``loads`` / ``writes`` typed iters,
     - a unified ``pretty_body`` returning the indented body listing
@@ -43,7 +43,13 @@ class BodyOp(Op):
     has no Load / Write naming a buffer the dict doesn't cover."""
 
     body: Body = field(default_factory=Body)
-    name: str = ""
+
+    @cached_property
+    def name(self) -> str:
+        """The kernel's name, computed from its exact identity (:func:`~emmy.compiler.wire.kernel_name`)."""
+        from emmy.compiler.wire import kernel_name  # noqa: PLC0415 — the wire module imports the IR
+
+        return kernel_name(self)
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)
@@ -70,23 +76,9 @@ class BodyOp(Op):
             object.__setattr__(self, "outputs", frozendict({n: Tensor(n, (), F32) for n in out_names}))
 
     def _derive_io_names(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Walk the body once; aggregate per-stmt
-        :meth:`Statement.external_reads` / :meth:`Statement.external_writes` and
-        filter out any name covered by some stmt's
-        :meth:`Statement.local_decls` (smem / staged buffers). Returns
+        """The body's external buffers (:attr:`Body.buffers`: kernel-local declarations left out) as
         ``(input_names, output_names)`` in body first-use order."""
-        decls: set[str] = set()
-        for s in self:
-            decls.update(s.local_decls())
-        ins: dict[str, None] = {}
-        outs: dict[str, None] = {}
-        for s in self:
-            for r in s.external_reads():
-                if r not in decls:
-                    ins.setdefault(r, None)
-            for w in s.external_writes():
-                if w not in decls:
-                    outs.setdefault(w, None)
+        ins, outs = self.body.buffers
         # A buffer the body both reads and writes is in place — a recurrence reading its own
         # earlier steps — and is one output param, not an input too.
         return tuple(name for name in ins if name not in outs), tuple(outs)

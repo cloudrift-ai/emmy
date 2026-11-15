@@ -3,8 +3,8 @@
   {"inputs":["a","b"],"outputs":["out"],"nodes":[{"id":"a","op":"input","outputs":[["a","f16",[3,32,32]]]},{"id":"b","op":"input","outputs":[["b","f16",[3,32,32]]]},{"id":"mm","op":"torch.matmul","inputs":["a","b"],"outputs":[["mm","f16",[3,32,32]]]},{"id":"out","op":"tensor.index_map","attrs":{"out_shape":[96,32],"sources":[{"input_idx":0,"coord_map":["out_coord_0 % 3","out_coord_0 // 3","out_coord_1"]}]},"inputs":["mm"],"outputs":[["out","f16",[96,32]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["b","a"],"outputs":["out"],"nodes":[{"id":"a","op":"input","outputs":[["a","f16",[3,32,32]]]},{"id":"b","op":"input","outputs":[["b","f16",[3,32,32]]]},{"id":"out","op":"loop","attrs":{"body":"for a0 in 0..32:\n    for a1 in 0..3:\n        for a2 in 0..32:\n            for a3 in 0..32:\n                in0 = load a[a1, a0, a3]\n                in1 = load b[a1, a3, a2]\n                f32 v0 = multiply(in0, in1)\n                acc0 <- add(acc0, v0) over a3\n            out[3 * a0 + a1, a2] = acc0","name":"k_matmul_57f8b4"},"inputs":["b","a"],"outputs":[["out","f16",[96,32]]]}]},"name":"k_matmul_57f8b4","formed":true,"traced":0,"origins":["mm","out"]}
+  {"loop_ir":{"inputs":["b","a"],"outputs":["out"],"nodes":[{"id":"a","op":"input","outputs":[["a","f16",[3,32,32]]]},{"id":"b","op":"input","outputs":[["b","f16",[3,32,32]]]},{"id":"out","op":"loop","attrs":{"body":"for a0 in 0..32:\n    for a1 in 0..3:\n        for a2 in 0..32:\n            for a3 in 0..32:\n                in0 = load a[a1, a0, a3]\n                in1 = load b[a1, a3, a2]\n                f32 v0 = multiply(in0, in1)\n                acc0 <- add(acc0, v0) over a3\n            out[3 * a0 + a1, a2] = acc0"},"inputs":["b","a"],"outputs":[["out","f16",[96,32]]]}]},"formed":true,"traced":0,"origins":["mm","out"]}
  ],
  "rows": [
-  {"name":"k_matmul_57f8b4","kernel":"k_matmul_57f8b4","pins":{"FAST_MATH":false},"knobs":{"WORK":"w1x1","TILE":"mma_m8n8k4_f16_f32/f1x1/k8","REDUCE":"","STAGE":"d1/smem"}}
+  {"name":"k_matmul_57f8b4","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"w1x1","TILE":"mma_m8n8k4_f16_f32/f1x1/k8","REDUCE":"","STAGE":"d1/smem"}}
  ]}

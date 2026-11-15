@@ -1,7 +1,7 @@
-"""CUDA backend: ``Graph`` → lowered ``Graph[CudaOp]`` → nvcc → GPU.
+"""CUDA backend: ``Graph`` → lowered ``Graph[CudaOp]`` → ptxas → GPU.
 
 The compiled artifact is the lowered ``Graph`` itself — every compute
-node carries a rendered CUDA kernel source plus its launch geometry.
+node carries its kernel's PTX plus its launch geometry.
 """
 
 from __future__ import annotations
@@ -158,30 +158,27 @@ class CudaBackend(Backend):
         warmup: int = 5,
         num_iters: int | str = 20,
         on_iter=None,
-        nvcc_flags: str | None = None,
         capture_graphs: bool = True,
         input_data: dict | None = None,
     ) -> BenchmarkResult:
         """The in-process benchmarking entry point for ``CudaBackend`` (``emmy run --bench``).
 
-        ``nvcc_flags`` re-points this one bench's compile at a different opt level without
-        disturbing the ambient flags. ``input_data`` times the program on those inputs (the
+        ``input_data`` times the program on those inputs (the
         run's reference inputs) instead of the synthetic fill. Benches in-process via
         :func:`benchmark_program`: ``on_iter`` interleaves peer torch closures, which share
         torch state with this process and can't cross the subprocess boundary. The blocking
         bench runs directly on the event loop (it is the only work in flight), so ``async``
         here is just the uniform call shape."""
-        with config.nvcc_flags_override(nvcc_flags):
-            result = benchmark_program(
-                compiled,
-                input_data=input_data,
-                warmup=warmup,
-                num_iters=num_iters,
-                on_iter=on_iter,
-                compile_timeout_s=self.bench_compile_timeout_s,
-                run_timeout_s=self.bench_run_timeout_s,
-                capture_graphs=capture_graphs,
-            )
+        result = benchmark_program(
+            compiled,
+            input_data=input_data,
+            warmup=warmup,
+            num_iters=num_iters,
+            on_iter=on_iter,
+            compile_timeout_s=self.bench_compile_timeout_s,
+            run_timeout_s=self.bench_run_timeout_s,
+            capture_graphs=capture_graphs,
+        )
         return BenchmarkResult(
             time_ms=result.time_ms,
             min_ms=result.min_ms,

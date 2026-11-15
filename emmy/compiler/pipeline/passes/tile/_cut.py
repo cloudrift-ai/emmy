@@ -63,7 +63,7 @@ from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of, wrap_multi_output_fragment
-from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
+from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, lift_nest, reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
@@ -265,19 +265,11 @@ def _output_owners(tile: TileOp) -> dict[int, tuple]:
 
 
 def seam_token(parent: TileOp, spelling: str) -> str:
-    """The token a piece cut from ``parent`` at the seam ``spelling`` carries in its kernel name,
-    ``…__place_<token>``, and in the workspace buffers it writes: the parent's structural identity and
-    the seam's canonical ``PLACE`` key, digested — the keys of a seam set joined by ``+`` for the
-    producers one decision fuses. Two pieces of one shape cut at different seams, or at one seam of
-    two parents, are two kernels, and a ``place_<token>`` pin reaches exactly one."""
+    """The token the workspace buffers a cut of ``parent`` at the seam ``spelling`` writes carry,
+    ``<root>__place_<token>_<i>``: the parent's structural identity and the seam's canonical ``PLACE`` key,
+    digested — the keys of a seam set joined by ``+`` for the producers one decision fuses — so the workspaces of
+    two cuts in one graph never share a buffer name."""
     return digest(parent.identity_key(structural=False) or "", spelling)[:10]
-
-
-def place_token(name: str) -> str | None:
-    """The token the kernel ``name`` carries — what follows its last ``__place_``, up to what a split
-    or a nested cut appends after ``__`` — or ``None`` for a kernel that is no cut piece. A
-    ``place_<token>`` pin and a recorded route address the piece by it."""
-    return name.rsplit("__place_", 1)[1].split("__", 1)[0] if "__place_" in name else None
 
 
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
@@ -494,31 +486,6 @@ def join_pairs(seams) -> tuple[tuple[CutSite, CutSite], ...]:
     )
 
 
-def _pruned(body: Body, roots: frozenset[str]) -> Body:
-    """``body`` cut to what ``roots`` need — the statements a root reads through, in order, a
-    loop kept with what its own body keeps."""
-    from emmy.compiler.ir.stmt import free_names  # noqa: PLC0415
-
-    needed = set(roots)
-    while True:
-        before = needed.copy()
-        kept: list = []
-        for stmt in reversed(tuple(body)):
-            if stmt.nested():
-                inner = tuple(_pruned(child, frozenset(needed)) for child in stmt.nested())
-                if not any(inner):
-                    continue
-                stmt = stmt.with_bodies(inner)
-            elif not (needed.intersection(stmt.defines()) or stmt.external_writes()):
-                continue
-            kept.append(stmt)
-            needed |= free_names(stmt)
-        # A carried state may be read before its update. Keep its update too, even when the
-        # backward walk discovered that read after it had already visited the update.
-        if needed == before:
-            return Body(tuple(reversed(kept)))
-
-
 def _coordinate_reads(body: Body, names: tuple[str, ...]) -> dict[str, Expression]:
     """For each coordinate the cone reads through ONE expression of that coordinate alone, other
     than the coordinate itself, that expression — the index a rotate-half read computes its column
@@ -585,7 +552,7 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expressio
         body = Body(tuple(stmt.rewrite(lambda name: name, sigma) for stmt in body))
     forms = []
     for exposed in seam.node.exposes:
-        identity = canonicalize_identity(_pruned(body, frozenset((exposed,))))
+        identity = canonicalize_identity(body.pruned((exposed,)))
         forms.append((identity.key, identity.arguments))
     own = {spelled: Var(name) for name, spelled in names.items()}
     at = {axis.name: address for axis, address in zip(stored, index, strict=True) if axis.name in strides and axis.name in names}
@@ -733,7 +700,7 @@ def _row_form(seam: CutSite, name: str, row: Expression, common: tuple[str, ...]
     body = Body(tuple(stmt.rewrite(lambda value: value, sigma) for stmt in body))
     if any(row.free_vars() & expression.free_vars() for stmt in body.iter() for expression in stmt.expressions()):
         return None
-    identity = canonicalize_identity(_pruned(body, frozenset((name,))))
+    identity = canonicalize_identity(body.pruned((name,)))
     return identity.key, identity.arguments
 
 
@@ -1134,7 +1101,7 @@ def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
     for position, name in enumerate(node.exposes):
         channel = _channels(node, (name,)) if len(node.exposes) > 1 else node
         table: dict = {}
-        body = _abstracted(_pruned(Body(tuple(channel.lower(bound=captured, axes=axes))), frozenset((name,))), captured, table, by_name)
+        body = _abstracted(Body(tuple(channel.lower(bound=captured, axes=axes))).pruned((name,)), captured, table, by_name)
         if body is None:
             return None
         expressions = tuple(table)
@@ -1328,9 +1295,7 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
 
 def _channels(node: Fold, names: tuple[str, ...]) -> Fold:
     """``node`` computing only the components ``names``, every operand it no longer reads dropped."""
-    from emmy.compiler.ir.tile.normalize import _prune_unread  # noqa: PLC0415
-
-    return _prune_unread(node.exposing(names), frozenset(names))
+    return node.exposing(names).pruned(names)
 
 
 def _unchanged(pieces: tuple, members) -> bool:
@@ -1381,7 +1346,7 @@ def _read_inline(node: Fold, inline: _InlineReads) -> tuple[Fold, dict[str, str]
             operands.append(edge)
             bound.extend(slots)
     lift = Lambda.closing((*node.lift.params[:lead], *bound), Body(members), node.lift.results)
-    return replace(node, operands=tuple(operands), lift=lift), {name: load.name.removeprefix(name) for name, load in loads.items()}
+    return node.replace(operands=tuple(operands), lift=lift), {name: load.name.removeprefix(name) for name, load in loads.items()}
 
 
 def _replace_member(member, targets: dict[int, tuple], renamed: dict[str, str]):
@@ -1409,8 +1374,8 @@ def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str], lift_reads
     :func:`_read_name` tags a workspace read because the value can still be computed in place
     beside it. The same holds one step on: a statement over that read is a different statement from
     the one still computed in place — ``v = in0__ws… + b`` beside ``v = in0 + b`` — and a lowered
-    scope binds a name once, so under one name the pair is the same SSA fault (nvcc: *already
-    declared*). Each such definition takes the tags of the reads it depends on; a statement that
+    scope binds a name once, so under one name the pair is the same SSA fault (a name defined
+    twice). Each such definition takes the tags of the reads it depends on; a statement that
     reads no workspace keeps its name and still shares with its in-place copy. The term's readers
     follow through :attr:`~emmy.compiler.ir.pure.fold.Fold.applied`, which is what walks the rename
     up the tree, one rebuilt term at a time. It stops at a reduce: a carried state keeps its name,
@@ -1425,7 +1390,7 @@ def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str], lift_reads
         tags.update((name, "".join(read)) for name in stmt.defines() if read)
     names = {name: f"{name}{tag}" for name, tag in tags.items() if name not in was}
     renamed.update(names)
-    return replace(after, lift=after.lift.rename(names)) if names else after
+    return after.replace(lift=after.lift.rename(names)) if names else after
 
 
 def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]) -> Fold:
@@ -1459,13 +1424,13 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
     body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets, renamed))
     if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body) and not lift_reads:
         return node
-    lift = replace(node.lift, body=Body(body))
+    lift = node.lift.replace(body=Body(body))
     if not all(bound):
         lead = 1 if node.base is not None else 0
         params = node.lift.params
         head, slots, tail = params[:lead], params[lead : lead + len(bound)], params[lead + len(bound) :]
-        lift = replace(lift, params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
-    return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed, lift_reads)
+        lift = lift.replace(params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
+    return _follow_reads(node, node.replace(operands=operands, lift=lift), renamed, lift_reads)
 
 
 def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
@@ -1496,7 +1461,7 @@ def _defined_values(root: Fold, skip: int | None = None) -> set[str]:
         if id(node) in seen or id(node) == skip:
             continue
         seen.add(id(node))
-        out |= set(node.exposes) | node.step().definitions.keys()
+        out |= set(node.exposes) | node.step().defined
         pending.extend(node.operands)
     return out
 
@@ -1635,8 +1600,10 @@ def _stored_cells(produced: Fold, axes: tuple, strides: dict[str, tuple[int, int
         if c == 1:
             produced = produced.rewrite(lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
             continue
-        folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpression("%", Var(axis.name), Literal(c, "int"))})
-        object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
+        folding = Sigma(
+            {axis.name: (Var(axis.name) / c) * d + BinaryExpression("%", Var(axis.name), Literal(c, "int"))},
+            SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}),
+        )
         produced = produced.rewrite(lambda name: name, folding)
     return produced
 
@@ -1652,18 +1619,6 @@ def _divisor(expression, name: str) -> int | None:
     return inner * int(expression.right.value)
 
 
-class _FoldingSigma(Sigma):
-    """A substitution that FOLDS as it lands, under a fixed range context.
-
-    ``Sigma.apply`` substitutes and stops, which is right everywhere else: a σ that rewrote its
-    result would hide what it did. Here the fold is the point — the whole gain is that
-    ``i / c`` and ``i % c`` collapse to the bare split coordinates, and an index left as
-    ``((hi * c) + lo) / c`` reaches the scheduler as an expression of the fused name again."""
-
-    def after(self, expression):
-        return expression.simplify(self._ctx)
-
-
 def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyCtx) -> Fold:
     """``produced`` with the coordinate ``name`` substituted and every index folded against ``ctx``.
 
@@ -1672,15 +1627,15 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
     the substituted name leaves the param list and :meth:`Lambda.closing` appends the two the body
     now reads, as TRAILING params, which is where a coordinate already sat and is what keeps the
     operand correspondence in the prefix untouched. A fold over an axis of the same name binds that
-    name for itself and its operands, so it is left whole."""
+    name for itself and its operands, so it is left whole. The fold is the point: the whole gain is that
+    ``i / c`` and ``i % c`` collapse to the bare split coordinates."""
     if produced.axis == name:
         return produced
-    folding = _FoldingSigma(dict(sigma.mapping))
-    object.__setattr__(folding, "_ctx", ctx)
+    folding = Sigma(dict(sigma.mapping), ctx)
     operands = tuple(_substitute_and_fold(edge, name, sigma, ctx) for edge in produced.operands)
     body = Body(stmt.rewrite(lambda n: n, folding) for stmt in produced.lift.body)
     lift = Lambda.closing(tuple(p for p in produced.lift.params if p != name), body, produced.lift.results)
-    return replace(produced, operands=operands, lift=lift)
+    return produced.replace(operands=operands, lift=lift)
 
 
 def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
@@ -1903,9 +1858,6 @@ def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, split_consu
     longer in the intersection."""
     piece = TileOp(
         op=_region_term(regions, tail, stores),
-        # The seam token keeps recursive pieces' kernel names distinct, as it does for a workspace
-        # producer — two same-named pieces from different cut levels would launch one kernel twice.
-        name=f"{tile.name}__place_{seam_token(tile, spelling)}",
         place=Placement(free=tuple(tile.place.free)),
         axes=tile.axes,
         output_specs=stores,
@@ -1924,8 +1876,8 @@ def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
     what one kernel binds. The value a cut materializes can still be computed in place beside the
     read: a structurally equal cone the replacement did not reach (replacement follows object
     sharing), or a second seam exposing that same value. Under one name those are two declarations
-    at two different addresses, which is an SSA fault and which nvcc rejects (*already declared in
-    the current scope*). Reads of ONE workspace at one address keep one name, so the emitted body
+    at two different addresses, which is an SSA fault (a name defined twice in one scope). Reads of ONE
+    workspace at one address keep one name, so the emitted body
     still binds each value once. What a reader derives from the read carries the tag on
     (:func:`_follow_reads`).
     """
@@ -2001,7 +1953,7 @@ def _splice_pieces(fragment: Graph, members: set[str], spelled: dict[str, str], 
     loop_graph = fragment.copy()
     for nid in members:
         tile = loop_graph.nodes[nid].op
-        loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body, name=tile.name)
+        loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body)
     live = live_outputs_of(loop_graph, members)
     merged = build_merged_region(loop_graph, members, live)
     if merged is None:
@@ -2011,7 +1963,7 @@ def _splice_pieces(fragment: Graph, members: set[str], spelled: dict[str, str], 
     merged = replace(merged, inputs={name: merged.inputs[name] for name in inputs if name in merged.inputs})
     replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
     merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
-    fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{seam_token(parent, seams)}")
+    fused = lift_kernel(merged_node.op)
     merged_node.op = replace(fused, split_consumed=any(fragment.nodes[nid].op.split_consumed for nid in members))
     fragment.splice(replacement, consumed=members, output=output_map)
 
@@ -2026,6 +1978,11 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
         _, stores = region.owned
         members = {node.id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
         _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
+
+
+#: The node hint a cut leaves on every kernel it mints. A graph fact, like op provenance: each such kernel is a new
+#: kernel, which reads only the pins that name it, and the schedule pass reads it as one piece of a cut kernel set.
+PIECE = "cut.piece"
 
 
 def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
@@ -2046,7 +2003,9 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
 
     Every piece leaves its placement open, so it can expose and decide smaller seams. A placement
     cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
-    sliced-axis split receipt."""
+    sliced-axis split receipt.
+
+    Every kernel the cut leaves is a new kernel and carries the :data:`PIECE` hint."""
     tile: TileOp = root.op
     split_consumed = tile.split_consumed or carries_partition(tile)
     owning = tuple(seam for seam in seams if seam.owned is not None)
@@ -2117,15 +2076,13 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
                 groups.append((names, produced, tuple(seam.dtypes[position] for position in positions), tuple(positions)))
         held: dict[int, str] = {}
         indexes: dict[int, tuple] = {}
-        for number, (names, produced, dtypes, ordinals) in enumerate(groups):
+        for names, produced, dtypes, ordinals in groups:
             axes, strides, index = _workspace_layout(produced, _weight_ordered(_workspace_axes(seam, produced), produced, tile.inputs))
             buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
             for name, buffer in zip(names, buffers, strict=True) if front is None else ():
                 held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})
                 indexes.update({position: index for position, own in enumerate(child.exposes) if own == name})
-            pieces.append(
-                (replace(seam, dtypes=dtypes), produced, axes, strides, token if number == 0 else f"{token}_{number}", names, buffers)
-            )
+            pieces.append((replace(seam, dtypes=dtypes), produced, axes, strides, names, buffers))
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
@@ -2240,7 +2197,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         for store in tile.output_specs
     )
     produced_pieces = []
-    for seam, produced, axes, strides, token, names, buffers, replacements in pieces:
+    for seam, produced, axes, strides, names, buffers, replacements in pieces:
         others = {target: loads for target, loads in everything.items() if target not in replacements}
         # A piece that reads another seam's workspace re-spells what it derives from it too, and
         # its own stores name those values.
@@ -2248,7 +2205,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         produced = _without_identity_casts(_replace_fold(produced, others, derived) if others else produced, stored)
         produced = _stored_cells(produced, axes, strides)
         index = tuple(Var(axis.name) for axis in axes)
-        produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
+        produced_pieces.append((seam, produced, axes, index, tuple(derived.get(name, name) for name in names), buffers))
 
     fragment = _input_fragment(match, root)
     spelled = {buffer: seam.spelling for seam, *_, buffers in produced_pieces for buffer in buffers}
@@ -2286,17 +2243,13 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     # containment makes this dependency graph acyclic, including chains whose members have the
     # same number of direct workspace reads.
     entries = []
-    for seam, produced, axes, index, token, names, buffers in _producer_order(produced_pieces):
+    for seam, produced, axes, index, names, buffers in _producer_order(produced_pieces):
         # The workspace keeps the shape the sibling already reads it back at, so the split below
         # moves the GRID and nothing else.
         shape = tuple(axis.extent for axis in axes)
         produced, grid, index, minted = _split_fused_pair(produced, axes, index)
         producer = TileOp(
             op=produced,
-            # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source
-            # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
-            # different cut levels would launch one kernel twice.
-            name=f"{tile.name}__place_{token}",
             # The workspace axes are the store's SWEEP, and the one rank rule
             # (``promoted_sweep``, applied by ``TileOp.__post_init__``) binds the ones binding
             # replicates nothing over. A free axis per workspace dimension instead bound the sweep a
@@ -2379,7 +2332,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         if not consumer_stores:
             _fuse_sibling_producers(fragment, spelled, tile)
             _join_pieces(fragment, joins, spelled, tile)
-            return fragment
+            return _marked(fragment)
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
             _over(regions, kept, consumer_stores),
@@ -2389,14 +2342,11 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
 
     consumer = TileOp(
         op=consumer_fold,
-        name=tile.name,
         place=tile.place,
         axes=tile.axes,
         # ``specs`` already reads each stored value under the name the cut left it;
         # ``add_output_piece`` re-spells the BUFFER each write targets.
         output_specs=consumer_stores,
-        placement_consumed=tile.placement_consumed,
-        placement_step=tile.placement_step + 1,
         split_consumed=split_consumed,
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
@@ -2413,6 +2363,14 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     )
     _fuse_sibling_producers(fragment, spelled, tile)
     _join_pieces(fragment, joins, spelled, tile)
+    return _marked(fragment)
+
+
+def _marked(fragment: Graph) -> Graph:
+    """``fragment`` with every kernel it holds marked a piece of a cut (:data:`PIECE`)."""
+    for node in fragment.nodes.values():
+        if isinstance(node.op, TileOp):
+            node.hints.set(PIECE, True)
     return fragment
 
 
@@ -2471,9 +2429,8 @@ def _contraction_producer(tile: TileOp, seam: CutSite, batch: list, others: dict
             nest = (Loop(axis=Axis(f"{_PLACEHOLDER}{slot}", space[slot][1]), body=Body(nest)),)
         nests.extend(nest)
     nest = tuple(nests)
-    name = f"{tile.name}__place_{seam_token(tile, seam.spelling)}"
     # The nest is stored as the piece's ``source``, as a re-formed piece's is: it is the body a kernel row stores.
-    return replace(lift_kernel(LoopOp(body=Body(nest)), name=name, shapes=shapes), source=LoopOp(body=Body(nest), name=name))
+    return replace(lift_nest(Body(nest), shapes), source=LoopOp(body=Body(nest)))
 
 
 def _digits(expression: Expression, placeholder: Var, by_name: dict) -> dict[str, Expression]:
@@ -2548,7 +2505,7 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
         for (expression, placeholder), span in zip(table.items(), ranges, strict=True):
             inverse.update(_digits(expression, placeholder, by_name))
             preimages.update(_preimage(expression, placeholder, span, by_name, shared=shared))
-        lowered = _pruned(Body(tuple(replaced.lower(bound=captured, axes=tile.axes))), frozenset((name,)))
+        lowered = Body(tuple(replaced.lower(bound=captured, axes=tile.axes))).pruned((name,))
         # A captured unit axis reads at 0 wherever a nested cut left it in an index.
         inverse.update({axis: Literal(0, "int") for axis in captured if axis not in inverse and _unit(by_name[axis])})
         body = None
@@ -2601,7 +2558,6 @@ __all__ = [
     "joined_halves",
     "joined_spelling",
     "output_map",
-    "place_token",
     "realize",
     "seam_token",
     "storage_frontier",

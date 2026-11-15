@@ -453,7 +453,7 @@ Command recipes skip `validate_extra_args()` since they don't go through engine 
 
 Without `strict`, result transfer is best effort and staged files may include local edits. With `strict`, the staged
 paths must be clean before execution, the Git revision and dirty flag are recorded, every `result_files` entry must be
-retrieved, and GPU, NVCC, and cuBLAS provenance must be available. A failed command still attempts to retrieve its
+retrieved, and GPU, ptxas, and cuBLAS provenance must be available. A failed command still attempts to retrieve its
 declared results so partial evidence is not lost.
 
 ### Result interpretation

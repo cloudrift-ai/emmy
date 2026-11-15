@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 
-from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M
+from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, slot_widths
 from emmy.serving.twins import LayoutConflict, LayoutScope, fork_less_weights, plan_layouts
 
 logger = logging.getLogger(__name__)
@@ -238,13 +238,13 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     return, whose LAST two entries are ``scores[T, k]`` / ``indices[T, k]``. One
     ``run_experts(xn, take, counts)`` call runs every HIT expert: ``take`` lists the rows of ``xn`` each expert
     gets, contiguously in ascending expert order, ``counts[e]`` how many are expert ``e``'s, and it returns the
-    outputs and, for each entry of ``take``, the output row that holds it; the partials weighted-scatter into a
-    fresh ``[T, H]``.
-    Scores cast to the activation dtype — some HF routers (Mixtral) return fp32 scores, and
-    ``index_add_`` requires matching dtypes. A router whose scaled weights can overflow individual
-    fp16 partials requests ``accumulate_float32``; that lane returns the float32 weighted sum so
-    its caller can combine every marked MoE contribution before one final model-dtype cast.
-    Ordinary routers keep the fp16 hot path.
+    outputs and, for each entry of ``take``, the output row that holds it. Each row's partials are weighted and summed
+    in one pass over the outputs (``embedding_bag``), in its picks' ascending expert order, the products and the sum in
+    float32 and the result rounded once to the activation dtype.
+    Scores cast to the activation dtype — some HF routers (Mixtral) return fp32 scores, and the weighted sum takes
+    the outputs' dtype. A router whose scaled weights can overflow fp16 requests ``accumulate_float32``; that lane
+    returns the float32 weighted sum so its caller can combine every marked MoE contribution before one final
+    model-dtype cast.
 
     On a tensor-parallel rank ``run_experts`` runs that rank's intermediate slice of each expert
     (``slice_routed_experts``): every rank runs the same picks, and the all-reduce the caller issues
@@ -260,39 +260,31 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     scores, indices = gated[-2], gated[-1]
     accumulate_dtype = torch.float32 if accumulate_float32 else xn.dtype
     scores = scores.to(accumulate_dtype)
-    out = torch.zeros_like(xn, dtype=accumulate_dtype)
     if indices.shape[0] == 1:
         picks = indices[0].tolist()
         counts = [0] * num_experts
         for e in picks:
             counts[e] += 1
         outputs, at = run_experts(xn, torch.zeros(len(picks), dtype=torch.long, device=xn.device), counts)
-        partials = outputs.index_select(0, at)
-        for row, pos in enumerate(sorted(range(len(picks)), key=picks.__getitem__)):
-            out += partials[row : row + 1].to(accumulate_dtype) * scores[:, pos, None]
-        return out
-    # Every hit expert's rows in one sort and ONE host read of the per-expert counts: a stable
-    # sort of the flattened picks lists each expert's (row, slot) pairs in row order, exactly the
-    # rows a per-expert ``where`` would find — without one device wait per expert. The experts'
-    # outputs come back in one buffer; the weighting and the sum run once per layer.
-    rows, k = indices.shape
-    # Each row's picks in ascending expert order, the order the single-row path adds them in, and a fixed one (one
-    # scattered index_add would leave the order to float atomics).
-    indices, by_expert = indices.sort(dim=1, stable=True)
-    scores = scores.gather(1, by_expert)
-    flat = indices.reshape(-1).long()
-    order = torch.argsort(flat, stable=True)
-    counts = torch.zeros(num_experts, dtype=torch.long, device=flat.device).scatter_add_(0, flat, torch.ones_like(flat))
-    outputs, at = run_experts(xn, order // k, counts.tolist())
-    # Back to pick order, pick-major so that each pick's rows are contiguous: the inverse of ``order`` says where row
-    # ``r``'s ``j``-th pick landed in ``take``, ``at`` which output row holds it. Weighted in place, then summed pick
-    # by pick.
-    weighted = outputs.index_select(0, at[order.argsort()].view(rows, k).t().reshape(-1))
-    weighted = weighted.to(accumulate_dtype).view(k, rows, -1)
-    weighted *= scores.t()[..., None]
-    for pick in range(k):
-        out += weighted[pick]
-    return out
+        # ``take`` lists the picks in ascending expert order.
+        pos, scores = at.view(1, -1), scores[:, sorted(range(len(picks)), key=picks.__getitem__)]
+    else:
+        # Every hit expert's rows in one sort and ONE host read of the per-expert counts: a stable
+        # sort of the flattened picks lists each expert's (row, slot) pairs in row order, exactly the
+        # rows a per-expert ``where`` would find — without one device wait per expert. The experts'
+        # outputs come back in one buffer.
+        rows, k = indices.shape
+        # Each row's picks in ascending expert order, the order the single-row path adds them in.
+        indices, by_expert = indices.sort(dim=1, stable=True)
+        scores = scores.gather(1, by_expert)
+        flat = indices.reshape(-1).long()
+        order = torch.argsort(flat, stable=True)
+        counts = torch.zeros(num_experts, dtype=torch.long, device=flat.device).scatter_add_(0, flat, torch.ones_like(flat))
+        outputs, at = run_experts(xn, order // k, counts.tolist())
+        # The inverse of ``order`` says where row ``r``'s ``j``-th pick landed in ``take``, ``at`` which output row
+        # holds it.
+        pos = at[order.argsort()].view(rows, k)
+    return torch.nn.functional.embedding_bag(pos, outputs.to(accumulate_dtype), per_sample_weights=scores, mode="sum")
 
 
 def _pinned(tensor, nbytes=0):
@@ -1684,8 +1676,8 @@ class EmmyGenRunner:
                 "one": None,
                 "m256": None,
                 "slots": None,
-                "slot_rows": None,
-                "group": None,
+                "slot_rows": {},
+                "group": {},
                 "ind_names": ind_names,
             }
             with torch.device("cpu"):
@@ -1768,10 +1760,12 @@ class EmmyGenRunner:
                         "weight_inputs": ind_names,
                     }
                     wrapper = build_moe_slots_wrapper(expert_w)
-                    # One row's k picks; on experts sliced across ranks (resident, in the ``F.linear`` form) also the
-                    # decode bucket's rows at once, each against its own picks: a decode step of several tokens then
-                    # runs one launch set instead of one per row.
-                    widths = (1, decode_bucket) if expert_slices > 1 and decode_bucket > 1 and paging is None and not transposed else (1,)
+                    # One row's k picks; on experts sliced across ranks (resident, in the ``F.linear`` form) also
+                    # several rows at once, each against its own picks, at every slot width up to the decode bucket: a
+                    # decode step of several tokens then runs one launch set, of the narrowest program that holds it,
+                    # instead of one per row.
+                    sliced = expert_slices > 1 and paging is None and not transposed
+                    widths = (1, *slot_widths(decode_bucket or 0)) if sliced else (1,)
                     for rows in widths:
                         name = pre + ("slots" if rows == 1 else f"slots{rows}")
                         picks = (moe_top_k,) if rows == 1 else (rows, moe_top_k)
@@ -1790,7 +1784,7 @@ class EmmyGenRunner:
                                     **stacked_kw,
                                 )
                             reads[name] = loaded[name].reads if stored(name) is not None else frozenset(read)
-                            tiers["slots" if rows == 1 else "slot_rows"] = {
+                            tier = {
                                 "wrapper": wrapper,
                                 "plan": slot_plan,
                                 "examples": slot_examples,
@@ -1800,6 +1794,10 @@ class EmmyGenRunner:
                                 "arena": slot_arena,
                                 "paged": paging,
                             }
+                            if rows == 1:
+                                tiers["slots"] = tier
+                            else:
+                                tiers["slot_rows"][rows] = tier
                             plans[name] = slot_plan
                         except Exception as ex:  # noqa: BLE001 — any compile failure → routed fallback, loudly
                             logger.warning(
@@ -1812,46 +1810,49 @@ class EmmyGenRunner:
                                 else "a wider decode step runs the one-row program row by row",
                             )
                             break
-                    # The grouped prefill program (``ExpertFFN.blocks``) on the same resident sliced experts: a prefill
-                    # step runs its experts with more rows than the decode bucket ``EXPERT_GROUP`` at a time, each
-                    # against blocks of ``EXPERT_PREFILL_M`` of its rows (:meth:`_launch_experts`), in place of one
-                    # launch set per expert. A compile failure leaves them on the per-expert tiers.
+                    # The grouped prefill programs (``ExpertFFN.blocks``) on the same resident sliced experts: a prefill
+                    # step runs its experts ``EXPERT_GROUP`` at a time, each against blocks of its rows, in place of one
+                    # launch set per expert (:meth:`_launch_experts`): blocks of the decode bucket for the experts routed
+                    # that many rows or fewer, blocks of ``EXPERT_PREFILL_M`` for the rest. A compile failure leaves that
+                    # width's experts on the per-expert tiers.
                     if expert_slices > 1 and paging is None and not transposed and not static_only and hasattr(expert_w, "blocks"):
-                        name = pre + "group"
-                        examples = [
-                            torch.zeros(EXPERT_GROUP, EXPERT_PREFILL_M, hidden, dtype=dtype),
-                            torch.zeros(EXPERT_GROUP, dtype=torch.int64),
-                            *stacked_w,
-                        ]
-                        try:
-                            with evidence_reads() as read:
-                                _, group_plan = _compile_split(
-                                    build_moe_slots_wrapper(expert_w, "blocks"),
-                                    examples,
-                                    None,
-                                    compiler_dtype,
-                                    plan=stored(name),
-                                    plan_cache=plan_cache,
-                                    **stacked_kw,
+                        for rows in sorted({decode_bucket or 0, EXPERT_PREFILL_M} - {0, 1}):
+                            name = pre + f"group{rows}"
+                            examples = [
+                                torch.zeros(EXPERT_GROUP, rows, hidden, dtype=dtype),
+                                torch.zeros(EXPERT_GROUP, dtype=torch.int64),
+                                *stacked_w,
+                            ]
+                            try:
+                                with evidence_reads() as read:
+                                    _, group_plan = _compile_split(
+                                        build_moe_slots_wrapper(expert_w, "blocks"),
+                                        examples,
+                                        None,
+                                        compiler_dtype,
+                                        plan=stored(name),
+                                        plan_cache=plan_cache,
+                                        **stacked_kw,
+                                    )
+                                reads[name] = loaded[name].reads if stored(name) is not None else frozenset(read)
+                                tiers["group"][rows] = {
+                                    "wrapper": build_moe_slots_wrapper(expert_w, "blocks"),
+                                    "plan": group_plan,
+                                    "examples": examples,
+                                    "aux_examples": stacked_kw["aux_examples"],
+                                    "weight_inputs": ind_names,
+                                    "dtype": compiler_dtype,
+                                    "arena": group_arena,
+                                }
+                                plans[name] = group_plan
+                            except Exception as ex:  # noqa: BLE001 — any compile failure → the per-expert tiers, loudly
+                                logger.warning(
+                                    "[gen_runner] grouped prefill expert program build failed for group %d at %d rows (%s); "
+                                    "prefill keeps one launch set per expert at that width",
+                                    g,
+                                    rows,
+                                    ex,
                                 )
-                            reads[name] = loaded[name].reads if stored(name) is not None else frozenset(read)
-                            tiers["group"] = {
-                                "wrapper": build_moe_slots_wrapper(expert_w, "blocks"),
-                                "plan": group_plan,
-                                "examples": examples,
-                                "aux_examples": stacked_kw["aux_examples"],
-                                "weight_inputs": ind_names,
-                                "dtype": compiler_dtype,
-                                "arena": group_arena,
-                            }
-                            plans[name] = group_plan
-                        except Exception as ex:  # noqa: BLE001 — any compile failure → the per-expert tiers, loudly
-                            logger.warning(
-                                "[gen_runner] grouped prefill expert program build failed for group %d (%s); prefill keeps one "
-                                "launch set per expert",
-                                g,
-                                ex,
-                            )
                 if static_only and tiers["bucket"] is None:
                     raise RuntimeError(
                         f"expert group {g} static decode compile failed while bucket {decode_bucket} "
@@ -2672,19 +2673,22 @@ class EmmyGenRunner:
                         raise RuntimeError("fixed-slot expert groups must agree on their output precision")
                     partial_dtype = torch.float32 if slot_precision.pop() else act_dtype
                     self._slot_partials = torch.empty(k, h, dtype=partial_dtype, device="cuda")
-                    # The decode bucket's rows at once, when every group has that program: its selector and partials,
-                    # shared by every layer as the one-row pair is.
-                    shared = {"slots": (self._slot_sel, self._slot_partials)}
-                    if all(t["slot_rows"] is not None for t in self._expert_tiers):
-                        rows = self._expert_tiers[0]["slot_rows"]["examples"][0].shape[0]
-                        self._slot_rows_sel = torch.zeros(rows, k, dtype=torch.int64, device="cuda")
-                        self._slot_rows_partials = torch.empty(rows, k, h, dtype=partial_dtype, device="cuda")
-                        shared["slot_rows"] = (self._slot_rows_sel, self._slot_rows_partials)
+                    # Several rows at once, at the slot widths every group has a program for: one selector and
+                    # partials pair of the widest, shared by every layer as the one-row pair is, and a narrower
+                    # program works on its leading rows.
+                    shared = [(1, self._slot_sel, self._slot_partials)]
+                    widths = set.intersection(*(set(t["slot_rows"]) for t in self._expert_tiers))
+                    if widths:
+                        self._slot_rows_sel = torch.zeros(max(widths), k, dtype=torch.int64, device="cuda")
+                        self._slot_rows_partials = torch.empty(max(widths), k, h, dtype=partial_dtype, device="cuda")
+                        shared += [(rows, self._slot_rows_sel[:rows], self._slot_rows_partials[:rows]) for rows in sorted(widths)]
                     for m in self._moe:
                         if m is None:
                             continue
-                        for tier, (sel, partials) in shared.items():
-                            slots = self._expert_tiers[m["group"]][tier]
+                        m["slot_rows"] = {}
+                        for rows, sel, partials in shared:
+                            tiers = self._expert_tiers[m["group"]]
+                            slots = tiers["slots"] if rows == 1 else tiers["slot_rows"][rows]
                             # A plan from a serving pack keeps the slots it was compiled with.
                             if {spec[2] for spec in slots["plan"].paged.values()} != ({m["paging"][0]} if "paging" in m else set()):
                                 raise RuntimeError("the fixed-slot program was compiled for another expert budget than the device holds")
@@ -2710,29 +2714,34 @@ class EmmyGenRunner:
                                     pager.declare(device(), name, homes, (m["num_experts"], m["bytes"][name], *m["paging"]))
                                     pager.bind(p.executor, name)
                                 m["pager"] = pager
-                            m[tier] = prog
+                            if rows == 1:
+                                m["slots"] = prog
+                            else:
+                                m["slot_rows"][rows] = prog
                     torch.cuda.empty_cache()
-                # One grouped prefill program INSTANCE per layer over its own experts, as the fixed-slot ones; each
-                # launch is lent its rows, output and selector (:meth:`_launch_experts`), so the instances share one
-                # arena: the decoded weights of a launch's experts.
+                # One instance of each grouped prefill program per layer over its own experts, as the fixed-slot ones;
+                # each launch is lent its rows, output and selector (:meth:`_launch_experts`), so the instances share
+                # one arena: the decoded weights of a launch's experts.
                 for m in self._moe:
-                    if m is None or (grouped := self._expert_tiers[m["group"]]["group"]) is None:
+                    if m is None:
                         continue
-                    prog, _ = _compile_split(
-                        grouped["wrapper"],
-                        grouped["examples"],
-                        None,
-                        grouped["dtype"],
-                        plan=grouped["plan"],
-                        aux_examples={**(grouped["aux_examples"] or {}), **m["inputs"]},
-                        weight_inputs=grouped["weight_inputs"],
-                        arena=grouped["arena"],
-                    )
-                    if any("_desc" in a for launch in prog.program.plan.launches for a in launch.arg_names):
-                        raise RuntimeError(
-                            "the grouped prefill expert program stages an operand through a descriptor; it cannot be lent its rows"
+                    m["blocks"] = {}
+                    for rows, grouped in self._expert_tiers[m["group"]]["group"].items():
+                        prog, _ = _compile_split(
+                            grouped["wrapper"],
+                            grouped["examples"],
+                            None,
+                            grouped["dtype"],
+                            plan=grouped["plan"],
+                            aux_examples={**(grouped["aux_examples"] or {}), **m["inputs"]},
+                            weight_inputs=grouped["weight_inputs"],
+                            arena=grouped["arena"],
                         )
-                    m["blocks"] = prog
+                        if any("_desc" in a for launch in prog.program.plan.launches for a in launch.arg_names):
+                            raise RuntimeError(
+                                "the grouped prefill expert program stages an operand through a descriptor; it cannot be lent its rows"
+                            )
+                        m["blocks"][rows] = prog
                 torch.cuda.empty_cache()
         self._dev_ready = True
 
@@ -3185,11 +3194,11 @@ class EmmyGenRunner:
         self._record_routing(moe, indices)
         capturing = torch.cuda.is_current_stream_capturing()
         stream = torch.cuda.current_stream()
-        if xn.shape[0] > 1 and (rows := moe.get("slot_rows")) is not None:
-            # Every row's picks at once through the decode bucket's program: the rows past this step's keep the
-            # picks and inputs of an earlier one, whose partials no row reads.
-            t = xn.shape[0]
-            p = rows.program
+        t = xn.shape[0]
+        if t > 1 and (width := min((rows for rows in moe.get("slot_rows", ()) if rows >= t), default=0)):
+            # Every row's picks at once through the narrowest slot program that holds the step: the rows past this
+            # step's keep the picks and inputs of an earlier one, whose partials no row reads.
+            p = moe["slot_rows"][width].program
             with gpu_lock():
                 self._slot_rows_sel[:t].copy_(indices)
                 with p.on_stream(stream):
@@ -3311,12 +3320,13 @@ class EmmyGenRunner:
         output row that holds it. Tier routing mirrors the main programs: M=1 twin, then the
         decode-bucket twin (pad → run; stale padding rows are per-token-independent), then the static
         M=256 prefill twin for row sets up to ``EXPERT_PREFILL_M`` (same pad-up contract), then the
-        symbolic program. A layer with the grouped prefill program instead runs every expert above the
-        decode bucket through it: each such expert's rows fill blocks of ``EXPERT_PREFILL_M``, the blocks
-        come first, padded to whole launches of ``EXPERT_GROUP``, and each launch is lent its blocks and
-        their experts' entries of the selector. Each tier runs its experts in ONE runtime call (``run_each``): per expert it
-        binds the width and points the weight operands at the expert's resident slices (a tier with TMA
-        descriptors, which bake pointers at build, copies the slices in instead). Issuing those calls
+        symbolic program. A layer with the grouped prefill programs instead runs its experts through them: an
+        expert routed up to the decode bucket's rows fills one block of that many, a wider one blocks of
+        ``EXPERT_PREFILL_M``; each program's blocks come first, padded to whole launches of ``EXPERT_GROUP``, and each
+        launch is lent its blocks and their experts' entries of the selector. Each tier runs its experts in ONE
+        runtime call (``run_each``): per expert it binds the width and points the weight operands at the expert's
+        resident slices (a tier with TMA descriptors, which bake pointers at build, copies the slices in instead).
+        Issuing those calls
         from Python, a dozen per expert, kept the GPU idle about three quarters of a routed prefill
         layer on V100. The rows are gathered once into blocks, one per expert, padded to its static
         twin's width, so a tier without descriptors is lent its block of the gathered rows and of the
@@ -3329,48 +3339,52 @@ class EmmyGenRunner:
         import torch
 
         tiers = self._expert_tiers[moe["group"]]  # this layer's shape group
-        grouped = moe.get("blocks")  # the layer's grouped prefill program, if built
+        groups = moe.get("blocks") or {}  # the layer's grouped prefill programs, by block width
+        grouped: dict = {}  # each grouped program's experts, by block width
         blocks = []
         start = 0
         for e, count in enumerate(counts):
             if count:
-                if grouped is not None and count > self._decode_bucket:
-                    prog, width = grouped, -(-count // EXPERT_PREFILL_M) * EXPERT_PREFILL_M
-                elif tiers["m256"] is not None and self._decode_bucket < count <= EXPERT_PREFILL_M:
-                    prog, width = tiers["m256"], EXPERT_PREFILL_M
-                elif count == 1 and tiers["one"] is not None:
-                    prog, width = tiers["one"], 1
-                elif tiers["bucket"] is not None and count <= self._decode_bucket:
-                    prog, width = tiers["bucket"], self._decode_bucket
-                elif (prog := tiers["sym"]) is not None:
-                    width = count
+                if (block_rows := self._decode_bucket if count <= self._decode_bucket else EXPERT_PREFILL_M) in groups:
+                    grouped.setdefault(block_rows, []).append((e, start, count))
                 else:
-                    raise RuntimeError(f"expert row width {count} exceeds the static-only decode bucket {self._decode_bucket}")
-                blocks.append((prog is tiers["sym"], e, prog, start, count, width))
+                    if tiers["m256"] is not None and self._decode_bucket < count <= EXPERT_PREFILL_M:
+                        prog, width = tiers["m256"], EXPERT_PREFILL_M
+                    elif count == 1 and tiers["one"] is not None:
+                        prog, width = tiers["one"], 1
+                    elif tiers["bucket"] is not None and count <= self._decode_bucket:
+                        prog, width = tiers["bucket"], self._decode_bucket
+                    elif (prog := tiers["sym"]) is not None:
+                        width = count
+                    else:
+                        raise RuntimeError(f"expert row width {count} exceeds the static-only decode bucket {self._decode_bucket}")
+                    blocks.append((prog is tiers["sym"], e, prog, start, count, width))
             start += count
-        batches: dict = {}
         offsets = [0] * len(counts)  # each expert's block start less its first entry in ``take``
-        picks = []  # the grouped program's experts, one per block of EXPERT_PREFILL_M rows
+        launches = []  # (grouped program, block width, its first row, its first pick, its pick count)
+        picks = []  # the grouped programs' experts, one per block
         block = 0
-        # The grouped experts first, then the per-expert tiers, the symbolic program's last.
-        for _, e, prog, first, count, width in sorted(blocks, key=lambda b: 0 if b[2] is grouped else 1 + b[0]):
-            if prog is grouped:
-                picks += [e] * (width // EXPERT_PREFILL_M)
-            else:
-                if picks and not batches:  # past the grouped blocks: pad them to whole launches
-                    picks += [picks[-1]] * (-len(picks) % EXPERT_GROUP)
-                    block = len(picks) * EXPERT_PREFILL_M
-                batches.setdefault(prog, []).append((e, block, count))
+        # The grouped experts first, each program's blocks padded to whole launches with its last expert; then the
+        # per-expert tiers, the symbolic program's last.
+        for block_rows, experts in sorted(grouped.items()):
+            first, pick = block, len(picks)
+            for e, at_take, count in experts:
+                offsets[e] = block - at_take
+                picks += [e] * -(-count // block_rows)
+                block = first + (len(picks) - pick) * block_rows
+            picks += [picks[-1]] * (-(len(picks) - pick) % EXPERT_GROUP)
+            block = first + (len(picks) - pick) * block_rows
+            launches.append((groups[block_rows], block_rows, first, pick, len(picks) - pick))
+        batches: dict = {}
+        for _, e, prog, first, count, width in sorted(blocks, key=lambda b: b[0]):
+            batches.setdefault(prog, []).append((e, block, count))
             offsets[e] = block - first
             block += width
-        if picks and not batches:
-            picks += [picks[-1]] * (-len(picks) % EXPERT_GROUP)
-            block = len(picks) * EXPERT_PREFILL_M
         count_t, offset_t = torch.tensor([counts, offsets], device=xn.device)
         at = torch.arange(start, device=xn.device) + offset_t.repeat_interleave(count_t, output_size=start)
         source = torch.zeros(block, dtype=torch.long, device=xn.device)
         source[at] = take
-        like_prog = next(iter(batches), grouped)
+        like_prog = next(iter(batches), launches[0][0] if launches else None)
         like = like_prog.program.buffer_view(like_prog.output_names[0])
         row_in, row_out = xn.shape[1] * xn.element_size(), like.shape[-1] * like.element_size()
         spare = 0
@@ -3383,24 +3397,25 @@ class EmmyGenRunner:
         stream = torch.cuda.current_stream()
         if picks:
             # One launch per EXPERT_GROUP blocks, each lent its blocks of the rows and of the output and its experts'
-            # entries of the selector; a padding block repeats the last expert and lands in rows nothing reads.
+            # entries of the selector; a padding block repeats the program's last expert and lands in rows nothing reads.
             sel = torch.tensor(picks, dtype=torch.int64, device=xn.device)
-            span, name = EXPERT_GROUP * EXPERT_PREFILL_M, grouped.output_names[0]
-            runs = [
-                (
-                    {},
-                    [
-                        ("x", x + i * EXPERT_PREFILL_M * row_in, span * row_in),
-                        (name, o + i * EXPERT_PREFILL_M * row_out, span * row_out),
-                        ("sel", sel.data_ptr() + i * sel.element_size(), EXPERT_GROUP * sel.element_size()),
-                    ],
-                    [],
-                    [],
-                )
-                for i in range(0, len(picks), EXPERT_GROUP)
-            ]
-            with grouped.program.on_stream(stream):
-                grouped.program.run_each(runs)
+            for prog, width, first, pick, n in launches:
+                span, name = EXPERT_GROUP * width, prog.output_names[0]
+                runs = [
+                    (
+                        {},
+                        [
+                            ("x", x + (first + i * width) * row_in, span * row_in),
+                            (name, o + (first + i * width) * row_out, span * row_out),
+                            ("sel", sel.data_ptr() + (pick + i) * sel.element_size(), EXPERT_GROUP * sel.element_size()),
+                        ],
+                        [],
+                        [],
+                    )
+                    for i in range(0, n, EXPERT_GROUP)
+                ]
+                with prog.program.on_stream(stream):
+                    prog.program.run_each(runs)
         for prog, picks in batches.items():
             name, swap = prog.output_names[0], self._expert_swap_safe[id(prog)]
             runs = []

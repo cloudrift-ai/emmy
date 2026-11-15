@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
 from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph, nvfp4_head_stored
-from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M
+from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, slot_widths
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -403,7 +403,7 @@ def capture_twin_graphs(
 
     def emit_experts(parts, expert_w, suffix, members):
         """The expert twins of one MoE profile: one per serving width, the M=1 and prefill ones every MoE boot
-        builds, the fixed-slot decode program and, on sliced experts, the grouped prefill program."""
+        builds, the fixed-slot decode program and, on sliced experts, the grouped prefill programs."""
         transposed = moe_expert_layout(parts[1])[0]
 
         def spell(name, graph, lead=()):
@@ -434,27 +434,30 @@ def capture_twin_graphs(
             spell(f"expert{name}{suffix}", trace_split(expert_w, examples, argnames))
         # The fixed-slot decode program: the row's k picks gathered from the E-stacked expert tensors
         # (``build_moe_slots_wrapper``), spelled like the per-expert twins with the expert axis leading. On sliced
-        # experts a decode step up to the slot width rides the slots too, every row against its own picks at once
-        # (``expert-slots8``); the one-row program stays the one-token step's.
+        # experts a decode step up to the slot width rides the slots too, every row against its own picks at once, in
+        # the narrowest of the slot widths that holds it (``expert-slots2``, ``-slots4``, ``-slots8``); the one-row
+        # program stays the one-token step's.
         top_k = int(getattr(text, "num_experts_per_tok", 0) or 0)
         chunk = slot_width if expert_slices > 1 and slot_width > 1 and not transposed else 1
-        for rows in sorted({1, chunk}) if top_k else ():
+        for rows in (1, *slot_widths(chunk)) if top_k else ():
             count = int(parts[1].gate_up_proj.shape[0])
             one = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
             sel = torch.zeros((top_k,) if rows == 1 else (rows, top_k), dtype=torch.int64)
             stacked = [one[0], sel, *(torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:])]
             graph = trace_split(build_moe_slots_wrapper(expert_w), stacked, None)
             spell(f"expert-slots{rows if rows > 1 else ''}{suffix}", graph, (count,))
-        # The grouped prefill program on sliced experts, for a boot with an any-width program: one launch over
-        # ``EXPERT_GROUP`` experts, each against a block of ``EXPERT_PREFILL_M`` of its routed rows (``x[G, R, H]``,
-        # ``sel[G]``), gathered from the same E-stacked tensors.
+        # The grouped prefill programs on sliced experts, for a boot with an any-width program: one launch over
+        # ``EXPERT_GROUP`` experts, each against a block of its routed rows (``x[G, R, H]``, ``sel[G]``), gathered from
+        # the same E-stacked tensors. Blocks of ``EXPERT_PREFILL_M`` rows carry the experts routed more rows than the
+        # slot width, blocks of the slot width the rest.
         if top_k and expert_slices > 1 and not transposed and None in widths and hasattr(expert_w, "blocks"):
             count = int(parts[1].gate_up_proj.shape[0])
-            one = _expert_examples(parts[1], EXPERT_PREFILL_M, hidden, td, split_gate_up=bool(storage))
-            stacked = [torch.zeros((EXPERT_GROUP, *one[0].shape), dtype=td), torch.zeros(EXPERT_GROUP, dtype=torch.int64)]
-            stacked += [torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:]]
-            graph = trace_split(build_moe_slots_wrapper(expert_w, "blocks"), stacked, None)
-            spell(f"expert-group{EXPERT_GROUP}x{EXPERT_PREFILL_M}{suffix}", graph, (count,))
+            for rows in sorted({chunk, EXPERT_PREFILL_M} - {1}):
+                one = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
+                stacked = [torch.zeros((EXPERT_GROUP, *one[0].shape), dtype=td), torch.zeros(EXPERT_GROUP, dtype=torch.int64)]
+                stacked += [torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:]]
+                graph = trace_split(build_moe_slots_wrapper(expert_w, "blocks"), stacked, None)
+                spell(f"expert-group{EXPERT_GROUP}x{rows}{suffix}", graph, (count,))
 
     def emit_halves(block, pre_w, post_w, suffix, members):
         """The ``pre`` and ``post`` twins of one attention layer at every serving width, scoped to ``members`` (the
