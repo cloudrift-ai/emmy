@@ -1600,8 +1600,10 @@ def _stored_cells(produced: Fold, axes: tuple, strides: dict[str, tuple[int, int
         if c == 1:
             produced = produced.rewrite(lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
             continue
-        folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpression("%", Var(axis.name), Literal(c, "int"))})
-        object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
+        folding = Sigma(
+            {axis.name: (Var(axis.name) / c) * d + BinaryExpression("%", Var(axis.name), Literal(c, "int"))},
+            SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}),
+        )
         produced = produced.rewrite(lambda name: name, folding)
     return produced
 
@@ -1617,18 +1619,6 @@ def _divisor(expression, name: str) -> int | None:
     return inner * int(expression.right.value)
 
 
-class _FoldingSigma(Sigma):
-    """A substitution that FOLDS as it lands, under a fixed range context.
-
-    ``Sigma.apply`` substitutes and stops, which is right everywhere else: a σ that rewrote its
-    result would hide what it did. Here the fold is the point — the whole gain is that
-    ``i / c`` and ``i % c`` collapse to the bare split coordinates, and an index left as
-    ``((hi * c) + lo) / c`` reaches the scheduler as an expression of the fused name again."""
-
-    def after(self, expression):
-        return expression.simplify(self._ctx)
-
-
 def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyCtx) -> Fold:
     """``produced`` with the coordinate ``name`` substituted and every index folded against ``ctx``.
 
@@ -1637,11 +1627,11 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
     the substituted name leaves the param list and :meth:`Lambda.closing` appends the two the body
     now reads, as TRAILING params, which is where a coordinate already sat and is what keeps the
     operand correspondence in the prefix untouched. A fold over an axis of the same name binds that
-    name for itself and its operands, so it is left whole."""
+    name for itself and its operands, so it is left whole. The fold is the point: the whole gain is that
+    ``i / c`` and ``i % c`` collapse to the bare split coordinates."""
     if produced.axis == name:
         return produced
-    folding = _FoldingSigma(dict(sigma.mapping))
-    object.__setattr__(folding, "_ctx", ctx)
+    folding = Sigma(dict(sigma.mapping), ctx)
     operands = tuple(_substitute_and_fold(edge, name, sigma, ctx) for edge in produced.operands)
     body = Body(stmt.rewrite(lambda n: n, folding) for stmt in produced.lift.body)
     lift = Lambda.closing(tuple(p for p in produced.lift.params if p != name), body, produced.lift.results)

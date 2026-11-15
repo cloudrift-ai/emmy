@@ -9,16 +9,25 @@ emmy-pure` runs its tests, and the Python suite runs it through the `emmy.emmy_i
 
 ## The boundary
 
-Python holds a handle on a term and asks whole questions — a reading, the canonical form, the tree normalization, the
-lowering — and never walks a term node by node across the boundary. What a pass DECIDES stays a pass in Python (the
-cut, the split, the layout, which recipe fuses, the schedule), calling the crate for the mechanics. The recipe
-definitions (SOFTMAX, WELFORD) are Python data built through this crate's constructors; `Fold.fuse` (the recipe
-matching) and `Fold.rewrite` (whose `Sigma` may carry a Python `after` hook) are the term's last Python members.
+Python holds a handle on a term and asks whole questions — a reading, the canonical form, a rewrite, the recipe
+matching, the tree normalization, the lowering — and never walks a term node by node across the boundary. What a pass
+DECIDES stays a pass in Python (the cut, the split, the layout, which recipe to try, the schedule), calling the crate
+for the mechanics. The recipe definitions (SOFTMAX, WELFORD) are Python data built through this crate's constructors.
+The one Python member of a term is the `rewrite` glue, which turns a rename function and an axis function into the
+maps the crate takes.
 
-A term is reached by OBJECT: the placement reads one value where it sees one term, so the extension gives a term one
-Python object while anything holds it (a table keyed by the term's address keeps a weak reference to it), and a term's
-operands read back as the objects they were built from. A wrapper holds its operands' objects, so every term reached
-by walking from a held one keeps its object, and its `id`, for the whole walk.
+## A term is reached by object
+
+Two terms with the same stored parts are EQUAL, and they are still two terms. The placement reads one value where it
+sees one term, and a pass tells two occurrences of equal terms apart by which one it holds, so the crate keeps
+identity (`ptr_eq`) beside equality and never merges equal terms on its own. Sharing is made in one place, the tree
+normalization, which collapses same-value cones onto one term.
+
+The extension gives a term one Python object while anything holds it (a table keyed by the term's address keeps a
+weak reference to it), so `is` in Python is `ptr_eq` in the crate. A term Python builds takes its operands' objects
+as it is made, so it reads back the objects it was given, and a wrapper keeps every object it hands out, so every
+term reached by walking from a held one keeps its object, and its `id`, for the whole walk. A `Lambda`, a `Recipe`
+and a view are values: they compare by what they hold.
 
 ## Modules
 
@@ -28,11 +37,17 @@ by walking from a held one keeps its object, and its `id`, for the whole walk.
   `componentwise` / `components`.
 - `twist.rs` — `Recipe`, `Channel`, `Twist`: the fused ⊕ over a carrier's state names (`program`) and the injected
   singleton (`inject`).
-- `fold.rs` — `Fold`: its stored parts and formation (`Fold::new`: the shadowed operand of a zero-axis term, the
-  positional binding, the carrier reads, A-first orientation, the observer), and the reads every pass asks:
-  `exposes`, `bindings`, `applied`, `axis`, `free_axes`, `carries`, `combine`, `canonical`.
+- `fold.rs` — `Fold`: its stored parts and formation in two halves that `Fold::new` runs in order:
+  the canonical rewrites (a zero-axis term loses its shadowed operands, a bilinear term takes its A operand first)
+  and the checks, which refuse and never repair (the positional binding, the monoid arity, the carrier reads, the
+  observer, a lift that applies). Then the reads every pass asks: `exposes`, `bindings`, `applied`, `axis`,
+  `free_axes`, `carries`, `combine`, `canonical`.
 - `readings.rs` — the derived readings: `exposing`, `based`, `roles`, the bilinear channels and the contraction they
   read as, `tiles_whole`, `chunked`, `per_state`, the reduction, slab and affine readings, `merge`, `step`.
+- `rewrite.rs` — `Fold::rewrite`: a term renamed, substituted and axis-mapped the way a statement is, the
+  substitution hygienic about the axis each term binds and folded under a range context when it carries one.
+- `fuse.rs` — `Fold::fuse`: the one generic algorithm over the recipes. It finds the pivot among the term's operands,
+  matches the score cone and a channel's pattern by canonical form, and instantiates the recipe by renaming.
 - `tree.rs` — the tree-wide canonical forms (`Fold::normalized`): the pass-through dissolve, the per-state split, the
   unread-component prune and the cone sharing, to a fixpoint remembered on the result per stored set.
 - `lower.rs` — the one lowering to Loop IR (`Fold::lower`), whose result kernel identity digests, and the demand walk
@@ -42,11 +57,15 @@ by walking from a held one keeps its object, and its `id`, for the whole walk.
 
 A term is immutable, so every derived read is computed once and kept on the term (a `OnceLock`, or a small table for
 a read that takes an argument): a structural copy that keeps a subtree keeps its answers, and a walk over a large fused
-tree stays linear. The memos are caches on the term, never fields of a golden or an op's knobs, and transport pickles
-the stored parts only.
+tree stays linear. A lowering is one of them, keyed by everything it reads: the bound coordinates, the stores, the
+axis table with each axis's window and hint, and the symbolic extents. The memos are caches on the term, never fields
+of a golden or an op's knobs, and transport pickles the stored parts only. The extension keeps no second memo: its
+wrapper holds only the Python objects it has already handed out.
 
 ## Invariants
 
 - **Normal form unchanged by the port.** The crate computes every canonical form the Python terms computed, byte for
-  byte; a change to one is a restamp decision, not a port detail.
+  byte; a change to one is a restamp decision, not a port detail. That includes the tie-break of the A-first
+  orientation between two slabs that both read the reduce axis last, which follows the name of each one's own row: a
+  term carries no axis order to read instead, so any other rule re-keys the kernels it touches on every card.
 - **Normalization carries no knob.** The tree normalization is a pure function of the tree and the stored names.

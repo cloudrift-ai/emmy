@@ -84,15 +84,6 @@ impl Recipe {
         Recipe(Arc::new(data))
     }
 
-    /// The shared data: what a table keyed per recipe holds a weak handle on.
-    pub fn arc(&self) -> &Arc<RecipeData> {
-        &self.0
-    }
-
-    pub fn ptr_eq(&self, other: &Recipe) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-
     /// The pivot's ⊕: the base monoid's first component.
     pub fn pivot(&self) -> &ElementwiseOp {
         &self.0.base[0]
