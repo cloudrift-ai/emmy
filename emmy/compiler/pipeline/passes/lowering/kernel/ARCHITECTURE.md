@@ -846,13 +846,15 @@ starts at `lane * n` reads its run as one vector even though the variable's own 
 the flat address that is not a sum, difference or product (a gathered selector's sign wrap, a cast, a quotient)
 counts as one unknown integer per distinct subterm, so a routed expert's selector-indexed weight run still proves.
 
-`030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements;
-its rules are `stamp_types` in `ir/types.py`. It runs early because the passes after it read the stamps and match
-one-operation values over the names the lowering wrote. `120_explicit_conversions` runs after them and completes the
-types (`explicit_conversions`, same module): each operation computes at one dtype, every conversion is a definition of
-its own, and a write stores a value of its buffer's element type. A `RegStore` epilogue is typed the same way
-(`epilogue_conversions`), over the f32 elements of its accumulators: a float load is widened to f32 by a conversion of
-its own and a select is f32, as the epilogue always computed. A conversion between a load and its reader would hide
+`030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements; its
+rules are `stamp_types` in `ir/types.py`. A cross-thread combine is built before its state has a dtype, so it runs at
+f32 unless its program names one; once the stamps give its states one integer dtype, the combine and its shared slabs
+take that dtype, since an integer rounds past 2**24 through f32. It runs early because the passes after it read the
+stamps and match one-operation values over the names the lowering wrote. `120_explicit_conversions` runs after them and
+completes the types (`explicit_conversions`, same module): each operation computes at one dtype, every conversion is a
+definition of its own, and a write stores a value of its buffer's element type. A `RegStore` epilogue is typed the same
+way (`epilogue_conversions`), over the f32 elements of its accumulators: a float load is widened to f32 by a conversion
+of its own and a select is f32, as the epilogue always computed. A conversion between a load and its reader would hide
 the pattern the vector passes, the shared carry and the load reuse look for, which is why it is not part of `030`. The
 body's optimization then computes each conversion once, at the shallowest scope that holds its source. `lowering/cuda`
 checks the result (`check_input`, which holds `check_types`) on every kernel before it compiles one.

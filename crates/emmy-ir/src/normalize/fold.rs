@@ -152,6 +152,13 @@ pub(crate) fn read_counts(body: &Body, exposed: &HashSet<Name>) -> HashMap<Name,
                 *counts.entry(name).or_default() += count;
             }
         }
+        // A statement that stays whatever reads it and updates a name in place (a cross-thread combine merging its
+        // states) reads that name's value; the definition filter above would drop the value it merges.
+        if !is_droppable_pure(stmt) {
+            for name in stmt.updates() {
+                *counts.entry(name).or_default() += 1;
+            }
+        }
     });
     counts
 }
@@ -203,6 +210,20 @@ mod tests {
     use crate::identity::canonicalize_identity;
     use crate::normalize::testing::*;
     use crate::normalize::{normalize_body, optimize_body};
+
+    /// A combine that stays because one of its states is read still merges every state it holds, so each state's
+    /// accumulator stays though nothing reads that state after the combine.
+    #[test]
+    fn a_state_a_combine_merges_keeps_its_accumulator() {
+        let given = body(
+            "Tile(axes=(m in 0..4, _lane in 0..32)):\n    for k in 0..16:\n        x = load X[m, k]\n        a <- add(a, x) over k\n\
+             \x20       y = load Y[m, k]\n        b <- add(b, y) over k\n\
+             \x20   WarpShuffle(state=(a, b), state_b=(a__o, b__o), length=32):\n        combine_states:\n\
+             \x20           a = a + a__o\n            b = b + b__o\n    O[m] = b",
+        );
+        let out = text(&optimize_body(&given).unwrap());
+        assert!(out.contains("a <- add(a, x)"), "{out}");
+    }
 
     #[test]
     fn a_run_of_one_test_is_one_condition_with_the_bodies_in_order() {
