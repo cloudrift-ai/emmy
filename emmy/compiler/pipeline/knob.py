@@ -463,8 +463,8 @@ def _environ_pins(family: str) -> tuple[tuple[str, str], ...]:
 def parse_knob_spec(raw: str) -> dict[str, str]:
     """Parse the shared ``K1=V1,K2=V2`` knob-spec grammar (the ``EMMY_KNOBS``
     aggregate, ``run --ab``) into an ordered ``{NAME: value}`` dict — whitespace
-    tolerated, empty entries skipped. A malformed entry (missing ``=`` / empty
-    KEY) raises ``ValueError``. Case is canonicalized per key part: the family
+    tolerated around an entry, empty entries skipped. A malformed entry (missing ``=`` / empty
+    KEY / whitespace inside the value, which is two pins written without their comma) raises ``ValueError``. Case is canonicalized per key part: the family
     (before any ``@``) uppercases, while the exact site (after it) lowercases — so
     ``tile@N0=…`` pins ``TILE@n0`` instead of being mangled to ``TILE@N0``."""
     out: dict[str, str] = {}
@@ -480,7 +480,10 @@ def parse_knob_spec(raw: str) -> dict[str, str]:
             raise ValueError(f"knob spec entry {entry!r} has empty KEY")
         fam, at, element = key.partition("@")
         key = fam.upper() + (at + element.lower() if at else "")
-        out[key] = value.strip()
+        value = value.strip()
+        if len(value.split()) > 1:
+            raise ValueError(f"knob spec entry {entry!r} holds whitespace in its value (entries are separated by ',')")
+        out[key] = value
     return out
 
 
