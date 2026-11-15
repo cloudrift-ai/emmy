@@ -14,10 +14,12 @@ lowering coverage.
 
 ## Where the numbers come from
 
-Times are microseconds on one card. "Recorded" is a row of that card's hardware golden, as `emmy golden list` prints
-it beside eager PyTorch, `torch.compile` or cuBLAS. "Pinned" is a hand pin run once with `emmy run --bench` on an RTX
-5090 (CUDA 13.0, November 2026). A pinned time shows that a structure realizes and roughly what it costs; it is not
-evidence until a record run writes it into a golden. Shapes of the hardware golden's programs used below:
+Times are microseconds on one card. "Recorded" is the fastest row that card's hardware golden holds for the program,
+which is the row a compile deploys, beside the eager PyTorch, `torch.compile` or cuBLAS time stored with the program.
+A program's first row can be slower than its fastest one, and `emmy golden list` prints the first. "Pinned" is a hand
+pin run once with `emmy run --bench` on an RTX 5090 (CUDA 13.0, November 2026). A pinned time shows that a structure
+realizes and roughly what it costs; it is not evidence, and two pins compare only inside one run. Shapes of the
+hardware golden's programs used below:
 
 | Program | Shape |
 | --- | --- |
@@ -59,7 +61,7 @@ warp holds 4 x 8 instructions of 16 x 8, and the K step is two atoms of 16.
 | Pointwise map | PyTorch `gpu_kernel`, 16-byte loads | Reproduces |
 | Row reduction | PyTorch `Reduce.cuh`, CUB block reduce | Reproduces |
 | Reduction to one value | CUB `DeviceReduce` | Reproduces the two-kernel form |
-| Softmax, RMSNorm, LayerNorm | Quack, FlashInfer | Reproduces; a faster softmax row than the recorded one; gap: row in shared memory |
+| Softmax, RMSNorm, LayerNorm | Quack, FlashInfer | Reproduces; gap: row in shared memory |
 | Prefix scan | CUB decoupled look-back, PyTorch scan | Better than PyTorch on rows; gap: scan across CTAs |
 | Top-k, sort, sampling | Air Top-K, FlashInfer sampling | Gap |
 | Gather, scatter, cache append | FlashInfer page append | Reproduces gather; gap: scatter-add |
@@ -72,7 +74,7 @@ warp holds 4 x 8 instructions of 16 x 8, and the K step is two atoms of 16.
 | 4-bit integer weights | Marlin | Gap |
 | Mixture of experts | B12x resident kernel, grouped product | Gap |
 | Convolution | cuDNN | Reproduces implicit product; gap: Winograd, FFT |
-| Attention, prefill | FlashAttention-2 | Reproduces at parity for full attention; gap: causal, head size 256 |
+| Attention, prefill | FlashAttention-2 | Better for full attention; gap: causal, head size 256 |
 | Attention, Hopper | FlashAttention-3 | Reproduces the tile; gap: ping-pong, overlap |
 | Attention, `tcgen05` | FlashAttention-4 | Gap |
 | Attention, decode | Flash-Decoding, FlashInfer | Better than FlashAttention-2 |
@@ -100,7 +102,7 @@ thread t of CTA c:
 loads and stores fold into vector accesses (`VECTORIZE_LOADS`, `VECTORIZE_STORES`, on by default). Fusion is maximal,
 so the chain is one kernel by construction.
 
-**Verdict: reproduces.** `pointwise.n16384`, RTX 5090, recorded `TILE=f2`: 11.2 against `torch.compile` 11.6 and
+**Verdict: reproduces.** `pointwise.n16384`, RTX 5090, recorded `TILE=f2`: 11.0 against `torch.compile` 11.6 and
 eager 12.5. RTX 4090, `TILE=f4`: 16.1 against 20.2.
 
 ## Row reduction
@@ -125,7 +127,7 @@ thread 0: out[row] = a
 `r` accumulators. The combine is derived: a shuffle up to one warp, then shared memory. `WORK=t<coop>x<cells>` packs
 several rows into a 128-thread CTA when `coop` is at most a warp.
 
-**Verdict: reproduces.** `reduce.k8192`, RTX 5090, recorded `WORK=t128 REDUCE=coop`: 3.4 against `torch.compile` 3.4
+**Verdict: reproduces.** `reduce.k8192`, RTX 5090, recorded `WORK=t128 REDUCE=coop`: 3.3 against `torch.compile` 3.4
 and eager 6.1. A sum over the same shape pinned at `WORK=t128 REDUCE=coop/v4`: 3.2.
 
 ## Reduction to one value
@@ -163,15 +165,16 @@ thread t: store_vector(out + t*V, exp(row_smem[t*V ..] - m) / d)
 ```
 
 **Row.** The statistics are reduce sites and the map is fused, so the row is the row reduction's:
-`WORK=t512 REDUCE=coop/v4`.
+`WORK=t512 REDUCE=coop`.
 
-**Verdict: reproduces, with a faster row than the recorded one and one gap.** `softmax.k8192` on the RTX 5090 is
-recorded at 10.7 (`WORK=t256 REDUCE=coop`) against `torch.compile` 7.3. Pinned at `WORK=t512 REDUCE=coop/v4` it runs
-7.5: the vector run closes the difference and is the row to record. `rms_norm.k8192` is recorded at 8.9 against 7.6;
-the same pin gives 8.5. One warp per row (`WORK=t32x4`) is 10.8 at this width and belongs to narrow rows.
+**Verdict: reproduces, within 1.1 times the reference.** RTX 5090: `softmax.k8192` is recorded at 8.1
+(`WORK=t512 REDUCE=coop`) against `torch.compile` 7.3, and `rms_norm.k8192` at 8.5 (`WORK=t512 REDUCE=coop/r4`)
+against 7.6. No faster row was found. In one run on the softmax, a vector run per lane was slower (`coop/v4` 10.1,
+`coop/v8` 9.3, against 8.2 for the recorded row), and so were 256 threads (11.2) and one warp per row (`WORK=t32x4`,
+10.8), which belongs to narrow rows.
 
 **Gap: the row in shared memory.** A `STAGE` pin on a cooperative reduce does not realize, so every statistic and the
-final map read the row from global memory again. This is the likely remainder on RMSNorm. A reduction across a
+final map read the row from global memory again. This is the likely remainder on both programs. A reduction across a
 cluster of CTAs has no spelling either; `REDUCE=g<n>k` covers that case with a second kernel, as FlashInfer does.
 
 ## Prefix scan
@@ -266,13 +269,13 @@ is the `mma_m8n8k4` atom with `STAGE=d2/smem`. Without tensor cores (f32 operand
 | --- | --- |
 | cuBLAS | 641 |
 | Pinned CUTLASS shape, `w2x2 …/f4x8/k2 d3/smem-async` | 681 |
-| Recorded, `w2x4 mma_m16n8k16_f16_f32/f2x4 d4/smem-tma` | 633 |
-| Recorded under fast math, `w4x2 mma_m16n8k16_f16_f16/f4x8/k4 d2/smem-tma` | 467 |
+| Recorded, `w2x4 mma_m16n8k16_f16_f32/f2x4 d4/smem-tma` | 627 |
+| Recorded under fast math, `w4x2 mma_m16n8k16_f16_f16/f4x8/k4 d2/smem-tma` | 465 |
 
 The f16-accumulate atom changes rounding and cuBLAS has no such mode, so the last row is a different contract, taken
-only where the compile allows it. Small products are behind: 512 x 512 f16 is recorded at 4.9 against `torch.compile`
-3.6. The f32 product at 4096 is recorded at 1912 against `torch.compile` 2187 on the RTX 5090, and at 2756 against
-cuBLAS 2459 on the RTX 4090.
+only where the compile allows it. A small product is level: 512 x 512 f16 is recorded at 3.3 against `torch.compile`
+3.6 and cuBLAS 6.1. The f32 product at 4096 is recorded at 1895 against `torch.compile` 2187 on the RTX 5090, and at
+2728 against cuBLAS 2459 on the RTX 4090.
 
 ## Dense product, load warp and TMA
 
@@ -296,10 +299,10 @@ is `wgmma_m64n<N>k16_f16_f32` with `WORK=w<4k>x1`, one instruction row per warp 
 every operand; `STAGE=…/p2` keeps two instruction groups in flight.
 
 **Verdict: reproduces the tile, the transport and the load warp.** The sm_120 pin above realizes with a 288-thread
-block and runs `matmul.square.4096` in 691 on the RTX 5090, against 633 for the recorded row without a load warp.
+block and runs `matmul.square.4096` in 691 on the RTX 5090, against 627 for the recorded row without a load warp.
 
 **Gap: persistent launch and ping-pong.** On the H100 the recorded `wgmma` rows trail the reference:
-`matmul.square.4096` 230 against cuBLAS 176, `matmul.qkv.h4096` 99.5 against `torch.compile` 73.6. Three parts of
+`matmul.square.4096` 229 against cuBLAS 176, `matmul.qkv.h4096` 99.5 against `torch.compile` 73.6. Three parts of
 the reference have no spelling: a persistent CTA with a tile scheduler (a row's CTA owns exactly one output tile),
 two compute groups on different tiles with overlapped epilogues, and a cluster of CTAs sharing one TMA copy. The
 epilogue is also a plain register store, never a TMA store.
@@ -472,20 +475,21 @@ TILE@map.1/twist.1/inner=mma_m16n8k16_f16_f32/f2x8/k4
 STAGE@map.1/twist=d1/smem-async
 ```
 
-**Verdict: reproduces, at parity for full attention.** RTX 5090, PyTorch's attention is FlashAttention-2:
+**Verdict: reproduces; better for full attention.** RTX 5090, PyTorch's attention is FlashAttention-2:
 
 | Program | Recorded | Fast math | PyTorch |
 | --- | --- | --- | --- |
-| `attention.hd64.fused` | 9.4 | 7.8 | 8.7 |
-| `attention.hd128.fused` | 16.7 | 13.0 | 16.2 |
-| `attention.hd128.causal.fused` | 14.5 | 12.5 | 11.4 |
-| `attention.hd256.causal.fused` | 40.6 | 38.8 | 29.4 |
+| `attention.hd64.fused` | 7.4 | 7.1 | 8.7 |
+| `attention.hd128.fused` | 13.1 | 11.5 | 16.2 |
+| `attention.hd128.causal.fused` | 13.5 | 12.5 | 11.4 |
+| `attention.hd256.causal.fused` | 40.2 | 34.8 | 29.4 |
 
-The recorded rows hold one instruction row per warp (16 query rows, `f1x…`) on a two-deep TMA ring, not
-FlashAttention-2's tile. That tile realizes but needs every register and spills: pinned on `attention.hd128.fused` it
-runs 37.
+A bench of the deployed pick in November 2026 agrees: full attention at head size 128 ran 15.1 against PyTorch 18,
+the causal one 15.5 against 13. The recorded rows hold one instruction row per warp (16 query rows, `f1x…`) on four
+warps, not FlashAttention-2's tile. That tile realizes but needs every register and spills: pinned on
+`attention.hd128.fused` it runs 37.
 
-**Gap: causal and head size 256.** The causal kernel is 1.27 times PyTorch's time and head size 256 is 1.38 times.
+**Gap: causal and head size 256.** The causal kernel is 1.18 times PyTorch's time and head size 256 is 1.37 times.
 The schedule is the same as the reference's; the difference measured on an A100 was in the code of one key block
 (shared-memory addresses computed again per block, twice the softmax arithmetic, a mask test per element), which is
 lowering work and not a missing row.
@@ -513,8 +517,8 @@ TILE@map.1/twist.1/inner=wgmma_m64n64k16_f16_f32/f1x8/k4
 STAGE@map.1/twist=d2/smem-async
 ```
 
-**Verdict: reproduces the tile and the instruction.** H100, recorded: `attention.hd128.fused` 10.9 against PyTorch's
-FlashAttention-2 at 10.9, and 9.7 under fast math; head size 256 causal 19.7 against 17.1.
+**Verdict: reproduces the tile and the instruction.** H100, recorded: `attention.hd128.fused` 10.7 against PyTorch's
+FlashAttention-2 at 10.9, and 9.6 under fast math; head size 256 causal 19.3 against 17.1.
 
 **Gap: ping-pong and overlap.** One compute group per CTA, no second group to alternate with, and no softmax
 overlapped with a product in flight. Parity with FlashAttention-2 on this card therefore means the reference's
