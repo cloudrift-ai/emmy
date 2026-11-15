@@ -28,6 +28,7 @@ def slot_widths(bucket: int) -> tuple[int, ...]:
     down to two rows. A decode step runs the narrowest that holds its rows, so it reads no more experts than it must."""
     return tuple(sorted({w for i in range(bucket.bit_length()) if (w := bucket >> i) > 1}))
 
+
 _KEY = re.compile(r"[A-Z][A-Z0-9_]*")
 _HEX_REVISION = re.compile(r"[0-9a-f]{7,40}")
 
