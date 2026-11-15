@@ -7,15 +7,16 @@ structure is still plain. The states are a chain of same-shaped nodes of one bod
 on the last; what lies between two of them is one step; and the steps differ only in the integer
 literals they read and mask at — an offset, a slice bound — each advancing affinely with the step.
 
-Each step is spliced into one body by the fusion rule's own
-splicer, the first step's body with its literals advanced by ``j`` must normalize to step ``j``'s,
-and only then is the chain replaced — by one kernel that carries the state (``Carry``) from the
-tensor the loop started with, stores what each step defined (the last state alone, where nothing
-but the next step reads a state), and by one slice of those stores per replaced buffer. A chain whose states alternate two bodies (a Sinkhorn row step then a column
-step) rolls as one step of two; a chain that is not one step advanced is left alone: a recurrence
-rolled wrongly is a wrong answer. A chain whose steps read their state only at the cell they write,
-and whose states nothing but the next step reads, is left alone too: fused whole it re-derives no
-state, so it is straight-line code, and rolling it would only store every state.
+Each step is spliced into one body by the fusion rule's own splicer, the first step's body with its
+literals advanced by ``j`` must normalize to step ``j``'s, and only then is the chain replaced — by
+one kernel that carries the state (``Carry``) from the tensor the loop started with, stores what
+each step defined (the last state alone, where nothing but the next step reads a state), and by one
+slice of those stores per replaced buffer. A chain whose states alternate two bodies (a Sinkhorn row
+step then a column step) rolls as one step of two; a chain that is not one step advanced is left
+alone: a recurrence rolled wrongly is a wrong answer. A chain whose steps read their state only at
+the cell they write, and whose states nothing but the next step reads, is left alone too: fused
+whole it re-derives no state, so it is straight-line code, and rolling it would only store every
+state.
 """
 
 from __future__ import annotations

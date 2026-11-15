@@ -231,9 +231,7 @@ def _resident(op, program, retained=frozenset()):
     else:
         seed = Let("_carry_seed", Literal(float(carry.seed)))
     # A copy that follows the changed cells finds the unchanged ones in both buffers.
-    seeded = tuple(
-        Write(shared, (Literal(slot, "int"), *suffix), ("_carry_seed",), value_dtype=seed.dtype) for slot in range(1 + lagging)
-    )
+    seeded = tuple(Write(shared, (Literal(slot, "int"), *suffix), ("_carry_seed",), value_dtype=seed.dtype) for slot in range(1 + lagging))
     threads = Literal(tile.block_threads, "int")
     initialize = StridedLoop(Axis("_carry_cell", prod(shape)), Builtin("thread_idx.x"), threads, (seed, *seeded))
     closing = ()
