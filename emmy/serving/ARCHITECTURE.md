@@ -455,11 +455,13 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   (under the outer capture the program issues its raw launch sequence, mirroring `run_device`). On a sliced-expert
   rank a decode batch up to the bucket width rides the slots too: its picks reach nearly as many distinct experts as
   there are picks, so the routed dispatch would launch about as often and add the per-layer host read. There each
-  group's program is also built at the bucket's width (`slot_rows`: `x[B, H]` and every row's picks `sel[B, k]` in,
-  `partials[B, k, H]` out, the twin `expert-slots8`), and a step of several rows runs it once, through a second shared
-  selector and partials pair, and combines every row with one batched score product. The rows past the step keep an
-  earlier step's picks and inputs, whose partials no row reads. A step of one row keeps the one-row program, and a
-  bucket-width program that does not build leaves the rows to it one at a time. Wider steps, prefill and whole-expert
+  group's program is also built at every slot width (`slot_widths`: the bucket and its halvings down to two rows;
+  `slot_rows`: `x[B, H]` and every row's picks `sel[B, k]` in, `partials[B, k, H]` out, the twins `expert-slots2`,
+  `-slots4`, `-slots8`), and a step of several rows runs the narrowest that holds it once, through a second shared
+  selector and partials pair, and combines every row with one batched score product. A program reads every slot's
+  expert whatever the step's rows, so the narrower programs are what makes a step's expert work follow its rows. The
+  rows past the step keep an earlier step's picks and inputs, whose partials no row reads. A step of one row keeps
+  the one-row program, and a step no built width holds goes through it one row at a time. Wider steps, prefill and whole-expert
   ranks ride the routed dispatch. **Grouped prefill tier:** on the same resident sliced experts each group also builds
   `ExpertFFN.blocks` over the stacked tensors (`x[G, R, H]` and one expert per block `sel[G]` in, `[G, R, H]` out,
   G = `EXPERT_GROUP`) at two block widths: R = the decode bucket for the experts a step routes that many rows or
