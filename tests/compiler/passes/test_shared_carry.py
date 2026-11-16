@@ -17,6 +17,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Loop, StridedLoop, Write, parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.pipeline.passes.tile._fromloop import owned_cells
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
@@ -65,18 +66,18 @@ def _graph(dtype=F32, *, masked=True, n=40, last=False):
 
 def test_discarded_clamps_do_not_change_the_state_owner():
     body, carry = _body()
-    assert shared._owned(body, carry) == ("b",)
+    assert owned_cells(body, carry) == ("b",)
     body, carry = _body(extra_reader=True)
-    assert shared._owned(body, carry) == (), "an unmasked reader can observe the other batch"
+    assert owned_cells(body, carry) == (), "an unmasked reader can observe the other batch"
 
 
 def test_shared_storage_keeps_the_ordered_loop_inside_one_launch():
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
+    with pinned_knobs({**_PINS, "STAGE": "d1/smem"}):
         compiled, kernels = compile_with_kernels(_graph(), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     assert not op.serial
     assert op.arg_order == ("seed", "out")
-    assert op.knobs["SHARED_CARRY"] == 1
+    assert op.knobs["STAGE"] == "d1/smem"
     (kernel,) = kernels.values()
     assert "_carry_copy" in text(kernel)
     assert "__acc" not in text(kernel)
@@ -85,10 +86,9 @@ def test_shared_storage_keeps_the_ordered_loop_inside_one_launch():
 
 def test_shared_storage_requires_room_for_both_states_and_the_combine():
     target = replace(Context.from_target((7, 0)), max_dynamic_smem=10000)
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=target)
+    compiled = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=target)
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
-    assert op.serial and not op.knobs.get("SHARED_CARRY")
+    assert op.serial and op.knobs["STAGE"] == "", "the schedule offers no shared storage the card has no room for"
 
 
 def test_recorded_shared_storage_is_picked_again_without_a_pin(tmp_path):
@@ -101,7 +101,7 @@ def test_recorded_shared_storage_is_picked_again_without_a_pin(tmp_path):
     path = tmp_path / "state.json"
     document.dump(path)
     target = document.targets()[0]
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
+    with pinned_knobs({**_PINS, "STAGE": "d1/smem"}):
         compiled = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((7, 0), gpu_name=card), db=None)
         nodes = [n for n in compiled.nodes.values() if isinstance(n.op, CudaOp)]
         record_greedy_pick(
@@ -112,11 +112,11 @@ def test_recorded_shared_storage_is_picked_again_without_a_pin(tmp_path):
             reference_backend="same-input-greedy",
         )
     measured = GoldenFile.load(path)
-    assert measured.rows[-1].knobs["SHARED_CARRY"] == "1"
+    assert measured.rows[-1].knobs["STAGE"] == "d1/smem"
     with sole_evidence([measured]), config.strict_evidence_override(True):
         replay = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((7, 0), gpu_name=card), db=None)
     [op] = [n.op for n in replay.nodes.values() if isinstance(n.op, CudaOp)]
-    assert op.knobs["SHARED_CARRY"] == 1 and not op.serial
+    assert op.knobs["STAGE"] == "d1/smem" and not op.serial
 
 
 def _selected_stores() -> Body:
@@ -171,7 +171,7 @@ def test_a_state_the_term_stores_every_step_has_no_port():
     step: the lift adds no buffer of its own, and the ordered launches read ``out`` one step back."""
     lifted = Pipeline.build(["tile/lift"]).run(_graph(), ctx=Context.from_target((7, 0)))
     assert [t.name for t in lifted.nodes["out"].outputs] == ["out"]
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 0}):
+    with pinned_knobs({**_PINS, "STAGE": ""}):
         compiled, kernels = compile_with_kernels(_graph(), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     (kernel,) = kernels.values()
@@ -198,8 +198,8 @@ def test_parallel_snapshot_copy_keeps_intermediate_casts():
     graph.nodes["out"].op = replace(graph.nodes["out"].op, body=cast_snapshot(graph.nodes["out"].op.body))
     array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
     outputs = []
-    for enabled in (0, 1):
-        with pinned_knobs({**_PINS, "SHARED_CARRY": enabled}):
+    for storage in ("", "d1/smem"):
+        with pinned_knobs({**_PINS, "STAGE": storage}):
             compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
         outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
     np.testing.assert_array_equal(*outputs)
@@ -211,8 +211,8 @@ def test_shared_state_does_not_round_the_seed_before_its_first_use():
     graph = _graph(F64)
     array = np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03
     outputs = []
-    for storage in (0, 1):
-        with pinned_knobs({**_PINS, "SHARED_CARRY": storage}):
+    for storage in ("", "d1/smem"):
+        with pinned_knobs({**_PINS, "STAGE": storage}):
             compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
         outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
     np.testing.assert_array_equal(*outputs)
@@ -225,8 +225,8 @@ def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked)
     graph = _graph(dtype, masked=masked)
     backend = CudaBackend()
     candidates = []
-    for enabled in (0, 1):
-        with pinned_knobs({**_PINS, "SHARED_CARRY": enabled}):
+    for storage in ("", "d1/smem"):
+        with pinned_knobs({**_PINS, "STAGE": storage}):
             candidates.append(Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe()))
     for seed in (0, 1):
         array = (np.random.default_rng(seed).standard_normal((2, 40, 40)) * 0.03).astype(dtype.np)
@@ -236,11 +236,11 @@ def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked)
 
 def test_ordered_launches_store_a_scan_s_last_state_at_the_last_launch_alone():
     """A store the step does not index is stored over by the next launch, so only the last launch writes it."""
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 0}):
+    with pinned_knobs({**_PINS, "STAGE": ""}):
         compiled, kernels = compile_with_kernels(_graph(last=True), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     (kernel,) = kernels.values()
-    assert op.serial and op.knobs["SHARED_CARRY"] == 0
+    assert op.serial and op.knobs["STAGE"] == ""
     guarded = {id(store) for cond in statements(kernel, Cond) if "2 == " in str(cond.cond) for store in cond.nested()[0].iter()}
     stores = [store for store in statements(kernel, Write) if store.output == "out"]
     assert stores and all(id(store) in guarded for store in stores)
@@ -249,11 +249,11 @@ def test_ordered_launches_store_a_scan_s_last_state_at_the_last_launch_alone():
 def test_shared_storage_stores_a_scan_s_last_state_once_and_copies_only_the_row_the_last_step_changed():
     """With no step's state to keep, the shared layout stores the state after its loop over the steps, and a
     step's copy between the two buffers covers the one row the step before it wrote, not the whole state."""
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
+    with pinned_knobs({**_PINS, "STAGE": "d1/smem"}):
         compiled, kernels = compile_with_kernels(_graph(last=True), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     (kernel,) = kernels.values()
-    assert not op.serial and op.arg_order == ("seed", "out") and op.knobs["SHARED_CARRY"] == 1
+    assert not op.serial and op.arg_order == ("seed", "out") and op.knobs["STAGE"] == "d1/smem"
     (steps,) = (loop for loop in statements(kernel, Loop) if loop.axis.name == "a0")
     assert not [store for store in steps.body.iter() if isinstance(store, Write) and store.output == "out"]
     (closing,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_last")
@@ -263,16 +263,18 @@ def test_shared_storage_stores_a_scan_s_last_state_once_and_copies_only_the_row_
 
 
 @requires_cuda
-@pytest.mark.parametrize("storage", [0, 1], ids=["global", "shared"])
+@pytest.mark.parametrize("storage", ["", "d1/smem"], ids=["global", "shared"])
 @pytest.mark.parametrize("masked", [True, False], ids=["selected", "full"])
 def test_a_scan_that_keeps_its_last_state_matches_the_last_step_of_one_that_keeps_all(storage, masked):
     array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
     outputs = []
     for last in (False, True):
         # A row every card since Volta realizes, so the storage under test is the one compiled.
-        with pinned_knobs({**_PINS, "WORK": "t128", "REDUCE": "coop-t/v2", "SHARED_CARRY": storage}):
+        # The unmasked step stages an operand too, so its row spells the state's storage at the carrying fold.
+        key = "STAGE" if masked else "STAGE@map.1/scan"
+        with pinned_knobs({**_PINS, "WORK": "t128", "REDUCE": "coop-t/v2", key: storage}):
             compiled = Pipeline.build(CUDA_PASSES).run(_graph(masked=masked, last=last), ctx=Context.probe())
         (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
-        assert op.knobs["SHARED_CARRY"] == storage
+        assert op.knobs[key] == storage
         outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
     np.testing.assert_array_equal(outputs[0][2], outputs[1])

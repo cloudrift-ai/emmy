@@ -786,9 +786,10 @@ the two apply paths stay distinct on a coop-K contraction.
 
 ## Shared carried state
 
-`035_shared_carry` offers a late storage choice for an ordered kernel whose state reads stay within independent
-leading batch coordinates. It proves ownership from each read's consuming predicates, including discarded clamped
-branches. One CTA owns each batch's complete state; the ordered axis and remaining grid axes become device loops.
+`035_shared_carry` realizes the shared storage a row's `STAGE=d1/smem` asks for, on an ordered kernel whose state
+reads stay within independent leading batch coordinates. The schedule offers the value only where ownership is
+proved from each read's consuming predicates, including discarded clamped branches, so the pass decides nothing; it
+rejects the row where the lowered kernel cannot hold the layout. One CTA owns each batch's complete state; the ordered axis and remaining grid axes become device loops.
 The scheduled reduction and its combine order remain unchanged. This changes kernel lowering, not Loop or Tile
 canonicalization, so the kernel keeps its identity.
 

@@ -13,8 +13,16 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import apply
 from emmy.compiler.ir.kernel.ir import FragmentLoad, FragmentPromote, FragmentRepack, MmaSyncPtx, RegFragment, fragment_registers
 from emmy.compiler.ir.schedule import Stage
-from emmy.compiler.ir.schedule.base import ScheduleRefused
-from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register
+from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.choices import Raster
+from emmy.compiler.ir.schedule.classic.schedule import KernelSchedule
+from emmy.compiler.ir.schedule.register import (
+    REGISTER_WORKS,
+    materialize_register,
+    register_accepts,
+    register_row,
+    register_tiles,
+)
 from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
@@ -33,8 +41,31 @@ def _lift(graph):
     return lifted
 
 
-def _context(tile, target=(12, 0)):
-    return RegisterContext(RegisterProblem(tile, Context.from_target(target), allow_f16=True))
+def _kernel(work, plan):
+    return KernelSchedule(work, Raster.parse(""), Stage(transport="reg"), plan)
+
+
+def _schedules(tile, target=(12, 0)):
+    """Every register schedule the catalog holds for ``tile`` on ``target``."""
+    ctx, program = Context.from_target(target), tile.register_program
+    return [
+        Schedule(_kernel(work, plan), {}, {})
+        for work in REGISTER_WORKS
+        for plan in register_tiles(program, work)
+        if register_accepts(program, work, plan, ctx)
+    ]
+
+
+def _register_leaves(tile, target=(12, 0), **pins):
+    """The rows of ``tile``'s schedule fork that keep its state in registers, under ``pins``."""
+    from importlib import import_module
+
+    from emmy.compiler.pipeline.fork import iter_leaves
+
+    classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
+    with pinned_knobs({"FAST_MATH": True, **pins}):
+        forks = classic_forks(tile, {}, Context.from_target(target))
+        return [leaf for leaf in iter_leaves(forks) if "d1/reg" in leaf.knobs.values()]
 
 
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
@@ -42,22 +73,20 @@ def test_register_schedule_round_trip_and_precision_gate(target):
     graph = _lift(_graph())
     (node,) = (n for n in graph.nodes.values() if isinstance(n.op, TileOp))
     tile = node.op
-    context = _context(tile, target)
-    assert not tuple(RegisterContext(replace(context.problem, allow_f16=False)).extensions())
-    assert not tuple(RegisterContext(replace(context.problem, target=Context.from_target((6, 0)))).extensions())
-    codec = RegisterCodec(context)
-    for schedule in context.extensions():
-        assert codec.decode(codec.encode(schedule)) == schedule
+    program = tile.register_program
+    assert _register_leaves(tile, target)
+    assert not _register_leaves(tile, target, FAST_MATH=False), "the catalog offers register storage under f16 accumulation"
+    assert not _register_leaves(tile, (6, 0))
+    for schedule in _schedules(tile, target):
         node.op = materialize_register(tile, schedule, {})
         assert "STAGE=d1/reg" in node.op.pretty_body()
         restored = Graph.from_dict(graph.to_dict())
         assert restored.nodes[node.id].op.schedule == schedule
         assert restored.nodes[node.id].op.register_program == node.op.register_program
-    row = {**codec.encode(schedule), "TILE": schedule.kernel.tile.spell().replace("/k4", "/k2")}
-    assert codec.decode(row).kernel.tile.bk == 2
-    invalid = replace(schedule, kernel=replace(schedule.kernel, tile=replace(schedule.kernel.tile, regs=(2, 1))))
-    with pytest.raises(ScheduleRefused):
-        context.extend(invalid)
+    work, plan = schedule.kernel.work, schedule.kernel.state_tile
+    assert register_row(schedule)["STAGE"] == "d1/reg"
+    assert register_accepts(program, work, replace(plan, bk=2), Context.from_target(target))
+    assert not register_accepts(program, work, replace(plan, regs=(2, 1)), Context.from_target(target))
     with pytest.raises(ValueError, match="one live value"):
         Stage.parse("d2/reg")
 
@@ -104,17 +133,18 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
     assert program.time in program.roots[-1].free_axes
 
 
-def test_a_descent_row_naming_other_families_offers_no_register_leaf():
-    """A descent narrows every offered tier with the kernel's whole row: a row naming a family the register tier does
-    not own describes another tier, so the register tier offers nothing for it, and a strict row must be its own."""
+def test_register_storage_schedules_no_site_of_the_step():
+    """Registers hold every stored value in the state's own fragments, so a register row leaves each site of the
+    step at its off value, and a row that tiles a site of the step is a row of another storage."""
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
-    context = _context(tile)
-    assert tuple(context.narrowed({}).extensions()), "the unnarrowed tier offers leaves"
-    row = {"WORK": "t16x8", "TILE@map.2/inner": "f26x26", "REDUCE@map.1/inner": ""}
-    for narrowing in (row, {"REDUCE@map.1/inner": ""}):
-        assert not tuple(context.narrowed(narrowing).extensions())
-    with pytest.raises(ValueError, match="accepts only WORK, TILE and STAGE"):
-        context.narrowed(row, strict=True)
+    leaves = _register_leaves(tile)
+    assert leaves
+    for leaf in leaves:
+        state = {key for key, value in leaf.knobs.items() if value == "d1/reg"}
+        geometry = {key for key in leaf.knobs if key.partition("@")[0] == "TILE" and leaf.knobs[key].startswith("mma_")}
+        assert len(state) == 1 and len(geometry) == 1
+        assert all(not value for key, value in leaf.knobs.items() if key not in {"WORK", *state, *geometry})
+    assert not _register_leaves(tile, REDUCE="coop")
 
 
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
@@ -158,7 +188,7 @@ def test_register_output_keeps_a_unit_batch_coordinate(batch_extent):
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
     assert (tile.register_program is not None) == (batch_extent == 1)
     if batch_extent == 1:
-        schedule = next(iter(_context(tile).extensions()))
+        schedule = _schedules(tile)[0]
         node.op = materialize_register(tile, schedule, {})
         _, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)), passes=["lowering/kernel", "lowering/cuda"])
         (kernel,) = kernels.values()
@@ -175,17 +205,10 @@ def test_classic_recurrence_does_not_reopen_the_launch_axis():
     assert not looped & {name for name, _extent in cuda.serial}
 
 
-def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
-    from importlib import import_module
-
-    from emmy.compiler.pipeline.fork import iter_leaves
-
-    classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
+def test_register_row_keeps_the_carrier_when_the_serial_form_is_also_offered():
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
-    with pinned_knobs({"FAST_MATH": True}):
-        forks = classic_forks(tile, {}, Context.from_target((12, 0)))
-        register = next(leaf for leaf in iter_leaves(forks) if leaf.knobs.get("STAGE") == "d1/reg")
-        (scheduled,) = register.expand()
+    register = _register_leaves(tile)[0]
+    (scheduled,) = register.expand()
     assert scheduled.carries and not scheduled.place.serial
     assert scheduled.register_program == tile.register_program
 
@@ -207,7 +230,7 @@ def test_register_operands_use_direct_loads_when_the_address_allows_it(target, s
         ),
     )
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
-    schedule = next(iter(_context(tile, target).extensions()))
+    schedule = _schedules(tile, target)[0]
     statements = tuple(factorize_register(materialize_register(tile, schedule, {})).body.iter())
     reads = [s for s in statements if isinstance(s, FragmentLoad)]
     assert bool(reads) == (stride == 1)
@@ -223,13 +246,13 @@ def test_gdn_reuses_the_corrected_values(target):
 
     graph = _lift(Pipeline.build(LOOP_PASSES).run(graph_from_code(_GATED_DELTA_RULE)[0]))
     (tile,) = (n.op for n in graph.nodes.values() if isinstance(n.op, TileOp) and n.op.carries)
-    for schedule in _context(tile, target).extensions():
+    for schedule in _schedules(tile, target):
         body = factorize_register(materialize_register(tile, schedule, {})).body
         statements = list(body.iter())
         # One product computes the correction, one updates the state. The separate correction
         # output shares the first product instead of evaluating the old state a second time.
         assert sum(isinstance(s, MmaSyncPtx) for s in statements) == (3 if target == (7, 0) else 2)
-        half = schedule.kernel.tile.atom.operand_dtype("c").nbytes == 2
+        half = schedule.kernel.state_tile.atom.operand_dtype("c").nbytes == 2
         assert sum(isinstance(s, FragmentPromote) for s in statements) == (2 if half else 0)
         assert isinstance(body[0], RegFragment) and body[0].dtype.name == "f32"
 
@@ -340,10 +363,13 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     lifted = _lift(Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0]))
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp) and n.op.carries)
     tile = node.op
-    context = _context(tile, Context.probe().compute_capability)
-    schedule = next(
-        s for s in context.extensions() if (s.kernel.tile.atom.operand_dtype("c").nbytes == 2) == half and s.kernel.work.units == (2, 1)
+    work = REGISTER_WORKS[1]
+    plan = next(
+        plan
+        for plan in register_tiles(tile.register_program, work)
+        if (plan.atom.operand_dtype("c").nbytes == 2) == half and register_accepts(tile.register_program, work, plan, Context.probe())
     )
+    schedule = Schedule(_kernel(work, plan), {}, {})
     graph = Graph()
     rng = np.random.default_rng(0)
     arrays = {}

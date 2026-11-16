@@ -2140,7 +2140,7 @@ def test_record_replaces_a_proposal_with_explicit_off_defaults(proposed, realize
     recorded = replace(
         proposal,
         name="generated",
-        knobs={**knobs, "TILE": "", "RASTER": "", "STAGE": "", "SHARED_CARRY": "0", **realized},
+        knobs={**knobs, "TILE": "", "RASTER": "", "STAGE": "", **realized},
         measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="same-input-greedy"),
         note=None,
     )
@@ -2152,7 +2152,7 @@ def test_record_replaces_a_proposal_with_explicit_off_defaults(proposed, realize
     assert merged.measurements == recorded.measurements and merged.knobs == recorded.knobs
 
 
-@pytest.mark.parametrize("decision", [{"LOOPIFY": "4"}, {"SHARED_CARRY": "1"}, {"VECTORIZE_LOADS": True}])
+@pytest.mark.parametrize("decision", [{"LOOPIFY": "4"}, {"STAGE": "d1/smem"}, {"VECTORIZE_LOADS": True}])
 def test_record_does_not_conflate_later_decisions(decision):
     proposal = Row(name="proposed", kernel=0, knobs={"WORK": "t256"})
     document = GoldenFile(compute_cap=(8, 9), rows=[proposal])
