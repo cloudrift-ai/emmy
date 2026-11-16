@@ -270,9 +270,11 @@ def test_a_scan_that_keeps_its_last_state_matches_the_last_step_of_one_that_keep
     outputs = []
     for last in (False, True):
         # A row every card since Volta realizes, so the storage under test is the one compiled.
-        with pinned_knobs({**_PINS, "WORK": "t128", "REDUCE": "coop-t/v2", "STAGE": storage}):
+        # The unmasked step stages an operand too, so its row spells the state's storage at the carrying fold.
+        key = "STAGE" if masked else "STAGE@map.1/scan"
+        with pinned_knobs({**_PINS, "WORK": "t128", "REDUCE": "coop-t/v2", key: storage}):
             compiled = Pipeline.build(CUDA_PASSES).run(_graph(masked=masked, last=last), ctx=Context.probe())
         (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
-        assert op.knobs["STAGE"] == storage
+        assert op.knobs[key] == storage
         outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
     np.testing.assert_array_equal(outputs[0][2], outputs[1])
