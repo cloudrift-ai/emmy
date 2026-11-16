@@ -154,9 +154,9 @@ Faults found on the way, each a compiler bug to raise:
 
 What follows, in order:
 
-1. Done: the respelling is the traced rule. It re-keys every Gated DeltaNet program at every width, so each card
-   that holds such a golden needs its programs traced again and recorded; the RTX 5090 goldens come first.
-2. Record the cut rows on the other cards (RTX 4090, A100, H100, V100) as they are rented.
+1. Done: the respelling is the traced rule. The trace takes it only above one chunk of 64 rows, so it re-keys the
+   256-row programs alone; today one golden holds them (the NVIDIA 27B checkpoint's, RTX 5090).
+2. Record the cut rows of those 256-row roots on the RTX 5090.
 3. The substitution, 53 µs: a tuned row first (it ran 31 µs in blocks of 16 alone), then R2's blocked inverse.
 4. R5 only for what is left against 87 µs.
 
