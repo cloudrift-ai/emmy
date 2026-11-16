@@ -64,8 +64,11 @@ Stock vLLM was not measured in this session, so the bar below is the 2026-11-12 
 | twins that deploy from the golden alone | 67 of 67 | 80 of 80 | |
 
 - **Width halves the first token and does not reach the 7,680-token bar.** A 256-row chunk takes about 81 ms where
-  four 64-row chunks take about 149 ms. From the golden's rows, the 48 Gated DeltaNet layers are about 51 ms of it
-  (1.06 ms each) and the 64 MLPs about 25 ms; the bar needs about 45 ms a chunk.
+  four 64-row chunks take about 149 ms. The bar needs about 45 ms a chunk. The golden's rows hold about
+  55.5 ms of it: a Gated DeltaNet layer is 0.86 ms (FP8 projections 0.40, MLP 0.29, the recurrence 0.16) and an
+  attention layer 0.90 ms at a 4,096 window (projections 0.40, MLP 0.28, the fold 0.21). Over the chunk the FP8
+  projections are 25.5 ms, the MLPs 18.6 ms, the recurrence 7.4 ms and the fold 3.3 ms. About 25 ms is in no row;
+  a served chunk was not profiled. (Corrected 2026-11-16: the split first written here counted the MLP twice.)
 - **The 197,632-token first token is inside the bar.** Long-window attention at 256 rows takes 4.96 ms a layer at
   131,072 positions, 3.1x the 64-row fold for four times the rows.
 - **GSM8K.** The two packs differ by 0.015 strict and 0.040 flexible, with a standard error of 0.033 on each score:

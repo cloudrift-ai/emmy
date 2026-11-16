@@ -543,11 +543,27 @@ What the session changes for the milestones:
    - **The plugin's any-width `pre` program is recorded,** the one twin the strict audit failed on when the session
      began.
 
-   Where an 81 ms chunk goes, from the golden's rows: the 48 Gated DeltaNet layers about 51 ms (1.06 ms each), the 64
-   MLPs about 25 ms (0.39 ms each), attention and its projections about 8 ms at a 4,096 window. The 7,680-token cell
-   needs about 45 ms a chunk, so what is left of this milestone is its second piece, the row cost of the Gated
-   DeltaNet layers, and the MLP at 256 rows (its gate and up projection is 3.2x the 64-row kernel for four times the
-   rows).
+   Where an 81 ms chunk goes, read again from the golden's rows on 2026-11-16 (the split written here first counted
+   the MLP twice and used times from before the tune). A Gated DeltaNet layer is 0.86 ms: its FP8 projections
+   0.40 ms (in qkv 149 us, in z 106, out 108, two small ones 35), its MLP 0.29 ms, the recurrence's fourteen
+   kernels 0.16 ms, the rest 0.04 ms. An attention layer is 0.90 ms at a 4,096 window: projections 0.40 ms, MLP
+   0.28 ms, the fold 0.21 ms. Over 48 and 16 layers that is about 55.5 ms of recorded kernel time: FP8 projections
+   25.5 ms, MLPs 18.6 ms, the recurrence 7.4 ms, the fold 3.3 ms. So about 25 ms of the chunk is in no row. The
+   rows are benched alone with their weights already in the card's cache; a served chunk makes about 2,700 launches
+   and reads each layer's weights cold. Which of the two it is has not been measured.
+
+   The 7,680-token cell needs about 45 ms a chunk, so three things are left, largest first:
+
+   - **The 25 ms outside the rows.** One profile of a served 7,680-token prefill on the 256-row pack, kernel by
+     kernel, as 8 did at 64 rows. No fix can be chosen before it.
+   - **The FP8 projections.** #1418 writes every FP8 product through the block-scaled instruction, 1.2 to 1.5 times
+     faster on its tiles; the pack of 2026-11-15 was built before it and these rows keep their old times. At 1.3
+     times that is about 6 ms a chunk for a record run alone.
+   - **The recurrence.** The kernel-gap plan owns it (its R0 to R4). At the reference's 87 us a layer it returns
+     about 3.3 ms a chunk, so at 256 rows it is the smallest of the three; in the verify step it is the largest.
+
+   With all three the recorded kernels come to about 46 ms. The MLP's two products already run near 500 TFLOP/s
+   and have no named lever.
 
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
