@@ -728,8 +728,8 @@ ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds
 the partition, so each slice stops at the block end plus the position minus its own base. Expression normalization
 may reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. It also
 orders a sum's terms by coefficient, which can put two masks ahead of a scaled score; the tier adds the masks last,
-each to the value it masks. A mask that scales the key against the row (native's decode and verify steps, whose rows fold a group of query heads) bounds
-no stream: it is masked per element alone. A mask whose
+each to the value it masks. A mask that scales the key against the row (native's decode and verify steps, whose rows
+fold a group of query heads) bounds no stream: it is masked per element alone. A mask whose
 masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every
 row the CTA holds, so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every
 key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
