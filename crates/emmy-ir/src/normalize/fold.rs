@@ -216,10 +216,10 @@ mod tests {
     #[test]
     fn a_state_a_combine_merges_keeps_its_accumulator() {
         let given = body(
-            "Tile(axes=(m in 0..4, _lane in 0..32)):\n    for k in 0..16:\n        x = load X[m, k]\n        a <- add(a, x) over k\n\
-             \x20       y = load Y[m, k]\n        b <- add(b, y) over k\n\
-             \x20   WarpShuffle(state=(a, b), state_b=(a__o, b__o), length=32):\n        combine_states:\n\
-             \x20           a = a + a__o\n            b = b + b__o\n    O[m] = b",
+            "Tile(axes=(m in 0..4, _lane in 0..32)):\n  for k in 0..16:\n    x = load X[m, k]\n    a <- add(a, x) over k\n\
+             \x20   y = load Y[m, k]\n    b <- add(b, y) over k\n\
+             \x20 WarpShuffle(state=(a, b), state_b=(a__o, b__o), length=32):\n    combine_states:\n\
+             \x20     a = a + a__o\n      b = b + b__o\n  O[m] = b",
         );
         let out = text(&optimize_body(&given).unwrap());
         assert!(out.contains("a <- add(a, x)"), "{out}");
@@ -230,24 +230,23 @@ mod tests {
         // Two stores under one test are one condition; a test that reads a name the first body defines, another
         // side, or a statement between keeps the conditions apart.
         let given = body(
-            "if i < n:\n    x = load a[i]\n    o[i] = x\nif i < n:\n    y = load a[i + 1]\n    o[i + 1] = y\n\
-             if i + 1 < n:\n    z = load a[i + 2]\n    o[i + 2] = z",
+            "if i < n:\n  x = load a[i]\n  o[i] = x\nif i < n:\n  y = load a[i + 1]\n  o[i + 1] = y\n\
+             if i + 1 < n:\n  z = load a[i + 2]\n  o[i + 2] = z",
         );
         assert_eq!(
             text(&optimize_body(&given).unwrap()),
-            "if i < n:\n    x = load a[i]\n    o[i] = x\n    y = load a[i + 1]\n    o[i + 1] = y\n\
-             if i + 1 < n:\n    z = load a[i + 2]\n    o[i + 2] = z"
+            "if i < n:\n  x = load a[i]\n  o[i] = x\n  y = load a[i + 1]\n  o[i + 1] = y\n\
+             if i + 1 < n:\n  z = load a[i + 2]\n  o[i + 2] = z"
         );
         let apart = body(
-            "x = load a[i]\nif i < n:\n    o[i] = x\nelse:\n    o[i + 1] = x\nif i < n:\n    o[i + 2] = x",
+            "x = load a[i]\nif i < n:\n  o[i] = x\nelse:\n  o[i + 1] = x\nif i < n:\n  o[i + 2] = x",
         );
         assert_eq!(text(&optimize_body(&apart).unwrap()), text(&apart));
     }
 
     #[test]
     fn a_decided_condition_is_its_one_side() {
-        let given =
-            body("x = load a[0]\nif 1:\n    o[0] = x\nif 0:\n    o[1] = x\nelse:\n    o[2] = x");
+        let given = body("x = load a[0]\nif 1:\n  o[0] = x\nif 0:\n  o[1] = x\nelse:\n  o[2] = x");
         assert_eq!(
             text(&optimize_body(&given).unwrap()),
             "x = load a[0]\no[0] = x\no[2] = x"
@@ -271,10 +270,10 @@ mod tests {
     fn normal_of(lines: &[&str]) -> String {
         let mut spelled = vec![
             "for i in 0..8:".to_string(),
-            "    v = load x[i]".to_string(),
-            "    s = load y[i]".to_string(),
+            "  v = load x[i]".to_string(),
+            "  s = load y[i]".to_string(),
         ];
-        spelled.extend(lines.iter().map(|line| format!("    {line}")));
+        spelled.extend(lines.iter().map(|line| format!("  {line}")));
         text(&normalize_body(&body(&spelled.join("\n"))).unwrap())
     }
 
@@ -290,7 +289,7 @@ mod tests {
                 "o = multiply(v, w)",
                 "O[i] = o"
             ]),
-            "for a0 in 0..8:\n    in0 = load x[a0]\n    v0 = 1.0 * in0\n    O[a0] = v0"
+            "for a0 in 0..8:\n  in0 = load x[a0]\n  v0 = 1.0 * in0\n  O[a0] = v0"
         );
     }
 
@@ -298,7 +297,7 @@ mod tests {
     fn a_constant_read_by_a_write_keeps_its_statement() {
         assert_eq!(
             normal_of(&["z = subtract(s, s)", "u = exp(z)", "O[i] = u"]),
-            "let f32 v0 = 1.0\nfor a0 in 0..8:\n    O[a0] = v0"
+            "let f32 v0 = 1.0\nfor a0 in 0..8:\n  O[a0] = v0"
         );
     }
 
@@ -313,7 +312,7 @@ mod tests {
                 "o = multiply(v, h)",
                 "O[i] = o"
             ]),
-            "let f16 v0 = 1.0\nfor a0 in 0..8:\n    in0 = load x[a0]\n    v1 = in0 * v0\n    O[a0] = v1"
+            "let f16 v0 = 1.0\nfor a0 in 0..8:\n  in0 = load x[a0]\n  v1 = in0 * v0\n  O[a0] = v1"
         );
     }
 
@@ -323,36 +322,33 @@ mod tests {
         // the loop that summed it reach no output: normalization drops them all, and keeps the stores.
         let normal = normalize_body(&body(
             "
-            for i in 0..8:
-                for k in 0..4:
-                    q = load Q[i, k]
-                    kk = load K[i, k]
-                    qk = multiply(q, kk)
-                    acc <- add(acc, qk) over k
-                let f32 scale = 0.125
-                s = multiply(acc, scale)
-                z = subtract(s, s)
-                w = exp(z)
-                v = load V[i]
-                o = multiply(v, w)
-                O[i] = o
+      for i in 0..8:
+        for k in 0..4:
+          q = load Q[i, k]
+          kk = load K[i, k]
+          qk = multiply(q, kk)
+          acc <- add(acc, qk) over k
+        let f32 scale = 0.125
+        s = multiply(acc, scale)
+        z = subtract(s, s)
+        w = exp(z)
+        v = load V[i]
+        o = multiply(v, w)
+        O[i] = o
             ",
         ))
         .unwrap();
         assert_eq!(
             text(&normal),
-            "for a0 in 0..8:\n    in0 = load V[a0]\n    v0 = 1.0 * in0\n    O[a0] = v0"
+            "for a0 in 0..8:\n  in0 = load V[a0]\n  v0 = 1.0 * in0\n  O[a0] = v0"
         );
     }
 
     /// A loop that reads `x` from `X`, runs `lines` and stores `o`.
     fn affine_body(lines: &[&str]) -> crate::body::Body {
-        let mut spelled = vec![
-            "for i in 0..8:".to_string(),
-            "    x = load X[i]".to_string(),
-        ];
-        spelled.extend(lines.iter().map(|line| format!("    {line}")));
-        spelled.push("    O[i] = o".to_string());
+        let mut spelled = vec!["for i in 0..8:".to_string(), "  x = load X[i]".to_string()];
+        spelled.extend(lines.iter().map(|line| format!("  {line}")));
+        spelled.push("  O[i] = o".to_string());
         body(&spelled.join("\n"))
     }
 
@@ -362,12 +358,10 @@ mod tests {
 
     /// The normal form of `O[i] = coefficient * X[i]`.
     fn scaled(coefficient: &str) -> String {
-        format!(
-            "for a0 in 0..8:\n    in0 = load X[a0]\n    v0 = {coefficient} * in0\n    O[a0] = v0"
-        )
+        format!("for a0 in 0..8:\n  in0 = load X[a0]\n  v0 = {coefficient} * in0\n  O[a0] = v0")
     }
 
-    const COPY: &str = "for a0 in 0..8:\n    in0 = load X[a0]\n    O[a0] = in0";
+    const COPY: &str = "for a0 in 0..8:\n  in0 = load X[a0]\n  O[a0] = in0";
 
     /// Every spelling of a scale by a float literal is one body, and the literal the fold took is dropped; `x + x`
     /// is the integer scale, another body, since an integer coefficient keeps an integer operand integer.
@@ -419,7 +413,7 @@ mod tests {
     #[test]
     fn a_select_whose_branches_bind_one_value_is_that_value() {
         assert_eq!(
-            affine_normal(&["o = select:", "    x when i < i", "    x when i < i"]),
+            affine_normal(&["o = select:", "  x when i < i", "  x when i < i"]),
             COPY
         );
     }

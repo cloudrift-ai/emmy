@@ -264,17 +264,17 @@ mod tests {
     fn a_body_that_holds_a_call_has_no_normal_form() {
         let given = parse_body(
             "sub project(row in 0..3, col in 0..8) -> sum:
-    for k in 0..16:
-        xv = load x[row, k]
-        wv = load weight[col, k]
-        product = multiply(xv, wv)
-        sum <- add(sum, product) over k
+  for k in 0..16:
+    xv = load x[row, k]
+    wv = load weight[col, k]
+    product = multiply(xv, wv)
+    sum <- add(sum, product) over k
 for k in 0..3:
-    for c in 0..8:
-        left = call project[x, weight](k, c)
-        right = call project[x, weight](k, (c + 4) % 8)
-        value = add(left, right)
-        out[k, c] = value",
+  for c in 0..8:
+    left = call project[x, weight](k, c)
+    right = call project[x, weight](k, (c + 4) % 8)
+    value = add(left, right)
+    out[k, c] = value",
         )
         .unwrap();
         let error = normalize_body(&given).unwrap_err().to_string();
@@ -310,30 +310,27 @@ for k in 0..3:
     #[test]
     fn a_body_normalizes_and_settles() {
         let text = normal(
-            "for i in 0..4:\n    for k in 0..8:\n        x = load a[i, k]\n        y = exp(x)\n        s <- add(s, y) over k\n    out[i] = s",
+            "for i in 0..4:\n  for k in 0..8:\n    x = load a[i, k]\n    y = exp(x)\n    s <- add(s, y) over k\n  out[i] = s",
         );
         assert!(
             text.contains("v0 = exp(in0)\n") && text.contains("acc0 <- add(acc0, v0) over a1"),
             "{text}"
         );
         let folded = normal(
-            "for i in 0..4:\n    x = load a[i]\n    let c = 2.0\n    y = multiply(x, c)\n    z = add(y, x)\n    out[i] = z",
+            "for i in 0..4:\n  x = load a[i]\n  let c = 2.0\n  y = multiply(x, c)\n  z = add(y, x)\n  out[i] = z",
         );
         assert!(folded.contains("v0 = 3.0 * in0"), "{folded}");
     }
 
     #[test]
     fn renamed_bodies_share_an_identity() {
-        let a = parse_body("for i in 0..4:\n    x = load p[i]\n    y = exp(x)\n    out[i] = y")
-            .unwrap();
-        let b = parse_body("for j in 0..4:\n    q = load r[j]\n    w = exp(q)\n    res[j] = w")
-            .unwrap();
+        let a = parse_body("for i in 0..4:\n  x = load p[i]\n  y = exp(x)\n  out[i] = y").unwrap();
+        let b = parse_body("for j in 0..4:\n  q = load r[j]\n  w = exp(q)\n  res[j] = w").unwrap();
         let ia = crate::identity::canonicalize_identity(&a, false, None).unwrap();
         let ib = crate::identity::canonicalize_identity(&b, false, None).unwrap();
         assert_eq!(ia.key, ib.key);
         assert_eq!(ia.arguments, vec![Name::from("p"), Name::from("out")]);
-        let c = parse_body("for j in 0..4:\n    q = load r[j]\n    w = log(q)\n    res[j] = w")
-            .unwrap();
+        let c = parse_body("for j in 0..4:\n  q = load r[j]\n  w = log(q)\n  res[j] = w").unwrap();
         assert_ne!(
             crate::identity::canonicalize_identity(&c, false, None)
                 .unwrap()
@@ -387,14 +384,14 @@ for k in 0..3:
         // spelling: the spelling reads nothing the order decides, so normalizing the normal form changes nothing.
         let once = normalize_uncached(&testing::body(
             "
-            for a0 in 0..48:
-                for a2 in 0..512:
-                    v36 = multiply(v35, v3)
-                    v37 = pad(v36)
-                    reshape_9[0, a0, a2 / 64, a2 % 64] = v37
-                    for a7 in 0..128:
-                        v146 = pad(v145)
-                        reshape_5[0, a0, a2 / 64, a2 % 64, a7] = v146
+      for a0 in 0..48:
+        for a2 in 0..512:
+          v36 = multiply(v35, v3)
+          v37 = pad(v36)
+          reshape_9[0, a0, a2 / 64, a2 % 64] = v37
+          for a7 in 0..128:
+            v146 = pad(v145)
+            reshape_5[0, a0, a2 / 64, a2 % 64, a7] = v146
             ",
         ))
         .unwrap();
@@ -407,14 +404,14 @@ for k in 0..3:
     fn one_key_softmax() -> Body {
         testing::body(
             "
-            for i in 0..8:
-                v = load x[i]
-                s = load y[i]
-                z = subtract(s, s)
-                u = exp(z)
-                w = divide(u, u)
-                o = multiply(v, w)
-                O[i] = o
+      for i in 0..8:
+        v = load x[i]
+        s = load y[i]
+        z = subtract(s, s)
+        u = exp(z)
+        w = divide(u, u)
+        o = multiply(v, w)
+        O[i] = o
             ",
         )
     }
@@ -423,15 +420,15 @@ for k in 0..3:
     fn equal_gather_index() -> Body {
         testing::body(
             "
-            x = load x[0]
-            for i in 0..4:
-                a = load indices[i]
-                b = load indices[i]
-                s = select:
-                    x when a - b < 1
-                    a when 1
-                v = exp(s)
-                out[i] = v
+      x = load x[0]
+      for i in 0..4:
+        a = load indices[i]
+        b = load indices[i]
+        s = select:
+          x when a - b < 1
+          a when 1
+        v = exp(s)
+        out[i] = v
             ",
         )
     }
@@ -444,12 +441,12 @@ for k in 0..3:
         let normal = crate::text::body_text(
             &normalize_uncached(&testing::body(
                 "
-                for a0 in 0..8:
-                    for a1 in 0..4:
-                        in0 = load U[a0, a1]
-                        acc0[a1] <- in0 seed 0
-                        v2 = pre acc0[a1]
-                        out[a0, a1] = v2
+        for a0 in 0..8:
+          for a1 in 0..4:
+            in0 = load U[a0, a1]
+            acc0[a1] <- in0 seed 0
+            v2 = pre acc0[a1]
+            out[a0, a1] = v2
                 ",
             ))
             .unwrap(),
@@ -469,26 +466,26 @@ for k in 0..3:
         // rank lost there flipped the operands on every second normalization.
         let normal = normalize_uncached(&testing::body(
             "
-            let f32 v0 = 1.0
-            for a0 in 0..128:
-                for a1 in 0..512:
-                    for a2 in 0..512:
-                        in0 = load wg[a1, a2]
-                        in1 = load wu[a1, a2]
-                        in2 = load x[a0, a2]
-                        f32 v1 = multiply(in0, in2)
-                        acc0 <- add(acc0, v1) over a2
-                        f32 v2 = multiply(in1, in2)
-                        acc1 <- add(acc1, v2) over a2
-                    f16 v3 = copy(acc1)
-                    f16 v4 = copy(acc0)
-                    f32 v5 = copy(v4)
-                    v6 = negative(v5)
-                    v7 = exp(v6)
-                    v8 = add(v7, v0)
-                    f16 v9 = divide(v5, v8)
-                    v10 = multiply(v3, v9)
-                    o[a0, a1] = v10
+      let f32 v0 = 1.0
+      for a0 in 0..128:
+        for a1 in 0..512:
+          for a2 in 0..512:
+            in0 = load wg[a1, a2]
+            in1 = load wu[a1, a2]
+            in2 = load x[a0, a2]
+            f32 v1 = multiply(in0, in2)
+            acc0 <- add(acc0, v1) over a2
+            f32 v2 = multiply(in1, in2)
+            acc1 <- add(acc1, v2) over a2
+          f16 v3 = copy(acc1)
+          f16 v4 = copy(acc0)
+          f32 v5 = copy(v4)
+          v6 = negative(v5)
+          v7 = exp(v6)
+          v8 = add(v7, v0)
+          f16 v9 = divide(v5, v8)
+          v10 = multiply(v3, v9)
+          o[a0, a1] = v10
             ",
         ))
         .unwrap();
@@ -508,8 +505,8 @@ in2 = load masked_fill_c2[0]
 in3 = load ones_scalar[0]
 in4 = load triu_zero[0]
 v1 = select:
-    in3 when _s1 + 1 <= _s2
-    in4 when true
+  in3 when _s1 + 1 <= _s2
+  in4 when true
 v2 = where(v1, in2, v0)
 v3 = exp(v2)",
         );
@@ -614,8 +611,8 @@ v3 = exp(v2)",
             ("minimum(i, 63)", "i"),
         ] {
             let normal = normalize_uncached(&parse_body(&format!(
-                "for i in 0..64:\n    for j in 0..8:\n        a = load X[{a}]\n        b = load X[{b}]\n        \
-                 c = add(a, b)\n        O[i, j] = c"
+                "for i in 0..64:\n  for j in 0..8:\n    a = load X[{a}]\n    b = load X[{b}]\n    \
+                 c = add(a, b)\n    O[i, j] = c"
             ))
             .unwrap())
             .unwrap();
@@ -682,24 +679,24 @@ v3 = exp(v2)",
         let cone = |weights: &str, out: &str| {
             format!(
                 "
-            for k in 0..4:
-                x = load X[i, k]
-                sq = multiply(x, x)
-                s <- add(s, sq)
-            r = rsqrt(s)
-            for m in 0..4:
-                y = load X[i, m]
-                scaled = multiply(y, r)
-                w_{out} = load {weights}[m, j]
-                p_{out} = multiply(w_{out}, scaled)
-                {out} <- add({out}, p_{out})"
+      for k in 0..4:
+        x = load X[i, k]
+        sq = multiply(x, x)
+        s <- add(s, sq)
+      r = rsqrt(s)
+      for m in 0..4:
+        y = load X[i, m]
+        scaled = multiply(y, r)
+        w_{out} = load {weights}[m, j]
+        p_{out} = multiply(w_{out}, scaled)
+        {out} <- add({out}, p_{out})"
             )
         };
         let writes = "
-            O1[i, j] = o1
-            O2[i, j] = o2";
+      O1[i, j] = o1
+      O2[i, j] = o2";
         let given = testing::body(&format!(
-            "for i in 0..8:\n    for j in 0..3:{}{}{writes}",
+            "for i in 0..8:\n  for j in 0..3:{}{}{writes}",
             cone("W1", "o1"),
             cone("W2", "o2")
         ));
@@ -809,7 +806,7 @@ pub(crate) mod testing {
     /// `text` one level further in.
     pub(crate) fn indented(text: &str) -> String {
         text.lines()
-            .map(|line| format!("    {line}"))
+            .map(|line| format!("{}{line}", crate::text::INDENT))
             .collect::<Vec<_>>()
             .join("\n")
     }

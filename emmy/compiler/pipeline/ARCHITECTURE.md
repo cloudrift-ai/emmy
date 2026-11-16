@@ -1057,8 +1057,9 @@ wire (`emmy/compiler/wire.py`: one mixin, one walker, a field at its default omi
 cross-object rules (every reference resolves to one kernel, a row spells a schedule and never a kernel-set
 decision, a repository golden names its card and measures with a reference), `load` / `dump` read and write a file
 through it, and `edit` is the one locked read-modify-write every record run goes through. The dump writes a header key
-per line with `gpu_name` alone on the first (a card-scoped reader skips a foreign file off that line) and an entry per
-line in each table, so a diff lands on the entry that changed.
+per line with `gpu_name` alone on the first (a card-scoped reader skips a foreign file off that line), an entry per
+line in each table, and inside an entry a graph's nodes, a body's statements and a row's fields a line each — a body
+as a list of its lines, joined back on load — so a diff lands on the node, statement or knob that changed.
 
 **The file stores inputs only.** A stored kernel has no identity, no name and no stamps beside its Loop IR. Rows
 (`kernel`), routing rows (`parent`, `children`) and latencies (`kernels`) point at a kernel by its position in the

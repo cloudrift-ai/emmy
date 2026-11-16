@@ -136,14 +136,14 @@ mod tests {
     fn two_seeded_reductions_of_one_value_are_one_read_where_the_first_is() {
         let (accums, _, listing) = states(
             "
-            for a in 0..4:
-                for b in 0..4:
-                    x = load X[a, b]
-                    acc1 <- add(acc1, x)
-                    y = load X[a, b]
-                    acc2 <- add(acc2, y)
-                v = add(acc1, acc2)
-                Y[a] = v
+      for a in 0..4:
+        for b in 0..4:
+          x = load X[a, b]
+          acc1 <- add(acc1, x)
+          y = load X[a, b]
+          acc2 <- add(acc2, y)
+        v = add(acc1, acc2)
+        Y[a] = v
             ",
         );
         assert_eq!(accums, 1, "{listing}");
@@ -154,30 +154,30 @@ mod tests {
     fn twin_online_softmax_states_are_one_pair() {
         let (accums, _, listing) = states(
             "
-            for r in 0..4:
-                for k in 0..16:
-                    s = load S[r, k]
-                    g1 = maximum(m1, s)
-                    d1 = subtract(m1, g1)
-                    b1 = exp(d1)
-                    e1 = subtract(s, g1)
-                    p1 = exp(e1)
-                    lb1 = multiply(l1, b1)
-                    l1 <- add(lb1, p1) over k
-                    m1 <- maximum(m1, s) over k
-                    t = load S[r, k]
-                    g2 = maximum(m2, t)
-                    d2 = subtract(m2, g2)
-                    b2 = exp(d2)
-                    e2 = subtract(t, g2)
-                    p2 = exp(e2)
-                    lb2 = multiply(l2, b2)
-                    l2 <- add(lb2, p2) over k
-                    m2 <- maximum(m2, t) over k
-                Y[r] = l1
-                Z[r] = l2
-                M[r] = m1
-                N[r] = m2
+      for r in 0..4:
+        for k in 0..16:
+          s = load S[r, k]
+          g1 = maximum(m1, s)
+          d1 = subtract(m1, g1)
+          b1 = exp(d1)
+          e1 = subtract(s, g1)
+          p1 = exp(e1)
+          lb1 = multiply(l1, b1)
+          l1 <- add(lb1, p1) over k
+          m1 <- maximum(m1, s) over k
+          t = load S[r, k]
+          g2 = maximum(m2, t)
+          d2 = subtract(m2, g2)
+          b2 = exp(d2)
+          e2 = subtract(t, g2)
+          p2 = exp(e2)
+          lb2 = multiply(l2, b2)
+          l2 <- add(lb2, p2) over k
+          m2 <- maximum(m2, t) over k
+        Y[r] = l1
+        Z[r] = l2
+        M[r] = m1
+        N[r] = m2
             ",
         );
         assert_eq!(accums, 2, "{listing}");
@@ -188,39 +188,39 @@ mod tests {
     fn twin_pivots_read_inside_the_loop_are_one() {
         let (accums, _, listing) = states(
             "
-            for r in 0..4:
-                for k in 0..16:
-                    s = load S[r, k]
-                    g1 = maximum(m1, s)
-                    W1[r, k] = g1
-                    m1 <- maximum(m1, s) over k
-                    t = load S[r, k]
-                    g2 = maximum(m2, t)
-                    W2[r, k] = g2
-                    m2 <- maximum(m2, t) over k
-                Y[r] = m1
-                Z[r] = m2
+      for r in 0..4:
+        for k in 0..16:
+          s = load S[r, k]
+          g1 = maximum(m1, s)
+          W1[r, k] = g1
+          m1 <- maximum(m1, s) over k
+          t = load S[r, k]
+          g2 = maximum(m2, t)
+          W2[r, k] = g2
+          m2 <- maximum(m2, t) over k
+        Y[r] = m1
+        Z[r] = m2
             ",
         );
         assert_eq!(accums, 1, "{listing}");
     }
 
     const TWIN_CARRIES: &str = "
-        for t in 0..8:
-            for i in 0..4:
-                u = load U[t, i]
-                h1p = pre h1[i]
-                n1 = add(h1p, u)
-                h1[i] <- n1 seed 0
-                w = load U[t, i]
-                h2p = pre h2[i]
-                n2 = add(h2p, w)
-                h2[i] <- n2 seed SEED
-        for j in 0..4:
-            a = pre h1[j]
-            Y[j] = a
-            b = pre h2[j]
-            Z[j] = b
+    for t in 0..8:
+      for i in 0..4:
+        u = load U[t, i]
+        h1p = pre h1[i]
+        n1 = add(h1p, u)
+        h1[i] <- n1 seed 0
+        w = load U[t, i]
+        h2p = pre h2[i]
+        n2 = add(h2p, w)
+        h2[i] <- n2 seed SEED
+    for j in 0..4:
+      a = pre h1[j]
+      Y[j] = a
+      b = pre h2[j]
+      Z[j] = b
         ";
 
     #[test]
@@ -239,14 +239,14 @@ mod tests {
     fn reductions_of_two_values_stay_two() {
         let (accums, _, listing) = states(
             "
-            for r in 0..4:
-                for k in 0..16:
-                    s = load S[r, k]
-                    m1 <- maximum(m1, s) over k
-                    t = load T[r, k]
-                    m2 <- maximum(m2, t) over k
-                Y[r] = m1
-                Z[r] = m2
+      for r in 0..4:
+        for k in 0..16:
+          s = load S[r, k]
+          m1 <- maximum(m1, s) over k
+          t = load T[r, k]
+          m2 <- maximum(m2, t) over k
+        Y[r] = m1
+        Z[r] = m2
             ",
         );
         assert_eq!(accums, 2, "{listing}");
@@ -257,12 +257,12 @@ mod tests {
     fn unseeded_accumulators_stay_two() {
         let (accums, _, listing) = states(
             "
-            for k in 0..8 seed=false:
-                x = load X[k]
-                left <- add(left, x) over k
-                right <- add(right, x) over k
-            O[0] = left
-            P[0] = right
+      for k in 0..8 seed=false:
+        x = load X[k]
+        left <- add(left, x) over k
+        right <- add(right, x) over k
+      O[0] = left
+      P[0] = right
             ",
         );
         assert_eq!(accums, 2, "{listing}");
@@ -274,15 +274,15 @@ mod tests {
     fn a_member_read_after_the_first_update_stays() {
         let (accums, _, listing) = states(
             "
-            for r in 0..4:
-                for k in 0..16:
-                    s = load S[r, k]
-                    m1 <- maximum(m1, s) over k
-                    g2 = maximum(m2, s)
-                    W[r, k] = g2
-                    m2 <- maximum(m2, s) over k
-                Y[r] = m1
-                Z[r] = m2
+      for r in 0..4:
+        for k in 0..16:
+          s = load S[r, k]
+          m1 <- maximum(m1, s) over k
+          g2 = maximum(m2, s)
+          W[r, k] = g2
+          m2 <- maximum(m2, s) over k
+        Y[r] = m1
+        Z[r] = m2
             ",
         );
         assert_eq!(accums, 2, "{listing}");

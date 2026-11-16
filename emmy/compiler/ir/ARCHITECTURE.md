@@ -325,17 +325,17 @@ bodies' kept answers, so asking costs the statement's own fields, not a walk of 
 **A body has one text**, which is also its wire form. `str(body)` is it and `parse_body` reads it back to an equal
 body, so the text says
 everything a statement holds and nothing derived from it: a field at its default is left out, an axis carries its
-window and a symbolic extent its hint. One statement is one line, a block's statements sit indented under its
-header, and expressions are in their own text:
+window and a symbolic extent its hint. One statement is one line, a block's statements sit indented two spaces under
+its header, and expressions are in their own text:
 
 ```
 let f32 v0 = 0.125
 for a0 in 0..4:
-    for a1 in 0..seq~128:
-        in0 = load x[a0, a1]
-        v1 = 2*in0 - v0 + 1
-        acc0 <- add(acc0, v1) over a1
-    y[a0] = acc0
+  for a1 in 0..seq~128:
+    in0 = load x[a0, a1]
+    v1 = 2*in0 - v0 + 1
+    acc0 <- add(acc0, v1) over a1
+  y[a0] = acc0
 ```
 
 A subroutine a call names is defined once, ahead of the statements, and the call spells the buffers it binds. Since

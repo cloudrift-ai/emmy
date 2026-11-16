@@ -182,11 +182,11 @@ mod tests {
     fn matmul(input_x: &str, input_y: &str, output: &str) -> String {
         format!(
             "
-            for a in 0..4:
-                x = load {input_x}[a]
-                y = load {input_y}[a]
-                z = multiply(x, y)
-                {output}[a] = z
+      for a in 0..4:
+        x = load {input_x}[a]
+        y = load {input_y}[a]
+        z = multiply(x, y)
+        {output}[a] = z
             "
         )
     }
@@ -206,11 +206,11 @@ mod tests {
     fn binary(op: &str, (left, right): (&str, &str)) -> String {
         format!(
             "
-            for a in 0..4:
-                x = load X[a]
-                y = load Y[a]
-                z = {op}({left}, {right})
-                O[a] = z
+      for a in 0..4:
+        x = load X[a]
+        y = load Y[a]
+        z = {op}({left}, {right})
+        O[a] = z
             "
         )
     }
@@ -229,14 +229,14 @@ mod tests {
                 for second in &forms {
                     let source = format!(
                         "
-                        for {i} in 0..4:
-                            for {j} in 0..4:
-                                a = load x[{first}]
-                                b = load x[{second}]
-                                left = exp(a)
-                                right = exp(b)
-                                sum = add(right, left)
-                                out[{i}, {j}] = sum
+            for {i} in 0..4:
+              for {j} in 0..4:
+                a = load x[{first}]
+                b = load x[{second}]
+                left = exp(a)
+                right = exp(b)
+                sum = add(right, left)
+                out[{i}, {j}] = sum
                         "
                     );
                     keys.insert(key(&source));
@@ -270,16 +270,16 @@ mod tests {
         // spellings gave the loads. The digest numbers a commutative node's sides in content order, so the identity
         // is the same whatever the buffers are called.
         let template = "
-            for k in 0..3:
-                for c in 0..8:
-                    for k_s1 in 0..16:
-                        wv_s2 = load {m}[(c + 4) % 8, k_s1]
-                        xv_s1 = load {i}[k, k_s1]
-                        wv_s1 = load {m}[c, k_s1]
-                        sum_s2 <- add(sum_s2, xv_s1 * wv_s2) over k_s1
-                        sum_s1 <- add(sum_s1, xv_s1 * wv_s1) over k_s1
-                    v = sum_s1 + sum_s2
-                    {o}[k, c] = v
+      for k in 0..3:
+        for c in 0..8:
+          for k_s1 in 0..16:
+            wv_s2 = load {m}[(c + 4) % 8, k_s1]
+            xv_s1 = load {i}[k, k_s1]
+            wv_s1 = load {m}[c, k_s1]
+            sum_s2 <- add(sum_s2, xv_s1 * wv_s2) over k_s1
+            sum_s1 <- add(sum_s1, xv_s1 * wv_s1) over k_s1
+          v = sum_s1 + sum_s2
+          {o}[k, c] = v
         ";
         let spelled = |m: &str, i: &str, o: &str| {
             template
@@ -306,18 +306,18 @@ mod tests {
     #[test]
     fn swapped_commutative_arguments_share_a_normal_form_and_an_identity() {
         let xy = "
-            for a in 0..4:
-                lx = load X[a]
-                ly = load Y[a]
-                z = add(lx, ly)
-                O[a] = z
+      for a in 0..4:
+        lx = load X[a]
+        ly = load Y[a]
+        z = add(lx, ly)
+        O[a] = z
             ";
         let yx = "
-            for a in 0..4:
-                ly = load Y[a]
-                lx = load X[a]
-                z = add(ly, lx)
-                O[a] = z
+      for a in 0..4:
+        ly = load Y[a]
+        lx = load X[a]
+        z = add(ly, lx)
+        O[a] = z
             ";
         assert_eq!(normal(xy), normal(yx));
         assert_eq!(clustered_key(xy), clustered_key(yx));
@@ -499,20 +499,20 @@ mod tests {
         let make = |axes: &str| {
             format!(
                 "
-                for row in 0..4:
-                    for column in 0..4:
-                        x = load X[row, column]
-                        total <- add(total, x) over {axes}
-                O[] = total
+        for row in 0..4:
+          for column in 0..4:
+            x = load X[row, column]
+            total <- add(total, x) over {axes}
+        O[] = total
                 "
             )
         };
         let per_row = "
-            for row in 0..4:
-                for column in 0..4:
-                    x = load X[row, column]
-                    total <- add(total, x) over column
-                O[row] = total
+      for row in 0..4:
+        for column in 0..4:
+          x = load X[row, column]
+          total <- add(total, x) over column
+        O[row] = total
             ";
         assert_eq!(key(&make("row, column")), key(&make("column, row")));
         assert_ne!(key(&make("row, column")), key(per_row));
@@ -524,10 +524,10 @@ mod tests {
         let make = |outer: &str, inner: &str| {
             format!(
                 "
-                for {outer} in 0..2:
-                    for {inner} in 0..3:
-                        x = load X[{outer}, {inner}]
-                        O[] = x
+        for {outer} in 0..2:
+          for {inner} in 0..3:
+            x = load X[{outer}, {inner}]
+            O[] = x
                 "
             )
         };
@@ -562,7 +562,7 @@ mod tests {
             .iter()
             .map(|header| header.split(" in ").nth(1).unwrap())
             .collect();
-        assert_eq!(depths, [0, 4, 8], "{first}");
+        assert_eq!(depths, [0, 2, 4], "{first}");
         assert_eq!(extents, ["0..6:", "0..128:", "0..128:"], "{first}");
     }
 
@@ -581,7 +581,7 @@ mod tests {
             } else {
                 (&loops[0], &loops[1])
             };
-            format!("{outer}\n    {inner}\n        x = load X[]\n        O[] = x")
+            format!("{outer}\n  {inner}\n    x = load X[]\n    O[] = x")
         };
         assert_eq!(
             key(&make(["outer", "inner"], ["source_a", "source_b"], false)),
@@ -599,9 +599,9 @@ mod tests {
         let make = |window: &str| {
             body(&format!(
                 "
-                for element in 0..4 window({window}):
-                    x = load X[element]
-                    O[element] = x
+        for element in 0..4 window({window}):
+          x = load X[element]
+          O[element] = x
                 "
             ))
         };
@@ -617,9 +617,9 @@ mod tests {
         let make = |hint: usize| {
             format!(
                 "
-                for element in 0..size~{hint}:
-                    x = load X[element]
-                    O[element] = x
+        for element in 0..size~{hint}:
+          x = load X[element]
+          O[element] = x
                 "
             )
         };
@@ -632,13 +632,13 @@ mod tests {
         let make = |element: &str, reduce: &str, predicate: &str, value: &str, total: &str| {
             format!(
                 "
-                for {element} in 0..4:
-                    {predicate} = load Mask[{element}]
-                    for {reduce} in 0..4:
-                        {value} = load X[{element}, {reduce}]
-                        {total} <- add({total}, {value}) over {reduce}
-                    if {predicate}:
-                        O[{element}] = {total}
+        for {element} in 0..4:
+          {predicate} = load Mask[{element}]
+          for {reduce} in 0..4:
+            {value} = load X[{element}, {reduce}]
+            {total} <- add({total}, {value}) over {reduce}
+          if {predicate}:
+            O[{element}] = {total}
                 "
             )
         };
@@ -660,15 +660,15 @@ mod tests {
         let make = |total: &str, maximum: &str| {
             format!(
                 "
-                for reduce in 0..4:
-                    x = load X[reduce]
-                    y = load Y[reduce]
-                    absolute = abs(x)
-                    exponential = exp(y)
-                    {total} <- add({total}, absolute) over reduce
-                    {maximum} <- maximum({maximum}, exponential) over reduce
-                Sum[] = {total}
-                Max[] = {maximum}
+        for reduce in 0..4:
+          x = load X[reduce]
+          y = load Y[reduce]
+          absolute = abs(x)
+          exponential = exp(y)
+          {total} <- add({total}, absolute) over reduce
+          {maximum} <- maximum({maximum}, exponential) over reduce
+        Sum[] = {total}
+        Max[] = {maximum}
                 "
             )
         };
@@ -684,10 +684,10 @@ mod tests {
         let make = |index: &str, condition: &str| {
             format!(
                 "
-                for element in 0..8:
-                    x = load X[{index}]
-                    if {condition}:
-                        O[element] = x
+        for element in 0..8:
+          x = load X[{index}]
+          if {condition}:
+            O[element] = x
                 "
             )
         };
@@ -701,9 +701,9 @@ mod tests {
     fn indexed(index: &str) -> String {
         format!(
             "
-            for element in 0..8:
-                x = load X[{index}]
-                O[] = x
+      for element in 0..8:
+        x = load X[{index}]
+        O[] = x
             "
         )
     }
@@ -734,9 +734,9 @@ mod tests {
         let make = |value: &str| {
             format!(
                 "
-                x = load X[]
-                if {value} < 0.0:
-                    O[] = x
+        x = load X[]
+        if {value} < 0.0:
+          O[] = x
                 "
             )
         };
@@ -749,10 +749,10 @@ mod tests {
         let make = |constant: &str, initial: &str| {
             format!(
                 "
-                let {constant} = 2.0
-                init f32 {initial} = 0
-                result = add({constant}, {initial})
-                O[] = result
+        let {constant} = 2.0
+        init f32 {initial} = 0
+        result = add({constant}, {initial})
+        O[] = result
                 "
             )
         };
@@ -768,9 +768,9 @@ mod tests {
         let make = |first: &str, second: &str| {
             format!(
                 "
-                {first}, {second} = load X[]
-                result = add({first}, {second})
-                O[] = result
+        {first}, {second} = load X[]
+        result = add({first}, {second})
+        O[] = result
                 "
             )
         };
@@ -885,13 +885,13 @@ mod tests {
         let make = |left: &str| {
             body(&format!(
                 "
-                {left} = load X[]
-                right = load Y[]
-                if 1:
-                    left_abs = abs({left})
-                    right_abs = abs(right)
-                    result = add(left_abs, right_abs)
-                    O[] = result
+        {left} = load X[]
+        right = load Y[]
+        if 1:
+          left_abs = abs({left})
+          right_abs = abs(right)
+          result = add(left_abs, right_abs)
+          O[] = result
                 "
             ))
         };
@@ -909,14 +909,14 @@ mod tests {
             let right_result = if reuse_names { "y" } else { "right_result" };
             format!(
                 "
-                for i in 0..4:
-                    x = load A[i]
-                    y = copy(x)
-                    OA[i] = y
-                for {right_axis} in 0..4:
-                    {right_input} = load B[{right_axis}]
-                    {right_result} = exp({right_input})
-                    OB[{right_axis}] = {right_result}
+        for i in 0..4:
+          x = load A[i]
+          y = copy(x)
+          OA[i] = y
+        for {right_axis} in 0..4:
+          {right_input} = load B[{right_axis}]
+          {right_result} = exp({right_input})
+          OB[{right_axis}] = {right_result}
                 "
             )
         };
@@ -974,7 +974,7 @@ mod tests {
             let constants = (0..9).map(|index| format!("let {prefix}_source_{index} = {index}.0"));
             let mut consumers: Vec<String> = (0..9)
                 .map(|index| {
-                    format!("if 1:\n    {prefix}_value_{index} = abs({prefix}_source_{index})")
+                    format!("if 1:\n  {prefix}_value_{index} = abs({prefix}_source_{index})")
                 })
                 .collect();
             if reverse {
@@ -993,16 +993,16 @@ mod tests {
     fn independent_sibling_loops_stay_ahead_of_their_epilogues() {
         let normal_text = normal(
             "
-            for first_axis in 0..4:
-                first_input = load X[first_axis]
-                first_sum <- add(first_sum, first_input) over first_axis
-            first_result = abs(first_sum)
-            for second_axis in 0..4:
-                second_input = load Y[second_axis]
-                second_sum <- add(second_sum, second_input) over second_axis
-            second_result = exp(second_sum)
-            O0[] = first_result
-            O1[] = second_result
+      for first_axis in 0..4:
+        first_input = load X[first_axis]
+        first_sum <- add(first_sum, first_input) over first_axis
+      first_result = abs(first_sum)
+      for second_axis in 0..4:
+        second_input = load Y[second_axis]
+        second_sum <- add(second_sum, second_input) over second_axis
+      second_result = exp(second_sum)
+      O0[] = first_result
+      O1[] = second_result
             ",
         );
         let top: Vec<&str> = normal_text
@@ -1032,19 +1032,19 @@ mod tests {
     #[test]
     fn a_computation_spelled_twice_keys_as_one_value() {
         let repeated = "
-            for element in 0..4:
-                input = load input_buffer[element]
-                first = abs(input)
-                second = abs(input)
-                result = add(first, second)
-                output[element] = result
+      for element in 0..4:
+        input = load input_buffer[element]
+        first = abs(input)
+        second = abs(input)
+        result = add(first, second)
+        output[element] = result
             ";
         let shared = "
-            for element in 0..4:
-                input = load input_buffer[element]
-                first = abs(input)
-                result = add(first, first)
-                output[element] = result
+      for element in 0..4:
+        input = load input_buffer[element]
+        first = abs(input)
+        result = add(first, first)
+        output[element] = result
             ";
         assert_eq!(key(repeated), key(shared));
     }
@@ -1127,10 +1127,10 @@ mod tests {
         let make = |flags: &str| {
             format!(
                 "
-                for reduce in 0..4{flags}:
-                    x = load X[reduce]
-                    total <- add(total, x) over reduce
-                O[] = total
+        for reduce in 0..4{flags}:
+          x = load X[reduce]
+          total <- add(total, x) over reduce
+        O[] = total
                 "
             )
         };
@@ -1256,10 +1256,10 @@ mod tests {
         for (outer, inner) in [("a9", "a10"), ("outer", "inner"), ("i", "j")] {
             let given = body(&format!(
                 "
-                for {outer} in 0..40:
-                    for {inner} in 0..128:
-                        v = load X[128 * {outer} + {inner}]
-                        Y[{outer}, {inner}] = v
+        for {outer} in 0..40:
+          for {inner} in 0..128:
+            v = load X[128 * {outer} + {inner}]
+            Y[{outer}, {inner}] = v
                 "
             ));
             let canonical = identity_key(&given, false);

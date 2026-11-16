@@ -85,9 +85,9 @@ mod tests {
     fn a_power_of_two_division_over_a_non_negative_index_is_a_shift() {
         let given = body(
             "
-            for k in 0..64:
-                x = load X[k / 8, k % 8, (k - 32) / 8, k / 3]
-                O[k] = x
+      for k in 0..64:
+        x = load X[k / 8, k % 8, (k - 32) / 8, k / 3]
+        O[k] = x
             ",
         );
         let out = text(&reduce_strength(&given).unwrap());
@@ -102,8 +102,8 @@ mod tests {
     fn a_grid_decode_over_the_built_ins_is_shifts_and_masks() {
         let given = body(
             "
-            Grid(axes=(a in 0..16, b in 0..32), decode=(block_idx.x / 2, thread_idx.x % 32), block_threads=64):
-                O[a, b] = a
+      Grid(axes=(a in 0..16, b in 0..32), decode=(block_idx.x / 2, thread_idx.x % 32), block_threads=64):
+        O[a, b] = a
             ",
         );
         let out = text(&reduce_strength(&given).unwrap());

@@ -28,23 +28,37 @@ They do three jobs at once:
 
 Model goldens live under `recipes/<model>/golden/`, in one file per exact GPU model and compute capability. The
 maintained model-agnostic golden records live under `emmy/compiler/pipeline/search/golden/records/`. A file is JSON
-with four tables, one entry per line:
+with four tables. Each entry starts on its own line, and a graph's nodes, a kernel body's statements and a row's
+fields each take a line of their own, so a diff shows the one that changed:
 
 ```json
 {"gpu_name": "NVIDIA GeForce RTX 5090",
  "compute_cap": [12, 0],
  "model": "google/gemma-4-12B-it",
  "programs": [
-  {"inputs":[...],"outputs":[...],"nodes":[...]}
+  {"inputs":[...],"outputs":[...],"nodes":[
+   {"id":"x0","op":"input",...},
+   ...
+  ]}
  ],
  "kernels": [
-  {"loop_ir":{...},"formed":true,"traced":0,"origins":["linear_7"],"bindings":{"num_tokens":32}}
+  {"loop_ir":{"inputs":[...],"outputs":[...],"nodes":[
+   ...,
+   {"id":"linear_7","op":"loop","attrs":{"body":[
+    "for a0 in 0..num_tokens~32:",
+    "  ..."
+   ]},...}
+  ]},"formed":true,"traced":0,"origins":["linear_7"],"bindings":{"num_tokens":32}}
  ],
  "routing": [
   {"parent":0,"arm":{"PLACE@inner.1/map":"cut"},"children":[1,2]}
  ],
  "rows": [
-  {"name":"gemma4_12b.norm_q_proj.m32","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"w1x16","TILE":"mma_m16n8k16_f16_f32/f2x2/k2","REDUCE":"g8k","RASTER":"","STAGE":"d2/smem"},"measurements":{"emmy_us":26.7,"reference_us":19.8,"reference_backend":"cublas"}}
+  {"name":"gemma4_12b.norm_q_proj.m32",
+   "kernel":0,
+   "pins":{"FAST_MATH":false},
+   "knobs":{"WORK":"w1x16","TILE":"mma_m16n8k16_f16_f32/f2x2/k2","REDUCE":"g8k","RASTER":"","STAGE":"d2/smem"},
+   "measurements":{"emmy_us":26.7,"reference_us":19.8,"reference_backend":"cublas"}}
  ]}
 ```
 
