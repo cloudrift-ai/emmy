@@ -574,9 +574,21 @@ def is_fp8_checkpoint(model_dir) -> bool:
 
 
 def _declares_static_fp8(qc: dict) -> bool:
-    """Whether a ``quantization_config`` MAPPING is the official FP8 declaration with STATIC
-    activations: one calibrated scale per linear input, stored in the shards."""
-    return qc.get("quant_method") == "fp8" and qc.get("activation_scheme") == "static"
+    """Whether a ``quantization_config`` MAPPING declares FP8 weights with STATIC activations: one calibrated scale
+    per linear input, stored in the shards. The official declaration says so in ``activation_scheme``; modelopt's
+    mixed scheme and llm-compressor say it in a ``config_groups`` entry whose 8-bit float weights read 8-bit float
+    input activations that are not dynamic."""
+    if qc.get("quant_method") == "fp8":
+        return qc.get("activation_scheme") == "static"
+    for group in (qc.get("config_groups") or {}).values():
+        specs = [group.get(key) for key in ("weights", "input_activations")] if isinstance(group, dict) else []
+        if (
+            len(specs) == 2
+            and all(isinstance(spec, dict) and spec.get("type") == "float" and int(spec.get("num_bits") or 0) == 8 for spec in specs)
+            and not specs[1].get("dynamic")
+        ):
+            return True
+    return False
 
 
 def declared_quantization(hf_config) -> str | None:
@@ -1714,35 +1726,46 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
 
 def _spell_fp8_round_trip(graph: Graph, activation: str, scale_bc: str, fmt: str, stem: str, shape) -> tuple[str, str]:
     """Encode ``activation / scale_bc`` to ``fmt`` and return ``(value, codes)``: the decoded value
-    times the scale, and the encoded codes it came from — the half the dynamic and the static FP8
-    activation share. The encode saturates to the format's finite range, which is the clamp a
-    static scale needs."""
+    times the scale, and the encoded codes it came from."""
+    bits = _spell_fp8_encode(graph, activation, scale_bc, fmt, stem, shape)
+    return _spell_fp8_decode(graph, bits, scale_bc, stem, graph.buffer(activation).dtype), bits
+
+
+def _spell_fp8_encode(graph: Graph, activation: str, scale_bc: str, fmt: str, stem: str, shape) -> str:
+    """Encode ``activation / scale_bc`` to ``fmt`` and return the codes — the half the dynamic and the static FP8
+    activation share. The encode saturates to the format's finite range, which is the clamp a static scale needs."""
     from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
-    source = graph.buffer(activation)
     normalized = graph.add_node(
         op=ElementwiseOp(op="divide"),
         inputs=[activation, scale_bc],
         output=Tensor(f"{stem}_normalized", shape, "f32"),
     )
-    bits = graph.add_node(
+    return graph.add_node(
         op=ElementwiseOp(op=f"to_{fmt}"),
         inputs=[normalized],
         output=Tensor(f"{stem}_bits", shape, fmt),
     )
+
+
+def _spell_fp8_decode(graph: Graph, bits: str, scale_bc: str, stem: str, dtype) -> str:
+    """Decode the FP8 codes ``bits`` and multiply by ``scale_bc``: the value a consumer reads, at ``dtype``."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    codes = graph.buffer(bits)
+    assert codes is not None
     decoded = graph.add_node(
-        op=ElementwiseOp(op=f"from_{fmt}"),
+        op=ElementwiseOp(op=f"from_{codes.dtype.name}"),
         inputs=[bits],
-        output=Tensor(f"{stem}_decoded", shape, source.dtype),
+        output=Tensor(_fresh_buffer_name(graph, f"{stem}_decoded"), codes.shape, dtype),
     )
-    restored = graph.add_node(
+    return graph.add_node(
         op=ElementwiseOp(op="multiply"),
         inputs=[decoded, scale_bc],
-        output=Tensor(f"{stem}_value", shape, source.dtype),
+        output=Tensor(_fresh_buffer_name(graph, f"{stem}_value"), codes.shape, dtype),
     )
-
-    return restored, bits
 
 
 def spell_dynamic_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
@@ -1799,8 +1822,12 @@ def spell_static_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
     calibrated f32 per linear beside its weight — ``activation_scale`` (Transformers' name) or
     ``input_scale`` (vLLM's). The activation is encoded as ``x / scale`` to the weight's own FP8
     format and decoded times the same scale, what Transformers and vLLM compute for these
-    checkpoints. Consumers reading one activation through equal-valued scales share one round
-    trip (a fused projection group is calibrated to one scale, stored once per member). Nothing
+    checkpoints. Consumers reading one activation through equal-valued scales share one encode
+    (a fused projection group is calibrated to one scale, stored once per member), and each then
+    decodes the shared codes itself, as the static 4-bit activation's consumers do
+    (:func:`_spell_static_fp4_quantize`): loop fusion materializes an activation's fan-out point,
+    so consumers in two kernels are handed the codes, which the second kernel's contraction reads
+    as FP8 bytes, where a shared decoded value would reach it as a 16-bit buffer. Nothing
     is marked to stay materialized: the scale is a checkpoint constant, and the codes are an
     ordinary cut seam of the kernel that reads them. Returns the number of rewired linears; any
     other declaration is a no-op. Runs after
@@ -1843,16 +1870,16 @@ def spell_static_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
                 handles[path] = stack.enter_context(safe_open(path, framework="pt"))
             return handles[path]
 
-        rewritten: dict[tuple[str, str, float], str] = {}
+        encoded: dict[tuple[str, str, float], tuple[str, str, str]] = {}
         for linear_id, activation, key, fmt in eligible:
             stored = _open(key).get_tensor(key)
             if stored.numel() != 1:
                 logger.warning("static %s activation %s is not one per-tensor scale; linear left 16-bit", fmt, key)
                 continue
             value = float(stored.float().reshape(-1)[0])
-            if (activation, fmt, value) not in rewritten:
-                source = graph.buffer(activation)
-                shape = _shape_extents(source.shape)
+            source = graph.buffer(activation)
+            shape = _shape_extents(source.shape)
+            if (activation, fmt, value) not in encoded:
                 stem = _fresh_buffer_name(graph, f"{activation}_static_fp8")
                 ones = (1,) * len(shape)
                 scale = graph.add_node(
@@ -1866,9 +1893,12 @@ def spell_static_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
                     inputs=[],
                     output=Tensor(f"{stem}_scale", ones, "f32"),
                 )
-                scale_bc = broadcast_to(graph, scale, shape)
-                rewritten[(activation, fmt, value)], _codes = _spell_fp8_round_trip(graph, activation, scale_bc, fmt, stem, shape)
-            graph.replace_input(linear_id, activation, rewritten[(activation, fmt, value)])
+                codes = _spell_fp8_encode(graph, activation, broadcast_to(graph, scale, shape), fmt, stem, shape)
+                encoded[(activation, fmt, value)] = (stem, scale, codes)
+            stem, scale, codes = encoded[(activation, fmt, value)]
+            # Each consumer broadcasts the scale for itself too: a shared broadcast would cross between two kernels whole.
+            restored = _spell_fp8_decode(graph, codes, broadcast_to(graph, scale, shape), stem, source.dtype)
+            graph.replace_input(linear_id, activation, restored)
             spelled += 1
     if spelled:
         logger.info("spelled static FP8 activation algebra (one scale per tensor) for %d linear(s) from %s", spelled, model_dir)

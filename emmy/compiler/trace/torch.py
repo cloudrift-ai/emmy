@@ -1844,6 +1844,8 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
             args = fx_node.args
             dim_raw = args[1] if len(args) > 1 else 0
             start_raw = args[2] if len(args) > 2 else None
+            if len(args) > 4 and args[4] != 1:
+                raise NotImplementedError(f"aten.slice requires step 1, got {args[4]!r}")
             dim = dim_raw if isinstance(dim_raw, int) and not isinstance(dim_raw, bool) else None
             start = 0 if start_raw is None else (start_raw if isinstance(start_raw, int) and not isinstance(start_raw, bool) else None)
             nid = g.add_node(

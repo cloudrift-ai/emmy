@@ -207,6 +207,38 @@ def test_a_chain_whose_masks_and_extents_grow_with_the_step_rolls_and_matches_ea
     np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)
 
 
+_INVERSE = """
+import torch, torch.nn as nn
+class Inverse(nn.Module):
+    # forward substitution, a row a step: the inverse of a unit lower triangular matrix, as a chunked
+    # gated delta rule computes it. A step reads rows of its state above the one it writes.
+    def forward(self, a):
+        a = a.tril(-1)
+        for i in range(1, {n}):
+            row = a[..., i, :i].clone()
+            sub = a[..., :i, :i].clone()
+            a = a.clone()
+            a[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+        return a + torch.eye({n})
+m = Inverse()
+m(torch.randn(2, {n}, {n}) * 0.1)
+"""
+
+
+def test_a_scan_whose_states_only_the_next_step_reads_stores_the_last_one_alone() -> None:
+    """Nothing reads a row substitution's state but the next row's, so the rolled kernel's store has the
+    state's shape, with no step axis: each step stores over the last one's."""
+    graph, _, _ = graph_from_code(_INVERSE.format(n=8))
+    rolled = Pipeline.build(LOOP_PASSES).run(graph)
+    ((scan, store),) = ((node.op, node.outputs) for node in rolled.nodes.values() if isinstance(node.op, LoopOp) and node.op.body.carries)
+    (steps,) = (stmt for stmt in scan.body if isinstance(stmt, Loop))
+    assert steps.axis.extent.as_static() > 2, "the rows between the first step's and the reader's roll"
+    assert [tuple(dim.as_static() for dim in tensor.shape) for tensor in store] == [(2, 8, 8)]
+
+    got, reference = _lifted_output(_INVERSE.format(n=8), "a")
+    np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)
+
+
 def test_steps_that_are_not_one_body_at_a_stride_do_not_roll() -> None:
     """The second chunk decays by a different tensor, so its step is not the first step read one
     stride later. Rolling it would fold ``h`` where the program said ``g``."""

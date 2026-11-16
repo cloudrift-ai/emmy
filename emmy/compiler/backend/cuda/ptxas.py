@@ -141,9 +141,14 @@ _ONE_WAVE = ".minnctapersm 1\n"
 
 
 def _assemble(text: Path, cubin: Path, arch: str, level: str | None) -> bool:
-    """Assemble ``text`` into ``cubin``; whether ptxas spilled registers to local memory."""
+    """Assemble ``text`` into ``cubin``; whether ptxas spilled registers to local memory. A refusal carries ptxas's
+    own message, which names the kernel and the line it refused."""
     command = [_ptxas(), *([level] if level else []), f"-arch={arch}", "-m64", "-v", "-o", str(cubin), str(text)]
-    run = subprocess.run(command, check=True, capture_output=True)
+    try:
+        run = subprocess.run(command, check=True, capture_output=True)
+    except subprocess.CalledProcessError as refused:
+        refused.add_note((refused.stderr or b"").decode(errors="replace").strip())
+        raise
     return any(int(spill) > 0 for spill in re.findall(rb"(\d+) bytes spill stores", run.stdout + run.stderr))
 
 
