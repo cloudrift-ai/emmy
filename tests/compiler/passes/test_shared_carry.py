@@ -263,7 +263,7 @@ def test_shared_storage_stores_a_scan_s_last_state_once_and_copies_only_the_row_
 
 
 @requires_cuda
-@pytest.mark.parametrize("storage", [0, 1], ids=["global", "shared"])
+@pytest.mark.parametrize("storage", ["", "d1/smem"], ids=["global", "shared"])
 @pytest.mark.parametrize("masked", [True, False], ids=["selected", "full"])
 def test_a_scan_that_keeps_its_last_state_matches_the_last_step_of_one_that_keeps_all(storage, masked):
     array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
