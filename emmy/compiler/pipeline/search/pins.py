@@ -132,7 +132,7 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
         if got is None:
             if want is None or not want.needs_split:
                 return option, knobs  # the row measured the kernel whole: no cross-CTA split
-        elif want is not None and want.needs_split and got.cta == want.cta and got.finalize == want.finalize:
+        elif want is not None and want.needs_split and (got.cta, got.finalize, got.pairs) == (want.cta, want.finalize, want.pairs):
             return option, knobs
     return None
 
