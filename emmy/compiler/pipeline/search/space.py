@@ -53,7 +53,7 @@ LAYOUT = Knob(
 REDUCE = Knob(
     "REDUCE",
     KnobType.STR,
-    help="Reduce-axis partition codec, site-local (g<n>[a|k] cta / coop[-t] / r<n> reg; empty=serial; "
+    help="Reduce-axis partition codec, site-local (g<n>[a|k[<p>]] cta / coop[-t] / r<n> reg; empty=serial; "
     "the coop WIDTH lives in WORK). "
     "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",

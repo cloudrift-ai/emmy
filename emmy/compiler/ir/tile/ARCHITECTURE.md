@@ -65,8 +65,25 @@ part's steps compose as an affine map `S ← A·S + b`, read off two walks of th
 kernels, each lifted from Loop IR like the walk: the probe (both walks of every part, the state stored per step),
 the prefix (the state carried across the parts by their maps, each part's start stored), and the walk itself over
 each part's range from its start, one part per batch cell. Three walks of a part where the sequence took one, for
-`n` times the parallelism; whether that pays is evidence's decision. A step that is not affine (the forward
-substitution) offers nothing and stays one kernel.
+`n` times the parallelism; whether that pays is evidence's decision. A step that is not affine (one that multiplies
+two reads of its state) offers nothing and stays one kernel. So does a walk under a free loop of more than one
+coordinate, and one whose stores the parts cannot write side by side.
+
+Affine maps compose, and the composition is a matrix product: `(A₁, b₁) ∘ (A₀, b₀) = (A₁·A₀, A₁·b₀ + b₁)`. The
+split can therefore halve its parts' maps before the prefix walks them (`REDUCE@…/scan=g<n>k<p>`, `p` compositions,
+a pin's alone): each composition is two kernels over half the maps of the level below, one for the matrices and
+one for the offsets, each an ordinary reduction over the column the two maps meet at, with a fork and a row of its
+own. An odd map out passes through. The prefix then walks the top level, and one fill-in kernel per composition
+gives the maps of the level below their starts, the even ones their pair's start and the odd ones that start
+through the even map. This is cyclic reduction; at `p = ⌈log₂ n⌉` the prefix is one step. The maps are dense
+(`mixed × mixed` per kept cell), so a composition costs a full matrix product whatever structure the step's own
+matrix had. A step that changes one row of its state is the identity plus a rank-one term, and the dense form
+does not keep that.
+
+What the walk stores decides where the split ends. Stores indexed by the step are written by the walk, each part
+its own cells. A walk whose one store is the state itself, each step over the last one's (a triangular inverse's
+row substitution), ends at the prefix: the prefix stores the final state, and the split mints no start, fill-in or
+walk, since parts side by side would race on that store.
 
 The classic schedule realizes the carrying loop as ordered launches with a global state buffer: at its fork it
 lifts the kernel's Loop IR again with the state as a buffer the node owns and the loop as the kernel's **serial

@@ -684,7 +684,9 @@ system and its inverse went from 192 to 94; the root that applies the inverse to
 
 What is left to match the reference: the solve is a 63-step forward substitution in f32, not a blocked inverse on
 tensor cores, and the reference's one launch per head has no spelling, since warp groups with different roles inside
-one CTA do not exist beyond the load warp. Two faults block the shorter routes. An inverse written as repeated
+one CTA do not exist beyond the load warp. The substitution's step is affine in its state, so a pin composes its
+steps as matrix products (`REDUCE@…/scan=g<n>k<p>`); the products are dense and in f32, which no tensor-core atom
+takes, and no card has measured them. Two faults block the shorter routes. An inverse written as repeated
 squaring is rolled into a serial kernel whose compile takes 25 GB at a chunk of 64. And a bare `PLACE=cut` on this
 program gives wrong results, where each cut pinned alone is correct.
 

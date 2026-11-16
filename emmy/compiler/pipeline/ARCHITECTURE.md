@@ -1504,7 +1504,8 @@ reading. There is no alias vocabulary: old `a:scalar` / `a:none` scalar tags, al
 tokens, leading-zero widths, and surrounding whitespace all raise rather than naming the same schedule twice.
 
 **`REDUCE`** (STR codec, the tile schedule) — the reduce-axis partition codec, site-local since step 7:
-`[g<n>[a|k]][/coop[-t]][/v<n>][/r<n>]` — `g` cross-CTA split-K (+ finalize letter), `coop` the cooperative-thread
+`[g<n>[a|k[<p>]]][/coop[-t]][/v<n>][/r<n>]` — `g` cross-CTA split-K (+ finalize letter, and under `k` the pairwise
+compositions of a carried state's part maps), `coop` the cooperative-thread
 fold (its WIDTH lives in `WORK`; `-t` the transposed lane map), `v` the lane's contiguous run (adjacent reduce
 elements under `coop`, which one vector load reads; adjacent output columns under `coop-t`), `r` ILP register fold.
 Empty = serial (the per-thread remainder is derived, never spelled); the retired `b<n>` coop-width spelling raises.
