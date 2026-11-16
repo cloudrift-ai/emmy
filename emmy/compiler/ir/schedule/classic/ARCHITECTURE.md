@@ -105,6 +105,7 @@ mixture-of-experts kernel, and the triangular inverse, which FlashInfer does not
 | Independent accumulators per thread | `REDUCE=…/r<n>` |
 | Threads swept along the output of a product | `REDUCE=coop-t` |
 | Reduction split across CTAs, second kernel combines | `REDUCE=g<n>k` |
+| A recurrence's steps composed pairwise by matrix products | `REDUCE=g<n>k<p>` |
 | Reduction split across CTAs, atomic add combines | `REDUCE=g<n>a` |
 | Order of CTAs over the output, for cache reuse | `RASTER=gm<G>` or `gn<G>` |
 | Which work is fused into the kernel | `PLACE@<seam>=cut` or `fuse` |
@@ -138,6 +139,7 @@ warp holds 4 x 8 instructions of 16 x 8, and the K step is two atoms of 16.
 | Attention, decode | Flash-Decoding, FlashInfer | Better than FlashAttention-2 |
 | Attention over a paged cache | FlashInfer | Gap: async copies of a paged operand |
 | Recurrence with a matrix state | FlashInfer Gated DeltaNet | Gap: blocked inverse, one launch; the rest is evidence |
+| Recurrence with a dense step | Cyclic reduction | Reproduces; pays on a small state |
 | Recurrence, one channel per thread | Mamba, RWKV | Reproduces RWKV; no evidence for Mamba |
 | Small triangular inverse | FlashInfer `CollectiveInverse` | Gap |
 
@@ -689,6 +691,32 @@ route: spelled so that its step is affine, 192 systems of 64 x 64 compose in 426
 walk of the substitution runs 53. A blocked inverse has to keep each step's rank-one form. Two faults block the
 shorter routes. An inverse written as repeated squaring is rolled into a serial kernel whose compile takes 25 GB at
 a chunk of 64. And a bare `PLACE=cut` on this program gives wrong results, where each cut pinned alone is correct.
+
+## Recurrence with a dense step
+
+**Best known.** Cyclic reduction, the parallel prefix of affine maps: a step `S <- A·S + b` is a map, two maps
+compose by a matrix product, so `n` steps halve to `n/2` in one launch of products and to one map in `log2 n`.
+
+**Row.** `REDUCE@…/scan=g<n>k<p>` on the carrying site, a kernel-set decision: `n` parts, `p` compositions. At one
+step a part the maps are read off the step, and each composition is a kernel with a row of its own. The serial
+walk is the unsplit arm.
+
+**Verdict: reproduces, and pays for a dense step over a small state.** Recorded, f32, 48 sequences, the tuned
+serial walk beside the full composition:
+
+| Program | RTX 5090 | RTX 4090 | H100 | A100 | V100 |
+| --- | --- | --- | --- | --- | --- |
+| `recurrence.dense.d16.t64`, 64 steps of a 16 x 16 product | 68 / 37 | 107 / 46 | 100 / 49 | 182 / 79 | 231 / 129 |
+| `recurrence.dense.d32.t32.last`, last state only | 68 / 29 | 75 / 36 | 72 / 37 | 399 / 63 | 206 / 134 |
+| `recurrence.dense.d128.t16`, 16 steps of a 128 x 128 product | 141 / 577 | 189 / 1,155 | 738 / 624 | 1,766 / 1,429 | 1,192 / 2,778 |
+| `recurrence.delta.d128.t4`, a rank-one update a step | 6 / 1,835 | 14 / 2,230 | 8 / 2,737 | 22 / 4,606 | 109 / 5,479 |
+| `recurrence.delta.d128.t16` | 21 / 7,406 | 50 / 9,175 | 725 / 11,034 | 1,467 / 18,534 | 415 / 21,996 |
+
+The maps are dense and f32. A step that is a dense product composes into the same products the walk runs one after
+another, and gains where the state is small and the sequence long. A step that is a rank-one update is the identity
+plus a thin term: the dense map does not keep that, and the walk wins by two orders. The decode recurrences of
+Gated DeltaNet are of that kind. Pinned on an RTX 5090, composing one of three rows runs 2,962 where the recorded
+walk runs 10. Maps kept in a factored form, and tensor-core operands for them, are the gap.
 
 ## Recurrence, one channel per thread
 
