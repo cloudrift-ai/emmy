@@ -656,15 +656,16 @@ for each chunk of 64 rows:
 store(out, S)
 ```
 
-**Row.** A static loop over one matrix state, with maps and additive products, takes the register schedule:
-`WORK=w<M>x1`, an f16 atom with `f1x<N>` covering the state's columns, and `STAGE=d1/reg`, which keeps the state in
-registers across all steps of one launch. Any other recurrence is one launch per step over a state buffer.
+**Row.** A static loop over one matrix state, with maps and additive products, takes register storage:
+`WORK=w<M>x1`, `STAGE=d1/reg` at the carrying fold, which keeps the state in registers across all steps of one
+launch, and at the same route a `TILE` of an f16 atom with `f1x<N>` covering the state's columns. Any other
+recurrence is one launch per step over a state buffer, or `STAGE=d1/smem` where one CTA owns the whole state.
 
 **Verdict: gap, and most of it is evidence.** The recurrence of a 27B-class layer (48 heads, head size 128), RTX 5090,
 256 rows: FlashInfer 38 to 87 depending on how the call is timed (80 the way vLLM calls it); Emmy partly tuned 2,310;
 eager PyTorch 309; `torch.compile` 216.
 
-The state update is not the gap. The chunk loop is one serial launch that takes the register schedule above, and it
+The state update is not the gap. The chunk loop is one serial launch that takes the register row above, and it
 runs 25 for four chunks of 64 and 35 for sixteen chunks of 16. The time is in the kernels around it: the output
 product 1,388, the setup of the triangular system 605, the product of its inverse with the values 142, and the
 substitution 140. Each is a fused region whose cut was never picked. With no evidence in scope the pick keeps a

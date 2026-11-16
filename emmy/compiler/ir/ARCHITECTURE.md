@@ -474,8 +474,8 @@ the free-axis order never sorts under the cells, and its shape is the loops over
 keeps two slots of the cell shape and commits the second after each step; how many slots survive and where they are
 stored is a schedule's question, not the statement's. The Tile lift keeps the state in the term: a `Fold` whose ⊕ is
 the action `next`, with the `Carry` index as its `cells` and a `Pre` as a carrier-read slab (`ir/tile/ARCHITECTURE.md`).
-The classic schedule realizes the loop as a serial launch axis over a state buffer; the register schedule retains the
-state inside a CTA and realizes the same axis as a loop.
+The classic schedule realizes the loop as a serial launch axis over a state buffer, or, where the row's `STAGE` keeps
+the state in shared memory or registers, inside a CTA as a loop.
 
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:

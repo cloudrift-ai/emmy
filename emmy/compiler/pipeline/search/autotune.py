@@ -1,8 +1,7 @@
 """Autotuning one kernel: which complete schedule rows to measure next, given the ones already measured.
 
 ``emmy run --tune N`` drives it: the program's one scheduled kernel is enumerated under the greedy kernel set
-(:func:`schedule_space`) — every schedule row crossed with the knobs the kernel lowering decides afterwards, the
-carried-state storage among them — the prior's ten best rows are measured first, then each batch is the rows with
+(:func:`schedule_space`) — every complete schedule row, a carried state's storage among its sites — the prior's ten best rows are measured first, then each batch is the rows with
 the highest expected improvement under a Gaussian process fit to the log latencies measured so far (Bayesian
 optimization). The caller measures — this module never touches the GPU.
 

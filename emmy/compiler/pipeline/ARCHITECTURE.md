@@ -177,7 +177,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/policy/greedy.py` | `greedy_decide` — the fork resolver `compile` / `run` / `serve` use: Part 3's hierarchy, one pick per fork. |
 | `search/strategy/` | The search shape above the loop: `base.SearchStrategy` and its one realization, `greedy.GreedyStrategy` — the greedy compile's retry orchestration (Part 4). |
 | `search/inventory.py` | `KernelInventory`, the splice watcher that reports each kernel-set decision a lowering takes, and the tune-DB routing-row writers. The golden restamp and `run --golden PATH` compose one into their pipeline (Parts 5–7). |
-| `search/autotune.py` | `run --tune`'s proposal side: `schedule_space` enumerates the one scheduled kernel under the greedy kernel set — each schedule row crossed with every value of the knobs the kernel lowering decides afterwards (`SHARED_CARRY`; `ranking.later_arms`, shared with the dataset's pools) — `prior_scores` ranks its rows, and `Autotuner` proposes the prior's best rows, then Bayesian optimization batches over the knob values split into their parts. A nonempty pool of all-off rows has zero feature dimensions; its rows are still measured, not skipped. It never touches the GPU; `run` measures. |
+| `search/autotune.py` | `run --tune`'s proposal side: `schedule_space` enumerates the one scheduled kernel under the greedy kernel set — every complete schedule row, a carried state's storage among its sites — `prior_scores` ranks its rows, and `Autotuner` proposes the prior's best rows, then Bayesian optimization batches over the knob values split into their parts. A nonempty pool of all-off rows has zero feature dimensions; its rows are still measured, not skipped. It never touches the GPU; `run` measures. |
 | `search/bench_record.py` | The perf-row writers: `persist_kernel_perf` (a `kernel` + `perf` row per benched kernel), `persist_bench_failure` (the `bench_fail` row of the kernel a failure names), `kernel_row` and `point_stats`. `run --bench` records through them (Part 5). |
 | `search/prior/` | The ONE ranking path: the `Prior` ABC (`base.py`) and its one implementation, `OfflinePrior` (`offline.py`), which `load_prior` builds from the weights artifact. `catboost_model.py` holds `CatBoostModel`, the offline prior's scoring function as a value object — the one definition the fitter trains and the deploy path ranks by. `fit/` is the offline fitter, split by responsibility — `catboost.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/dataset/group.Group`, one layer down: a pool is data, not a fitter detail. |
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — every rank and regret metric resolves here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
@@ -717,10 +717,8 @@ independent command invocations, not a second orchestration layer inside `run`.
 
 **Greedy compares complete rows.** A branch carries only a partial schedule and is not a valid prior input. Measured
 rows descend directly to their exact offered row; otherwise the prior ranks the complete offered rows
-and selects the global argmin. A schedule row is scored at the best value of every knob the kernel lowering decides
-afterwards (`ranking.later_arms`), so the schedule the shared storage makes fastest wins the schedule fork and the
-storage fork then takes the arm the same prior scores best for it: the fork is decided in two steps, but on the rows
-the pools were fit over. This preserves the fitted model's semantics, at the
+and selects the global argmin. A carried state's storage is a site of the row, so the schedule and the storage
+are picked together, in one step. This preserves the fitted model's semantics, at the
 cost of traversing the row space until schedule composition and scoring are factorized end to end. The `OfflinePrior` ranks (including a positive
 `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns nothing every fork
 falls to the first leaf in emission order, which is meaningless and may be slow. Greedy benches nothing, so it can
@@ -1368,15 +1366,10 @@ one admission rule) by card, regime, kernel (the exact one the rows were measure
 from a definition, which is why it keys on the kernel where the measured pools key on the stamp signature) and sizes,
 beside a count of the rows it dropped, as `measured_groups` does; `ranking.build_golden_groups` enumerates each pool
 from the kernel's own definition (`KernelDef.program`: the stored body at the rows' sizes, through the tile and kernel
-lowering, under the regime's pins) and finds each golden row in it by `features.tile_signature` and the value of every
-knob the kernel lowering decides afterwards. The rows are the schedule rows crossed with the arms of each fork the
-kernel lowering opens on the scheduled kernel (`SHARED_CARRY`; `ranking.LaterForks`), read at the first golden row's
-schedule so the arm that golden took is offered: a pool spells every knob a greedy compile decides on the kernel, and
-only the values the lowering offers there, so every labelled row is a real alternative. The greedy's schedule fork and
-`run --tune` cross with every registered value instead (`ranking.later_arms`); a value the lowering never offers scores
-as a row nothing was measured on and is never the pick at the fork that decides it. Fitting on registry-crossed pools
-was measured and rejected: the phantom twins of every golden on kernels that never open the fork cost 5–7% of top-1
-over the pools. A pool's positives are its fastest verified rows (`ranking.POSITIVE_WITHIN`):
+lowering, under the regime's pins) and finds each golden row in it by `features.tile_signature`. The rows are the
+kernel's schedule rows, the same ones the greedy's schedule fork and `run --tune` enumerate: a pool spells every knob
+a greedy compile decides on the kernel, and only the values the schedule offers there, so every labelled row is a real
+alternative. A pool's positives are its fastest verified rows (`ranking.POSITIVE_WITHIN`):
 a verified row another verified row of the same pool beats by more than measurement noise — the row a re-record
 replaced — is a measured slower row, neither a positive nor a drawn negative. The base features are the pool's context
 and the kernel's stamps, computed from that definition — a golden's program is never read. Two pools that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape
@@ -1559,10 +1552,25 @@ the schedule CHOOSES — rotation and refill discipline derive at materializatio
 retired `ring` flag compiled byte-identically with and without it), and `smem` / `bk_elems` are resolver outputs,
 never spelled. See `lowering/kernel/ARCHITECTURE.md`.
 
-`d1/reg` selects persistent register storage for a matrix recurrence whose rows are independent across warps.
-The chunk loop runs inside each CTA, with one FP32 carry slot and reused matrix fragments. Its promotion interval
-is the `TILE` K chunk. The prior receives a register-storage indicator rather than shared-memory pipeline features;
-existing fitted artifacts have no coefficient for the new indicator until refitted.
+`STAGE` names where a site keeps a value it reads more than once. A staged operand is one such value; the state a
+kernel carries across the steps of a loop is another. A carrying kernel has one more `STAGE` site, at the route of its
+carrying fold (bare when it is the row's only `STAGE` site), with three values:
+
+- empty — the state lives in global memory and each step is one ordered launch.
+- `d1/smem` — the state lives in two shared buffers, each row padded by one column, and the steps run inside one
+  launch. The schedule offers it only when the state reads prove CTA ownership, both buffers fit the card's shared
+  memory, and the row runs a one-dimensional cooperative thread tile. `lowering/kernel/035_shared_carry` realizes it,
+  and rejects the row where the lowered kernel cannot hold the layout. A store that does not read the step — the
+  state a rolled scan ends with — is written once under either storage. Shared storage is not a rule: with few
+  independent batches and a large per-step grid it serializes the card (2 CTAs doing every row: 163 ms against
+  2.8 ms for ordered launches on a V100), so evidence decides.
+- `d1/reg` — persistent register storage for a matrix recurrence whose rows are independent across warps. The chunk
+  loop runs inside each CTA, with one FP32 carry slot and reused matrix fragments. The row spells the register
+  geometry as the `TILE` of the same route, whose K chunk is the promotion interval, and leaves every site of the
+  step off.
+
+The prior reads the storage as two indicators, one for shared and one for register storage, rather than
+shared-memory pipeline features.
 
 **`WSPEC`** (STR codec, RETIRED) — the warp-specialization producer band `p<np>` is INVENTORY: realized rows spell
 it as `WORK`'s `+p<np>` suffix, `SCHEDULE_FAMILIES` no longer lists it, no shipped golden carries the key, and the
@@ -1585,14 +1593,6 @@ no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `
 `grid_tile` eligibility). The fixed 2-D contraction domain is `('', 'gm8', 'gn4', 'gn8')`; the schedule restriction
 keeps `gn4` and `gn8` out unless an exact `RASTER` parameter selects one. Wall-time effect is small and shape-dependent
 (±2–4% measured), so golden evidence arbitrates per shape.
-
-**`SHARED_CARRY`** (INT, `lowering/kernel/035_shared_carry`) — late carried-state storage: `0` keeps global storage
-and one launch per ordered step, `1` keeps the state in two shared buffers, each row padded by one column. The pass
-offers the shared layout only when state reads prove CTA ownership and both buffers plus existing scratch fit. A
-store that does not read the step — the state a rolled scan ends with — is written once under either storage. The
-choice is part of the measured kernel row, so a recorded row replays its storage without a manual pin. Shared
-storage is not a rule: with few independent batches and a large per-step grid it serializes the card (2 CTAs doing
-every row: 163 ms against 2.8 ms for ordered launches on a V100), so evidence decides.
 
 **`S_*` and `H_*` are not knobs.** They are feature columns (`features.STRUCT_PREFIX` / `CTX_PREFIX`): `S_*` a
 kernel's structural features (statement/op histogram + loop extents + operand dtypes), computed from the kernel

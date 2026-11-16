@@ -99,12 +99,12 @@ schedule's fork realizes that fold as a serial kernel (`states_as_buffers`): the
 seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is untouched, so a
 contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
 kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
-to completion before the next kernel's first, so pieces could not interleave step by step. The register schedule
-can realize that same ordered axis inside a CTA when every state read stays within its warp's rows. Its schedule
-choice goes through the same lazy fork adapter; the ordinary Fold tree and precision gates remain shared.
-Kernel lowering also offers shared storage when the complete state belongs to one CTA per independent batch and
-fits the card's shared-memory limit. It keeps the scheduled reduction order and requested snapshots while moving the
-ordered axis into the CTA. Global storage remains an offered sibling.
+to completion before the next kernel's first, so pieces could not interleave step by step. Where the state lives
+is the row's `STAGE` at the carrying fold, a site of the same schedule. Register storage realizes the ordered axis
+inside a CTA when every state read stays within its warp's rows. Shared storage does when the complete state
+belongs to one CTA per independent batch and fits the card's shared-memory limit; kernel lowering realizes it,
+keeping the scheduled reduction order and requested snapshots while moving the ordered axis into the CTA. Global
+storage, one launch per step, is the third value.
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over three ordered domains. It first offers the maximal fused tree beside every semantically

@@ -193,7 +193,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Route** — The spelling a structural knob key addresses a node of the fold tree by: from the root, each departure
   names the node stood on and the 1-based stored operand taken (`map.1`), and the last segment names the kind of the
   node arrived at — `PLACE@map.1/twist.1/inner.2/map`, `TILE@map.1/twist.1/inner`. Kinds are the term's derived
-  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site.
+  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site. A carrying
+  fold reads as `scan`, and its route is where a row spells the storage of the carried state (`STAGE@…/scan`).
 - **Twist recipe** — A twisted monoid stated as data (`ir/pure/twist.py`): a componentwise base monoid with its
   per-element lift, conjugated by a bijection ψ (transport of structure — associativity is inherited), beside which
   the recipe stores what conjugation does not give stably: one pattern per channel (the per-element map a dependent
