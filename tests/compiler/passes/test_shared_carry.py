@@ -15,7 +15,7 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Write, parse_body
+from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Loop, StridedLoop, Write, parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
@@ -24,7 +24,7 @@ shared = import_module("emmy.compiler.pipeline.passes.lowering.kernel.035_shared
 _PINS = {"PLACE": "fuse", "WORK": "t512", "REDUCE": "coop-t/n8/v4", "FAST_MATH": True}
 
 
-def _body(n=40, *, masked=True, extra_reader=False):
+def _body(n=40, *, masked=True, extra_reader=False, last=False):
     row = f"t + {n - 5}"
     predicate = f"r < {row} + 1 && {row} <= r && c < {row}"
     owner = f"{predicate} ? b : 0" if masked else "b"
@@ -46,17 +46,19 @@ def _body(n=40, *, masked=True, extra_reader=False):
                         updated = add(old, sum)
                         {value}
                         state[b, r, c] <- next seed `seed`
-                        out[t, b, r, c] = next{extra}
+                        out[{"" if last else "t, "}b, r, c] = next{extra}
         """
     )
     carry = next(stmt for stmt in body.iter() if isinstance(stmt, Carry))
     return body, carry
 
 
-def _graph(dtype=F32, *, masked=True, n=40):
+def _graph(dtype=F32, *, masked=True, n=40, last=False):
+    """The scan storing every step's state, or (``last``) the state it ends with alone."""
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("seed", (2, n, n), dtype), node_id="seed")
-    graph.add_node(LoopOp(body=_body(n, masked=masked)[0]), ["seed"], Tensor("out", (3, 2, n, n), dtype), node_id="out")
+    out = Tensor("out", (2, n, n) if last else (3, 2, n, n), dtype)
+    graph.add_node(LoopOp(body=_body(n, masked=masked, last=last)[0]), ["seed"], out, node_id="out")
     graph.inputs, graph.outputs = ["seed"], ["out"]
     return graph
 
@@ -230,3 +232,47 @@ def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked)
         array = (np.random.default_rng(seed).standard_normal((2, 40, 40)) * 0.03).astype(dtype.np)
         outputs = [backend.run(program, input_data={"seed": array})[0].outputs["out"] for program in candidates]
         np.testing.assert_array_equal(*outputs)
+
+
+def test_ordered_launches_store_a_scan_s_last_state_at_the_last_launch_alone():
+    """A store the step does not index is stored over by the next launch, so only the last launch writes it."""
+    with pinned_knobs({**_PINS, "SHARED_CARRY": 0}):
+        compiled, kernels = compile_with_kernels(_graph(last=True), ctx=Context.from_target((7, 0)))
+    (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+    (kernel,) = kernels.values()
+    assert op.serial and op.knobs["SHARED_CARRY"] == 0
+    guarded = {id(store) for cond in statements(kernel, Cond) if "2 == " in str(cond.cond) for store in cond.nested()[0].iter()}
+    stores = [store for store in statements(kernel, Write) if store.output == "out"]
+    assert stores and all(id(store) in guarded for store in stores)
+
+
+def test_shared_storage_stores_a_scan_s_last_state_once_and_copies_only_the_row_the_last_step_changed():
+    """With no step's state to keep, the shared layout stores the state after its loop over the steps, and a
+    step's copy between the two buffers covers the one row the step before it wrote, not the whole state."""
+    with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
+        compiled, kernels = compile_with_kernels(_graph(last=True), ctx=Context.from_target((7, 0)))
+    (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+    (kernel,) = kernels.values()
+    assert not op.serial and op.arg_order == ("seed", "out") and op.knobs["SHARED_CARRY"] == 1
+    (steps,) = (loop for loop in statements(kernel, Loop) if loop.axis.name == "a0")
+    assert not [store for store in steps.body.iter() if isinstance(store, Write) and store.output == "out"]
+    (closing,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_last")
+    assert [store.output for store in closing.body.iter() if isinstance(store, Write)] == ["out"]
+    (copy,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_copy")
+    assert str(copy.end) == "40 * a0 + 1400" and str(copy.start) == "thread_idx.x + 40 * a0 + 1360"
+
+
+@requires_cuda
+@pytest.mark.parametrize("storage", [0, 1], ids=["global", "shared"])
+@pytest.mark.parametrize("masked", [True, False], ids=["selected", "full"])
+def test_a_scan_that_keeps_its_last_state_matches_the_last_step_of_one_that_keeps_all(storage, masked):
+    array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
+    outputs = []
+    for last in (False, True):
+        # A row every card since Volta realizes, so the storage under test is the one compiled.
+        with pinned_knobs({**_PINS, "WORK": "t128", "REDUCE": "coop-t/v2", "SHARED_CARRY": storage}):
+            compiled = Pipeline.build(CUDA_PASSES).run(_graph(masked=masked, last=last), ctx=Context.probe())
+        (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+        assert op.knobs["SHARED_CARRY"] == storage
+        outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
+    np.testing.assert_array_equal(outputs[0][2], outputs[1])

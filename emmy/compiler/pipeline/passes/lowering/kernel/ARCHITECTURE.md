@@ -805,6 +805,15 @@ per-cell path. Each shared row is padded by one column, so column-strided reads 
 The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks between
 shared and global storage; ownership, supported geometry and the card's shared-memory limit decide only legality.
 
+A store that does not read the step is the state a rolled scan ends with (`loop/fusion/005_roll_recurrence`): every
+step would write the same cells, and only the last step's are read. Both storages write it once. The ordered launches
+store it behind the last launch (`036_keep_last_store`). The shared layout stores it from its buffer after the loop
+over the steps, and declines a store that is not the state itself at the state's data type. With no snapshot left to
+store each step, the whole-CTA copy has only the two buffers to keep in agreement, and the buffer a step writes
+differs from the state it reads only in the cells the step before changed. So the seed fills both buffers, and where
+the update's predicate bounds the state's leading cell coordinate (one row of a triangular inverse), the copy covers
+that range at the step before instead of the whole state.
+
 ## Kernel-IR peepholes
 
 **A kernel body is optimized at construction.** `KernelOp` runs `optimize_body` on its body, in the base it shares

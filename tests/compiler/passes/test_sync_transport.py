@@ -93,6 +93,23 @@ def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:
     assert {assign.name for assign in fill.iter_of_type(Assign)} == {f"out__c{i}" for i in range(8)}
 
 
+def test_compute_fill_takes_a_scalar_read_beside_a_vector_run() -> None:
+    """A computed operand can read a 0-d buffer (a calibrated FP8 scale) beside its k-indexed slab read. That read has
+    no last-dim index to advance with the column, so it replicates per cell while the slab read stays one vector run;
+    the plan once indexed its last dim and the fill raised before any kernel was built."""
+
+    def value(_k0, row, col):
+        stmts = parse_body(f"x_v = load x[{row}, {col}]\ns_v = load s[]\nout = multiply(x_v, s_v)\n")
+        return list(stmts), "out"
+
+    operand = SyncOperand(tag="b", shape=(1, 8), value=value)
+    transport = SyncTransport(operands=(operand,), slab_dtype=F16, cta=CtaTile(Literal(0, "int"), 1))
+    fill = Body(tuple(transport.fill(k0=Literal(0, "int"), slot=Literal(0, "int"), k0_cur=Literal(0, "int"))))
+
+    assert {load.input for load in fill.loads} == {"x", "s"}
+    assert {assign.name for assign in fill.iter_of_type(Assign)} == {f"out__c{i}" for i in range(8)}
+
+
 def test_software_swizzle_shifts_by_the_slab_row_not_the_atom() -> None:
     """A software-filled slab's XOR reads its ROW index — which needs the slab's OWN stride once a
     row is wider than one swizzle atom.

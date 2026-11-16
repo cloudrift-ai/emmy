@@ -485,6 +485,15 @@ def symbolic_bindings(tensors: Iterable, extents: Iterable = ()) -> dict[str, in
 
 def kernel_bindings(op) -> dict[str, int]:
     """The sizes a bench of ``op`` binds its symbolic dims to (:func:`symbolic_bindings` over its
-    buffers and its axes: a loop may run over a size no buffer carries) — what a ``perf`` row of a
-    dynamic kernel records so rows at two sizes stay apart."""
-    return symbolic_bindings((*op.inputs.values(), *op.outputs.values()), (axis.extent for axis in getattr(op, "axes", ())))
+    buffers and the loops its body runs: a loop may run over a size no buffer carries) — what a ``perf``
+    row of a dynamic kernel records so rows at two sizes stay apart. A tile's axis table can hold an axis
+    its body never runs, as a split's combine step holds the slice its partials reduced, and such an
+    axis binds nothing: a combine over a fixed number of partials is one kernel at every window."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
+    if isinstance(op, TileOp) and op.op is not None:
+        formed = formed_from(op)
+        extents = tuple(loop.axis.extent for loop in (formed.body if formed is not None else op.loop_body).loops)
+    else:
+        extents = tuple(axis.extent for axis in getattr(op, "axes", ()))
+    return symbolic_bindings((*op.inputs.values(), *op.outputs.values()), extents)
