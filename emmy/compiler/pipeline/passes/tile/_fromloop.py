@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from itertools import count
+from math import prod
 from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import F32
@@ -1010,6 +1011,30 @@ def carried_program(op):
                     return None
                 return loop, carry, owned_cells(loop.body, carry)
     return None
+
+
+def shared_state(op, program) -> tuple[str, tuple[int, ...]] | None:
+    """The buffer the serial kernel ``op`` keeps its carried state in and the state's static shape below the
+    step and the owned batch cells, or ``None``: the port the lift added, or the output the term stores the
+    state into itself. Its two padded copies are what shared storage holds (:func:`shared_state_bytes`)."""
+    loop, carry, batch = program
+    written = {s.output for s in loop.body.iter() if isinstance(s, Write)}
+    ports = [name for name in op.outputs if name not in written]
+    if not ports and carry.name in (stored := stored_states(loop, ())):
+        ports = [stored[carry.name][1].output]
+    if len(ports) != 1:
+        return None
+    tensor = op.outputs[ports[0]]
+    kept = tuple(dim for dim, n in enumerate(tensor.shape) if n != 1)  # the dims a size-one coordinate pins to 0 hold no cell
+    dimensions = tuple(tensor.shape[dim] for dim in kept[1 + len(batch) :])
+    if not dimensions or any(not n.is_static for n in dimensions):
+        return None
+    return ports[0], tuple(n.as_static() for n in dimensions)
+
+
+def shared_state_bytes(shape: tuple[int, ...], dtype) -> int:
+    """Shared memory the two buffers of a state of ``shape`` take, each row padded by one column."""
+    return 2 * prod(shape[:-1]) * (shape[-1] + 1) * dtype.nbytes
 
 
 def lift_serial(op: LoopOp, *, prefix: str) -> tuple[TileOp, dict[str, tuple]]:

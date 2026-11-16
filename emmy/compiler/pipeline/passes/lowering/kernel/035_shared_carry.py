@@ -31,7 +31,7 @@ from emmy.compiler.ir.stmt import (
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.types import value_dtypes
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.tile._fromloop import carried_program, conjuncts, seed_index, stored_states
+from emmy.compiler.pipeline.passes.tile._fromloop import carried_program, conjuncts, seed_index, shared_state
 
 PATTERN = [Pattern("root", KernelOp)]
 _resolve = import_module("emmy.compiler.pipeline.passes.lowering.kernel.045_merge_select_loads")._resolve
@@ -55,20 +55,13 @@ def _resident(op, program, retained=frozenset()):
     grid = tile.axes[len(batch) : split]
     if not grid:
         return None
-    # The state's buffer: the port the lift added, or the output the term stores the state into itself.
-    written = {s.output for s in loop.body.iter() if isinstance(s, Write)}
-    ports = [name for name in op.outputs if name not in written]
-    if not ports and carry.name in (stored := stored_states(loop, ())):
-        ports = [stored[carry.name][1].output]
-    if len(ports) != 1:
+    state = shared_state(op, program)
+    if state is None:
         return None
-    port = ports[0]
+    port, shape = state
+    written = {s.output for s in loop.body.iter() if isinstance(s, Write)}
     tensor = op.outputs[port]
     kept = tuple(dim for dim, n in enumerate(tensor.shape) if n != 1)  # the dims a size-one coordinate pins to 0 hold no cell
-    dimensions = tuple(tensor.shape[dim] for dim in kept[1 + len(batch) :])
-    if not dimensions or any(not n.is_static for n in dimensions):
-        return None
-    shape = tuple(n.as_static() for n in dimensions)
     shared = "_carry"
     parity = Var(loop.axis.name) % Literal(2, "int")
     before = BinaryExpression("<", Literal(0, "int"), Var(loop.axis.name))  # the first-step predicate, in normal form

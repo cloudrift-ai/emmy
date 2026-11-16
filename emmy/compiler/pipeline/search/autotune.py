@@ -1,9 +1,9 @@
 """Autotuning one kernel: which complete schedule rows to measure next, given the ones already measured.
 
 ``emmy run --tune N`` drives it: the program's one scheduled kernel is enumerated under the greedy kernel set
-(:func:`schedule_space`) — every complete schedule row, a carried state's storage among its sites — the prior's ten best rows are measured first, then each batch is the rows with
-the highest expected improvement under a Gaussian process fit to the log latencies measured so far (Bayesian
-optimization). The caller measures — this module never touches the GPU.
+(:func:`schedule_space`) — every complete schedule row, a carried state's storage among its sites — the prior's
+ten best rows are measured first, then each batch is the rows with the highest expected improvement under a
+Gaussian process fit to the log latencies measured so far (Bayesian optimization). The caller measures — this module never touches the GPU.
 
 A knob value is split into its parts before the process sees it (``TILE`` ``mma_m16n8k16_f16_f32/f2x4/k2`` → the
 atom, a ``2×4`` fragment count and a ``k2`` step), so two rows that differ in one tile dimension are near each other.

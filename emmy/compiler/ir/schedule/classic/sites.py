@@ -726,7 +726,10 @@ class ClassicKernelSite(Site[ClassicSchedule]):
         if program is None or register not in self._states():
             return ()
         (key,) = classic_state_tile_keys(problem.tile)
-        named = problem.row.get(key) or (problem.bare_pins.get("TILE") if key != "TILE" else None)
+        named = problem.row.get(key)
+        if not named and self._states() == (register,):
+            # A row that keeps the state in registers and spells one bare geometry names the state's.
+            named = problem.bare_pins.get("TILE")
         if not named and not problem.allow_f16_accumulate:
             return ()
         works = REGISTER_WORKS if "WORK" not in problem.row else (() if problem.work is None else (problem.work,))
@@ -749,10 +752,15 @@ class ClassicKernelSite(Site[ClassicSchedule]):
         catalog = (Stage.direct(), *self.problem.state_stages) if len(keys) == 1 else (Stage.direct(),)
         if not keys:
             return catalog
-        named = self.problem.row.get(keys[0])
-        if named is None and keys[0] != "STAGE":
-            named = self.problem.bare_pins.get("STAGE")
         spelled = {stage.spell(): stage for stage in catalog}
+        named = self.problem.row.get(keys[0])
+        if named is None and keys[0] != "STAGE" and (bare := self.problem.bare_pins.get("STAGE")) is not None:
+            # A bare pin names one site of the kernel: the state offers its value beside direct, and
+            # ``unrealized_bare_pin`` asks the completed schedule which site carried it. Registers hold no
+            # operand, so that value names the state alone.
+            if bare == "d1/reg":
+                return (spelled[bare],) if bare in spelled else ()
+            return tuple(dict.fromkeys((Stage.direct(), spelled.get(bare, Stage.direct()))))
         if named in spelled:
             return (spelled[named],)
         # A value no state takes (an operand transport published to every kernel) names another site.

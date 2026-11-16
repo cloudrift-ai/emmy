@@ -14,7 +14,7 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule.base import Schedule
-from emmy.compiler.ir.schedule.choices import Tile, Work
+from emmy.compiler.ir.schedule.choices import Raster, Stage, Tile, Work
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select
 
 if TYPE_CHECKING:
@@ -137,14 +137,6 @@ class RegisterProgram:
         return cls(time, state, carrying.init[0], outputs, roots, batch_axes, rows, columns)
 
 
-@dataclass(frozen=True, slots=True)
-class RegisterSchedule:
-    """A warp inventory and matrix fragment geometry for register storage."""
-
-    work: Work
-    tile: Tile
-
-
 #: The warp inventories a register schedule's catalog offers.
 REGISTER_WORKS = tuple(Work(kind="warp", units=(warps, 1)) for warps in (1, 2, 4))
 
@@ -171,16 +163,18 @@ def register_accepts(program: RegisterProgram | None, work: Work, plan: Tile, ta
 
 def register_row(schedule: Schedule) -> dict[str, str]:
     """A register schedule as the three values that decide it — the wire form of a scheduled kernel."""
-    return {"WORK": schedule.kernel.work.spell(), "TILE": schedule.kernel.tile.spell(), "STAGE": "d1/reg"}
+    return {"WORK": schedule.kernel.work.spell(), "TILE": schedule.kernel.state_tile.spell(), "STAGE": "d1/reg"}
 
 
 def register_schedule(tile: TileOp, row) -> Schedule:
     """The register schedule ``row`` spells on ``tile`` (inverse of :func:`register_row`)."""
     if set(row) != {"WORK", "TILE", "STAGE"} or row["STAGE"] != "d1/reg":
         raise ValueError("a register schedule is exactly WORK, TILE and STAGE=d1/reg")
+    from emmy.compiler.ir.schedule.classic.schedule import KernelSchedule  # noqa: PLC0415 — the package reads this module
+
     work = Work.parse(row["WORK"])
-    choice = RegisterSchedule(work, Tile.parse(row["TILE"], work))
-    if not register_accepts(tile.register_program, choice.work, choice.tile, None):
+    choice = KernelSchedule(work, Raster.parse(""), Stage(transport="reg"), Tile.parse(row["TILE"], work))
+    if not register_accepts(tile.register_program, choice.work, choice.state_tile, None):
         raise ValueError("row does not select one register schedule")
     return Schedule(choice, {}, {})
 
@@ -193,9 +187,9 @@ class RegisterMaterialization:
         if workers is not None or not place.is_mapped:
             raise ValueError("register storage needs a mapped, uniform warp inventory")
         kernel = schedule.kernel
-        if not isinstance(kernel, RegisterSchedule) or schedule.nodes or schedule.edges:
+        if kernel.state.transport != "reg" or schedule.nodes or schedule.edges:
             raise ValueError("register storage takes one kernel choice and no site choice")
-        if not register_accepts(source.register_program, kernel.work, kernel.tile, None):
+        if not register_accepts(source.register_program, kernel.work, kernel.state_tile, None):
             raise ValueError("register schedule is outside this loop's domain")
 
 

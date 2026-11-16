@@ -25,12 +25,8 @@ remains a skip rather than a guessed schedule.
 
 from __future__ import annotations
 
-from math import prod
-
 from emmy.compiler.dim import paged_declarations
-from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.choices import Stage
 from emmy.compiler.ir.schedule.classic import (
@@ -50,7 +46,7 @@ from emmy.compiler.pipeline.fork import Fork, exact_schedule_leaf, iter_leaves
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import family_pins, kernel_pin, schedule_pin_fingerprint
 from emmy.compiler.pipeline.passes.tile._cut import PIECE
-from emmy.compiler.pipeline.passes.tile._fromloop import carried_program, serial_form
+from emmy.compiler.pipeline.passes.tile._fromloop import carried_program, serial_form, shared_state, shared_state_bytes
 from emmy.compiler.pipeline.schedule import fork_schedule
 from emmy.compiler.structural import digest
 
@@ -99,18 +95,15 @@ def cpu_forks(tile: TileOp, knobs: dict, ctx) -> list[Fork]:
 
 
 def _shared_state_fits(tile: TileOp, ctx) -> bool:
-    """Whether the one state ``tile`` carries can be kept in shared memory: one CTA owns each state whole
-    (:func:`carried_program`), and the two padded buffers the steps alternate between fit beside nothing else.
-    What only the lowered kernel shows is the kernel lowering's to decline."""
+    """Whether the one state the serial kernel ``tile`` carries can be kept in shared memory: one CTA owns each
+    state whole (:func:`carried_program`), and the two padded buffers the steps alternate between fit beside
+    nothing else. What only the lowered kernel shows is the kernel lowering's to decline."""
     program = carried_program(tile)
-    if program is None:
+    state = shared_state(tile, program) if program is not None else None
+    if state is None:
         return False
-    _, carry, owned = program
-    cells = [tile.axis_of(cell.name).extent for cell in carry.index if isinstance(cell, Var) and cell.name not in owned]
-    if not cells or any(not extent.is_static for extent in cells):
-        return False
-    *rows, columns = (extent.as_static() for extent in cells)
-    return 2 * prod(rows) * (columns + 1) * F32.nbytes <= ctx.max_dynamic_smem
+    port, shape = state
+    return shared_state_bytes(shape, tile.outputs[port].dtype) <= ctx.max_dynamic_smem
 
 
 def classic_forks(
@@ -131,7 +124,7 @@ def classic_forks(
     the reading a row published across peer kernels takes — instead of refusing a value that names
     a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin. ``node`` is the
     kernel's graph node id, which names the buffer a carried state's serial form keeps it in."""
-    from emmy.compiler.ir.schedule.register import RegisterSchedule, materialize_register  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.register import materialize_register  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
     row = pin_row(tile.name, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
@@ -142,7 +135,7 @@ def classic_forks(
     carrying, state_stages = tile, ()
     if tile.carries:
         tile = serial_form(carrying, node)
-        if len(tile.state_routes) == 1 and _shared_state_fits(carrying, ctx):
+        if _shared_state_fits(tile, ctx):
             state_stages += (Stage(transport="smem"),)
         if carrying.register_program is not None:
             state_stages += (Stage(transport="reg"),)
@@ -189,7 +182,7 @@ def classic_forks(
         codec=codec,
         inherited_knobs=knobs,
         materialize=lambda schedule, row: (
-            materialize_register(carrying, Schedule(RegisterSchedule(schedule.kernel.work, schedule.kernel.state_tile), {}, {}), row)
+            materialize_register(carrying, Schedule(schedule.kernel, {}, {}), row)
             if schedule.kernel.state.transport == "reg"
             else materialize_classic(tile, knobs=row, target=ctx, schedule=schedule)
         ),

@@ -177,8 +177,6 @@ def _stage_features(knobs: dict) -> dict[str, float]:
     st = _parsed_stage(str(spec))
     if st is None:
         return {}
-    if st.transport == "reg":
-        return {"D_stage_reg": 1.0}  # register storage has no shared-memory pipeline
     return {
         "D_stage_depth": float(st.depth),
         "D_stage_async": 1.0 if st.is_async else 0.0,
@@ -430,7 +428,7 @@ def knob_features(knobs: dict) -> dict[str, float]:
 def _state_key(kernel: Op, knobs: Mapping) -> str | None:
     """The key ``knobs`` spells the storage of ``kernel``'s one carried state under, or ``None``: the carrying
     fold's route, or the bare ``STAGE`` of a kernel whose step stages no operand."""
-    tile = next((op for op in kernel.source_chain() if hasattr(op, "state_routes")), None)
+    tile = kernel_tile(kernel)
     routes = tile.state_routes if tile is not None else ()
     if len(routes) != 1:
         return None
@@ -461,9 +459,10 @@ class Featurizer:
         base = {**self.base, **stamps(kernel)}
         if pieces is None and self.warp_eligible(kernel):
             base["S_warp_eligible"] = 1.0
-        if (key := _state_key(kernel, knobs)) is not None and knobs[key] in ("", "d1/smem"):
-            # A carried state in shared memory is no operand fill: the row prices it as its own fact.
+        if (key := _state_key(kernel, knobs)) is not None:
+            # A carried state's storage is no operand fill: the row prices it as its own facts.
             base["D_state_shared"] = float(knobs[key] == "d1/smem")
+            base["D_state_reg"] = float(knobs[key] == "d1/reg")
             knobs = {name: value for name, value in knobs.items() if name != key}
         left = [(kernel, None)] if pieces is None else kernel_pieces(pieces)
         of_pieces = piece_features(left)

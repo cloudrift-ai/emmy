@@ -14,9 +14,10 @@ from emmy.compiler.ir.expression import apply
 from emmy.compiler.ir.kernel.ir import FragmentLoad, FragmentPromote, FragmentRepack, MmaSyncPtx, RegFragment, fragment_registers
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.choices import Raster
+from emmy.compiler.ir.schedule.classic.schedule import KernelSchedule
 from emmy.compiler.ir.schedule.register import (
     REGISTER_WORKS,
-    RegisterSchedule,
     materialize_register,
     register_accepts,
     register_row,
@@ -40,11 +41,15 @@ def _lift(graph):
     return lifted
 
 
+def _kernel(work, plan):
+    return KernelSchedule(work, Raster.parse(""), Stage(transport="reg"), plan)
+
+
 def _schedules(tile, target=(12, 0)):
     """Every register schedule the catalog holds for ``tile`` on ``target``."""
     ctx, program = Context.from_target(target), tile.register_program
     return [
-        Schedule(RegisterSchedule(work, plan), {}, {})
+        Schedule(_kernel(work, plan), {}, {})
         for work in REGISTER_WORKS
         for plan in register_tiles(program, work)
         if register_accepts(program, work, plan, ctx)
@@ -78,7 +83,7 @@ def test_register_schedule_round_trip_and_precision_gate(target):
         restored = Graph.from_dict(graph.to_dict())
         assert restored.nodes[node.id].op.schedule == schedule
         assert restored.nodes[node.id].op.register_program == node.op.register_program
-    work, plan = schedule.kernel.work, schedule.kernel.tile
+    work, plan = schedule.kernel.work, schedule.kernel.state_tile
     assert register_row(schedule)["STAGE"] == "d1/reg"
     assert register_accepts(program, work, replace(plan, bk=2), Context.from_target(target))
     assert not register_accepts(program, work, replace(plan, regs=(2, 1)), Context.from_target(target))
@@ -247,7 +252,7 @@ def test_gdn_reuses_the_corrected_values(target):
         # One product computes the correction, one updates the state. The separate correction
         # output shares the first product instead of evaluating the old state a second time.
         assert sum(isinstance(s, MmaSyncPtx) for s in statements) == (3 if target == (7, 0) else 2)
-        half = schedule.kernel.tile.atom.operand_dtype("c").nbytes == 2
+        half = schedule.kernel.state_tile.atom.operand_dtype("c").nbytes == 2
         assert sum(isinstance(s, FragmentPromote) for s in statements) == (2 if half else 0)
         assert isinstance(body[0], RegFragment) and body[0].dtype.name == "f32"
 
@@ -364,7 +369,7 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
         for plan in register_tiles(tile.register_program, work)
         if (plan.atom.operand_dtype("c").nbytes == 2) == half and register_accepts(tile.register_program, work, plan, Context.probe())
     )
-    schedule = Schedule(RegisterSchedule(work, plan), {}, {})
+    schedule = Schedule(_kernel(work, plan), {}, {})
     graph = Graph()
     rng = np.random.default_rng(0)
     arrays = {}
