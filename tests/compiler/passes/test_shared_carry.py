@@ -236,11 +236,11 @@ def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked)
 
 def test_ordered_launches_store_a_scan_s_last_state_at_the_last_launch_alone():
     """A store the step does not index is stored over by the next launch, so only the last launch writes it."""
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 0}):
+    with pinned_knobs({**_PINS, "STAGE": ""}):
         compiled, kernels = compile_with_kernels(_graph(last=True), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     (kernel,) = kernels.values()
-    assert op.serial and op.knobs["SHARED_CARRY"] == 0
+    assert op.serial and op.knobs["STAGE"] == ""
     guarded = {id(store) for cond in statements(kernel, Cond) if "2 == " in str(cond.cond) for store in cond.nested()[0].iter()}
     stores = [store for store in statements(kernel, Write) if store.output == "out"]
     assert stores and all(id(store) in guarded for store in stores)
@@ -249,11 +249,11 @@ def test_ordered_launches_store_a_scan_s_last_state_at_the_last_launch_alone():
 def test_shared_storage_stores_a_scan_s_last_state_once_and_copies_only_the_row_the_last_step_changed():
     """With no step's state to keep, the shared layout stores the state after its loop over the steps, and a
     step's copy between the two buffers covers the one row the step before it wrote, not the whole state."""
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
+    with pinned_knobs({**_PINS, "STAGE": "d1/smem"}):
         compiled, kernels = compile_with_kernels(_graph(last=True), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     (kernel,) = kernels.values()
-    assert not op.serial and op.arg_order == ("seed", "out") and op.knobs["SHARED_CARRY"] == 1
+    assert not op.serial and op.arg_order == ("seed", "out") and op.knobs["STAGE"] == "d1/smem"
     (steps,) = (loop for loop in statements(kernel, Loop) if loop.axis.name == "a0")
     assert not [store for store in steps.body.iter() if isinstance(store, Write) and store.output == "out"]
     (closing,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_last")
@@ -270,9 +270,9 @@ def test_a_scan_that_keeps_its_last_state_matches_the_last_step_of_one_that_keep
     outputs = []
     for last in (False, True):
         # A row every card since Volta realizes, so the storage under test is the one compiled.
-        with pinned_knobs({**_PINS, "WORK": "t128", "REDUCE": "coop-t/v2", "SHARED_CARRY": storage}):
+        with pinned_knobs({**_PINS, "WORK": "t128", "REDUCE": "coop-t/v2", "STAGE": storage}):
             compiled = Pipeline.build(CUDA_PASSES).run(_graph(masked=masked, last=last), ctx=Context.probe())
         (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
-        assert op.knobs["SHARED_CARRY"] == storage
+        assert op.knobs["STAGE"] == storage
         outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
     np.testing.assert_array_equal(outputs[0][2], outputs[1])
