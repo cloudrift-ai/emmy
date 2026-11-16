@@ -10,7 +10,9 @@ from emmy.deploy import DeployParams, replica_services
 from emmy.deploy import (
     deploy as deploy_entry,
 )
+from emmy.deploy.compose import check_protectable
 from emmy.deploy.plan import load_plan
+from emmy.deploy.serving_key import add_serving_api_key_argument
 from emmy.provisioning.cloud import (
     DEFAULT_VM_ACTIVE_TIMEOUT,
     provision_cloud_vm,
@@ -63,6 +65,12 @@ async def _handle_cloud(args):
             f"Model {index}: {service.recipe.model_name} on GPU {devices} at gpu_memory_utilization="
             f"{service.recipe.engine.llm.gpu_memory_utilization}, port {service.port}"
         )
+
+    try:
+        check_protectable(services, args.serving_api_key)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
 
     ssh_key = os.path.expanduser(args.ssh_key)
     hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
@@ -120,6 +128,7 @@ async def _handle_cloud(args):
         load_balancer=load_balancer,
         model_dir=args.model_dir,
         hf_token=hf_token,
+        api_key=args.serving_api_key or "",
         dry_run=args.dry_run,
         port_mappings=conn.port_mappings,
         proxy=args.vm_proxy,
@@ -177,6 +186,7 @@ def register_cloud_target(subparsers):
         help="Extra SSH public key file to install in the VM's authorized_keys (repeatable)",
     )
     parser.add_argument("--hf-token", default=None, help="HuggingFace token (default: $HF_TOKEN)")
+    add_serving_api_key_argument(parser)
     parser.add_argument("--model-dir", default="/hf_models", help="Model cache directory")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")
     parser.add_argument("--billing-exempt", action="store_true", help="Skip billing for CloudRift (admin-only)")

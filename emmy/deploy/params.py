@@ -29,6 +29,7 @@ class DeployParams:
     load_balancer: bool = False  # nginx on 8080 in front of every service (replica fan-out)
     model_dir: str = "/hf_models"
     hf_token: str = ""
+    api_key: str = ""  # serving API key of a protected deployment; empty deploys open endpoints
     dry_run: bool = False
     port_mappings: list[tuple[int, int]] = field(default_factory=list)
     proxy: str | None = None  # HTTP proxy the host reaches the internet through (--vm-proxy)

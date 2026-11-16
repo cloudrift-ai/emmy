@@ -163,6 +163,8 @@ def _validate_and_build(config: dict) -> Recipe:
     engine = next((name for name in ("native", "sglang") if name in llm_dict), "vllm")
     extra_args = llm_dict.get(engine, {}).get("extra_args", "")
     validate_extra_args(extra_args, engine=engine)
+    if "VLLM_API_KEY" in str(llm_dict.get(engine, {}).get("extra_env", "")):
+        raise ValueError("extra_env must not set VLLM_API_KEY: a recipe holds no secret; deploy with --serving-api-key")
     if engine == "native":
         # The native server runs one request on one GPU from the pack its image carries.
         if not llm_dict["native"].get("image") or not llm_dict["native"].get("golden"):

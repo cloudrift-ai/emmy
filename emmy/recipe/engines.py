@@ -37,6 +37,7 @@ _HARDCODED_FLAGS = {
     "--model-path",
     "--served-model-name",
     "--revision",
+    "--api-key",  # a secret: a protected deployment takes it at deploy time, never from a recipe
 }
 
 # Preparation flags a native lane's pack takes from the recipe's own fields or the bake.
