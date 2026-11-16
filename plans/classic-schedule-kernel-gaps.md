@@ -156,7 +156,9 @@ What follows, in order:
 
 1. Done: the respelling is the traced rule. The trace takes it only above one chunk of 64 rows, so it re-keys the
    256-row programs alone; today one golden holds them (the NVIDIA 27B checkpoint's, RTX 5090).
-2. Record the cut rows of those 256-row roots on the RTX 5090.
+2. Done: the 256-row roots are recorded on the RTX 5090. Six roots sum to 474 µs against 524 before. The root
+   that applies the inverse got slower (279 to 313): its scaled products cut into pointwise kernels and scalar
+   products that refuse a tensor-core tile. That root is the next thing to fix.
 3. The substitution, 53 µs: a tuned row first (it ran 31 µs in blocks of 16 alone), then R2's blocked inverse.
 4. R5 only for what is left against 87 µs.
 

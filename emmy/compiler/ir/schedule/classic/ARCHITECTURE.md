@@ -676,6 +676,11 @@ the substitution, it runs 195. The products take `mma_m16n8k16_bf16_f32` tiles a
 which stores only its last state, is 53 of the 195. None of these picks is the prior's own: unpinned, the substitution
 takes a thread tile and runs 919, and one 128-wide reduce takes a CTA per output cell and runs 336.
 
+Inside a whole layer the gain is smaller. Recorded on the RTX 5090 for the 256-row layer of the 27B NVFP4 checkpoint,
+the six roots the rule reaches sum to 474 against 524 for the rule as Transformers writes it. The root that forms the
+system and its inverse went from 192 to 94; the root that applies the inverse to the values and keys went from 279 to
+313, because its scaled products cut into pointwise kernels and scalar products that take no tensor-core tile.
+
 What is left to match the reference: the solve is a 63-step forward substitution in f32, not a blocked inverse on
 tensor cores, and the reference's one launch per head has no spelling, since warp groups with different roles inside
 one CTA do not exist beyond the load warp. Two faults block the shorter routes. An inverse written as repeated
