@@ -186,8 +186,8 @@ def test_a_pairwise_pin_names_a_carried_state_and_a_depth_its_parts_have() -> No
 _INVERSE = """
 import torch, torch.nn as nn
 class Inverse(nn.Module):
-    # The inverse of a unit lower triangular matrix a row a step, as the Gated DeltaNet wrapper spells it:
-    # the system read from its own tensor, so the step is the state plus one row of the system times the state.
+    # The inverse of a unit lower triangular matrix a row a step, the system read from its own tensor: the
+    # step is the state plus one row of the system times the state, which is affine in the state.
     def forward(self, a):
         low = a.tril(-1)
         eye = torch.eye({n})
@@ -239,10 +239,11 @@ m(torch.randn(1, 32, 2, 8), torch.randn(1, 32, 2, 8), torch.randn(1, 32, 2, 8), 
 
 
 @pytest.mark.parametrize("pin", ["g3k", "g3k2"])
-def test_both_recurrences_of_the_gated_delta_rule_compose_and_match_eager(pin: str) -> None:
-    """The rule as the Gated DeltaNet wrapper traces it holds two recurrences, and both are affine: the row
-    substitution under the batch's one coordinate, which stores its last state, and the chunk loop, which
-    stores a second value beside its state every step. One pin reaches both carrying sites."""
+def test_the_chunk_loop_of_the_gated_delta_rule_composes_and_matches_eager(pin: str) -> None:
+    """The rule as the Gated DeltaNet wrapper traces it holds two recurrences. The chunk loop is affine: it
+    stores a second value beside its state every step, under the batch's one coordinate, and three parts
+    of one step read their maps off the step. The row substitution multiplies two reads of its state, so
+    the pin that reaches both carrying sites decides nothing on it."""
     import torch  # noqa: PLC0415
 
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
@@ -253,9 +254,8 @@ def test_both_recurrences_of_the_gated_delta_rule_compose_and_match_eager(pin: s
     with pinned_knobs({SCAN: pin, "REDUCE": ""}):
         graph = Pipeline.build(["tile/lift", "tile/cut"], select=["lift", "cut"]).run(Pipeline.build(LOOP_PASSES).run(graph))
     names = [node.id for node in graph.nodes.values() if isinstance(node.op, TileOp)]
-    # Three parts: two steps each of the substitution's six, probed; one each of the chunk loop's three, read off it.
-    assert sum(name.endswith("__probe") for name in names) == 1
-    assert sum("__map" in name for name in names) == 2 * int(pin[3:] or 0) + 1
+    assert not any(name.endswith("__probe") for name in names)
+    assert sum("__map" in name for name in names) == int(pin[3:] or 0) + 1
 
     arrays = run_loops(graph)
     (out,) = graph.outputs
