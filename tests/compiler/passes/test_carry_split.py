@@ -73,14 +73,16 @@ def test_an_unmapped_carried_kernel_uses_ordered_cuda_launches() -> None:
 
 
 def test_the_walk_is_offered_its_split_and_declines_it_by_default() -> None:
-    """The unsplit walk beside one arm per width the step count divides into, the row spelled on
-    the carrying site; a step that squares its state is not affine and offers nothing."""
+    """The unsplit walk beside one arm per width the step count divides into and, at one step a part,
+    one per pairwise composition of the maps, the row spelled on the carrying site; a step that squares
+    its state is not affine and offers nothing."""
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph(steps=STEPS))
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
     from emmy.compiler.pipeline import Match  # noqa: PLC0415
 
     forks = split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node)
-    assert [fork.knobs for fork in forks] == [{"REDUCE@map.1/scan": v} for v in ("", "g2k", "g4k", "g8k")]
+    offered = ("", "g2k", "g4k", "g8k", "g8k1", "g8k2", "g8k3")  # the catalog's widths, then one step a part to every depth
+    assert [fork.knobs for fork in forks] == [{"REDUCE@map.1/scan": v} for v in offered]
 
     squared = _step("c, i, j", steps=STEPS).map(
         lambda s: parse_body("kept = multiply(own, own)") if isinstance(s, Assign) and s.name == "kept" else s

@@ -456,7 +456,8 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
     carrying one (:func:`_carrying_body`), stores the parts cannot write side by side
     (:func:`_carry_stores`), a piece of a realized split. Only the
     deferred finalize exists here (``g<n>k``): the parts' maps compose in a kernel, there is nothing
-    to add atomically. The pairwise compositions of the maps (``g<n>k<p>``) are a pin's alone."""
+    to add atomically. The pairwise compositions of the maps (``g<n>k<p>``) are offered at one step a part,
+    where the maps cost no probe; a pin may name them at any width."""
     view = node.affine()
     if view is None or carries_partition(tile) or tile.split_consumed or (body := _carrying_body(tile.loop_body)) is None:
         return None
@@ -496,10 +497,15 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
         if plan.pairs > (plan.cta - 1).bit_length():
             raise ValueError(f"REDUCE={pin}: {plan.cta} parts are one map after {(plan.cta - 1).bit_length()} compositions")
         return [arm(plan.cta, plan.pairs)]
-    options = [unsplit]
-    for plan in splitk_moves():
-        if plan.finalize == "kernel" and splitk_width(time, plan.cta) is None:
-            options.append(arm(plan.cta))
+    # The catalog's widths, then one step a part composed to every depth: at that width the maps are read off the
+    # step, and how far composing them pays against walking what is left is the pieces' to price.
+    steps = time.extent.as_static() if time.extent.is_static else 1
+    widths = [
+        plan.cta for plan in splitk_moves() if plan.finalize == "kernel" and plan.cta != steps and splitk_width(time, plan.cta) is None
+    ]
+    options = [unsplit, *(arm(width) for width in widths)]
+    if steps > 1:
+        options += [arm(steps, pairs) for pairs in range((steps - 1).bit_length() + 1)]
     return options
 
 

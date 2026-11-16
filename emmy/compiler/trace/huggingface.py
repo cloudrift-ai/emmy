@@ -309,6 +309,22 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
 CHUNK = 64
 
 
+def unit_lower_inverse(system):
+    """The inverse of ``I + L``, ``L`` the strictly lower triangle of ``system``, a row a step.
+
+    Each step adds one row of ``-L`` times the state to that row of the state, and reads ``-L`` from its own
+    tensor, never from the state it seeds: the step is then affine in the state, which is what lets the steps
+    compose as matrix products. The chunked Gated DeltaNet rule traces this; a hardware golden traces it alone."""
+    import torch
+
+    eye = torch.eye(system.shape[-1], dtype=system.dtype, device=system.device)
+    low = -system.tril(-1)
+    inverse = low
+    for i in range(1, system.shape[-1]):
+        inverse = inverse + eye[i].unsqueeze(-1) * (low[..., i : i + 1, :] @ inverse)
+    return inverse + eye
+
+
 def _chunk_rule_scan_then_read(
     scope,
     query,
@@ -329,11 +345,8 @@ def _chunk_rule_scan_then_read(
     ``query @ state + intra @ new_values`` over the stacked chunks at once. ``beta``, the decay and the query scale
     multiply the ``chunk x chunk`` matrices and the rows of a product's result, never the queries, keys or values:
     those stay the operands they were loaded as, which is what a tensor-core tile reads. The sums are the
-    reference's; a scale meets its product on the other side, so the rounding differs in the last place.
-
-    The chunk's triangular system is inverted a row a step. Each step adds one row of the system times the state
-    to that row of the state, and reads the system from the tensor it was built as, never from the state it
-    seeds: the step is then affine in the state, which is what lets the steps compose as matrix products."""
+    reference's; a scale meets its product on the other side, so the rounding differs in the last place. The
+    chunk's triangular system is inverted by :func:`unit_lower_inverse`."""
     import torch
     import torch.nn.functional as F
 
@@ -356,15 +369,11 @@ def _chunk_rule_scan_then_read(
     cum = g.cumsum(dim=3)
     pairwise = (cum.unsqueeze(4) - cum.unsqueeze(3)).masked_fill(upper, float("-inf")).exp()
     system = (key @ key.transpose(-1, -2)) * (pairwise * beta.unsqueeze(4))
-    eye = torch.eye(chunk_size, dtype=system.dtype, device=system.device)
     if not scope["is_torchdynamo_exporting"]():
+        eye = torch.eye(chunk_size, dtype=system.dtype, device=system.device)
         inverse = torch.linalg.solve_triangular(system, eye.expand_as(system), upper=False, unitriangular=True)
     else:
-        low = -system.tril(-1)
-        inverse = low
-        for i in range(1, chunk_size):
-            inverse = inverse + eye[i].unsqueeze(-1) * (low[..., i : i + 1, :] @ inverse)
-        inverse = inverse + eye
+        inverse = unit_lower_inverse(system)
     new_values = (inverse * beta.unsqueeze(3)) @ value
     k_cumdecay = (inverse * (beta * cum.exp()).unsqueeze(3)) @ key
     intra = (query @ key.transpose(-1, -2)) * (pairwise * scale)
