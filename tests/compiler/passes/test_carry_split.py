@@ -155,8 +155,10 @@ def test_the_parts_maps_compose_pairwise_and_match_the_sequential_walk(pin: str)
     composed = [f"out__{kind}{level}" for level in range(1, pairs + 1) for kind in ("map", "offset", "start")]
     assert sorted(tiles) == sorted(["out", "out__probe", "out__probe_seed", "out__start", *composed])
     carrying = {name for name, tile in tiles.items() if tile.carries}
-    assert carrying == {"out", "out__probe", f"out__start{pairs}"}, "the prefix walks the top level alone"
-    assert tiles[f"out__start{pairs}"].axis_of(head(tiles[f"out__start{pairs}"].op).axis).extent.as_static() == -(-parts // 2**pairs)
+    left = -(-parts // 2**pairs)
+    assert carrying == {"out", "out__probe", *([f"out__start{pairs}"] if left > 1 else [])}, "one map left applies to the seed"
+    if left > 1:
+        assert tiles[f"out__start{pairs}"].axis_of(head(tiles[f"out__start{pairs}"].op).axis).extent.as_static() == left
 
     arrays = _run(graph)
     np.testing.assert_allclose(arrays["out"], _reference(arrays), rtol=1e-4, atol=1e-5)
@@ -203,7 +205,7 @@ def test_the_row_substitution_composes_to_its_last_state_and_matches_eager(pin: 
     with pinned_knobs({SCAN: pin} if pin else {}):
         graph = Pipeline.build(["tile/lift", "tile/cut"], select=["lift", "cut"]).run(Pipeline.build(LOOP_PASSES).run(graph))
     carrying = [node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and node.op.carries]
-    assert len(carrying) == (2 if pin else 1), "the probe and the prefix, and no walk"
+    assert len(carrying) == (0 if pin == "g6k3" else 2 if pin else 1) + (pin == "g6k3"), "the probe and the prefix, and no walk"
     assert sum("__map" in node.id for node in graph.nodes.values()) == (int(pin[3:]) if pin[3:] else 0)
 
     arrays = run_loops(graph)
@@ -324,3 +326,24 @@ def test_the_delta_rule_splits_and_matches_eager() -> None:
     # their workspaces sit beside them under longer names.
     chunks = sorted((name for name in arrays if re.fullmatch(r"matmul(_\d+)?", name)), key=lambda name: int(name[7:] or 0))
     np.testing.assert_allclose(np.concatenate([arrays[name] for name in chunks], axis=1), reference, rtol=1e-4, atol=1e-5)
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("pin", ["g2k", "g6k", "g6k3"])
+def test_the_row_substitution_composes_to_its_last_state_on_the_gpu(pin: str) -> None:
+    """The prefix owns the kernel's output here, and stores the final state from ordered launches."""
+    import torch  # noqa: PLC0415
+
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
+
+    graph, _, (module, _, _) = graph_from_code(_INVERSE.format(n=8))
+    with pinned_knobs({SCAN: pin}):
+        graph = Pipeline.build(CUDA_PASSES).run(graph)
+    assert sum(node.id.endswith("__probe") for node in graph.nodes.values()) == 1
+    a = (np.random.default_rng(0).standard_normal((2, 8, 8)) * 0.1).astype(np.float32)
+    result, _ = run_program(graph, {"a": a})
+    (out,) = graph.outputs
+    want = module(torch.from_numpy(a)).numpy()
+    np.testing.assert_allclose(np.asarray(result.outputs[out]).reshape(want.shape), want, rtol=1e-4, atol=1e-5)

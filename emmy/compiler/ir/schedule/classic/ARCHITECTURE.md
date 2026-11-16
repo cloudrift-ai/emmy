@@ -685,8 +685,10 @@ system and its inverse went from 192 to 94; the root that applies the inverse to
 What is left to match the reference: the solve is a 63-step forward substitution in f32, not a blocked inverse on
 tensor cores, and the reference's one launch per head has no spelling, since warp groups with different roles inside
 one CTA do not exist beyond the load warp. The substitution's step is affine in its state, so a pin composes its
-steps as matrix products (`REDUCE@…/scan=g<n>k<p>`); the products are dense and in f32, which no tensor-core atom
-takes, and no card has measured them. Two faults block the shorter routes. An inverse written as repeated
+steps as matrix products (`REDUCE@…/scan=g<n>k<p>`). RTX 5090, 192 systems of 64 x 64, f32: the serial walk
+1,965; all twelve product kernels of the full composition 840; the probe that reads the step maps 14,384. So the
+pin loses today, and by the probe alone. A 64-step recurrence over a 16 x 16 state runs 51 composed against 400
+walked. Two faults block the shorter routes. An inverse written as repeated
 squaring is rolled into a serial kernel whose compile takes 25 GB at a chunk of 64. And a bare `PLACE=cut` on this
 program gives wrong results, where each cut pinned alone is correct.
 

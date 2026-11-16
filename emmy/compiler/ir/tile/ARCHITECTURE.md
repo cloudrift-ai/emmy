@@ -78,7 +78,9 @@ gives the maps of the level below their starts, the even ones their pair's start
 through the even map. This is cyclic reduction; at `p = ⌈log₂ n⌉` the prefix is one step. The maps are dense
 (`mixed × mixed` per kept cell), so a composition costs a full matrix product whatever structure the step's own
 matrix had. A step that changes one row of its state is the identity plus a rank-one term, and the dense form
-does not keep that.
+does not keep that. The probe is the larger cost: it contracts every step against the packed identity to read a
+matrix the step holds as an operand, as much work as the walk it replaces, twice. One map left at the top applies
+to the seed in a kernel that carries nothing.
 
 What the walk stores decides where the split ends. Stores indexed by the step are written by the walk, each part
 its own cells. A walk whose one store is the state itself, each step over the last one's (a triangular inverse's

@@ -54,7 +54,7 @@ from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
-from emmy.compiler.pipeline.passes.tile._fromloop import carrying_loops, stored_states
+from emmy.compiler.pipeline.passes.tile._fromloop import carrying_loops, seed_index, stored_states
 from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_nest, reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
 
@@ -394,7 +394,7 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
         if not (mixed.is_static and kept.is_static) or kept.as_static() < mixed.as_static():
             return None
     (loop,) = (stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries)
-    if _carry_stores(loop) is None:
+    if (stores := _carry_stores(loop)) is None:
         return None
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(tile, split_consumed=True), {key: ""})
@@ -403,10 +403,12 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
     if pin is None:
         pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
 
-    output = redirects(root) if match is not None else None  # an enumeration-only arm carries none
-
     def arm(cta: int, pairs: int = 0) -> DeferredFork:
         spelling = Reduce.of(cta=cta, pairs=pairs).spell()
+        # Composed to one map, a walk that stores its last state carries nothing: its state port goes with it.
+        ends = stores == "last" and pairs == (cta - 1).bit_length()
+        kept = output_root(root, {spec.write.output for spec in tile.output_specs}) if ends else root
+        output = redirects(kept) if match is not None else None  # an enumeration-only arm carries none
         return DeferredFork(lambda: realize_carry_split(match, root, cta, pairs), {key: spelling}, structural=True, output=output)
 
     if pin is not None:
@@ -630,27 +632,36 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
             add(target[level], _nest(Body(tuple(stmts)), (pair, *axes)), reads)
 
     # The prefix: the state carried across the maps of the top level, each one's start the state before it.
-    carried = f"{state}__across"
-    top = Axis(part.name, Dim(counts[pairs]))
-    product, value = applied(pairs, here, lambda index, name: (Pre(name=name, carrier=carried, index=index),))
+    # One map left applies to the seed, and nothing is carried.
+    carried, seed, single = f"{state}__across", node.init[0], counts[pairs] == 1
+    where = Literal(0, "int") if single else here
+
+    def prior(index: tuple, name: str) -> tuple:
+        if not single:
+            return (Pre(name=name, carrier=carried, index=index),)
+        if isinstance(seed, str):
+            return (Load(names=(name,), input=seed, index=seed_index(index, shapes[seed])),)
+        return (Let(name=name, value=seed),)
+
+    product, value = applied(pairs, where, prior)
     if stores == "steps":
-        kept = Write(output=starts[pairs], index=(here, *own), values=("_from",))
+        kept = Write(output=starts[pairs], index=(where, *own), values=("_from",))
     else:
         (kept,) = (stmt.replace(values=("_next",)) for stmt in loop.body.iter() if isinstance(stmt, Write))
     prefix_body = _nest(
         Body(
             (
                 *product,
-                *offset(pairs, here, own, "_b"),
-                Pre(name="_from", carrier=carried, index=own),
+                *offset(pairs, where, own, "_b"),
+                *prior(own, "_from"),
                 Assign("_next", apply("add", value, "_b")),
-                Carry(name=carried, value="_next", index=own, seed=node.init[0]),
+                *(() if single else (Carry(name=carried, value="_next", index=own, seed=seed),)),
                 kept,
             )
         ),
-        (top, *cell_axes),
+        (*(() if single else (Axis(part.name, Dim(counts[pairs])),)), *cell_axes),
     )
-    seeded = [node.init[0]] if isinstance(node.init[0], str) else []
+    seeded = [seed] if isinstance(seed, str) else []
     read = [probe_states] if pairs == 0 else [maps[pairs], offsets[pairs]]
     written = output_root(root, {spec.write.output for spec in tile.output_specs})
 
@@ -663,12 +674,12 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
         )
 
     if stores == "last":
-        prefix_tile = replace(piece(prefix_body), split_consumed=True)
+        prefix_tile = replace(piece(prefix_body), split_consumed=True) if not single else piece(prefix_body)
         ports = owned(prefix_tile)
         result = add_output_piece(frag, written, prefix_tile, [*read, *seeded], states=ports)
         result.outputs.extend(port.name for port in ports if port.name.endswith("__split"))
         return result
-    add(starts[pairs], prefix_body, [*read, *seeded], carried=True)
+    add(starts[pairs], prefix_body, [*read, *seeded], carried=not single)
 
     # The fill-in: every map of the level below starts where its pair starts, the odd one through the even map.
     for level in range(pairs, 0, -1):

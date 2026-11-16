@@ -1,6 +1,6 @@
 # Composing an affine recurrence by matrix products
 
-Status: phase 0 and the CPU half of phase 1 are built (2026-11-16); nothing has run on a card. Replaces step R2 of
+Status: phase 0 and phase 1 are built and measured on one card (2026-11-16); S7 is open. Replaces step R2 of
 `classic-schedule-kernel-gaps.md`, the blocked inverse as a recognizer of one shape.
 
 ## Where it stands (2026-11-16)
@@ -17,13 +17,49 @@ Built, and equal to the sequential walk on the CPU loop backend at every depth:
 - **Two limits lifted on the way**, both of which the real rule hits: a size-one free loop outside the carrying one
   (the batch of one), and a probe that would not lift when the step stores a second value beside its state.
 
+## What the RTX 5090 measured (2026-11-16)
+
+One session on the dev box, `emmy run --bench --ab`, f32, no tuning of any piece. The GPU equality tests pass,
+the last-state path included. The bench does not check a pinned row's numbers; the tests do, at small sizes.
+
+| Program | Serial walk | Pinned arm | Where the time is |
+|---|---|---|---|
+| 64 steps, 16 x 16 state, batch 48, every state read | 400 µs (eager 294) | **51 µs**, `g64k6`, 23 launches | spread evenly |
+| Substitution, 192 systems of 64 x 64, 62 steps | 1,965 µs | ~15,400 µs, `g62k6` | probe 14,384; all twelve products 840 |
+| 16 steps, 128 x 128 state, batch 48 | 7,960 µs (eager 322) | did not finish in 10 s | the probe |
+
+What this says:
+
+- **The dense products are not the problem. The probe is.** On the substitution, composing all 62 maps costs
+  840 µs, under half the serial walk, on thread tiles. Reading the maps costs 17 times that: the probe contracts
+  every step against a packed identity to learn a matrix the step already holds as an operand.
+- **A long sequence over a small state wins today**, eight times over the serial walk and six over eager.
+- **The products above the first level take a staged thread tile on their own** (`t16x8`, `f4x4`, `d2/smem-tma`).
+  The first level reads a difference of two probe stores, not a plain operand, and runs four times slower per
+  product.
+- **bf16 operands look affordable, on synthetic data.** Simulated in PyTorch against a float64 inverse, random
+  unit keys: f32 composed 1e-8, f16 operands 6e-5, bf16 operands 5e-4 at the worst entry, entries at most 1. Real
+  keys are correlated and were not tried, so S7 is not decided.
+- **The serial walk of a dense state is itself slow**: 7,960 µs for sixteen steps of 128 x 128, 25 times eager.
+  That is its own finding, outside this plan.
+
+So phase 2 starts somewhere else than planned. First read the step's matrix off the step as a term, which removes
+the probe and keeps the maps dense. That alone should put the substitution near 840 µs. The factored families come
+after it, and build on the same reading.
+
 Not done:
 
-- **No card has run any of it.** The GPU equality test is written and skipped here. S6 and S7 are open.
-- **No realization case.** A case needs a card for its verdict.
-- **The goldens.** The respelling re-keys every Gated DeltaNet program: restamp, then a record run per card.
+- **S7** on real keys, and a narrowed arm.
+- **No realization case** yet.
+- **The goldens.** The respelling changes the substitution's kernel in every fresh Gated DeltaNet trace. The stored
+  programs still lower as they did, so no golden is stale, but their rows do not reach the new kernel until a record
+  run per card.
 - **The part count of the real rule.** At a chunk of 64 the substitution rolls to 62 steps and the 256-row chunk
-  loop to 3, so the pins are `g62k<p>` and `g3k<p>`; the catalog's widths divide neither.
+  loop to 3, so the pins are `g62k<p>` and `g3k<p>`; the catalog's widths divide neither, and one pin cannot name
+  both sites at different counts.
+- **Other models.** Six goldens hold fourteen kinds of carrying kernel: the Gated DeltaNet substitution and chunk
+  loop, and a 19-step 4 x 4 iteration in DeepSeek-V4 that is not affine. No stored program outside Gated DeltaNet
+  has an affine recurrence.
 
 Goal: any carried state whose step is affine in the state can be compiled as products the schedule already tiles,
 as one more arm of the fork the carrying kernel already has. Evidence decides whether the arm is picked. Nothing
