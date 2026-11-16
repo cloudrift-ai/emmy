@@ -271,8 +271,8 @@ mod tests {
         for text in [
             "in0 = load x[a0 * 4 + (a1 // 2) % 3, a0 < 8 ? thread_idx.x : (int)n, minimum(a0, 7) & 1, (a1 + 1) % seq_len]",
             "let v0 = 2.5 * v1 + exp(v2) - thread_idx.x",
-            "if x + 1.0 < 0.0 && a0 == 1:\n    y[a0] = v0",
-            "if a0 + 1 <= n && a1 == 0:\n    y[a0] = v0",
+            "if x + 1.0 < 0.0 && a0 == 1:\n  y[a0] = v0",
+            "if a0 + 1 <= n && a1 == 0:\n  y[a0] = v0",
         ] {
             parse_statement(text).unwrap_or_else(|err| panic!("{err}\n{text}"));
         }

@@ -161,22 +161,22 @@ mod tests {
     /// `S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c` from zero, storing each step the state it read: a step reads
     /// other cells of its own state.
     const STEP: &str = "
-        for c in 0..3:
-            decay = load D[c]
-            for i in 0..4:
-                for j in 0..4:
-                    for k in 0..4:
-                        w = load W[i, k]
-                        other = pre S[k, j]
-                        p = multiply(w, other)
-                        mixed <- add(mixed, p)
-                    u = load U[c, i, j]
-                    own = pre S[i, j]
-                    kept = multiply(own, decay)
-                    moved = add(kept, mixed)
-                    next = add(moved, u)
-                    S[i, j] <- next seed 0.0
-                    out[c, i, j] = own
+    for c in 0..3:
+      decay = load D[c]
+      for i in 0..4:
+        for j in 0..4:
+          for k in 0..4:
+            w = load W[i, k]
+            other = pre S[k, j]
+            p = multiply(w, other)
+            mixed <- add(mixed, p)
+          u = load U[c, i, j]
+          own = pre S[i, j]
+          kept = multiply(own, decay)
+          moved = add(kept, mixed)
+          next = add(moved, u)
+          S[i, j] <- next seed 0.0
+          out[c, i, j] = own
     ";
 
     #[test]
@@ -215,31 +215,31 @@ mod tests {
         // The listing is the body's text: the state's update names its seed, and a read of it is a `pre`.
         let listing = |source: &str| indented(&text(&normalize_body(&body(source)).unwrap()));
         let fold_then_read = "
-            for c in 0..3:
-                for i in 0..4:
-                    u = load U[c, i]
-                    own = pre S[i]
-                    next = add(own, u)
-                    S[i] <- next seed 0
-            for r in 0..4:
-                last = pre S[r]
-                out[r] = last
+      for c in 0..3:
+        for i in 0..4:
+          u = load U[c, i]
+          own = pre S[i]
+          next = add(own, u)
+          S[i] <- next seed 0
+      for r in 0..4:
+        last = pre S[r]
+        out[r] = last
         ";
         assert_eq!(
             listing(fold_then_read),
-            "    for a0 in 0..3:\n        for a1 in 0..4:\n            in0 = load U[a0, a1]\n            v0 = pre acc0[a1]\n            v1 = in0 + v0\n            acc0[a1] <- v1 seed 0\n    for a2 in 0..4:\n        v2 = pre acc0[a2]\n        out[a2] = v2"
+            "  for a0 in 0..3:\n    for a1 in 0..4:\n      in0 = load U[a0, a1]\n      v0 = pre acc0[a1]\n      v1 = in0 + v0\n      acc0[a1] <- v1 seed 0\n  for a2 in 0..4:\n    v2 = pre acc0[a2]\n    out[a2] = v2"
         );
         // The same shape with a scalar fold in place of the carried state.
         let plain_fold = "
-            for c in 0..3:
-                for i in 0..4:
-                    u = load U[c, i]
-                    total <- add(total, u)
-                out[c] = total
+      for c in 0..3:
+        for i in 0..4:
+          u = load U[c, i]
+          total <- add(total, u)
+        out[c] = total
         ";
         assert_eq!(
             listing(plain_fold),
-            "    for a0 in 0..3:\n        for a1 in 0..4:\n            in0 = load U[a0, a1]\n            acc0 <- add(acc0, in0)\n        out[a0] = acc0"
+            "  for a0 in 0..3:\n    for a1 in 0..4:\n      in0 = load U[a0, a1]\n      acc0 <- add(acc0, in0)\n    out[a0] = acc0"
         );
     }
 }

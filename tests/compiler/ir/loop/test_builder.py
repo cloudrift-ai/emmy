@@ -60,9 +60,9 @@ def test_insert_descends_by_axis_and_prepends_at_the_leaf():
         """
         v3 = copy(x)
         for a in 0..4:
-            v2 = copy(x)
-            for b in 0..8:
-                v1 = copy(x)
-            v0 = copy(x)
+          v2 = copy(x)
+          for b in 0..8:
+            v1 = copy(x)
+          v0 = copy(x)
         """
     )

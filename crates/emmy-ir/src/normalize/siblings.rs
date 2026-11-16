@@ -349,12 +349,12 @@ mod tests {
     fn unify_skips_disjoint_load_positions() {
         let out = unified(
             "
-            for a2 in 0..16:
-                p = load A[a2]
-                acc0 <- add(acc0, p)
-            for a3 in 0..16:
-                q = load B[a3]
-                acc1 <- add(acc1, q)
+      for a2 in 0..16:
+        p = load A[a2]
+        acc0 <- add(acc0, p)
+      for a3 in 0..16:
+        q = load B[a3]
+        acc1 <- add(acc1, q)
             ",
         );
         assert_eq!(loop_axes(&out), ["a2", "a3"]);
@@ -365,17 +365,17 @@ mod tests {
         // A overlaps B on (x, 0) and B overlaps C on (y, 0), so all three take one name.
         let out = unified(
             "
-            for a in 0..8:
-                p = load x[a]
-                acc_a <- add(acc_a, p)
-            for b in 0..8:
-                q = load x[b]
-                r = load y[b]
-                s = multiply(q, r)
-                acc_b <- add(acc_b, s)
-            for c in 0..8:
-                t = load y[c]
-                acc_c <- add(acc_c, t)
+      for a in 0..8:
+        p = load x[a]
+        acc_a <- add(acc_a, p)
+      for b in 0..8:
+        q = load x[b]
+        r = load y[b]
+        s = multiply(q, r)
+        acc_b <- add(acc_b, s)
+      for c in 0..8:
+        t = load y[c]
+        acc_c <- add(acc_c, t)
             ",
         );
         assert_eq!(loop_axes(&out), ["a", "a", "a"]);
@@ -398,14 +398,14 @@ mod tests {
         // would see the accumulator in flight.
         let out = merged(
             "
-            for k in 0..16:
-                x1 = load X[k]
-                acc_max <- maximum(acc_max, x1)
-            for k in 0..16:
-                x2 = load X[k]
-                d = subtract(x2, acc_max)
-                e = exp(d)
-                acc_sum <- add(acc_sum, e)
+      for k in 0..16:
+        x1 = load X[k]
+        acc_max <- maximum(acc_max, x1)
+      for k in 0..16:
+        x2 = load X[k]
+        d = subtract(x2, acc_max)
+        e = exp(d)
+        acc_sum <- add(acc_sum, e)
             ",
         );
         assert_eq!(loop_axes(&out).len(), 2, "sequential reduces stay distinct");
@@ -420,26 +420,26 @@ mod tests {
         // RMSNorm after the one-operation split: `rsqrt(mean + eps)` is two statements between the loops, the second
         // reading the first. Spelled between the loops or above them, one normal form.
         let split = "
-            for k in 0..16:
-                x1 = load X[0, k]
-                acc0 <- add(acc0, x1)
-            t = add(accb, 1e-6)
-            s1 = rsqrt(t)
-            for k in 0..16:
-                x2 = load X[1, k]
-                m2 = multiply(x2, s1)
-                acc1 <- add(acc1, m2)
+      for k in 0..16:
+        x1 = load X[0, k]
+        acc0 <- add(acc0, x1)
+      t = add(accb, 1e-6)
+      s1 = rsqrt(t)
+      for k in 0..16:
+        x2 = load X[1, k]
+        m2 = multiply(x2, s1)
+        acc1 <- add(acc1, m2)
             ";
         let above = "
-            t = add(accb, 1e-6)
-            s1 = rsqrt(t)
-            for k in 0..16:
-                x1 = load X[0, k]
-                acc0 <- add(acc0, x1)
-            for k in 0..16:
-                x2 = load X[1, k]
-                m2 = multiply(x2, s1)
-                acc1 <- add(acc1, m2)
+      t = add(accb, 1e-6)
+      s1 = rsqrt(t)
+      for k in 0..16:
+        x1 = load X[0, k]
+        acc0 <- add(acc0, x1)
+      for k in 0..16:
+        x2 = load X[1, k]
+        m2 = multiply(x2, s1)
+        acc1 <- add(acc1, m2)
             ";
         assert_eq!(
             loop_axes(&merged(split)),
@@ -453,30 +453,30 @@ mod tests {
     fn merge_moves_an_independent_reduce_the_second_loop_waits_on() {
         // The scale comes from a reduce over another axis, spelled between the loops or above them.
         let between = "
-            for k in 0..16:
-                x1 = load X[0, k]
-                acc0 <- add(acc0, x1)
-            for j in 0..8:
-                y = load Y[j]
-                accb <- add(accb, y)
-            s1 = rsqrt(accb)
-            for k in 0..16:
-                x2 = load X[1, k]
-                m2 = multiply(x2, s1)
-                acc1 <- add(acc1, m2)
+      for k in 0..16:
+        x1 = load X[0, k]
+        acc0 <- add(acc0, x1)
+      for j in 0..8:
+        y = load Y[j]
+        accb <- add(accb, y)
+      s1 = rsqrt(accb)
+      for k in 0..16:
+        x2 = load X[1, k]
+        m2 = multiply(x2, s1)
+        acc1 <- add(acc1, m2)
             ";
         let above = "
-            for j in 0..8:
-                y = load Y[j]
-                accb <- add(accb, y)
-            s1 = rsqrt(accb)
-            for k in 0..16:
-                x1 = load X[0, k]
-                acc0 <- add(acc0, x1)
-            for k in 0..16:
-                x2 = load X[1, k]
-                m2 = multiply(x2, s1)
-                acc1 <- add(acc1, m2)
+      for j in 0..8:
+        y = load Y[j]
+        accb <- add(accb, y)
+      s1 = rsqrt(accb)
+      for k in 0..16:
+        x1 = load X[0, k]
+        acc0 <- add(acc0, x1)
+      for k in 0..16:
+        x2 = load X[1, k]
+        m2 = multiply(x2, s1)
+        acc1 <- add(acc1, m2)
             ";
         assert_eq!(normal(between), normal(above));
         assert_eq!(
@@ -492,15 +492,15 @@ mod tests {
         // waits on the write, the write on the first loop, and the loops stay apart.
         let out = merged(
             "
-            for k in 0..16:
-                x1 = load X[0, k]
-                acc0 <- add(acc0, x1)
-            O[0] = acc0
-            y = load O[0]
-            for k in 0..16:
-                x2 = load X[1, k]
-                m2 = multiply(x2, y)
-                acc1 <- add(acc1, m2)
+      for k in 0..16:
+        x1 = load X[0, k]
+        acc0 <- add(acc0, x1)
+      O[0] = acc0
+      y = load O[0]
+      for k in 0..16:
+        x2 = load X[1, k]
+        m2 = multiply(x2, y)
+        acc1 <- add(acc1, m2)
             ",
         );
         assert_eq!(loop_axes(&out).len(), 2);
@@ -514,13 +514,13 @@ mod tests {
         // the buffer's version, and merging would read `O[15 - k]` before the step that writes it.
         let out = merged(
             "
-            for k in 0..16:
-                x1 = load X[k]
-                acc0 <- add(acc0, x1)
-                O[k] = x1
-            for k in 0..16:
-                y = load O[15 - k]
-                acc1 <- add(acc1, y)
+      for k in 0..16:
+        x1 = load X[k]
+        acc0 <- add(acc0, x1)
+        O[k] = x1
+      for k in 0..16:
+        y = load O[15 - k]
+        acc1 <- add(acc1, y)
             ",
         );
         assert_eq!(loop_axes(&out).len(), 2);
@@ -532,16 +532,16 @@ mod tests {
         // loops it must not keep them apart, or the form would depend on where the lowering put it.
         let out = merged(
             "
-            s0 = rsqrt(acc_a)
-            for k in 0..16:
-                x1 = load X[0, k]
-                m1 = multiply(x1, s0)
-                acc0 <- add(acc0, m1)
-            s1 = rsqrt(acc_b)
-            for k in 0..16:
-                x2 = load X[1, k]
-                m2 = multiply(x2, s1)
-                acc1 <- add(acc1, m2)
+      s0 = rsqrt(acc_a)
+      for k in 0..16:
+        x1 = load X[0, k]
+        m1 = multiply(x1, s0)
+        acc0 <- add(acc0, m1)
+      s1 = rsqrt(acc_b)
+      for k in 0..16:
+        x2 = load X[1, k]
+        m2 = multiply(x2, s1)
+        acc1 <- add(acc1, m2)
             ",
         );
         assert_eq!(loop_axes(&out), ["k"], "one loop holds both contractions");
@@ -558,14 +558,14 @@ mod tests {
         // A value the second loop reads that the first loop produces is a dependence: the loops stay sequential.
         let out = merged(
             "
-            for k in 0..16:
-                x1 = load X[k]
-                acc0 <- add(acc0, x1)
-            s = rsqrt(acc0)
-            for k in 0..16:
-                x2 = load X[k]
-                m2 = multiply(x2, s)
-                acc1 <- add(acc1, m2)
+      for k in 0..16:
+        x1 = load X[k]
+        acc0 <- add(acc0, x1)
+      s = rsqrt(acc0)
+      for k in 0..16:
+        x2 = load X[k]
+        m2 = multiply(x2, s)
+        acc1 <- add(acc1, m2)
             ",
         );
         assert_eq!(loop_axes(&out).len(), 2);
@@ -577,12 +577,12 @@ mod tests {
         // alpha-equal copies of a single cone always look like. The incoming body's local is renamed apart.
         let out = merged(
             "
-            for k in 0..16:
-                v = load A[k]
-                acc0 <- add(acc0, v)
-            for k in 0..16:
-                v = load B[k]
-                acc1 <- add(acc1, v)
+      for k in 0..16:
+        v = load A[k]
+        acc0 <- add(acc0, v)
+      for k in 0..16:
+        v = load B[k]
+        acc1 <- add(acc1, v)
             ",
         );
         assert_eq!(loop_axes(&out).len(), 1);
@@ -614,13 +614,13 @@ mod tests {
         // could not reach its readers.
         let out = merged(
             "
-            for k in 0..16:
-                p = load A[k]
-                acc <- add(acc, p)
-            for k in 0..16:
-                q = load B[k]
-                acc <- add(acc, q)
-            out[n] = acc
+      for k in 0..16:
+        p = load A[k]
+        acc <- add(acc, p)
+      for k in 0..16:
+        q = load B[k]
+        acc <- add(acc, q)
+      out[n] = acc
             ",
         );
         assert_eq!(loop_axes(&out).len(), 2);
@@ -756,14 +756,14 @@ mod tests {
         // A pure statement between the two loops defines a name the second loop's body reads.
         let out = merged(
             "
-            for k in 0..16:
-                p = load A[k]
-                acc0 <- add(acc0, p)
-            bias = exp(acc0)
-            for k in 0..16:
-                q = load B[k]
-                m = multiply(q, bias)
-                acc1 <- add(acc1, m)
+      for k in 0..16:
+        p = load A[k]
+        acc0 <- add(acc0, p)
+      bias = exp(acc0)
+      for k in 0..16:
+        q = load B[k]
+        m = multiply(q, bias)
+        acc1 <- add(acc1, m)
             ",
         );
         assert_eq!(loop_axes(&out).len(), 2);
@@ -827,15 +827,15 @@ mod tests {
         // A reduction hoisted beside an existing sibling merges in the same normalization.
         let normalized = normalize_body(&body(
             "
-            for i in 0..2:
-                for k0 in 0..4:
-                    x0 = load X[k0]
-                    a <- add(a, x0)
-                A[i] = a
-            for k1 in 0..4:
-                x1 = load X[k1]
-                b <- add(b, x1)
-            B[] = b
+      for i in 0..2:
+        for k0 in 0..4:
+          x0 = load X[k0]
+          a <- add(a, x0)
+        A[i] = a
+      for k1 in 0..4:
+        x1 = load X[k1]
+        b <- add(b, x1)
+      B[] = b
             ",
         ))
         .unwrap();

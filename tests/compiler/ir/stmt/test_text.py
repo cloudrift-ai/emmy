@@ -64,14 +64,14 @@ STATEMENTS = [
         Select("v3", (SelectBranch("x", A0.lt(ONE)), SelectBranch("y", BinaryExpression(">=", A0, ONE)))),
         """\
         v3 = select:
-            x when a0 < 1
-            y when a0 >= 1""",
+          x when a0 < 1
+          y when a0 >= 1""",
     ),
     (
         Loop(Axis("a0", 4), (Write("y", (A0,), ("v",)),)),
         """\
         for a0 in 0..4:
-            y[a0] = v""",
+          y[a0] = v""",
     ),
     (Loop(Axis("a0", Dim("seq", hint=128)), (), unroll=True, seed=False), "for a0 in 0..seq~128 unroll=true seed=false:"),
     (Loop(Axis("a0", Dim(Var("seq") * Literal(2, "int"), hint=64)), ()), "for a0 in 0..seq * 2~64:"),
@@ -85,7 +85,7 @@ STATEMENTS = [
         StridedLoop(K, Var("t"), Literal(32, "int"), (Write("y", (Var("k"),), ("v",)),)),
         """\
         for k in t..64 step 32:
-            y[k] = v""",
+          y[k] = v""",
     ),
     (
         StridedLoop(K, Literal(0, "int"), Literal(8, "int"), (), unroll=True, end=Var("k_end")),
@@ -95,9 +95,9 @@ STATEMENTS = [
         Cond(A0.lt(ONE), (Write("y", (A0,), ("v",)),), (Write("y", (A0,), ("w",)),)),
         """\
         if a0 < 1:
-            y[a0] = v
+          y[a0] = v
         else:
-            y[a0] = w""",
+          y[a0] = w""",
     ),
     (Cond(A0.lt(ONE), ()), "if a0 < 1:"),
 ]

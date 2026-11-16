@@ -539,16 +539,16 @@ mod tests {
     fn the_lanes_of_one_load_are_values_apart() {
         let out = placed(
             "
-            for i in 0..4:
-                x0, x1, x2, x3 = load X[i]
-                y0 = multiply(x0, 2.0)
-                y1 = multiply(x1, 2.0)
-                y2 = multiply(x2, 2.0)
-                y3 = multiply(x3, 2.0)
-                O[i, 0] = y0
-                O[i, 1] = y1
-                O[i, 2] = y2
-                O[i, 3] = y3
+      for i in 0..4:
+        x0, x1, x2, x3 = load X[i]
+        y0 = multiply(x0, 2.0)
+        y1 = multiply(x1, 2.0)
+        y2 = multiply(x2, 2.0)
+        y3 = multiply(x3, 2.0)
+        O[i, 0] = y0
+        O[i, 1] = y1
+        O[i, 2] = y2
+        O[i, 3] = y3
             ",
         );
         assert_eq!(
@@ -565,18 +565,18 @@ mod tests {
     fn a_seeded_state_is_read_inside_its_loop_as_the_step_before() {
         let out = placed(
             "
-            for r in 0..4:
-                init f32 m1 = -1e+30
-                init f32 m2 = -1e+30
-                for k in 0..16 seed=false:
-                    s = load S[r, k]
-                    t = load T[r, k]
-                    g1 = maximum(m1, s)
-                    g2 = maximum(m2, s)
-                    W1[r, k] = g1
-                    W2[r, k] = g2
-                    m1 <- maximum(m1, s) over k
-                    m2 <- maximum(m2, t) over k
+      for r in 0..4:
+        init f32 m1 = -1e+30
+        init f32 m2 = -1e+30
+        for k in 0..16 seed=false:
+          s = load S[r, k]
+          t = load T[r, k]
+          g1 = maximum(m1, s)
+          g2 = maximum(m2, s)
+          W1[r, k] = g1
+          W2[r, k] = g2
+          m1 <- maximum(m1, s) over k
+          m2 <- maximum(m2, t) over k
             ",
         );
         assert_eq!(
@@ -591,14 +591,14 @@ mod tests {
     #[test]
     fn a_loop_that_holds_a_barrier_stays_and_bounds_nothing_below_it() {
         let given = "
-            for r in 0..4:
-                init f32 acc = 0
-                for k in 0..16 seed=false:
-                    x = load X[k]
-                    acc <- add(acc, x) over k
-                    Sync
-                y = add(acc, 1.0)
-                O[r] = y
+      for r in 0..4:
+        init f32 acc = 0
+        for k in 0..16 seed=false:
+          x = load X[k]
+          acc <- add(acc, x) over k
+          Sync
+        y = add(acc, 1.0)
+        O[r] = y
             ";
         let out = placed(given);
         assert_eq!(loop_axes(&out), ["r"], "{}", text(&out));
@@ -611,14 +611,14 @@ mod tests {
     fn a_name_updated_in_place_keys_the_value_it_read() {
         let given = body(
             "
-            RegFragment(name=c1, role=c, dtype=f32)
-            RegFragment(name=c2, role=c, dtype=f32)
-            LdmatrixLoad(frag=a, src_buffer=A, src_index=(0, 0), role=a, ldm=16)
-            LdmatrixLoad(frag=b, src_buffer=B, src_index=(0, 0), role=b, ldm=8)
-            LdmatrixLoad(frag=b2, src_buffer=B2, src_index=(0, 0), role=b, ldm=8)
-            MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b2, shape=(16, 8, 16))
-            MmaSyncPtx(c_frag=c1, a_frag=a, b_frag=b, shape=(16, 8, 16))
-            MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b, shape=(16, 8, 16))
+      RegFragment(name=c1, role=c, dtype=f32)
+      RegFragment(name=c2, role=c, dtype=f32)
+      LdmatrixLoad(frag=a, src_buffer=A, src_index=(0, 0), role=a, ldm=16)
+      LdmatrixLoad(frag=b, src_buffer=B, src_index=(0, 0), role=b, ldm=8)
+      LdmatrixLoad(frag=b2, src_buffer=B2, src_index=(0, 0), role=b, ldm=8)
+      MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b2, shape=(16, 8, 16))
+      MmaSyncPtx(c_frag=c1, a_frag=a, b_frag=b, shape=(16, 8, 16))
+      MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b, shape=(16, 8, 16))
             ",
         );
         let numbering = crate::numbering::value_numbers(
@@ -672,14 +672,14 @@ mod tests {
     fn copy_aliases_do_not_leak_between_sibling_scopes() {
         let out = placed(
             "
-            for i in 0..4:
-                x = load A[i]
-                y = copy(x)
-                OA[i] = y
-            for i in 0..4:
-                x = load B[i]
-                y = exp(x)
-                OB[i] = y
+      for i in 0..4:
+        x = load A[i]
+        y = copy(x)
+        OA[i] = y
+      for i in 0..4:
+        x = load B[i]
+        y = exp(x)
+        OB[i] = y
             ",
         );
         assert_eq!(stmt_text(&inner(&out.stmts()[1]).stmts()[1]), "y = exp(x)");
@@ -689,7 +689,7 @@ mod tests {
     fn rename_free_and_placement_reach_nested_statements() {
         for depth in [2, 24] {
             let mut spelled = String::from(
-                "if outer:\n    shadow = exp(outer)\n    left[] = shadow\nelse:\n    right[] = outer",
+                "if outer:\n  shadow = exp(outer)\n  left[] = shadow\nelse:\n  right[] = outer",
             );
             for level in 0..depth {
                 spelled = format!("for i{level} in 0..4:\n{}", indented(&spelled));
@@ -721,17 +721,17 @@ mod tests {
     fn cse_shares_selections_and_their_downstream_cones() {
         let out = placed(
             "
-            let `zero` = 0
-            let other_zero = 0
-            left = select:
-                x when p
-                `zero` when 1
-            right = select:
-                x when p
-                other_zero when 1
-            a = exp(left)
-            b = exp(right)
-            out[0] = b
+      let `zero` = 0
+      let other_zero = 0
+      left = select:
+        x when p
+        `zero` when 1
+      right = select:
+        x when p
+        other_zero when 1
+      a = exp(left)
+      b = exp(right)
+      out[0] = b
             ",
         );
         assert_eq!(statement_types(&out), ["Let", "Select", "Assign", "Write"]);
@@ -745,14 +745,14 @@ mod tests {
     fn cse_selection_predicates_observe_rebound_coordinates() {
         unchanged(
             "
-            a = select:
-                x when k
-                y when 1
-            for k in 0..4:
-                b = select:
-                    x when k
-                    y when 1
-                out[k] = b
+      a = select:
+        x when k
+        y when 1
+      for k in 0..4:
+        b = select:
+          x when k
+          y when 1
+        out[k] = b
             ",
         );
     }
@@ -761,9 +761,9 @@ mod tests {
     fn cse_does_not_drop_repeated_accumulator_updates() {
         unchanged(
             "
-            for k in 0..8:
-                sum <- add(sum, x) over k
-                sum <- add(sum, x) over k
+      for k in 0..8:
+        sum <- add(sum, x) over k
+        sum <- add(sum, x) over k
             ",
         );
     }
@@ -772,9 +772,9 @@ mod tests {
     fn cse_does_not_alias_distinct_unseeded_accumulators() {
         unchanged(
             "
-            for k in 0..8 seed=false:
-                left <- add(left, x) over k
-                right <- add(right, x) over k
+      for k in 0..8 seed=false:
+        left <- add(left, x) over k
+        right <- add(right, x) over k
             ",
         );
     }
@@ -783,11 +783,11 @@ mod tests {
     fn cse_partial_state_changes_invalidate_dependent_values() {
         unchanged(
             "
-            for k in 0..8:
-                before = exp(sum)
-                sum <- add(sum, x) over k
-                after = exp(sum)
-                out[k] = after
+      for k in 0..8:
+        before = exp(sum)
+        sum <- add(sum, x) over k
+        after = exp(sum)
+        out[k] = after
             ",
         );
     }
@@ -796,11 +796,11 @@ mod tests {
     fn cse_nested_state_changes_invalidate_enclosing_values() {
         unchanged(
             "
-            before = exp(sum)
-            for k in 0..4 seed=false:
-                sum <- add(sum, x) over k
-            after = exp(sum)
-            out[0] = after
+      before = exp(sum)
+      for k in 0..4 seed=false:
+        sum <- add(sum, x) over k
+      after = exp(sum)
+      out[0] = after
             ",
         );
     }
@@ -814,10 +814,10 @@ mod tests {
     fn cse_removes_repeated_copies_of_one_binding() {
         let out = placed(
             "
-            value = load x[0]
-            first[0] = value
-            value = load x[0]
-            second[0] = value
+      value = load x[0]
+      first[0] = value
+      value = load x[0]
+      second[0] = value
             ",
         );
         assert_eq!(
@@ -830,10 +830,10 @@ mod tests {
     fn cse_never_aliases_a_value_to_an_overwritten_representative() {
         unchanged(
             "
-            value = load x[0]
-            copy = load x[0]
-            value = load y[0]
-            out[0] = copy
+      value = load x[0]
+      copy = load x[0]
+      value = load y[0]
+      out[0] = copy
             ",
         );
         unchanged("value = exp(value)\nvalue = exp(value)");
@@ -843,19 +843,19 @@ mod tests {
     fn cse_does_not_merge_reductions_with_distinct_explicit_seeds() {
         unchanged(
             "
-            init f32 left = 0
-            init f32 right = 1
-            for k in 0..8:
-                left <- add(left, x)
-                right <- add(right, x)
+      init f32 left = 0
+      init f32 right = 1
+      for k in 0..8:
+        left <- add(left, x)
+        right <- add(right, x)
             ",
         );
     }
 
     #[test]
     fn common_branch_load_cannot_cross_a_write_on_either_path() {
-        let read = "    value = load x[0]\n    out[0] = value\n";
-        let write = "    x[0] = replacement\n";
+        let read = "  value = load x[0]\n  out[0] = value\n";
+        let write = "  x[0] = replacement\n";
         for (left, right) in [
             (format!("{write}{read}"), read.to_string()),
             (read.to_string(), format!("{write}{read}")),
@@ -869,18 +869,18 @@ mod tests {
         // An alias that reverses sorted operands must not hide the rest of a duplicate chain.
         let out = placed(
             "
-            z = load X[0]
-            a = load X[0]
-            m = load Y[0]
-            z1 = multiply(m, z)
-            a1 = multiply(a, m)
-            z2 = add(m, z1)
-            a2 = add(a1, m)
-            left = subtract(m, z1)
-            right = subtract(a1, m)
-            O[0] = a2
-            L[0] = left
-            R[0] = right
+      z = load X[0]
+      a = load X[0]
+      m = load Y[0]
+      z1 = multiply(m, z)
+      a1 = multiply(a, m)
+      z2 = add(m, z1)
+      a2 = add(a1, m)
+      left = subtract(m, z1)
+      right = subtract(a1, m)
+      O[0] = a2
+      L[0] = left
+      R[0] = right
             ",
         );
         let assigned: Vec<&str> = out
@@ -903,10 +903,10 @@ mod tests {
         // The loop only reads the dropped name, so the alias must reach inside.
         let out = placed(
             "
-            in0 = load const[0]
-            in1 = load const[0]
-            for a in 0..4:
-                v = add(in0, in1)
+      in0 = load const[0]
+      in1 = load const[0]
+      for a in 0..4:
+        v = add(in0, in1)
             ",
         );
         assert_eq!(load_names(&out), ["in0"]);
@@ -923,13 +923,13 @@ mod tests {
     fn cse_reuses_a_dominating_read_until_the_write_on_that_branch() {
         let out = placed(
             "
-            old = load x[0]
-            if p:
-                before = load x[0]
-                out[0] = before
-                x[0] = replacement
-                after = load x[0]
-                new[0] = after
+      old = load x[0]
+      if p:
+        before = load x[0]
+        out[0] = before
+        x[0] = replacement
+        after = load x[0]
+        new[0] = after
             ",
         );
         assert_eq!(
@@ -943,9 +943,9 @@ mod tests {
     fn dedup_loads_rewires_every_vector_lane() {
         let out = placed(
             "
-            x0, x1 = load X[0]
-            y0, y1 = load X[0]
-            sum = add(y0, y1)
+      x0, x1 = load X[0]
+      y0, y1 = load X[0]
+      sum = add(y0, y1)
             ",
         );
         assert_eq!(text(&out), "x0, x1 = load X[0]\nsum = x0 + x1");
@@ -955,11 +955,11 @@ mod tests {
     fn dedup_loads_invalidates_a_read_after_writing_its_buffer() {
         let out = placed(
             "
-            old = load B[0]
-            replacement = load R[0]
-            B[0] = replacement
-            new = load B[0]
-            O[0] = new
+      old = load B[0]
+      replacement = load R[0]
+      B[0] = replacement
+      new = load B[0]
+      O[0] = new
             ",
         );
         let from_b: Vec<&str> = out
@@ -977,10 +977,10 @@ mod tests {
     fn dedup_loads_does_not_reuse_a_read_across_a_loop_that_writes_its_buffer() {
         let out = placed(
             "
-            before = load B[0]
-            for a in 0..4:
-                current = load B[0]
-                B[0] = current
+      before = load B[0]
+      for a in 0..4:
+        current = load B[0]
+        B[0] = current
             ",
         );
         assert_eq!(
@@ -993,9 +993,9 @@ mod tests {
     fn hoists_invariant_load_above_loop() {
         let out = placed(
             "
-            for a in 0..4:
-                x = load X[]
-                o[a] = x
+      for a in 0..4:
+        x = load X[]
+        o[a] = x
             ",
         );
         assert_eq!(statement_types(&out), ["Load", "Loop"]);
@@ -1011,12 +1011,12 @@ mod tests {
         // defined inside the outer loop's body.
         let out = placed(
             "
-            for a in 0..4:
-                for b in 0..8:
-                    xb = load X[b]
-                    acc <- add(acc, xb)
-                v = exp(acc)
-                out[a] = v
+      for a in 0..4:
+        for b in 0..8:
+          xb = load X[b]
+          acc <- add(acc, xb)
+        v = exp(acc)
+        out[a] = v
             ",
         );
         assert_eq!(
@@ -1036,11 +1036,11 @@ mod tests {
     fn keeps_inner_loop_when_it_references_outer_axis() {
         let out = placed(
             "
-            for a in 0..4:
-                for b in 0..8:
-                    xab = load X[a, b]
-                    acc <- add(acc, xab)
-                out[a] = acc
+      for a in 0..4:
+        for b in 0..8:
+          xab = load X[a, b]
+          acc <- add(acc, xab)
+        out[a] = acc
             ",
         );
         assert_eq!(loop_axes(&out), ["a"]);
@@ -1052,9 +1052,9 @@ mod tests {
         // A strided loop binds a sequential axis the way a loop does, so it partitions its body the same way.
         let out = placed(
             "
-            for a in 0..4 step 1:
-                x = load X[]
-                o[a] = x
+      for a in 0..4 step 1:
+        x = load X[]
+        o[a] = x
             ",
         );
         assert_eq!(statement_types(&out), ["Load", "StridedLoop"]);
@@ -1067,12 +1067,12 @@ mod tests {
     fn hoists_inner_strided_loop_and_consumer_together() {
         let out = placed(
             "
-            for a in 0..4:
-                for b in 0..8 step 1:
-                    xb = load X[b]
-                    acc <- add(acc, xb)
-                v = exp(acc)
-                out[a] = v
+      for a in 0..4:
+        for b in 0..8 step 1:
+          xb = load X[b]
+          acc <- add(acc, xb)
+        v = exp(acc)
+        out[a] = v
             ",
         );
         assert_eq!(
@@ -1093,11 +1093,11 @@ mod tests {
         // write happens, so it stays.
         let out = placed(
             "
-            for a in 0..4:
-                for b in 0..8:
-                    xb = load X[b]
-                    scratch[b] = xb
-                out[a] = xb
+      for a in 0..4:
+        for b in 0..8:
+          xb = load X[b]
+          scratch[b] = xb
+        out[a] = xb
             ",
         );
         assert_eq!(loop_axes(&out), ["a"]);
@@ -1111,15 +1111,15 @@ mod tests {
         // in the body writes holds one value on either side of the barrier, and moves.
         let out = placed(
             "
-            for i in 0..4:
-                O[0] = one
-                back = load O[0]
-                Sync
-                again = load O[0]
-                staged = load S[0]
-                P[i] = back
-                Q[i] = staged
-                R[i] = again
+      for i in 0..4:
+        O[0] = one
+        back = load O[0]
+        Sync
+        again = load O[0]
+        staged = load S[0]
+        P[i] = back
+        Q[i] = staged
+        R[i] = again
             ",
         );
         assert_eq!(statement_types(&out), ["Load", "Loop"]);
@@ -1135,15 +1135,15 @@ mod tests {
         // reads the chunk, and neither moves out of the chunk loop nor shares a read ahead of the barrier.
         let out = placed(
             "
-            Smem(name=slab, extents=(8))
-            early = load slab[0]
-            E[0] = early
-            for k in 0..4:
-                CpAsyncCopy(smem=slab, smem_index=(0), src=X, src_index=(k), nbytes=16)
-                CpAsyncWait
-                Sync
-                x = load slab[0]
-                O[k] = x
+      Smem(name=slab, extents=(8))
+      early = load slab[0]
+      E[0] = early
+      for k in 0..4:
+        CpAsyncCopy(smem=slab, smem_index=(0), src=X, src_index=(k), nbytes=16)
+        CpAsyncWait
+        Sync
+        x = load slab[0]
+        O[k] = x
             ",
         );
         let chunk = inner(out.stmts().last().unwrap());
@@ -1159,13 +1159,13 @@ mod tests {
         // behind it: the row is no storage the kernel writes, so the second read is the first.
         let out = placed(
             "
-            x = load X[0]
-            y = multiply(x, 2.0)
-            O[0] = y
-            Sync
-            x2 = load X[0]
-            y2 = multiply(x2, 2.0)
-            P[0] = y2
+      x = load X[0]
+      y = multiply(x, 2.0)
+      O[0] = y
+      Sync
+      x2 = load X[0]
+      y2 = multiply(x2, 2.0)
+      P[0] = y2
             ",
         );
         assert_eq!(
@@ -1182,17 +1182,17 @@ mod tests {
         // shape is a GDN decoder layer's fused normalization (Qwen3.5-9B, layer 0).
         let out = placed(
             "
-            z = load Z[]
-            for a in 0..4:
-                for b in 0..4:
-                    for c in 0..4:
-                        accc <- add(accc, z)
-                    x = load X[a, b]
-                    v1 = add(accc, x)
-                    accb <- add(accb, v1)
-                acca <- add(acca, accb)
-            v3 = exp(acca)
-            Y[] = v3
+      z = load Z[]
+      for a in 0..4:
+        for b in 0..4:
+          for c in 0..4:
+            accc <- add(accc, z)
+          x = load X[a, b]
+          v1 = add(accc, x)
+          accb <- add(accb, v1)
+        acca <- add(acca, accb)
+      v3 = exp(acca)
+      Y[] = v3
             ",
         );
         assert_eq!(
@@ -1213,13 +1213,13 @@ mod tests {
     fn normalization_dedups_loads_and_rewires_gather_indices() {
         let out = normalized(
             "
-            for a in 0..4:
-                idx0 = load indices[a]
-                idx1 = load indices[a]
-                x0 = load values[idx0]
-                x1 = load values[idx1]
-                sum = add(x0, x1)
-                out[a] = sum
+      for a in 0..4:
+        idx0 = load indices[a]
+        idx1 = load indices[a]
+        x0 = load values[idx0]
+        x1 = load values[idx1]
+        sum = add(x0, x1)
+        out[a] = sum
             ",
         );
         assert_eq!(out.len(), 1, "{}", text(&out));
@@ -1240,11 +1240,11 @@ mod tests {
         for inner_input in ["x", "y"] {
             let out = normalized(&format!(
                 "
-                value = load x[0]
-                for i in 0..4:
-                    value = load {inner_input}[0]
-                    inner[i] = value
-                outer[0] = value
+        value = load x[0]
+        for i in 0..4:
+          value = load {inner_input}[0]
+          inner[i] = value
+        outer[0] = value
                 "
             ));
             let loads: HashMap<Name, Name> = out
@@ -1275,15 +1275,15 @@ mod tests {
         // An equal gather index exposes a constant predicate, then an invariant shared cone.
         let out = normalized(
             "
-            x = load x[0]
-            for i in 0..4:
-                a = load indices[i]
-                b = load indices[i]
-                s = select:
-                    x when a - b < 1
-                    a when 1
-                v = exp(s)
-                out[i] = v
+      x = load x[0]
+      for i in 0..4:
+        a = load indices[i]
+        b = load indices[i]
+        s = select:
+          x when a - b < 1
+          a when 1
+        v = exp(s)
+        out[i] = v
             ",
         );
         assert!(
@@ -1338,7 +1338,7 @@ mod tests {
                 format!("{axis} / 256")
             };
             format!(
-                "for {axis} in 0..1024:\n    {name}x = load x[{index}]\n    {name}v = exp({name}x)\n    \
+                "for {axis} in 0..1024:\n  {name}x = load x[{index}]\n  {name}v = exp({name}x)\n  \
                  {name} <- add({name}, {name}v) over {axis}"
             )
         };
@@ -1361,20 +1361,20 @@ mod tests {
         // the second is the first under another name.
         let out = normalized(
             "
-            for m in 0..4:
-                for k in 0..8:
-                    x0 = load x[m, k]
-                    w0 = load w[k]
-                    p0 = multiply(x0, w0)
-                    acc0 <- add(acc0, p0) over k
-                    x1 = load x[m, k]
-                    w1 = load w[k]
-                    p1 = multiply(x1, w1)
-                    acc1 <- add(acc1, p1) over k
-                gate = exp(acc0)
-                up = exp(acc1)
-                out = multiply(gate, up)
-                out[m] = out
+      for m in 0..4:
+        for k in 0..8:
+          x0 = load x[m, k]
+          w0 = load w[k]
+          p0 = multiply(x0, w0)
+          acc0 <- add(acc0, p0) over k
+          x1 = load x[m, k]
+          w1 = load w[k]
+          p1 = multiply(x1, w1)
+          acc1 <- add(acc1, p1) over k
+        gate = exp(acc0)
+        up = exp(acc1)
+        out = multiply(gate, up)
+        out[m] = out
             ",
         );
         assert_eq!(out.len(), 1, "{}", text(&out));

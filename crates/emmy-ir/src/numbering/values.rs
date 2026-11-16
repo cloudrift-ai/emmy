@@ -1226,7 +1226,7 @@ mod tests {
         assert_ne!(numbering.numbers[6], numbering.numbers[7]);
         let looped = |seed: &str| {
             let body = crate::text::parse_body(&format!(
-                "{seed}for k in 0..4:\n    f32 x = load A[k]\n    f32 s <- add(s, x)\nf32 O[0] = s"
+                "{seed}for k in 0..4:\n  f32 x = load A[k]\n  f32 s <- add(s, x)\nf32 O[0] = s"
             ))
             .unwrap();
             let numbering = value_numbers(&body, &|name| Key::Str(*name), Chains::Flat);

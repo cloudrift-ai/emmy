@@ -304,11 +304,11 @@ mod tests {
     fn every_order_of_a_small_body_normalizes_to_one_form() {
         let statements = body(
             "
-            x = load X[]
-            absolute = abs(x)
-            y = load Y[]
-            result = add(absolute, y)
-            O[] = result
+      x = load X[]
+      absolute = abs(x)
+      y = load Y[]
+      result = add(absolute, y)
+      O[] = result
             ",
         );
         let forms: Vec<Body> = permutations(statements.stmts())
@@ -329,22 +329,22 @@ mod tests {
             let k = format!("k_{weight}");
             format!(
                 "
-        for {k} in 0..8:
-            x_{weight} = load X[i, {k}]
-            n_{weight} = load N[{k}]
-            w_{weight} = load {weight}[{k}, j]
-            s_{weight} = multiply(scale, x_{weight})
-            t_{weight} = multiply(n_{weight}, s_{weight})
-            p_{weight} = multiply(t_{weight}, w_{weight})
-            acc_{weight} <- add(acc_{weight}, p_{weight}) over {k}"
+    for {k} in 0..8:
+      x_{weight} = load X[i, {k}]
+      n_{weight} = load N[{k}]
+      w_{weight} = load {weight}[{k}, j]
+      s_{weight} = multiply(scale, x_{weight})
+      t_{weight} = multiply(n_{weight}, s_{weight})
+      p_{weight} = multiply(t_{weight}, w_{weight})
+      acc_{weight} <- add(acc_{weight}, p_{weight}) over {k}"
             )
         };
         let weights = ["W_up", "W_gate"];
         let spelled = format!(
-            "for i in 0..4:\n    for j in 0..4:{}{}",
+            "for i in 0..4:\n  for j in 0..4:{}{}",
             weights.map(projection).concat(),
             weights
-                .map(|w| format!("\n        O_{w}[i, j] = acc_{w}"))
+                .map(|w| format!("\n    O_{w}[i, j] = acc_{w}"))
                 .concat()
         );
         let forms: HashSet<String> = (0..8)
@@ -369,11 +369,11 @@ mod tests {
         let incoming = ordering_constraints(
             &body(
                 "
-                X[] = first
-                left = load X[]
-                right = load X[]
-                X[] = second
-                tail = load X[]
+        X[] = first
+        left = load X[]
+        right = load X[]
+        X[] = second
+        tail = load X[]
                 ",
             ),
             true,
@@ -419,7 +419,7 @@ mod tests {
                 .zip(buffers)
                 .map(|(name, buffer)| {
                     format!(
-                        "\n    if {axis} < 4:\n        {name} = load {buffer}[{axis}]\n        {name}_value = abs({name})\n        {buffer}_output[{axis}] = {name}_value"
+                        "\n  if {axis} < 4:\n    {name} = load {buffer}[{axis}]\n    {name}_value = abs({name})\n    {buffer}_output[{axis}] = {name}_value"
                     )
                 })
                 .collect();
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn a_repeated_definition_is_captured_from_its_nearest_predecessor() {
         let make = |name: &str, inner: &str, result: &str, late_before_capture: bool| {
-            let capture = format!("if true:\n    {inner} = abs({name})\n    P[] = {inner}\n");
+            let capture = format!("if true:\n  {inner} = abs({name})\n  P[] = {inner}\n");
             let second = format!("{name} = load B[]\n");
             let middle = if late_before_capture {
                 format!("{second}{capture}")
@@ -483,7 +483,7 @@ mod tests {
         // A deeper scope's rebind of a name binds nothing read above it: the block still depends on the enclosing
         // definition, so it cannot sort above it.
         let given = body(
-            "if true:\n    y = abs(x)\n    if true:\n        let x = 2.0\n        P[] = x\n    O[] = y\nx = load X[]",
+            "if true:\n  y = abs(x)\n  if true:\n    let x = 2.0\n    P[] = x\n  O[] = y\nx = load X[]",
         );
         let normal = text(&normalize_body(&given).unwrap());
         let mut lines = normal.lines();
@@ -520,7 +520,7 @@ mod tests {
                     };
                     let op = ["abs", "exp", "negative"][chain % 3];
                     format!(
-                        "for {prefix}i in 0..4:\n    {prefix}x = load {prefix}X[{prefix}i]\n    {prefix}y = {op}({prefix}x)\n    {prefix}O[{prefix}i] = {prefix}y"
+                        "for {prefix}i in 0..4:\n  {prefix}x = load {prefix}X[{prefix}i]\n  {prefix}y = {op}({prefix}x)\n  {prefix}O[{prefix}i] = {prefix}y"
                     )
                 })
                 .collect();
