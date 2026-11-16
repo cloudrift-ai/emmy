@@ -343,6 +343,20 @@ class ConstantOp(Op):
         raise NotImplementedError("ConstantOp with value=None must be supplied by the executor")
 
 
+def is_f4_pair_table(node) -> bool:  # noqa: ANN001
+    """Whether ``node`` is the e2m1 pair table an NVFP4 weight decodes through: the 256 x 2 constant the loader builds
+    from ``from_f4e2m1`` of each byte's two nibbles (``loader.quant``). A backend reads a lookup into it as that decode,
+    computed, where the lookup itself would be a gather of one 16-bit value per lane."""
+    op = getattr(node, "op", None)
+    source = getattr(op, "source_graph", None)
+    return (
+        isinstance(op, ConstantOp)
+        and source is not None
+        and tuple(op.source_shape or ()) == (256, 2)
+        and any(getattr(getattr(n.op, "op", None), "name", None) == "from_f4e2m1" for n in source.nodes.values())
+    )
+
+
 def _keepdim_axis(shape: tuple, axis: int | str) -> tuple:
     """Return shape with the given axis set to 1 (keepdim=True semantics).
 

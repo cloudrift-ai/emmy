@@ -28,6 +28,7 @@ def options(arguments):
     parser.add_argument("--page-tokens", type=int, help="Tokens of KV cache per page (default: one page spanning the context)")
     parser.add_argument("--kv-cache-dtype", default="auto", choices=tuple(KV_CACHE_DTYPES), help="KV cache dtype (default: the model's)")
     parser.add_argument("--native-pack", type=Path)
+    parser.add_argument("--export", type=Path, help="Prepare the serving bundle into this new directory and exit, serving nothing")
     parser.add_argument(
         "--prefill-size", type=int, help="Native export chunk width (default: 16; 1 disables chunking); a decode-width chunk follows"
     )
@@ -55,6 +56,8 @@ def options(arguments):
         raise ValueError("draft tokens are a nonnegative count that applies to preparation, not an existing pack")
     if not 1 <= (args.max_model_len or 1) <= MAX_CONTEXT or not 1 <= args.port <= 65535:
         raise ValueError(f"native context must be 1–{MAX_CONTEXT} and port must be 1–65535")
+    if args.export and args.native_pack:
+        raise ValueError("--export prepares a bundle; --native-pack serves an existing one")
     if args.prefill_size is not None and (args.native_pack or not 1 <= args.prefill_size <= MAX_CONTEXT):
         raise ValueError(f"prefill size requires preparation and must be 1–{MAX_CONTEXT}")
     return args
@@ -189,7 +192,7 @@ def launch(args, arguments):
             logger.info("%s", shlex.join(bench))
         return
     binary = shutil.which("emmy-server")
-    if not binary:
+    if not binary and not opts.export:
         raise FileNotFoundError("emmy-server is not installed; install the matching native binary package before serving")
     if opts.native_pack:
         metadata = json.loads((root / "serving.json").read_text())
@@ -197,7 +200,7 @@ def launch(args, arguments):
             raise ValueError("native pack model, revision, or context does not match the request")
     else:
         # Export publishes a fresh directory. Keep the resulting bundle for deliberate reuse.
-        root = Path(tempfile.mkdtemp(prefix="emmy-native-")) / "artifact"
+        root = opts.export or Path(tempfile.mkdtemp(prefix="emmy-native-")) / "artifact"
         prepare(
             model,
             revision,
@@ -213,6 +216,8 @@ def launch(args, arguments):
             drafts=opts.drafts,
         )
         logger.info("Prepared native serving artifact: %s", root)
+        if opts.export:
+            return
     serve = command(model, opts, root.resolve(), binary)
     env = _child_env()
     if args.bench:

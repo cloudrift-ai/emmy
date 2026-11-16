@@ -79,6 +79,23 @@ static __device__ __forceinline__ unsigned char emmy_to_f4e2m1(float value) {
 
 """
 
+# The e2m1 pair table an NVFP4 weight decodes through, computed instead of read (``Load.render`` spells
+# a lookup into a ``RenderCtx.pair_tables`` buffer as this call). Row ``b`` of the 256x2 table holds
+# byte ``b``'s low- and high-nibble values, so flat index ``i`` reads nibble ``i & 1`` of byte ``i >> 1``.
+# The code's sign goes to the f16 sign bit and its three magnitude bits under the exponent's two low
+# bits and the mantissa's top bit. That spells the value times 2^-14 (e2m1's subnormal 0.5 lands on an
+# f16 subnormal), and one exact multiply by 2^14 gives the value back: the move ``emmy_from_f8e4m3``
+# makes for e4m3. Every e2m1 value is exact in f16, so the result equals the table's entry.
+_F4_PAIR_PRELUDE = """\
+#include <cuda_fp16.h>
+static __device__ __forceinline__ __half emmy_f4_pair(int i) {
+    unsigned code = ((unsigned)i >> 1 >> ((i & 1) << 2)) & 0xFu;
+    unsigned short bits = ((code & 8u) << 12) | ((code & 7u) << 9);
+    return __hmul(__ushort_as_half(bits), __ushort_as_half(0x7400u));
+}
+
+"""
+
 _BITCAST_PRELUDE = """\
 template <typename To, typename From>
 static __device__ __forceinline__ To emmy_bitcast(From value) {
@@ -1420,6 +1437,7 @@ def render_kernelop(
     literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
     paged_buffers: tuple[tuple[str, int, int], ...] = (),
+    pair_tables: frozenset[str] = frozenset(),
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
 
@@ -1452,6 +1470,10 @@ def render_kernelop(
     stays ``kv_len`` everywhere above the load. Empty (the default) renders
     every buffer flat.
 
+    ``pair_tables`` names the inputs that are the e2m1 pair table an NVFP4 weight decodes through: a
+    ``Load`` from one computes its value (``_F4_PAIR_PRELUDE``) instead of reading it. The buffer
+    stays a parameter, so the signature does not change.
+
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
     ``kernel_op.outputs`` (distinct ``Write.output`` names) become
@@ -1475,6 +1497,7 @@ def render_kernelop(
         literal_constants=literals,
         smem_dynamic_offsets=smem_offsets,
         buffer_dtypes={n: t.dtype.name for n, t in tmap.items()},
+        pair_tables=frozenset(pair_tables),
     )
 
     def _dtype_for(name: str) -> object:
@@ -1622,6 +1645,7 @@ def render_kernelop(
     # preludes are gated on the rendered text.
     bitcast_prelude = _BITCAST_PRELUDE if "emmy_bitcast<" in body_text else ""
     f4_encode = _F4_ENCODE_PRELUDE if "emmy_to_f4e2m1(" in body_text else ""
+    f4_encode += _F4_PAIR_PRELUDE if "emmy_f4_pair(" in body_text else ""
     preludes = (
         f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{_wgmma_prelude(kernel_op)}"
         f"{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"

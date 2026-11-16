@@ -2100,7 +2100,10 @@ def test_recorded_route_addresses_successive_remainders_and_cut_producers(monkey
         "PLACE@place_bbbb/map.3/inner": "cut",
     }
     if bare:
-        expected = dict.fromkeys(("PLACE", "PLACE@step.1", "PLACE@place_aaaa", "PLACE@place_aaaa/step.1", "PLACE@place_bbbb"), "cut")
+        # A recorded root-most cut is one step of a chain the bare hand pin would cut whole, so it replays numbered.
+        expected = dict.fromkeys(
+            ("PLACE@step.0", "PLACE@step.1", "PLACE@place_aaaa/step.0", "PLACE@place_aaaa/step.1", "PLACE@place_bbbb/step.0"), "cut"
+        )
     assert _route_pins(document, "final") == expected
 
 

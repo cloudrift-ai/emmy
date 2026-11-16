@@ -43,8 +43,15 @@ def _linear(tmp_path, *, m=16, k=256, n=256, dtype="bfloat16"):
 
 
 def _pins(place: str, stage: str, *, atom: str = K16_BF16, chunk: str = "k8") -> dict:
-    # The reduction is pinned unsplit: a split is the kernel-set pick's call, which a prior refit moves.
-    return {"PLACE": place, "REDUCE": "", "WORK": "w1x4", "TILE": f"{atom}/f1x1/{chunk}", "STAGE": stage}
+    # The reduction is pinned unsplit: a split is the kernel-set pick's call, which a prior refit moves. The cut is
+    # the one at the frontier, numbered: a bare cut would go on to cut the remainder's statistic seam too.
+    return {
+        "PLACE@step.0" if place == "cut" else "PLACE": place,
+        "REDUCE": "",
+        "WORK": "w1x4",
+        "TILE": f"{atom}/f1x1/{chunk}",
+        "STAGE": stage,
+    }
 
 
 def _lower(graph, pins):

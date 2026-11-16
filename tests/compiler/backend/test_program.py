@@ -244,7 +244,7 @@ def test_cold_benchmark_never_batches_or_times_a_hot_program(monkeypatch):
 
     fake.iter_once = once
     monkeypatch.setattr(program.CompiledProgram, "build", lambda *a, **kw: fake)
-    monkeypatch.setattr(cache, "L2Eviction", lambda: lambda: None)
+    monkeypatch.setattr(cache, "CacheEviction", lambda: lambda: None)
     with pinned_knobs({"COLD_CACHE": True}):
         measured = benchmark_program(object(), warmup=1, num_iters=2)
     assert calls and all(batch == [1] for batch in calls)
@@ -266,3 +266,39 @@ def test_weight_streaming_is_slower_after_l2_eviction():
     assert hot.captured and cold.captured
     assert cold.time_ms > hot.time_ms
     assert cold.e2e_ms is None
+
+
+@requires_cuda
+def test_straight_line_code_is_slower_after_cache_eviction():
+    import statistics
+
+    import torch
+
+    from emmy.compiler.backend.cuda.cache import CacheEviction, straight_line_source
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import F32
+
+    # 32 KB of straight-line code: a repeated launch finds it in the SM's instruction cache, an evicted one fetches it.
+    sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    plan = ExecutionPlan(
+        "cuda",
+        ["scratch"],
+        ["sink"],
+        [BufferSpec("scratch", (Dim(4),), F32, "input"), BufferSpec("sink", (Dim(sms),), F32, "output")],
+        {},
+        {},
+        [LaunchSpec("code", "code", ("scratch", "sink"), ((sms,), (1,), (1,)), ((128,), (1,), (1,)), 0, (), writes=("sink",))],
+        {"code": KernelSpec(source=straight_line_source("code", 32 * 1024))},
+    )
+    with gpu_lock():
+        prog = CompiledProgram.build_from_plan(plan, {"scratch": torch.zeros(4, device="cuda")})
+        evict = CacheEviction()
+        with prog.on_torch_stream():
+            hot = statistics.median(prog.executor.time_launch(0, 1, 1000.0) for _ in range(30))
+            cold = []
+            for _ in range(30):
+                evict()
+                cold.append(prog.executor.time_launch(0, 1, 1000.0))
+    assert statistics.median(cold) > 1.5 * hot

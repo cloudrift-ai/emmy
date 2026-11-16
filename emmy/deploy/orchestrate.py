@@ -237,7 +237,8 @@ def model_downloads(services: list[Service], baked=frozenset()) -> list[tuple[st
     items = []
     for service in services:
         image = service.recipe.engine.llm.image
-        if image in baked:
+        # A native image's pack holds the weights, the tokenizer and the template.
+        if image in baked or service.recipe.engine.llm.engine_name == "native":
             continue
         items.append((image, service.recipe.model_name, service.recipe.model.revision))
         adapter = service.recipe.engine.llm.vllm.lora_adapter if service.recipe.engine.llm.vllm else None

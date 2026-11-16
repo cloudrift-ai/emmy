@@ -242,6 +242,17 @@ class Load(Stmt):
         # fall back to ``ctx.buffer_dtypes`` so handwritten test fixtures
         # without a stamped dtype still render correctly.
         src_dt = self.dtype.name if self.dtype is not None else ctx.buffer_dtypes.get(self.input, "f32")
+        if self.input in ctx.pair_tables and not self.carried:
+            # Each name's value is computed from its flat table index (``emmy_f4_pair``), exact in every float dtype.
+            out = []
+            for k, nm in enumerate(self.names):
+                idx_k = (*self.index[:-1], BinaryExpr("+", self.index[-1], Literal(k, "int"))) if k else self.index
+                value = f"emmy_f4_pair({render_index(self.input, idx_k, ctx)})"
+                if src_dt != "f16":
+                    value = ctx.target.convert(ctx.target.convert(value, "f16", "f32"), "f32", src_dt)
+                ctx.ssa_dtypes[nm] = src_dt
+                out.append(f"{pad}{ctx.type_name(src_dt)} {nm} = {value};")
+            return out
         mem = ctx.memory_for(self.input)
         n = self.width
         vec_pair = None if self.is_scalar else ctx.target.vector_type(src_dt, n)

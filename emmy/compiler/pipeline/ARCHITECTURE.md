@@ -339,9 +339,14 @@ trees. `Fork` (`fork.py`) is an interface with four members:
   cannot be pickled, and the greedy builds only the leaf it picks; the rows are the same at any worker count.
   A kernel-set fork's arms are built the same way before the placement prior ranks them (`fork.parallel_expand`):
   each arm is a splice of the whole kernel, so a cut offering dozens of seams costs one arm per worker instead of
-  their sum, and the parent memoizes what each worker built on the arm, where its own expansion would. Only the
-  fragment comes back, so the redirect of the kernel's buffers onto its outputs rides the arm as data
-  (`DeferredFork.output`), set at enumeration and applied to the match when the arm is spliced.
+  their sum, and the parent memoizes what each worker built on the arm, where its own expansion would. The worker
+  also binds each piece the arm leaves to the fragment's buffers and computes what the pick reads of every arm —
+  the piece's derived body, its exact identity and its `S_*` stamps — which come back beside the fragment and are
+  memoized on the piece where its own computation would put them (`fork._piece_facts`): a `TileOp` pickles its
+  stored fields only, and without them the parent lowered every piece of every arm again, once to featurize it and
+  once more to price or check it by identity when the DB holds a row or a failure. Nothing else comes back, so the
+  redirect of the kernel's buffers onto its outputs rides the arm as data (`DeferredFork.output`), set at
+  enumeration and applied to the match when the arm is spliced.
 
 A pick calls `expand()` only on the branches it descends into, so only the subtrees a resolve actually walks ever get
 built. `DeferredFork` is a leaf whose selected rewrite is materialized only when expanded — what the cut and split
@@ -428,9 +433,16 @@ kernel-set fork (`pins.KERNEL_SET_DOMAINS`) — keep the kernel whole, cut one o
 width, store a constant in its source layout — each featurized by the same `Featurizer` row a schedule candidate gets.
 The `P_*` block describes the kernels the arm leaves (`features.piece_features`: the piece count, each `S_*` stamp
 summed and maxed over the pieces, and the number of kernel roots that fold a whole contraction, which separates cuts
-with equal Loop histograms but different projection placement). A split arm's `REDUCE` width also gives it the
-`D_*` occupancy features — its CTA count, its waves against the card's SM count and how full the last wave is —
-which say what a split buys on a given card where the piece stamps only say how large the pieces are. Its dataset is
+with equal Loop histograms but different projection placement). Among the stamps is the kernel's work, `S_ext_trips`:
+the statement executions its body performs, every leaf once per trip of the static loops around it, free loops
+included, so a cone recomputed per output counts per output where the per-cell `S_ext_serial_cell_work` and the
+flat extent products cannot see the recompute; and the arm's `P_trips_ratio` reads its pieces' work against the
+kernel the fork decides — 1 for the arm that keeps it whole, far below it for a cut that computes a cone once. A
+whole Gated DeltaNet decode kernel recomputes its chunk's solve per output element, and before this column every
+arm but one left that recompute standing and the prior could not tell them apart. A split arm's `REDUCE` width also
+gives it the `D_*` occupancy features — its CTA count, its waves against the card's SM count and how full the last
+wave is — which say what a split buys on a given card where the piece stamps only say how large the pieces are. Its
+dataset is
 `emmy db export --space placement`: one pool per kernel-set fork of every golden kernel, walked through the lift and
 the cut pass only (`ranking.walk_placement`) one seam at a time, as a deploy with no recorded route walks it. A
 several-seam cut a golden recorded is the kernel set it left: at the kernel's fork every single seam carving a piece
@@ -903,7 +915,7 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   reconstructs it inside each row's replay-pin scope. Omitted independent pins inherit the recorded umbrella.
   Publishing a recorded regime spells those effective defaults explicitly, so ambient overrides cannot leak in;
   equivalent omitted and explicit defaults share one regime without rewriting the stored row's pins.
-  Cold measurements evict L2 before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
+  Cold measurements evict L2 and the instruction caches before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
   regime through import, freeze and export; an omitted pin means hot. Neither regime prices the other's rows.
   The regime knobs are one tuple, `space.REGIME_KNOBS` — the precision-trading family and `COLD_CACHE` — and every
   reader of a regime iterates it through `space.regime_pins`: the live-regime test (`evidence.regime_live`), the
@@ -1091,7 +1103,14 @@ compare by their effective regime, so recording fills an existing proposal while
 pin spelling. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's rows alone
 (no tune DB, no prior). A routing row the unpinned cut pass does not take again is
 refused before anything is written, since the next restamp would drop it. A composed cut leaves its children open,
-so a cut pinned on one of them (`PLACE@place_<token>/…`) records as a later decision on that child. Each measured row
+so a cut pinned on one of them (`PLACE@place_<token>/…`) records as a later decision on that child. The pin spells the
+child's own seams, bare where it has one (`PLACE@place_<token>=cut`), and the strict record needs rows for the pieces
+that cut mints — a remainder's cross-CTA split fork refuses with none — so the child is benched first under the pin
+alone (`run --golden PATH --kernel CHILD --bench` with `EMMY_KNOBS=PLACE=cut` at the tune standard, which writes its
+routing row and its pieces' rows into the tune DB); the strict whole-target record then takes the cut from those rows
+with no pin. The isolated record of a named row (`--kernel CHILD --realization ROW`) pins the row's kernel whole, so it
+takes no hand `PLACE` pin. A `place_<token>` pin that names none of the child's seams decides nothing, and the audit
+answers with the seams it offers. Each measured row
 carries `tried`: the schedules of its kernel the tune DB held at its sizes and regime on the card
 (`bench_record.measured_schedules`) —
 the search behind the row, which nothing else in the file can tell, and which goes with the measurement when a restamp
@@ -1455,9 +1474,10 @@ structural tree-path codec before classic sites exist. The maximal fused kernel 
 siblings — closure counting the offer-time provider closure and dependent-seam composition `passes/ARCHITECTURE.md`
 describes. A cut is
 consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
-the structural decision trace. A scoped cut consumes its authoritative placement decision on both fresh pieces, which
-proceed to scheduling. Bare `PLACE=cut` selects the primary seam and consumes placement on both pieces. Only unpinned
-cuts leave their pieces able to re-enter placement and expose smaller seams.
+the structural decision trace. A pinned cut decides the one fork its pins name; the remainder and the pieces it
+leaves re-enter placement and take their own fork, which a `step.<n>` or `place_<token>` pin, evidence or the prior
+decides. Bare `PLACE=cut` selects the root-most seam at every step, so it cuts the remainder chain until no seam is
+left, and never reaches a piece.
 
 **`WORK`** (STR codec) — the kernel-global **worker inventory**, spelled exactly once per row (step 7):
 `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer band the retired per-row `WSPEC` key

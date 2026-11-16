@@ -23,7 +23,7 @@ from emmy.compiler.backend.base import resolve_tune_db
 from emmy.compiler.backend.cpu.codegen import PAIR_TABLE, Unsupported, generate
 from emmy.compiler.backend.cpu.runtime import CpuKernel, NativeProgram, default_threads
 from emmy.compiler.context import Context
-from emmy.compiler.ir.base import ConstantOp
+from emmy.compiler.ir.base import ConstantOp, is_f4_pair_table
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
@@ -149,20 +149,6 @@ def _cut_everywhere(graph: Graph, ctx: Context) -> Graph:
     return cut
 
 
-def _is_pair_table(node) -> bool:  # noqa: ANN001
-    """Whether ``node`` is the e2m1 pair table an NVFP4 weight decodes through: the 256 x 2 constant the loader builds
-    from ``from_f4e2m1`` of each byte's two nibbles (``loader.quant``). The generator reads a lookup into it as that
-    decode, which vectorizes, where the lookup itself would be a gather of one 16-bit value per lane."""
-    op = getattr(node, "op", None)
-    source = getattr(op, "source_graph", None)
-    return (
-        isinstance(op, ConstantOp)
-        and source is not None
-        and tuple(op.source_shape or ()) == (256, 2)
-        and any(getattr(getattr(n.op, "op", None), "name", None) == "from_f4e2m1" for n in source.nodes.values())
-    )
-
-
 def _static_or_name(dim) -> int | str:  # noqa: ANN001
     try:
         return dim.value
@@ -179,7 +165,7 @@ def _build(graph: Graph, node, schedule) -> CpuKernel:  # noqa: ANN001
     if any(t is None for t in tensors.values()):
         raise Unsupported("a buffer missing from the graph")
     shapes = {b: tuple(_static_or_name(d) for d in t.shape) for b, t in tensors.items()}
-    dtypes = {b: PAIR_TABLE if _is_pair_table(graph.nodes.get(b)) else str(t.dtype) for b, t in tensors.items()}
+    dtypes = {b: PAIR_TABLE if is_f4_pair_table(graph.nodes.get(b)) else str(t.dtype) for b, t in tensors.items()}
     try:
         ir_text, plan = generate(op, shapes, dtypes, schedule)
     except (TypeError, ValueError, KeyError) as exc:

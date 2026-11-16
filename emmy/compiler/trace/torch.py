@@ -1769,6 +1769,16 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
 
     # --- Squeeze / permute ---
+    # A permute that moves only size-1 axes keeps every element in place, so it is a reshape like a squeeze. Any
+    # other permute moves data: a ``TransposeOp`` over the full permutation, never a reshape of the same bytes.
+    if op_name == "permute":
+        x_shape = tuple(g.nodes[input_ids[0]].output.shape)
+        perm = tuple(axis % len(x_shape) for axis in fx_node.args[1])
+        moved = [axis for axis in perm if not (x_shape[axis].is_static and x_shape[axis].as_static() == 1)]
+        if moved != sorted(moved):
+            nid = g.add_node(op=TransposeOp(axes=perm), inputs=input_ids[:1], output=Tensor(name, shape, dtype), node_id=name)
+            node_map[name] = nid
+            return
     if op_name in ("squeeze", "permute"):
         # ``ReshapeOp.shape`` is ``tuple[int | str, ...]`` — unwrap Dim wrappers
         # so the op-level field carries the raw int / symbolic-name form.

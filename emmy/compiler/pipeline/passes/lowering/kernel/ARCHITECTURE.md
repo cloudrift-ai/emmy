@@ -767,7 +767,9 @@ and the constant base must be divisible by the vector width, and subsequent elem
 last coordinate alone is insufficient when an outer row has an odd stride. Unknown multidimensional layouts retain
 scalar operations; split coordinates may still vectorize when simplification reconstructs an aligned flat address.
 A strided loop's variable counts as a multiple of the alignment its start and step share, so a `coop/v<n>` lane that
-starts at `lane * n` reads its run as one vector even though the variable's own coefficient is one.
+starts at `lane * n` reads its run as one vector even though the variable's own coefficient is one. A subterm of
+the flat address that is not a sum, difference or product (a gathered selector's sign wrap, a cast, a quotient)
+counts as one unknown integer per distinct subterm, so a routed expert's selector-indexed weight run still proves.
 
 `030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
 Register-partial merges use the same accumulator policy as streaming updates: selecting folds retain the input dtype,
@@ -778,8 +780,9 @@ stale float stamp that a structurally cloned, previously untyped body can carry.
 `095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. A run
 of f32 elements moves as one `float2` / `float4`, and a run of f16 or bf16 elements as one 4-, 8- or 16-byte access
 (the pair type `__half2` / `__nv_bfloat162`, or `uint2` / `uint4` punned to 4 and 8 elements). A
-`coop/v<n>` lane's run of fp8 weight bytes reads as one 2-, 4-, 8- or 16-byte word (width 16 is tried for 1-byte
-dtypes only), each byte converting straight to f16; a run that divides the reduce extent carries no bounds mask (the
+`coop/v<n>` lane's run of fp8 weight bytes or packed e2m1 pairs reads as one 2-, 4-, 8- or 16-byte word (width 16
+is tried for 1-byte dtypes only), each fp8 byte converting straight to f16 and each pair byte indexing the pair
+table; a run that divides the reduce extent carries no bounds mask (the
 modulo a mask spells blocks every vector load); and before grouping, a load index `(Y + r) / d` whose `Y` is a
 non-negative multiple of a `g` dividing `d`, with `0 < r < g`, reads `Y / d`, so every element of a lane's run reads a
 block-scaled weight's scale at the run's own index and nvcc loads it once (V100 width-1 fp8 down projection: 181 →

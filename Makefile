@@ -1,5 +1,5 @@
 .PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-corpus-regen lint format git-sha-guard pypi-dist \
-	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
+	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push native-image
 
 help:
 	@echo "Server Benchmark Makefile"
@@ -21,6 +21,8 @@ help:
 	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, and publish a"
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
+	@echo "  native-image RECIPE=<dir> - Bake a recipe's native lane (emmy-server + pack) on the target GPU"
+	@echo "                    (docker/emmy-native)"
 	@echo "  test-durations - Re-measure tests/durations_cpu.json (the CI test-balancing baseline)"
 	@echo "  test-corpus-regen - Restamp the realization corpus after a lowering / codec change (COMPLETE=1 adds entries)"
 	@echo "  clean          - Remove virtual environment and generated files"
@@ -279,6 +281,12 @@ serve-verify: serve-config-guard
 serve-push: serve-config-guard
 	@echo "ERROR: direct serving-image pushes are disabled; use 'emmy publish <recipe>'." >&2
 	@exit 2
+
+# --- a recipe's native lane as one serving image (docker/emmy-native): the pack prepared from the
+# --- recipe golden on the target GPU, emmy-server and the runtime worker. Nothing is pushed.
+native-image: setup git-sha-guard
+	@test -n "$(RECIPE)" || (echo "usage: make native-image RECIPE=recipes/<model>"; exit 1)
+	docker/emmy-native/bake.sh $(RECIPE)
 
 bench: setup
 	@echo "Running benchmarks..."

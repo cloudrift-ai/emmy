@@ -21,7 +21,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OPENAI_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
       OPENAI__API_BASE: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
-      CONFIG__MODEL: ${{ format('openai/{0}', vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8') }}
+      CONFIG__MODEL: ${{ format('openai/{0}', vars.ONBOARD_AGENT_MODEL || 'deepseek-ai/DeepSeek-V4-Flash-0731') }}
       CONFIG__FALLBACK_MODELS: '[]'
       CONFIG__CUSTOM_MODEL_MAX_TOKENS: '128000'
       CONFIG__MAX_MODEL_TOKENS: '128000'
