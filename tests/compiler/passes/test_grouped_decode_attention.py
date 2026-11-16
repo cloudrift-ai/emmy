@@ -24,6 +24,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.trace.torch import trace_module
+from emmy.compiler.wire import kernel_bindings, kernel_tile
 from emmy.serving.native.prepare import WINDOW, attend_module
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
@@ -63,9 +64,9 @@ def _attention(rows, cache=torch.bfloat16, grouped=True):
     return module, trace_module(module, examples, dynamic_shapes=shapes)
 
 
-def _lifted(graph):
+def _lifted(graph, ctx=CTX):
     """The lifted kernel and its twisted carrier."""
-    tiled = Pipeline.build(["tile/lift"]).run(Pipeline.build(LOOP_PASSES).run(graph), ctx=CTX)
+    tiled = Pipeline.build(["tile/lift"]).run(Pipeline.build(LOOP_PASSES).run(graph), ctx=ctx)
     (root,) = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
 
     def folds(node):
@@ -102,10 +103,20 @@ def test_the_rows_groups_of_a_key_value_head_are_the_fold_s_rows(rows, cache) ->
     assert all(heads.name in load.index[1].free_vars() for load in _cache_reads(folded))
 
 
+def test_an_fp8_cache_takes_a_16_bit_cell_on_a_card_with_no_fp8_cell() -> None:
+    """sm_80 has no FP8 tensor-core cell, but the chunk tier converts each value into a 16-bit cell's fragment, so
+    the twist over an FP8 cache is offered that cell there too, the integer position beside the value
+    notwithstanding."""
+    ampere = Context.from_target((8, 0))
+    root, twist = _lifted(_attention(1, torch.float8_e4m3fn)[1], ampere)
+    assert "mma_m16n8k16_bf16_f32" in refusals._warp_atoms(root, ampere, twist)
+
+
 @pytest.mark.parametrize("rows", [1, 3])
 def test_a_key_split_combines_the_slices_partials_not_the_window(rows) -> None:
     """Split across the window, a partial per key-value head and slice reads its slice of the head's cache once for
-    every row's group; the finalize reads the partials alone and never the window, which is no extent of it."""
+    every row's group; the finalize reads the partials alone and never the window, which is no extent of it, so its
+    rows record no size: an export prices the split's pieces at each range's window projected onto their own sizes."""
     _, graph = _attention(rows)
     with pinned_knobs(_pins(torch.bfloat16, rows, SLICES)):
         lowered, kernel_ir = compile_with_kernels(graph, ctx=CTX)
@@ -118,6 +129,7 @@ def test_a_key_split_combines_the_slices_partials_not_the_window(rows) -> None:
     assert np.prod([extent for axis in partial.op.grid for extent in axis]) == KV * SLICES
     assert list(finalize.inputs) == [partial.id]
     assert WINDOW not in finalize.op.runtime_args and WINDOW not in text(kernel_ir[finalize.id])
+    assert kernel_bindings(kernel_tile(finalize.op)) == {} and WINDOW in kernel_bindings(kernel_tile(partial.op))
 
 
 @requires_cuda

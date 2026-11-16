@@ -193,9 +193,13 @@ and a conservative compile can still execute the same graph algebra without sele
 When the declaration specifies static activations instead, `loader.quant.spell_static_fp8_activations` spells the same
 encode, decode and scale round trip at the calibrated per-tensor scale each linear stores beside its weight
 (`activation_scale`, or `input_scale`). There is no amax: the encode saturates to the format's finite range, which is
-the clamp the calibrated scale relies on. Linears reading one activation through equal scales share one round trip,
-as a projection group calibrated together does. Nothing is marked to stay materialized: the codes are an interior
-value of the kernel, and a contraction that wants both multiplicands as FP8 bytes takes a cut at that seam.
+the clamp the calibrated scale relies on. Linears reading one activation through equal scales share one encode, as a
+projection group calibrated together does, and each decodes the shared codes for itself, as the static 4-bit
+activation's consumers do. Loop fusion materializes an activation's fan-out point, so two consumers a kernel boundary
+parts (a Gated DeltaNet layer's `in_proj_qkv` before the recurrence, its `in_proj_z` after it) are handed the codes,
+and the second kernel's contraction reads FP8 bytes; a decoded value shared between them would cross as a 16-bit
+buffer and leave that product off the FP8 tier. Nothing is marked to stay materialized: within one kernel the codes
+are an interior value, and a contraction that wants both multiplicands as FP8 bytes takes a cut at that seam.
 
 **Input-sourced fp8.** When the weights are forward-argument `InputOp`s instead of constants (the MoE serving seam's
 expert programs — one program per layer kind, per-expert 2-D slices fed per launch), the constant speller can never

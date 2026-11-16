@@ -7,15 +7,16 @@ structure is still plain. The states are a chain of same-shaped nodes of one bod
 on the last; what lies between two of them is one step; and the steps differ only in the integer
 literals they read and mask at — an offset, a slice bound — each advancing affinely with the step.
 
-Each step is spliced into one body by the fusion rule's own
-splicer, the first step's body with its literals advanced by ``j`` must normalize to step ``j``'s,
-and only then is the chain replaced — by one kernel that carries the state (``Carry``) from the
-tensor the loop started with, stores what each step defined, and by one slice of those stores per
-replaced buffer. A chain whose states alternate two bodies (a Sinkhorn row step then a column
-step) rolls as one step of two; a chain that is not one step advanced is left alone: a recurrence
-rolled wrongly is a wrong answer. A chain whose steps read their state only at the cell they write,
-and whose states nothing but the next step reads, is left alone too: fused whole it re-derives no
-state, so it is straight-line code, and rolling it would only store every state.
+Each step is spliced into one body by the fusion rule's own splicer, the first step's body with its
+literals advanced by ``j`` must normalize to step ``j``'s, and only then is the chain replaced — by
+one kernel that carries the state (``Carry``) from the tensor the loop started with, stores what
+each step defined (the last state alone, where nothing but the next step reads a state), and by one
+slice of those stores per replaced buffer. A chain whose states alternate two bodies (a Sinkhorn row
+step then a column step) rolls as one step of two; a chain that is not one step advanced is left
+alone: a recurrence rolled wrongly is a wrong answer. A chain whose steps read their state only at
+the cell they write, and whose states nothing but the next step reads, is left alone too: fused
+whole it re-derives no state, so it is straight-line code, and rolling it would only store every
+state.
 """
 
 from __future__ import annotations
@@ -296,9 +297,11 @@ def _spelling(body: Body) -> tuple[str, tuple[str, ...]]:
     return body.structural_key(structural=False), tuple(load.input for load in body.loads)
 
 
-def _rolled(step: Body, steps: int, seed: float | str) -> Body:
+def _rolled(step: Body, steps: int, seed: float | str, every: bool) -> Body:
     """The step under a loop that carries its state: the state read becomes a ``Pre`` read, its
-    store the state's definition, and every kept buffer gains the step as its leading axis."""
+    store the state's definition, and every kept buffer gains the step as its leading axis. A state
+    read at its last step alone (``every`` false) gains none: each step stores over the last one's,
+    so the buffer holds the state the loop ended with."""
 
     def roll(stmt: Statement) -> Statement | tuple[Statement, ...]:
         if isinstance(stmt, Load) and stmt.input == _STATE:
@@ -310,17 +313,17 @@ def _rolled(step: Body, steps: int, seed: float | str) -> Body:
             return kept
         if len(stmt.values) != 1 or not all(isinstance(e, Var) or e == Literal(0, "int") for e in stmt.index):
             raise RuleSkipped("the state is not stored one value per cell")
-        return (Carry(name=_STATE, value=stmt.values[0], index=stmt.index, seed=seed), kept)
+        return (Carry(name=_STATE, value=stmt.values[0], index=stmt.index, seed=seed), kept if every else stmt)
 
     return Body((Loop(axis=Axis("step", steps), body=step.map(roll)),))
 
 
-def _slice(tensor: Tensor, source: str, step: int) -> LoopOp:
+def _slice(tensor: Tensor, source: str, step: int | None) -> LoopOp:
+    """``tensor`` read from the rolled kernel's store: its ``step``, or the whole of a store that keeps one."""
     axes = tuple(Axis(f"s{dim}", extent) for dim, extent in enumerate(tensor.shape))
     cell = tuple(Var(axis.name) for axis in axes)
-    body = Body(
-        (Load(names=("kept",), input=source, index=(Literal(step, "int"), *cell)), Write(output=tensor.name, index=cell, values=("kept",)))
-    )
+    at = cell if step is None else (Literal(step, "int"), *cell)
+    body = Body((Load(names=("kept",), input=source, index=at), Write(output=tensor.name, index=cell, values=("kept",))))
     for axis in reversed(axes):
         body = Body((Loop(axis=axis, body=body),))
     return LoopOp(body=body)
@@ -361,10 +364,15 @@ def _roll(match: Match, chain: list[Node]) -> Graph:
     # Fused whole, a chain re-derives a state only when a step reads it at another cell, or when a
     # state is read by anything but the next step. Without either it is straight-line code, which
     # fusion inlines once; rolling it would only store every state.
-    if all(
+    # A state nothing but the next step reads is stored for no one: the store keeps the last state alone.
+    every = any(
+        node.outputs[0].name in graph.outputs or not set(graph.buffer_users(node.outputs[0].name)) <= regions[index + 1]
+        for index, node in enumerate(chain[:-1])
+    )
+    if not every and all(
         len(body.writes) == 1 and all(load.index == body.writes[0].index for load in body.loads if load.input == _STATE)
         for body, _, _ in spliced
-    ) and all(set(graph.buffer_users(node.outputs[0].name)) <= regions[index + 1] for index, node in enumerate(chain[:-1])):
+    ):
         raise RuleSkipped("no state is re-derived when the chain fuses whole")
     if len({len(live) for _, live, _ in spliced}) != 1:
         raise RuleSkipped("the steps keep different buffers")
@@ -381,12 +389,13 @@ def _roll(match: Match, chain: list[Node]) -> Graph:
 
     seed: float | str = 0.0 if _is_zero(graph, states[0]) else states[0]
     stores = tuple(f"{chain[0].id}__steps{index}" for index in range(len(kept)))
-    body = _rolled(_advanced(abstract, literals, deltas, Var("step"), len(regions)), len(regions), seed)
+    body = _rolled(_advanced(abstract, literals, deltas, Var("step"), len(regions)), len(regions), seed, every)
     back = {f"{_STEP}{i}": name for i, name in enumerate(stores)}
     back.update((f"{_CONST}{index}", name) for index, (name, _) in enumerate(constants))
     rolled = LoopOp(body=body.rename_buffers(back))
     tensors = tuple(
-        Tensor(name, (len(regions), *graph.buffer(old).shape), graph.buffer(old).dtype) for name, old in zip(stores, kept, strict=True)
+        Tensor(name, (*((len(regions),) if every or index else ()), *graph.buffer(old).shape), graph.buffer(old).dtype)
+        for index, (name, old) in enumerate(zip(stores, kept, strict=True))
     )
     fragment = Graph()
     for name in rolled.inputs:
@@ -397,10 +406,13 @@ def _roll(match: Match, chain: list[Node]) -> Graph:
     renamed: dict[str, str] = {}
     for index, (_, live, _) in enumerate(spliced):
         for store, old in zip(stores, live, strict=True):
+            last = store == stores[0] and not every
+            if last and index < len(spliced) - 1:
+                continue
             # The splice restores the replaced buffer's id on the slice; its tensor carries that name.
             renamed[old] = f"{old}__rolled"
             tensor = replace(graph.buffer(old), name=old)
-            fragment.add_node(_slice(tensor, store, index), [store], tensor, node_id=renamed[old])
+            fragment.add_node(_slice(tensor, store, None if last else index), [store], tensor, node_id=renamed[old])
     fragment.outputs = list(renamed.values())
     match.consumed = set().union(*(_stateful(graph, region, state) for region, state in zip(regions, states, strict=True)))
     match.output = renamed
