@@ -1,6 +1,6 @@
 """CUDA program execution for ``Graph[CudaOp]``: the Python facade over the runtime.
 
-Python compiles — nvcc into the content-addressed cubin cache, the execution plan, the host
+Python compiles — ptxas into the content-addressed cubin cache, the execution plan, the host
 bytes every input and constant starts from — and hands the runtime (``crates/emmy-runtime``,
 hosted in-process through the ``emmy.emmy_runtime`` extension) the plan's JSON form, one cubin path
 per kernel, those bytes, and the memory every region of the program's layout lives in. The
@@ -39,7 +39,7 @@ import numpy as np
 from emmy import config, emmy_runtime
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.binding import host_bindings, is_device_tensor, resolve_symbolic, with_generated_constants
-from emmy.compiler.backend.cuda import nvcc
+from emmy.compiler.backend.cuda import ptxas
 from emmy.compiler.backend.cuda.device import device, torch_module
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
 from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, plan_from_graph, plan_to_dict
@@ -69,7 +69,7 @@ def _cubin_path(name: str, spec: KernelSpec, *, cubin_dir: Path | None = None) -
     and errors otherwise — the pack loader pre-checks cubin existence, so hitting this means the
     cache was cleared mid-boot."""
     if spec.binary_key is not None:
-        path = (cubin_dir or nvcc.cubin_cache_dir()) / f"{spec.binary_key}.cubin"
+        path = (cubin_dir or ptxas.cubin_cache_dir()) / f"{spec.binary_key}.cubin"
         if path.exists():
             return path
         if spec.source is None:
@@ -79,14 +79,14 @@ def _cubin_path(name: str, spec: KernelSpec, *, cubin_dir: Path | None = None) -
             )
     if spec.source is None:
         raise RuntimeError(f"kernel {name!r}: plan carries neither a source nor a cached cubin")
-    return nvcc.compile_kernel(spec.source, name, arch_specific=spec.arch_specific)
+    return ptxas.compile_kernel(spec.source, name)
 
 
 def _compile_kernels(plan: ExecutionPlan, *, deadline: float | None = None, cubin_dir: Path | None = None) -> dict[str, str]:
     """One cubin path per kernel of ``plan``, compiled through the cache where needed.
 
     ``deadline`` is the compile budget's monotonic expiry, checked BETWEEN kernels — the only
-    boundary a Python-level check has, since one compile is a single call into nvcc. Checking
+    boundary a Python-level check has, since one compile is a single call into ptxas. Checking
     here rather than after the whole load is what keeps a cold multi-kernel compile from
     outliving the wall cap that SIGKILLs the bench worker: past the cap the operator is told a
     worker died, which reads as a slow kernel, and the fact that nothing about the kernel was
@@ -140,7 +140,8 @@ def device_view(pinned):
     """Address a pinned (page-locked) host tensor as a CUDA tensor of the same shape and dtype:
     under unified addressing a mapped host allocation is reachable from the device at its own
     address, so a kernel gathers from it over PCIe with no copy. ``pinned`` must stay alive as
-    long as the view; the view owns nothing."""
+    long as the view; the view owns nothing. The view is on torch's current device: on a rank of a tensor-parallel
+    group, a view on device 0 would open a context there and run its ops on another rank's card."""
     import torch  # noqa: PLC0415
 
     if not pinned.is_pinned() or not pinned.is_contiguous():
@@ -150,7 +151,7 @@ def device_view(pinned):
         raise RuntimeError("this platform does not map host allocations into the device address space")
     np_dtype = np.dtype(str(pinned.dtype).removeprefix("torch."))
     capsule = emmy_runtime.device_tensor_capsule(
-        pinned.data_ptr(), list(pinned.shape), _DLPACK_CODES[np_dtype.kind], np_dtype.itemsize * 8, 0
+        pinned.data_ptr(), list(pinned.shape), _DLPACK_CODES[np_dtype.kind], np_dtype.itemsize * 8, torch.cuda.current_device()
     )
     return torch.from_dlpack(capsule)
 
@@ -267,7 +268,7 @@ class CompiledProgram:
     captured graphs on the other.
 
     Constructed inside ``gpu_lock()`` by the public entry points (:func:`run_program`,
-    :func:`run_program_debug`, :func:`benchmark_program`) so every CUDA-touching phase — nvcc,
+    :func:`run_program_debug`, :func:`benchmark_program`) so every CUDA-touching phase — ptxas,
     allocation, the kernel-launch loop, the output copy — runs with the lock held. Peer xdist
     workers never interleave with us on the device, which previously surfaced as small numerical
     divergence in multi-kernel attention tests when the suite ran in parallel.
@@ -1036,11 +1037,9 @@ class _AsyncBenchWorker:
 
     @staticmethod
     def _encode(request: dict) -> bytes:
-        from emmy.compiler.pipeline.search.space import FAST_MATH, cold_cache, precision_pin  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import cold_cache, precision_pins  # noqa: PLC0415
 
-        return pickle.dumps(
-            {**request, "fast_math": precision_pin(FAST_MATH), "cold_cache": cold_cache()}, protocol=pickle.HIGHEST_PROTOCOL
-        )
+        return pickle.dumps({**request, "precision": precision_pins(), "cold_cache": cold_cache()}, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def _decode(body: bytes) -> dict:
@@ -1049,7 +1048,7 @@ class _AsyncBenchWorker:
     def __init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         # Bounded tail of the CURRENT child's stderr, fed by a background drain task. A
-        # chatty child (HF shard-download progress, nvcc warnings) would otherwise fill
+        # chatty child (HF shard-download progress, ptxas warnings) would otherwise fill
         # the ~64 KB stderr pipe and block mid-job — which the parent misreads as a
         # wall-timeout hang — and the tail is the diagnostic every failure path wants.
         self._stderr_tail = ""
@@ -1394,7 +1393,6 @@ async def benchmark_compare_isolated_async(
     warmup: int,
     iters: int,
     seed: int,
-    nvcc_flags: str | None = None,
 ) -> tuple:
     """Run the deployable eager / torch.compile / emmy comparison in the
     SIGKILL-able worker, awaiting a fresh one-shot :class:`_AsyncBenchWorker`
@@ -1420,7 +1418,6 @@ async def benchmark_compare_isolated_async(
     resp = await _run_job_oneshot(
         {
             "graph": lowered,
-            "nvcc_flags": nvcc_flags,
             "torch_spec": torch_spec,
             "bench_backends": bench_backends,
             "warmup": warmup,

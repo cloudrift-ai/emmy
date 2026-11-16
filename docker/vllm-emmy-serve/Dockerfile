@@ -1,5 +1,5 @@
 # Prebuilt per-model serving image: the vllm-emmy image + the warmed cubin cache and the
-# HF model snapshot baked in, so cold-start pays zero nvcc compiles and zero HF downloads
+# HF model snapshot baked in, so cold-start pays zero ptxas runs and zero HF downloads
 # (no HF_TOKEN needed). One built image serves exactly one (model, GPU, config) triple.
 #
 # Build (the Makefile drives it; MODEL picks the pinned models/<slug>.env):
@@ -113,14 +113,14 @@ ENV SERVE_REVISION="${REVISION}" \
     SERVE_V2_MODEL_RUNNER="${V2_MODEL_RUNNER}" \
     SERVE_ENV="${RUNTIME_ENV}"
 
-# The runtime the plain image was built FROM (a digest for a fork) and the toolkit that compiled
+# The runtime the plain image was built FROM (a digest for a fork) and the ptxas that assembled
 # the baked cubins, beside the CUDA version the runtime's base declares.
 ARG RUNTIME_BASE=
-ARG NVCC_VERSION=
+ARG PTXAS_VERSION=
 LABEL ai.emmy.publish.family="${PUBLISH_FAMILY}" \
       ai.emmy.runtime.base="${RUNTIME_BASE}" \
       ai.emmy.runtime.cuda="${CUDA_VERSION}" \
-      ai.emmy.runtime.nvcc="${NVCC_VERSION}" \
+      ai.emmy.runtime.ptxas="${PTXAS_VERSION}" \
       ai.emmy.model.id="${MODEL}" \
       ai.emmy.model.revision="${REVISION}" \
       ai.emmy.target.gpu="${TARGET_GPU}" \

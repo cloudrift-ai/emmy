@@ -50,9 +50,17 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Compiler** — A program that translates code from one form into another. Emmy translates PyTorch model operations
   into CUDA code.
 - **Operation (op)** — One unit of computation, such as add, matrix multiplication, softmax, or RMSNorm.
-- **Affine statement** — The Loop IR statement `name = offset + Σ coefficient·arg`: one statement for a sum, a
-  difference, a negation or a product with a literal. Normalization folds every such chain into one, so two spellings
-  of the same sum are one kernel.
+- **Affine form** — The canonical spelling of a sum: like terms merged, zero terms dropped, the terms ordered from the
+  largest coefficient to the smallest (`a - b`, never `-b + a`), a whole-number coefficient or offset spelled as the
+  integer when no float literal fed the sum (`x + x` is `2 * x`; once a float literal fed it, every literal the sum
+  spells is a float: `2.0 * x`, `x - 8.0`, `2.0 * x + 2.0 * y` for `x + x + 2.0 * y`, and a sum that would spell none
+  keeps `1.0 * x`, since the literal is what makes an operation over integer operands a float one), the offset last
+  (`2 * x - y + 0.5`). Its coefficient domain is the expression class of the field: an `Index` folds integer literals
+  alone and keeps every quotient a term, since integer division floors; a `Value` folds any literal and a quotient by
+  a float literal into its reciprocal scale. Normalization spells every sum, difference, negation and literal scale
+  this way, so two spellings of the same sum are one kernel. An **affine region** is the part of an expression the
+  form covers: the sum with its differences, negations and literal scales, down to the names, literals and other
+  operations it reads, which the normal form spells as one node of a definition.
 - **Graph** — A representation of a program as nodes connected by data-flow edges. A node usually represents an
   operation; an edge means that one operation uses a value produced by another.
 - **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually
@@ -96,6 +104,17 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Body normalization** — The canonical form every Loop IR body takes at construction and inside every identity
   digest, so two spellings of one program key the same. It answers to no knob, pin or evidence; a transform that
   something decides is a pass, not a normalization step.
+- **Body optimization** — The steps of body normalization that remove work: the exact simplifications, every value
+  computed once at the shallowest scope that holds its operands, unread values dropped. A Kernel IR body takes these
+  alone at construction (`optimize_body`) and keeps the loops, the order and the names its passes wrote, since no
+  identity reads it. Like normalization, it answers to no knob, pin or evidence.
+- **Statement type** — The type a Loop IR statement belongs to: `Loop`, `Load`, `Accum`, … Forty-four are declared in
+  one list in the `emmy-ir` crate, fourteen shared and thirty of the Kernel IR; each is a Rust struct and a Python class
+  of the same name. A statement is one instance of its type in a body.
+- **Expression class** — Which of the two kinds of scalar arithmetic an expression field admits: `Index`, integer
+  arithmetic over integer operands (an index, an extent, a guard), or `Value`, every operation over any operand (the
+  value an `Assign` or an `Accum` computes, a condition). Every expression field of a statement type declares one, and
+  construction refuses an expression outside it.
 - **Rewrite rule** — A small compiler transformation. It recognizes a pattern, such as RMSNorm, and replaces it with
   equivalent lower-level operations.
 - **Pipeline** — An ordered sequence of compiler passes. The output of one stage becomes the input to the next.
@@ -160,10 +179,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   to the original model operation when debugging.
 - **Metadata** — Information about program data rather than the data itself, such as a tensor's shape, a kernel's
   original operation, or the number of threads needed for launch.
-- **Stamp** — To write a value onto a graph node or an operation as metadata that later stages can read: a kernel's
-  name, or a tuning choice a fork decided. Nothing computed from an operation is stamped onto it. A kernel's *stamps*
-  (the `S_*` features: statement and operation counts, loop extents, operand dtypes) keep the name but are computed
-  from the kernel's body wherever they are read.
+- **Stamp** — To write a value onto a graph node or an operation as metadata that later stages can read: a tuning
+  choice a fork decided. Nothing computed from an operation is stamped onto it. A kernel's name is `k_` and the first
+  12 hex digits of its exact identity, computed wherever it is read, so every kernel of one identity has one name and
+  the name says nothing about the operations it realizes. A kernel's *stamps* (the `S_*` features: statement and
+  operation counts, loop extents, operand dtypes) keep the word but are computed from the kernel's body wherever they
+  are read.
 - **Mutable / immutable** — A mutable object can be changed after creation. An immutable object cannot; code creates
   a replacement instead. Emmy's graph is mutable, while many nested compiler statements are immutable.
 - **Closure** — The property that a term is closed over its enclosing iteration axes: it reads only those axes,
@@ -219,8 +240,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Carrier** — The temporary state maintained by a reduction and the rule for combining partial states. A sum's
   carrier can be one accumulated number; stable softmax needs several related values.
 - **Tensor core** — Specialized GPU hardware for performing small matrix operations efficiently.
-- **nvcc / NVRTC** — Two NVIDIA CUDA compilers. nvcc compiles ahead of execution; NVRTC compiles CUDA source at
-  runtime.
+- **nvcc / NVRTC** — Two NVIDIA CUDA C++ compilers. Emmy uses neither: it writes PTX itself.
+- **PTX** — NVIDIA's assembly language for GPU kernels: typed instructions over virtual registers. The `emmy-ptx`
+  crate, the Kernel IR to PTX compiler, writes every kernel's code in it; it is the stage `emmy compile --ir ptx`
+  prints.
+- **ptxas** — NVIDIA's PTX assembler, part of the CUDA toolkit. It turns PTX text into the machine code a card runs
+  (a cubin), and does register allocation, instruction scheduling and loop unrolling on the way. It is the one
+  toolkit binary Emmy runs.
 - **CUDA graph capture** — Recording a sequence of GPU launches so the sequence can be replayed with less CPU
   overhead.
 - **Paged buffer** — A buffer reached through a page table instead of one base address: cut along one axis every
@@ -260,6 +286,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   result format or top-level record copy.
 - **Benchmark** — A controlled measurement of speed, latency, throughput, or resource use.
 - **Latency** — The time needed to complete one operation or request. Lower latency is faster.
+- **Full-context latency** — The time one non-streaming request takes when its prompt and output together fill a
+  deployment's context length: a prompt of `context_length - 512` tokens and 512 generated tokens, sent one at a
+  time. A recipe stores the slowest of three in whole seconds (`engine.llm.full_context_latency_s`), at most the 290
+  seconds a deployed request has before Relay abandons it; onboarding halves a context until its request fits. The
+  catalog exports it per deployment, and Relay reads it as the reference for its non-streaming request timeout.
 - **Throughput** — The amount of work completed per unit of time, such as requests per second. Higher throughput is
   better.
 - **VM (virtual machine)** — A computer created by software, often rented from a cloud provider. A GPU VM includes
@@ -294,8 +325,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — A forced tuning choice. A hand pin comes from the environment (`EMMY_STAGE=d2/smem-async`, `EMMY_KNOBS`,
   `emmy run --ab`) and is how a row is measured rather than chosen: a pinned benchmark measures the forced configuration
-  rather than the one the compiler would have picked. A kernel never carries pins of its own: a measured row reaches
-  it only as evidence at its forks.
+  rather than the one the compiler would have picked. A pin is bare (`TILE`, every kernel), scoped to a site
+  (`PLACE@map.1/inner`), or scoped to a kernel by its name (`TILE@k_3f2a1b9c04de`, every kernel of that name; a
+  `PLACE` kernel pin may add a site after a slash). A kernel never carries pins of its own: a measured row reaches it
+  only as evidence at its forks.
 - **Schedule key** — The name a schedule choice is stored under when one kernel contains more than one step that takes
   the same kind of choice. Written plain, `TILE` refers to the kernel's main step. Where a kernel has several — the
   fused norm→linear kernel folds both its statistic and its contraction — the name carries a suffix identifying the
@@ -308,11 +341,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Realize** — A recorded configuration *realizes* when the compiler, at the point where it makes that choice, offers
   a candidate matching the recording. A configuration that realizes nowhere cannot be deployed, however good the
   measurement stored with it.
-- **Regime** — The settings a measurement was taken under, or that a compile is running under: chiefly the compiler
-  optimization level (`-O3`, the deployable one and the only one anything is measured in) plus whether fast-math
-  approximations are enabled. Measurements taken in different regimes are not interchangeable, which is why tuning
-  measures in the regime it deploys into. A lower optimization level remains available as a compile-speed option for
-  the test suite; it is not a measurement lane, and nothing measured under one is read by a deploy.
+- **Regime** — The settings a measurement was taken under, or that a compile is running under: the precision
+  decisions (whether fast-math approximations are enabled, and each independent override) and whether the cache was
+  evicted before each launch. Measurements taken in different regimes are not interchangeable, which is why tuning
+  measures in the regime it deploys into.
 - **Candidate** — One complete set of choices that the compiler could use.
 - **Greedy selection** — Choosing the candidate that currently appears best without exploring alternatives during
   normal compilation.
@@ -330,11 +362,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   from two different pools are not comparable, because they are different kernels. A pool may hold more than one
   verified answer: a shape recorded twice, or under two names, contributes several.
 - **Golden file** (*golden*) — A card's measurements in the tune DB's shape: the kernels it measured (``kernels``:
-  each kernel's Loop IR and name, plus, for a target, the traced program it was lowered from and the sizes that
+  each kernel's Loop IR, plus, for a target, the traced program it was lowered from and the sizes that
   specialized it), the kernel-set decisions taken on them (``routing``) and the measured rows (``rows``), beside the
-  traced programs. It holds inputs only: a compile imports its rows under each kernel's exact identity, which the
-  import computes from the stored Loop IR. `--golden PATH` names the file a command reads instead of the repository's.
-- **Row** — One ``perf`` row of a golden: the kernel (by its ``ref``, the name the file knows it by), the sizes its
+  traced programs. It holds inputs only — no kernel name, no identity; rows and decisions point at a kernel by its
+  position in the file — and a compile imports its rows under each kernel's exact identity, which the import computes
+  from the stored Loop IR. `--golden PATH` names the file a command reads instead of the repository's.
+- **Row** — One ``perf`` row of a golden: the kernel (by its position in the file's kernel list), the sizes its
   symbolic dims were benched at, the input regime (``pins``), the schedule row (``knobs``) and the measurement. Its
   ``name`` is a label a command selects it by (`--realization NAME`). A row with no measurement is a proposal, not
   evidence; one with no schedule is a target that has only been traced.
@@ -360,12 +393,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
   `run --bench` writes its rows there, and a golden file's rows are imported there before a compile picks. A row is
   evidence for the kernel whose exact identity it is keyed by. All are read by one rule.
-- **Routing row** (*route row*, in older text) — The tune database's record of one kernel-set decision: the kernel
-  it was offered on, the arm — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half — and the pieces
-  it minted, one row per piece. A golden stores the same rows, its kernels named by their ``ref``. At that kernel's
-  fork the decision is priced as the sum of its pieces' measured rows, which outranks the placement prior's ranking; a
-  decision no piece's row prices is off the measured ballot, and the pieces the arm mints are decided from rows of
-  their own (see *Routing table*).
+- **Routing row** (*route row*, in older text) — The tune database's record of one kernel-set decision: the kernel it
+  was offered on, the arm — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half — and the pieces it
+  minted, one row per piece. A golden stores the same rows, pointing at kernels by their position in the file. At that
+  kernel's fork the decision is priced as the sum of its pieces' measured rows, which outranks the placement prior's
+  ranking; a decision no piece's row prices is off the measured ballot, and the pieces the arm mints are decided from
+  rows of their own (see *Routing table*).
 - **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
   the decision minted, one row per piece. It says which pieces a route leads to, and the decision's price on a card
   is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced. Where a
@@ -391,7 +424,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   reproduce.
   The one kept with the repository (`search/freezes/`, a file per card) is what `emmy db import --repository` reads
   beside the repository goldens; a tune writes its rows as one more file there, beside the card's, and the nightly
-  refresh folds those files into each card's.
+  refresh folds those files into each card's, then compiles every row under its own schedule and drops the rows the
+  compiler no longer realizes (`emmy golden realize --drop`).
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the tune database's rows, the golden rows in scope imported among them, the fastest compatible
   row winning — then the prior's prediction, and last the rule's own first option. A structural

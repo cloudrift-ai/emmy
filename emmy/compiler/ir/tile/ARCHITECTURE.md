@@ -105,7 +105,8 @@ boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a 
 ## Canonicalization
 
 `Lambda.__post_init__` owns context-independent construction normalization: every
-pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
+pure body receives the normal form's statement order (`fragment_order`) and commutative `Assign` arguments are sorted
+before it reaches a Fold.
 Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
 arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.
 For a broadcast-batched product whose batch axis occurs in only one operand, the placement's trailing output pair
@@ -156,7 +157,7 @@ states over different free coordinates separate; statistics sharing the same coo
 
 Normalization ends by restoring OBJECT SHARING: same-value cones — alpha-equal with identical captures and exposed
 result names, so a copy differing only in internal binder spelling still qualifies — collapse onto one Fold object
-(`_share_common_cones`), so a value fusion inlined into several consumption sites — attention's softmax
+(the last pass of `Fold.normalized`), so a value fusion inlined into several consumption sites — attention's softmax
 statistics, read by the weight cone and by the epilogue — is one node again. This is an invariant, not an
 optimization: seam grouping and cut realization key on object identity, so severed sharing silently turns one value
 into per-site recompute that no schedule can undo (the class PR #679 measured at three orders of magnitude). A
@@ -242,8 +243,10 @@ reading dropped the fp8 decode cone's scale out of the kernel entirely. Both are
 and only the measurement moves. Treat a contraction that canonicalizes to PLANAR as a coverage bug to investigate, not
 as a supported slow path.
 
-A node's own canonical forms are formation's (`Fold.__post_init__` orients a bilinear term A-first, `Lambda` orders
-its body); `TileOp.__post_init__` applies the tree-wide ones and the legacy output-sweep-to-free-axis adjustment
+A node's own canonical forms are formation's (`Fold.__post_init__` orients a bilinear term A-first — two slabs by
+the earlier row each reads alone, a coordinate the compiler minted such as a key split's partition sorting by its name
+without the leading underscore, so a sliced operand keeps its unsliced orientation; `Lambda` orders its body);
+`TileOp.__post_init__` applies the tree-wide ones and the legacy output-sweep-to-free-axis adjustment
 whenever a contraction operand reads the kernel's shared output sweep. The contraction may be the root compute node or
 a later site in the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute
 output loop.
@@ -278,7 +281,7 @@ no matter what kind: a projection evaluates its operands before its scalar body,
 that does not exist yet. The `closed` gate reads only the fold's own lift and cannot see a nested capture; the
 composed placement cut builds exactly this shape (the consumer piece's workspace loads and rsqrt chain feed the
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
-nvcc).
+the code generator).
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information, and the total lift
 restores it in TWO ways, and which one applies is decided by what the term can support.

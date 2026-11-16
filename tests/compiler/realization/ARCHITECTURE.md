@@ -28,7 +28,7 @@ A case earns a place in the corpus in either of two ways:
 - A realization gap: a schedule family that is never offered, a pin that refuses or fails to lower, or a pin that
   runs wrong.
 - Capability coverage: a small representative set from a model-agnostic hardware golden when that capability would
-  otherwise run no `built` or `correct` nodes. Keep distinct kernel kinds and schedules, omit measurements and GPU
+  otherwise run no `correct` nodes. Keep distinct kernel kinds and schedules, omit measurements and GPU
   names, and stop once the main paths have live coverage. This proves those rows still build and run; it does not
   qualify the full golden.
 
@@ -135,7 +135,7 @@ note is prose about where the gap came from; regeneration keeps it.
 | Stage | Assertion | GPU |
 | --- | --- | --- |
 | `realized` | with the case as the compile's only evidence, the graph lowers through `CUDA_PASSES` at the declared capability, `unreproducible_pin_flag` is `None`, every authored family is stamped, and every kernel-set decision the case records was taken | no |
-| `built` | lower the same way on the live card, then build a `CompiledProgram` — nvcc accepts it | yes, exact capability |
+| `built` | lower the same way, then assemble every kernel's PTX with ptxas for the declared card | no; a ptxas that takes the target |
 | `correct` | run against the reference within tolerance | yes, exact capability |
 
 All three run under `helpers.evidence_scope`: the case's file is the whole golden scope, strictly (`golden.sole_evidence`,
@@ -156,8 +156,11 @@ Each is its own test node, so an `_xfail_<stage>` suffix lands on exactly the st
 declared gap are skipped, because a schedule that never realizes has nothing to run.
 
 `realized` always runs at the **declared** capability, so an sm_70 lockout is exercised on any box, GPU or not. `built`
-and `correct` run only when the live capability **equals** the declared one — a pinned schedule is a claim about one
-capability, never about a merely newer card.
+assembles that code for the declared card on any box: ptxas assembles any target it supports, with no card. A ptxas
+that does not take the target skips the node (`helpers.assembles` asks it once per card): CUDA 13's no longer takes
+`sm_70`, so a Volta case is built where an older toolkit is installed, as on the V100 hosts. `correct` runs only when
+the live capability **equals** the declared one — a pinned schedule is a claim about one capability, never about a
+merely newer card — and lowers on the live card, as a deploy there does.
 
 The reference for `correct` is the kernel's traced ops (the target's `origins`) run on the numpy backend, the slice
 `emmy run` benchmarks against (`GoldenFile.reference_program`); a kernel with no exact frontend twin compares against
@@ -166,10 +169,10 @@ through their own load transformations, so a lowered transpose still reads the r
 
 ## Latency
 
-A case may also carry measured microseconds. **The measuring lives in `tests/perf/`**, not here: `make test` compiles
-at `-Xcicc -O1`, which is not a measurement lane, so a latency assertion in this directory would measure the wrong
-regime entirely. That lane benches every closed case its card can run, joins the result to its comparison table, and
-compares the same measurement against the stored number — one bench, both answers. See `tests/perf/ARCHITECTURE.md`.
+A case may also carry measured microseconds. **The measuring lives in `tests/perf/`**, not here: `make test` runs its
+workers side by side on one card, which is not a measurement lane. That lane benches every closed case its card can run,
+joins the result to its comparison table, and compares the same measurement against the stored number — one bench, both
+answers. See `tests/perf/ARCHITECTURE.md`.
 
 A slower case **reports** rather than fails: enforcement belongs in a human reviewing the timing-refresh pull request,
 not in a red test a legitimate correctness fix could pin red forever. Nothing auto-updates a stored number — an
@@ -219,9 +222,11 @@ Four rules make it load-bearing:
    spelling. Loading fails loudly on `STAGE=d2/ring`, `WORK=zzz9x9`, `TILE=mma_m64n64k64_…` or `REDUCE=g2z`, while a
    canonical but unreachable pin (`WORK=w7x13`, `TILE=…/f99x99/k8`) parses cleanly and falls through to `realized`,
    where a genuine lockout belongs.
-3. **Refuse to write when a verdict changed.** If one commit re-keys a kernel and breaks realization, regeneration
-   fixes the first and must not let the second ride along. It names the affected cases and exits non-zero; resolving
-   them is a review conversation, not a mechanical step.
+3. **Refuse to write when the verdict contradicts the filename.** If one commit re-keys a kernel and breaks
+   realization, regeneration fixes the first and must not let the second ride along; a gap that closed is a file to
+   rename. The restamped case is what is judged — a stale route spelling makes the stored half unreplayable, which says
+   nothing about the case. It names the affected cases and exits non-zero; resolving them is a review conversation,
+   not a mechanical step.
 4. **Keep the note.** A case's evidence citation is the file's `note` field, not a comment, so a regeneration and
    every dump carry it.
 

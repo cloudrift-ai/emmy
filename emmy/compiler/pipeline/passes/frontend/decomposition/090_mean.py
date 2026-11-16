@@ -33,7 +33,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, out: Tensor) -> Graph | None:
         frag,
         name=f"{out.name}_count",
         value=None if symbolic else count_value,
-        context_value=dim_size.expr if symbolic else None,
+        context_value=dim_size.expression if symbolic else None,
         target_shape=out.shape,
         dtype=out.dtype,
     )

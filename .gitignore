@@ -19,6 +19,7 @@ __pycache__/
 
 # The runtime extension an editable install builds in place
 emmy/emmy_runtime*.so
+emmy/emmy_ir*.so
 
 # Build and run artifacts
 dist/

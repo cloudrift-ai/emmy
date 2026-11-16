@@ -18,7 +18,7 @@ only a log. An interrupted process may leave `running`, which is explicit incomp
 - task ID, stable row ID, experiment directory, kind, variant, and raw matrix parameters;
 - Git revision and dirty flag;
 - execution timestamps, stage, phase timings, error, and infrastructure lifecycle;
-- hostname, OS/kernel, CPU topology, memory, per-GPU identity/state and driver, NVCC and cuBLAS versions, Docker, root
+- hostname, OS/kernel, CPU topology, memory, per-GPU identity/state and driver, ptxas and cuBLAS versions, Docker, root
   filesystem, and uptime from the experiment host.
 
 The record contains no serving metrics, benchmark values, workload output, rendered command, compose document,
@@ -62,7 +62,7 @@ The orchestrator MUST NOT:
 Command records preserve timing, status, errors, and system information. For a staged command, Git provenance names
 the invoking worktree revision and the dirty state of the exact declared stage paths; neither the installed package
 nor a reused remote source tree supplies that provenance. `command.strict` requires those staged paths to be clean,
-every declared result file, GPU identity, NVCC, and cuBLAS. A failed command still attempts to retrieve declared
+every declared result file, GPU identity, ptxas, and cuBLAS. A failed command still attempts to retrieve declared
 results.
 
 The repository `run-experiment` skill validates row coverage, keeps the latest records inside the archived raw-run
@@ -82,8 +82,15 @@ client and captures raw server logs.
 one container per repeat and writes raw JSON records to the existing client-output artifact. It retains generated
 token IDs and appends `session_new_tokens` between calls. `random_input_len` is the session's mean prompt length;
 `random_prefix_len` is a common prefix included within that length. Initial prompts are distinct random token
-sequences from the pinned model tokenizer, excluding special tokens. This workload uses greedy fixed-length output
-and requires backend cached-token usage details. It measures no quality metric.
+sequences from the pinned model tokenizer, excluding special tokens. This workload uses greedy fixed-length output,
+and every call must generate exactly `random_output_len` tokens. A session of several calls also requires the
+backend's generated token IDs and cached-token usage details. A one-call session (`session_calls: 1`) is one
+non-streaming completion request timed end to end, and asks nothing more of the server than a token-ID prompt: the
+full-context latency lane the onboarding skill runs is a one-call session whose prompt and output together fill
+`context_length` (the field is defined in `emmy/recipe/ARCHITECTURE.md`). `session_request_timeout_s` bounds each
+request, in seconds (unset: one hour), and a request that runs past it fails the run: that lane sets it to the time a
+deployed request has to answer, so a context too long for the platform fails at the first request. It measures no
+quality metric.
 
 `session_concurrencies` optionally sweeps session concurrency without redeploying the server; otherwise the client
 uses `max_concurrency`. `num_prompts` must be a multiple of `session_calls`, and defines the same number of sessions

@@ -67,6 +67,25 @@ def test_random_input_values_bound_u8_scale_codes_without_changing_adjacent_inpu
     assert fp8.dtype == np.uint8 and np.isfinite(decode_f8(fp8, "f8e4m3")).all()
 
 
+def test_a_native_chunk_is_benched_last_in_the_window_it_is_priced_at():
+    """A causal chunk reads keys only up to its rows, and a random draw puts its rows at the cache's start: a bench
+    gives native's attention the position of the window's last chunk, so its time is the window's."""
+    from emmy.commands.run import _chunk_position
+    from emmy.compiler.specialize import specialize_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.serving.native.prepare import attend_module
+
+    window = torch.export.Dim("cache_tokens", min=64, max=1 << 20)
+    examples = (torch.zeros(16, 32), torch.zeros(512, 2, 8), torch.zeros(512, 2, 8), torch.zeros(1, dtype=torch.int64))
+    traced = trace_module(attend_module(4, 2, 8, 16), examples, dynamic_shapes={"keys": {0: window}, "values": {0: window}})
+
+    def static(shape):
+        return tuple(dim.as_static() for dim in shape)
+
+    assert _chunk_position(specialize_program(traced, {"cache_tokens": 4096}), static) == 4096 - 16
+    assert _chunk_position(trace_module(torch.nn.ReLU(), (torch.zeros(4),)), static) is None
+
+
 def test_random_input_values_use_adapter_scale_and_binary_selection():
     import numpy as np
 
@@ -834,6 +853,25 @@ def test_strict_proof_takes_a_float_outputs_step_in_the_format_it_is_computed_in
     assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
 
 
+@pytest.mark.parametrize(
+    ("code", "fmt"),
+    [
+        ("x = torch.randn(4, 8, dtype=torch.bfloat16); torch.exp(x[:, :4].float() * 0.5)", "f32"),
+        ("x = torch.randn(4, 8, dtype=torch.bfloat16); torch.exp((x[:, :4] * 0.5).float())", "bf16"),
+        ("x = torch.randn(4, 8); torch.exp(x[:, :4].bfloat16().float() * 0.5)", "bf16"),
+    ],
+)
+def test_strict_proof_takes_a_float_outputs_step_from_the_ops_that_round(code, fmt):
+    """A bf16 input sliced and cast to f32 carries no bf16 rounding, so f32 math on it gets the f32 step. bf16 math
+    before the cast, or a cast that narrows f32 to bf16, rounds into bf16 and sets the bf16 step."""
+    from emmy.commands.run import _computed_from_formats, _output_formats
+    from emmy.commands.trace import graph_from_code
+
+    graph, *_ = graph_from_code(code)
+    formats = _output_formats(dict.fromkeys(graph.outputs), graph, _computed_from_formats(graph))
+    assert formats == dict.fromkeys(graph.outputs, fmt)
+
+
 def test_strict_proof_passes_a_quantized_output_one_code_from_the_reference():
     """A quantized output whose values are each the reference's code or one beside it passes when it misses the FP64
     code on no more elements than the reference and its mean error is no worse, even where its worst element sits two
@@ -1411,7 +1449,6 @@ def test_ab_evidence_captures_each_rows_precision_scope(tmp_path, monkeypatch):
     with pinned_knobs({"FAST_MATH": False}):
         run_mod._record_bench_evidence(SimpleNamespace(), benches, None)
     assert [ctx.precision_pins()["FAST_EXP"] for ctx in seen] == [False, True]
-    assert seen[0].compile_flags == seen[1].compile_flags
     assert seen[0].structural_key() != seen[1].structural_key()
 
 
@@ -1701,8 +1738,10 @@ def _dump_ir(project_root: Path, code: str, stage: str, out_dir: Path) -> Path:
         cwd=project_root,
     )
     assert rc.returncode == 0, rc.stderr
-    # Stage dumps are named ``NN_<stage>.json`` — pick the matching one.
-    candidates = sorted(out_dir.glob(f"*_{stage.replace('/', '_')}*.json"))
+    # Stage dumps are named ``NN_<pass>.json`` after the stage's last pass — pick the matching one. The PTX stage's
+    # last pass is ``lowering/cuda``.
+    dumped = {"ptx": "lowering/cuda"}.get(stage, stage)
+    candidates = sorted(out_dir.glob(f"*_{dumped.replace('/', '_')}*.json"))
     candidates = [p for p in candidates if not p.name.endswith(".rules.json") and not p.name.endswith(".kernels.json")]
     assert candidates, f"no dump matched stage={stage} in {out_dir}: {list(out_dir.iterdir())}"
     return candidates[-1]
@@ -1754,13 +1793,13 @@ def test_run_ir_kernel_stage(run_cli, project_root, tmp_path):
 
 
 @requires_cuda
-def test_run_ir_cuda_stage_no_tail(run_cli, project_root, tmp_path):
-    """Already-lowered cuda IR has no remaining passes."""
-    ir_path = _dump_ir(project_root, "torch.nn.RMSNorm(64)(torch.randn(1,8,64))", "cuda", tmp_path)
+def test_run_ir_ptx_stage_no_tail(run_cli, project_root, tmp_path):
+    """Already-lowered PTX-stage IR has no remaining passes."""
+    ir_path = _dump_ir(project_root, "torch.nn.RMSNorm(64)(torch.randn(1,8,64))", "ptx", tmp_path)
     rc, stdout, stderr = run_cli("run", "-v", "--ir", str(ir_path))
     assert rc == 0, f"stderr: {stderr}"
     log = stdout + stderr
-    assert "Loaded cuda IR" in log
+    assert "Loaded ptx IR" in log
     assert "running tail passes: (none)" in log
 
 
@@ -1980,7 +2019,7 @@ def test_bind_inputs_arity_mismatch_raises():
 
 def test_compare_wall_s_scales_with_kernel_count():
     """The comparison job's SIGKILL wall cap derives from the workload — a fixed cap
-    false-fails big-model runs whose child legitimately pays a first nvcc compile per
+    false-fails big-model runs whose child legitimately pays a first kernel build per
     kernel (bounded by the in-child compile budget) before ever benching."""
     from types import SimpleNamespace
 
@@ -2378,12 +2417,12 @@ def test_kernel_stats_reuse_runtime_loader(monkeypatch):
     seen = []
 
     def attributes(name, spec):
-        seen.append((name, spec.source, spec.arch_specific))
+        seen.append((name, spec.source))
         return {"num_regs": 128, "local_size_bytes": 0, "shared_size_bytes": 256}
 
     monkeypatch.setattr(program, "kernel_attributes", attributes)
     assert _collect_kernel_attrs(graph) == {"k": {"num_regs": 128, "local_size_bytes": 0, "shared_size_bytes": 256}}
-    assert seen == [("k", source, True)]
+    assert seen == [("k", source)]
 
 
 def test_print_kernel_stats_greedy_bench_fail_row(capsys):
@@ -2428,7 +2467,7 @@ def test_print_kernel_stats_uses_execution_symbolic_environment(capsys):
     from emmy.commands.run import _print_kernel_stats
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.cuda.ir import CudaOp
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
 
     graph = Graph()
     graph.add_node(

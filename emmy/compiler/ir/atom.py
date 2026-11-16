@@ -33,6 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.dtype import BF16, F8E4M3, F8E5M2, F16, F32, DataType, F4E2M1x2
+from emmy.emmy_ir import fragment_table
 
 # Canonical dtype token → the PTX instruction's dtype field, where they differ. The mma wrapper
 # names (``emmy_mma_m16n8k32_e4m3_f32``) and the atom-name convention both spell the PTX token.
@@ -53,7 +54,6 @@ class AtomKind:
     shape: tuple[int, int, int]
     operand_dtypes: tuple[tuple[str, DataType], ...]
     instruction_shape: tuple[int, int, int] | None = None
-    fragment_registers: tuple[tuple[str, int], ...] = ()
     fragment_layout: str = "m16n8k16"
     target_feature: str = "has_mma_m16n8k16"
     #: The atom's target has no ``cp.async``, so every staged operand — a copied one and the
@@ -67,18 +67,18 @@ class AtomKind:
                 return dt
         raise KeyError(f"atom {self.name!r} has no operand role {role!r}")
 
-    def fragment_nregs(self, role: str) -> int | None:
-        """An explicit per-lane register count for ``role``, or ``None`` for the shape-derived layout."""
-        return next((n for r, n in self.fragment_registers if r == role), None)
+    def fragment_registers(self, role: str) -> int:
+        """The registers a lane holds of the ``role`` fragment: its row of the lane-to-element table says
+        (``emmy_ir.fragment_table``, the one rule a ``RegFragment`` counts by). A warp-group cell reads B
+        through a shared-memory descriptor and holds none."""
+        if self.is_wgmma and role == "b":
+            return 0
+        return len(fragment_table(self.fragment_layout, role, self.operand_dtype(role).name).registers)
 
     @property
     def accumulator_registers_per_lane(self) -> int:
         """The C fragment's per-lane 32-bit register count."""
-        explicit = self.fragment_nregs("c")
-        if explicit is not None:
-            return explicit
-        m, n, _ = self.shape
-        return (m * n) // (64 if self.operand_dtype("c").nbytes == 2 else 32)
+        return self.fragment_registers("c")
 
     def available_on(self, ctx) -> bool:
         """Whether the target Context selects this atom's instruction family."""
@@ -205,7 +205,6 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
             (16, 16, 4),
             (("a", F16), ("b", F16), ("c", acc)),
             instruction_shape=(8, 8, 4),
-            fragment_registers=(("a", 2), ("b", 2), ("c", 4 if acc == F16 else 8)),
             fragment_layout="m8n8k4",
             target_feature="has_volta_mma",
             sync_copy_staging=True,
@@ -226,7 +225,7 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
     # ``instruction_shape`` says how many of them one instruction spans
     # (``cells_per_instruction``), so the epilogue, the softmax row statistics and the P→A repack
     # keep the mma.sync lane maps and the drain groups cells per instruction. The register counts
-    # are per logical cell, not derived from the 64-row PTX shape: A takes the m16n8k16 register
+    # are per logical cell (the ``wgmma`` rows of the lane-to-element table): A takes the m16n8k16 register
     # layout (or a descriptor), B always arrives through a shared-memory descriptor. sm_90 only —
     # the two Blackwell families have a different instruction or none (``has_wgmma``). Appended
     # after the ``mma.sync`` family so no option-0 pick moves.
@@ -236,7 +235,6 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
             (16, 8, 16),
             (("a", dtype), ("b", dtype), ("c", F32)),
             instruction_shape=(64, n, 16),
-            fragment_registers=(("a", 4), ("b", 0), ("c", 4)),
             fragment_layout="wgmma",
             target_feature="has_wgmma",
         )
@@ -267,7 +265,6 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
         "mma_m16n8k64_e2m1_f32",
         (16, 8, 64),
         (("a", F4E2M1x2), ("b", F4E2M1x2), ("c", F32)),
-        fragment_registers=(("a", 4), ("b", 2), ("c", 4)),
         target_feature="has_block_scaled_f4_mma",
     ),
 }

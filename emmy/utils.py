@@ -11,8 +11,7 @@ class cached_method:  # noqa: N801 — a decorator, spelled like ``cached_proper
     while the attribute stays a call. A derived read of an immutable term is computed once per
     (hashable) argument tuple and dies with the instance — unlike a ``functools.cache`` keyed on
     ``self``, which hashes the whole term per call and holds every term ever built for the life of
-    the process. The owner's ``__getstate__`` may strip the slot (``Lambda`` does), like any memo
-    here."""
+    the process. The owner's ``__getstate__`` may strip the slot, like any memo here."""
 
     def __init__(self, fn):
         self.fn = fn

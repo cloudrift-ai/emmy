@@ -1,105 +1,102 @@
-"""Shared statement primitives — the leaves and control flow used across
-every IR layer.
+"""Shared statement primitives — the leaves and control flow used across every IR layer.
 
-Defined here rather than under any one IR package because all three IRs
-(Loop, Tile, Kernel) consume the same leaf vocabulary:
+The statement types, ``Body``, the text form, normalization and identity are implemented in Rust (the ``emmy-ir``
+crate, reached through the ``emmy.emmy_ir`` extension); this package is their one face to the rest of the compiler.
+``__all__`` is the whole interface: the rest of the compiler imports these names and no submodule. The statement types
+every layer shares are here; the Kernel IR's thirty are exported by ``emmy.compiler.ir.kernel.ir``. Rendering a
+statement as host C++ for the Loop IR runner is not statement business and lives in :mod:`emmy.compiler.ir.loop.render`.
 
-- ``Stmt`` — abstract base for every body statement.
-- Leaves: ``Load``, ``Assign``, ``Accum``, ``Init``, ``Write``,
-  ``Select``, ``SelectBranch`` — pure compute primitives that read/write SSA
-  names and external buffers (in :mod:`.leaves`).
-- Block stmts: ``Loop``, ``StridedLoop``, ``Cond`` — carry child bodies
-  (in :mod:`.blocks`).
-- Tree walks: :meth:`Body.iter` (pre-order recursive) and
-  :meth:`Body.map` (flat 1:N transformer) — methods on
-  :class:`Body` (in :mod:`.body`).
-- Body normalization: the public ``normalize_body`` driver and its internal ordered passes
-  (drop-size-one, canonicalize-axis-order, copy-alias-elim,
-  reduce-axis-unify, hoist, simplify, dedup-loads, canonical-statement-order, rename-ssa) in
-  :mod:`.normalize`.
-- Pretty printing + render context: ``RenderCtx``, ``op_to_expr``,
-  ``select_to_ternary``, ``render_index`` (in :mod:`.base`).
-
-Each IR layer adds its own scheduling-specific Stmts on top:
-
-- Loop IR: nothing extra — its bodies are exactly Loop / leaves.
-- Tile IR: the typed tile flavors and staging constructs — DEMOLISHED,
-  pending rebuild.
-- Kernel IR: ``Smem``, ``Sync``, ``TreeHalve``, plus the shared
-  constructs.
-
-Loop-IR's ``LoopOp`` and validation stay in ``ir/loop/`` because they enforce Loop-IR-specific
-invariants. Body analysis, demand reconstruction, normalization and structural identity stay here.
+The boundary: Rust owns the data and Python reads it through accessors; a field read hands back a held object, so a
+statement read twice from a body is one object; only strings, numbers, booleans, tuples of those and the module's own
+classes cross it. The few members that take a Python function and keep its results (``rename`` by a function,
+``rewrite``, ``Body.fold``) are written here over the Rust reads; ``Body.map`` and ``map_expressions`` call the function
+from Rust through the fallible walks and hold nothing of it afterwards.
 """
 
-from emmy.compiler.ir.stmt.base import (
-    INDENT,
-    Paged,
-    RenderCtx,
-    Stmt,
-    op_to_expr,
-    pretty_body,
-    render_body,
-    render_index,
-    select_to_ternary,
-)
-from emmy.compiler.ir.stmt.base import (
-    _axis_identity as _axis_identity,  # re-export for downstream IR layers,
-)
-from emmy.compiler.ir.stmt.base import (
-    _pad as _pad,  # re-export for ir.kernel.ir,
-)
-from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body, refs_axis, stmt_axis_names
-from emmy.compiler.ir.stmt.leaves import (
-    Accum,
-    Affine,
-    Assign,
-    Carry,
-    Init,
-    Let,
-    Load,
+from __future__ import annotations
+
+import emmy.emmy_ir as _ir
+
+Statement = _ir.Statement
+Body = _ir.Body
+Accum = _ir.Accum
+Assign = _ir.Assign
+Call = _ir.Call
+Carry = _ir.Carry
+Cond = _ir.Cond
+Init = _ir.Init
+Let = _ir.Let
+Load = _ir.Load
+Loop = _ir.Loop
+Pre = _ir.Pre
+Select = _ir.Select
+SelectBranch = _ir.SelectBranch
+StridedLoop = _ir.StridedLoop
+Subroutine = _ir.Subroutine
+Write = _ir.Write
+ZeroPrologue = _ir.ZeroPrologue
+
+parse_body = _ir.parse_body
+pretty_body = _ir.pretty_body
+normalize_body = _ir.normalize_body
+optimize_body = _ir.optimize_body
+check_types = _ir.check_types
+check_input = _ir.check_input
+reduce_strength = _ir.reduce_strength
+one_operation_per_definition = _ir.one_operation_per_definition
+normalize_lambda_body = _ir.normalize_lambda_body
+simplify_body = _ir.simplify_body
+prepare_body = _ir.prepare_body
+free_names = _ir.free_names
+exposed_defines = _ir.exposed_defines
+mask_select_predicate = _ir.mask_select_predicate
+ordering_constraints = _ir.ordering_constraints
+dtype_promote = _ir.dtype_promote
+
+from emmy.compiler.ir.stmt.glue import (  # noqa: E402 — the glue installs members on the classes above
+    Identity,
     OutputSpec,
-    Pre,
-    Select,
-    SelectBranch,
-    Write,
-    ZeroPrologue,
-    binary,
-    mask_select_predicate,
+    canonicalize_identity,
+    fields_of,
 )
-from emmy.compiler.ir.stmt.normalize import normalize_body
 
 __all__ = [
-    "refs_axis",
-    "stmt_axis_names",
-    "INDENT",
     "Accum",
-    "Pre",
-    "Carry",
-    "Affine",
-    "binary",
     "Assign",
     "Body",
+    "Call",
+    "Carry",
     "Cond",
+    "Identity",
     "Init",
     "Let",
     "Load",
     "Loop",
-    "mask_select_predicate",
-    "Paged",
-    "RenderCtx",
-    "ZeroPrologue",
+    "OutputSpec",
+    "Pre",
     "Select",
     "SelectBranch",
-    "Stmt",
+    "Statement",
     "StridedLoop",
+    "Subroutine",
     "Write",
-    "OutputSpec",
+    "ZeroPrologue",
+    "canonicalize_identity",
+    "dtype_promote",
+    "exposed_defines",
+    "fields_of",
+    "one_operation_per_definition",
+    "free_names",
+    "mask_select_predicate",
     "normalize_body",
-    "op_to_expr",
+    "normalize_lambda_body",
+    "optimize_body",
+    "check_types",
+    "check_input",
+    "reduce_strength",
+    "ordering_constraints",
+    "prepare_body",
+    "parse_body",
     "pretty_body",
-    "render_body",
-    "render_index",
-    "select_to_ternary",
+    "simplify_body",
 ]

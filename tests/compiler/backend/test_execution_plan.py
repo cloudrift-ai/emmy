@@ -29,7 +29,7 @@ from emmy.compiler.backend.plan import (
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loader.binder import apply_load_ops
@@ -48,7 +48,7 @@ def _sample_graph() -> Graph:
         node_id="w",
     )
     g.add_node(op=ConstantOp(name="div", context_value=Var("seq_len")), inputs=[], output=Tensor("div", (1,)), node_id="div")
-    ceil_div = BinaryExpr("//", BinaryExpr("+", Var("seq_len"), Literal(15, "int")), Literal(16, "int"))
+    ceil_div = BinaryExpression("//", BinaryExpression("+", Var("seq_len"), Literal(15, "int")), Literal(16, "int"))
     g.add_node(
         op=CudaOp(
             kernel_source="__global__ void k_test() {}",
@@ -80,7 +80,7 @@ def test_plan_projection():
     assert plan.runtime_constants == {"div": Var("seq_len")}
     assert plan.weights == {"w": WeightSpec(source_path="model.w", load_ops=(("transpose", (1, 0)),), graph_dtype="f32")}
     assert set(plan.kernels) == {"k_test"}
-    assert plan.kernels["k_test"].arch_specific and plan.kernels["k_test"].source.startswith("__global__")
+    assert plan.kernels["k_test"].source.startswith("__global__")
     assert plan.symbolic_bindings == {"seq_len": ("x", 0)}
     (launch,) = plan.launches
     assert launch.kernel_name == "k_test" and launch.runtime_args == ("seq_len",)
@@ -130,25 +130,14 @@ def test_cpu_plan_round_trips_with_its_thread_split_in_place_of_the_cuda_grid():
     assert plan_from_dict(wire) == plan
 
 
-def test_a_plan_stored_under_the_old_tma_key_still_reads():
-    """``uses_tma`` became ``arch_specific`` when the block-scaled fp4 mma turned out to need the
-    same arch-suffixed target for its own reason. The meaning did not change, so a pack baked
-    before the rename must keep loading rather than silently dropping to the unsuffixed arch."""
-    wire = json.loads(json.dumps(plan_to_dict(plan_from_graph(_sample_graph()))))
-    spec = wire["kernels"]["k_test"]
-    assert spec.pop("arch_specific") is True
-    spec["uses_tma"] = True
-    assert plan_from_dict(wire).kernels["k_test"].arch_specific is True
-
-
 def test_only_a_kernel_that_waits_on_its_predecessor_launches_dependent():
     """A programmatic dependent launch may start a kernel before the grid ahead of it finished, so
-    only a kernel whose source waits on that grid (``griddepcontrol.wait``) is marked, and a plan
+    only a kernel that waits on that grid is marked (the lowering marks every kernel it writes), and a plan
     stored before the mark existed reads unmarked: its kernels launch serialized."""
     graph = _sample_graph()
     assert plan_from_graph(graph).kernels["k_test"].dependent_launch is False
     node = graph.nodes["y"]
-    node.op = dataclasses.replace(node.op, kernel_source='__global__ void k_test() { asm volatile("griddepcontrol.wait;"); }')
+    node.op = dataclasses.replace(node.op, dependent_launch=True)
     plan = plan_from_graph(graph)
     assert plan.kernels["k_test"].dependent_launch is True
     wire = json.loads(json.dumps(plan_to_dict(plan)))
@@ -202,11 +191,11 @@ def test_plan_format_version_gate():
         plan_from_dict(d)
 
 
-def test_grid_expr_survives_round_trip():
+def test_grid_expression_survives_round_trip():
     plan = plan_from_graph(_sample_graph())
     restored = plan_from_dict(json.loads(json.dumps(plan_to_dict(plan))))
     (launch,) = restored.launches
-    # The composite ceil-div factor must come back as a real Expr (evaluable), not a string.
+    # The composite ceil-div factor must come back as a real Expression (evaluable), not a string.
     (factor,) = launch.grid[0]
     assert factor.eval({"seq_len": 33}) == 3
     assert launch.grid[1] == ("seq_len", 2)
@@ -318,11 +307,11 @@ def test_reciprocal_load_op_rebinds_after_plan_json_round_trip():
 
 def _slice_index_map(out_shape, spans):
     """A single-source ``IndexMapOp`` reading ``spans`` (per-axis ``(start, step)``)."""
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
     from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 
     coords = tuple(
-        BinaryExpr("+", BinaryExpr("*", Var(f"out_coord_{i}"), Literal(step, "int")), Literal(start, "int"))
+        BinaryExpression("+", BinaryExpression("*", Var(f"out_coord_{i}"), Literal(step, "int")), Literal(start, "int"))
         for i, (start, step) in enumerate(spans)
     )
     return IndexMapOp(out_shape=out_shape, sources=(IndexSource(input_idx=0, coord_map=coords),))
@@ -343,7 +332,7 @@ def test_slice_index_map_encodes_and_matches_the_binder(shape, spans):
 def test_non_affine_index_map_stays_outside_the_vocabulary():
     """A transposing index map is NOT a slice — it must encode as ``None`` rather than as a
     silently wrong per-axis read."""
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 
     swap = IndexMapOp(out_shape=(3, 2), sources=(IndexSource(input_idx=0, coord_map=(Var("out_coord_1"), Var("out_coord_0"))),))
@@ -468,3 +457,25 @@ def test_merged_kernels_keep_their_names_unless_another_source_holds_one():
     assert renamed.startswith("k_copy_") and names["k_add"] == "k_add"
     assert kernels[renamed].source == other.source.replace("k_copy", renamed) and set(kernels) == {"k_copy", renamed, "k_add"}
     assert merge_kernels(kernels, {"k_copy": other}) == {"k_copy": renamed}
+
+
+def test_a_name_with_two_sources_launches_each_under_its_own_symbol():
+    """Kernels of one identity share a name; under one schedule they compile to one code and share it, while one that
+    carries other code (a neighbor's zero-init) launches under a symbol of its own, never the first source."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (64,)), node_id="x")
+    twin = ".visible .entry k_twin(\n\t.param .u64 k_twin_param_0,\n\t.param .u64 k_twin_param_1\n)\n{\n\tret;\n}\n"
+    sources = (twin, twin)
+    other = twin.replace("\tret;", "\t// zero-init\n\tret;")
+    for node, (source, inp) in enumerate(zip((*sources, other), ("x", "y0", "y1"), strict=True)):
+        g.add_node(
+            op=CudaOp(kernel_source=source, kernel_name="k_twin", arg_order=(inp, f"y{node}")),
+            inputs=[inp],
+            output=Tensor(f"y{node}", (64,)),
+            node_id=f"y{node}",
+        )
+    g.inputs, g.outputs = ["x"], ["y2"]
+    plan = plan_from_graph(g)
+    first, second, third = (launch.kernel_name for launch in plan.launches)
+    assert first == second == "k_twin" and third.startswith("k_twin_")
+    assert plan.kernels[third].source == other.replace("k_twin", third)  # the entry and the symbols derived from it

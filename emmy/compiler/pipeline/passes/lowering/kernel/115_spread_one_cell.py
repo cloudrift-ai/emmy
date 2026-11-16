@@ -18,11 +18,10 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Builtin
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import Sync
-from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
-from emmy.compiler.ir.stmt.blocks import StridedLoop
+from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -36,30 +35,32 @@ def rewrite(root: Node) -> KernelOp:
     (tile,) = tiles
     if not any(isinstance(stmt, Loop) and not stmt.is_reduce for stmt in tile.body):
         raise RuleSkipped("no free loop to spread")
-    body: list[Stmt] = []
+    body: list[Statement] = []
     written: set[str] = set()
     for stmt in tile.body:
         if written & _reads(stmt):
             body.append(Sync())
             written.clear()
         if isinstance(stmt, Loop) and not stmt.is_reduce:
-            body.append(StridedLoop(axis=stmt.axis, start=Var("threadIdx.x"), step=Var("blockDim.x"), body=stmt.body, seed=stmt.seed))
+            body.append(
+                StridedLoop(axis=stmt.axis, start=Builtin("thread_idx.x"), step=Builtin("block_dim.x"), body=stmt.body, seed=stmt.seed)
+            )
             written |= _writes(stmt)
         else:
             body.append(stmt)
-    spread = replace(tile, body=Body(tuple(body)), spread=True)
+    spread = tile.replace(body=Body(tuple(body)), spread=True)
     return replace(op, body=Body(tuple(spread if stmt is tile else stmt for stmt in op.body)))
 
 
-def _reads(stmt: Stmt) -> set[str]:
+def _reads(stmt: Statement) -> set[str]:
     return {s.input for s in _walk(stmt) if isinstance(s, Load)}
 
 
-def _writes(stmt: Stmt) -> set[str]:
+def _writes(stmt: Statement) -> set[str]:
     return {s.output for s in _walk(stmt) if isinstance(s, Write)}
 
 
-def _walk(stmt: Stmt):
+def _walk(stmt: Statement):
     yield stmt
     for body in stmt.nested():
         for child in body:

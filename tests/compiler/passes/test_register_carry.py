@@ -6,18 +6,21 @@ import numpy as np
 import pytest
 
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.kernel.ir import FragmentPromote, FragmentRepack, LdmatrixLoad, MmaSyncPtx, RegFragment
+from emmy.compiler.ir.expression import apply
+from emmy.compiler.ir.kernel.ir import FragmentLoad, FragmentPromote, FragmentRepack, MmaSyncPtx, RegFragment, fragment_registers
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.base import ScheduleRefused
 from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register
+from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._register import factorize_register
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 from tests.compiler.ir.test_carried_state import _graph, _inputs, _reference, _unit_seeded_graph
 
 
@@ -61,32 +64,31 @@ def test_register_schedule_round_trip_and_precision_gate(target):
 
 def test_register_storage_refuses_cross_warp_state_reads():
     from emmy.compiler.ir.loop import LoopOp
-    from emmy.compiler.ir.stmt import Pre
-    from tests.compiler.ir.test_carried_state import _step, c, i, j, k
+    from emmy.compiler.ir.stmt import parse_body
+    from tests.compiler.ir.test_carried_state import _step
 
     graph = _graph()
-    body = _step((c, i, j)).map(lambda s: replace(s, index=(i, k)) if isinstance(s, Pre) and s.index == (k, j) else s)
+    body = _step("c, i, j").map(lambda s: parse_body("other = pre S[i, k]") if str(s) == "other = pre S[k, j]" else s)
     graph.nodes["out"].op = LoopOp(body=body)
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
     assert tile.register_program is None
 
 
 def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Assign, Body, Load
+    from emmy.compiler.ir.stmt import Assign, Body, parse_body
 
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
     (carrying,) = (site.node for site in tile.sites if site.node.carries)
     lift = carrying.lift
-    changed = replace(
-        carrying,
-        lift=replace(
-            lift,
+    changed = carrying.replace(
+        lift=lift.replace(
             body=Body(
                 (
-                    Load(name="phase", input="D", index=(Var(carrying.axis),)),
+                    *parse_body(f"phase = load D[{carrying.axis}]"),
                     *[
-                        replace(stmt, args=(stmt.args[0], "phase")) if isinstance(stmt, Assign) and stmt.name == lift.results[0] else stmt
+                        stmt.replace(value=apply(stmt.value.operation, stmt.value.operands[0], "phase"))
+                        if isinstance(stmt, Assign) and stmt.name == lift.results[0]
+                        else stmt
                         for stmt in lift.body
                     ],
                 )
@@ -95,7 +97,7 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
     )
 
     def substitute(term):
-        return changed if term is carrying else replace(term, operands=tuple(substitute(edge) for edge in term.operands))
+        return changed if term is carrying else term.replace(operands=tuple(substitute(edge) for edge in term.operands))
 
     program = replace(tile, op=substitute(tile.op)).register_program
     assert program is not None
@@ -118,19 +120,25 @@ def test_a_descent_row_naming_other_families_offers_no_register_leaf():
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
 def test_chunk_loop_is_inside_one_launch(target):
     with pinned_knobs({"FAST_MATH": True, "STAGE": "d1/reg"}):
-        graph = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target(target))
+        graph, kernels = compile_with_kernels(_graph(), ctx=Context.from_target(target))
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
+    (kernel,) = kernels.values()
     assert not op.serial and op.smem_bytes == 0
-    assert op.arg_order == ("D", "W", "U", "out")
+    assert sorted(op.arg_order) == ["D", "U", "W", "out"]  # in the order of the roles its identity names
     assert [t.name for t in graph.nodes["out"].outputs] == ["out"]
-    assert f"float _state0[{8 if target == (7, 0) else 4}]" in op.kernel_source and "for (int a0" in op.kernel_source
-    assert "out__acc1[" not in op.kernel_source
-    assert "#include <cuda_fp16.h>" in op.kernel_source  # The buffers are FP32; the direct loader constructs FP16 operands.
+    # The state is an accumulator of floats in registers, and the step axis is a loop of the one launch.
+    (state,) = [fragment for fragment in statements(kernel, RegFragment) if fragment.name == "_state0"]
+    assert (state.role, state.dtype.name, fragment_registers(state)) == ("c", "f32", 8 if target == (7, 0) else 4)
+    assert any(loop.axis.name == "a0" for loop in statements(kernel, Loop, StridedLoop))
+    assert "out__acc1" not in text(kernel)
+    # The buffers are FP32; the direct loader constructs FP16 operands.
+    loads = statements(kernel, FragmentLoad)
+    assert loads and all((load.src_dtype, load.dtype) == (F32, F16) for load in loads if load.role in ("a", "b"))
 
 
 def _with_output_batch_axis(graph, batch_extent):
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Write
 
     node = graph.nodes["out"]
@@ -138,7 +146,7 @@ def _with_output_batch_axis(graph, batch_extent):
     tensor.shape = (tensor.shape[0], Dim(batch_extent), *tensor.shape[1:])
     node.op = replace(
         node.op,
-        body=node.op.body.map(lambda s: replace(s, index=(s.index[0], Literal(0, "int"), *s.index[1:])) if isinstance(s, Write) else s),
+        body=node.op.body.map(lambda s: s.replace(index=(s.index[0], Literal(0, "int"), *s.index[1:])) if isinstance(s, Write) else s),
     )
     return graph
 
@@ -152,18 +160,19 @@ def test_register_output_keeps_a_unit_batch_coordinate(batch_extent):
     if batch_extent == 1:
         schedule = next(iter(_context(tile).extensions()))
         node.op = materialize_register(tile, schedule, {})
-        lowered = Pipeline.build(["lowering/kernel", "lowering/cuda"]).run(graph, ctx=Context.from_target((12, 0)))
-        (cuda,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
-        assert "emmy_mma_m16n8k16" in cuda.kernel_source
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)), passes=["lowering/kernel", "lowering/cuda"])
+        (kernel,) = kernels.values()
+        assert any(tuple(mma.shape) == (16, 8, 16) for mma in statements(kernel, MmaSyncPtx))
 
 
 def test_classic_recurrence_does_not_reopen_the_launch_axis():
     with pinned_knobs({"FAST_MATH": False}):
-        graph = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((12, 0)))
+        graph, kernels = compile_with_kernels(_graph(), ctx=Context.from_target((12, 0)))
     (cuda,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
+    (kernel,) = kernels.values()
     assert cuda.serial
-    for name, _extent in cuda.serial:
-        assert f"for (int {name} =" not in cuda.kernel_source
+    looped = {loop.axis.name for loop in statements(kernel, Loop, StridedLoop)}
+    assert not looped & {name for name, _extent in cuda.serial}
 
 
 def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
@@ -174,7 +183,7 @@ def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
     classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
     with pinned_knobs({"FAST_MATH": True}):
-        forks = classic_forks(tile, tile.name, {}, Context.from_target((12, 0)))
+        forks = classic_forks(tile, {}, Context.from_target((12, 0)))
         register = next(leaf for leaf in iter_leaves(forks) if leaf.knobs.get("STAGE") == "d1/reg")
         (scheduled,) = register.expand()
     assert scheduled.carries and not scheduled.place.serial
@@ -184,7 +193,7 @@ def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
 @pytest.mark.parametrize("stride", [1, 2])
 def test_register_operands_use_direct_loads_when_the_address_allows_it(target, stride):
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Load
 
     graph = _graph()
@@ -194,15 +203,15 @@ def test_register_operands_use_direct_loads_when_the_address_allows_it(target, s
     graph.nodes["out"].op = replace(
         op,
         body=op.body.map(
-            lambda s: replace(s, index=(s.index[0], s.index[1] * Literal(stride, "int"))) if isinstance(s, Load) and s.input == "W" else s
+            lambda s: s.replace(index=(s.index[0], s.index[1] * Literal(stride, "int"))) if isinstance(s, Load) and s.input == "W" else s
         ),
     )
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
     schedule = next(iter(_context(tile, target).extensions()))
     statements = tuple(factorize_register(materialize_register(tile, schedule, {})).body.iter())
-    reads = [s for s in statements if isinstance(s, LdmatrixLoad)]
+    reads = [s for s in statements if isinstance(s, FragmentLoad)]
     assert bool(reads) == (stride == 1)
-    assert all(s.src_buffer == "W" and s.b_trans and not s.staged and s.gmem_guard for s in reads)
+    assert all(s.src_buffer == "W" and s.b_trans and not s.staged and s.clamp for s in reads)
     assert any(isinstance(s, FragmentRepack) and s.role == "b" for s in statements) == (stride != 1)
     assert any(isinstance(s, FragmentRepack) and s.role == "a" for s in statements)
 
@@ -274,7 +283,7 @@ def test_register_state_starts_from_the_seed_tensor_on_cuda(unit, unit_batch):
 def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
     from emmy.compiler.backend.cuda.program import run_program
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Carry, Pre
 
     source = _graph(seed="S0")
@@ -283,7 +292,7 @@ def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
     op = source.nodes["out"].op
     zero = Literal(0, "int")
     source.nodes["out"].op = replace(
-        op, body=op.body.map(lambda s: replace(s, index=(zero, s.index[0], zero, s.index[1])) if isinstance(s, (Carry, Pre)) else s)
+        op, body=op.body.map(lambda s: s.replace(index=(zero, s.index[0], zero, s.index[1])) if isinstance(s, (Carry, Pre)) else s)
     )
     pins = {"FAST_MATH": False}
     if register:
@@ -298,30 +307,11 @@ def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
     np.testing.assert_allclose(result.outputs["out"], want, rtol=2e-3 if register else 1e-5, atol=2e-3 if register else 1e-6)
 
 
-def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
-    """A gmem-direct fragment's constant offset is added to the pointer, outside the ``int`` index.
-
-    CUDA 12.9's front end widens ``&k[base + 2048]`` to 64 bits before folding the constant, so
-    every offset became its own live pointer: the GDN step below took 255 registers and spilled
-    24 bytes there, while CUDA 13 folded the same source into 189 registers. ``&k[base] + 2048``
-    is one pointer and a load immediate on both (179 registers on CUDA 12.9)."""
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-    from emmy.compiler.ir.stmt import RenderCtx
-
-    ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))}, buffer_dtypes={"k": "f32"}, ssa_dtypes={"r": "f16"})
-    row = BinaryExpr("+", BinaryExpr("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
-    load = LdmatrixLoad(frag="r", src_buffer="k", src_index=(Var("a1"), row, Literal(8, "int")), role="b", staged=False, ldm=128)
-    (line,) = load.render(ctx)
-    assert line.strip() == "emmy_mma_load_b_gmem<float, __half>(r, &k[a1 * 8192 + a0 * 64 * 128] + 2056, 128);"
-
-
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 @pytest.mark.parametrize("shape", [(17, 80, 35), (64, 128, 128)], ids=["tails", "gdn128"])
 @pytest.mark.parametrize("half", [False, True], ids=["f32-acc", "f16-acc"])
 def test_gdn_chunk_step_matches_loop_on_cuda(shape, half):
-    from emmy import config
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.backend.cuda.program import CompiledProgram, kernel_attributes
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -370,11 +360,9 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     lowered = Pipeline.build(["lowering/kernel", "lowering/cuda"]).run(graph)
     lowered.validate()
     (op,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
-    (port,) = (t.name for t in node.outputs if t.name not in graph.outputs)  # the state's buffer, dropped with the port
-    assert not op.serial and port not in op.arg_order
-    # The carried state's register residency is a property of the deployable build: at the
-    # correctness lane's `-Xcicc -O1` the fragment arrays stay in local memory.
-    with gpu_lock(), config.nvcc_flags_override(""):
+    assert not op.serial
+    # The carried state stays in registers.
+    with gpu_lock():
         program = CompiledProgram.build(lowered, arrays)
         program.iter_once()
         result = program.outputs()

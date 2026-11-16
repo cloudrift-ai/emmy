@@ -210,10 +210,12 @@ def _tiny_nvfp4_hybrid(path, config, mtp=None):
             f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
             f"{base}.weight_scale_2": torch.from_numpy(scale2),
             f"{base}.input_scale": torch.tensor([0.05]),
-            # An NVFP4 output head, which serving keeps coded and runs as a program of its own.
+            # An NVFP4 output head with its activation's calibrated scale, which serving keeps coded and runs W4A4 as a
+            # program of its own.
             "lm_head.weight": torch.from_numpy(head[0]),
             "lm_head.weight_scale": torch.from_numpy(np.ascontiguousarray(head[1])).view(torch.float8_e4m3fn),
             "lm_head.weight_scale_2": torch.from_numpy(head[2].reshape(())),
+            "lm_head.input_scale": torch.tensor(0.05),
             # The trunk stores more layers than the MTP head, as every real checkpoint does: that count is what
             # tells the two stacks apart, and a tie would pick one by string-hash order.
             "model.layers.1.input_layernorm.weight": torch.ones(64, dtype=torch.bfloat16),
@@ -246,7 +248,8 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
         from emmy.compiler.pipeline.search.golden.format import program_text
         from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph
 
-        assert program_text(graphs["head-sym"]) == program_text(head_graph(Nvfp4HeadSpec(64, 64, "float16")))
+        assert program_text(graphs["head-sym"]) == program_text(head_graph(Nvfp4HeadSpec(64, 64, "float16", str(tmp_path))))
+        assert "to_f4e2m1" in program_text(graphs["head-sym"]), "the head runs W4A4, as the trunk's marked linears"
     for name, graph in graphs.items():
         if not name.startswith("gdn"):
             continue
@@ -464,14 +467,15 @@ def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
     assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
     assert [tuple(post.nodes[i].output.shape) for i in post.inputs] == [(4, 32), (4, 64)]
-    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2)]
+    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2), (4, 32)]
     assert [tuple(expert.nodes[i].output.shape) for i in expert.inputs] == [(4, 32), (32, 32), (32, 16)]
     token_dim = graphs["pre-sym"].nodes[graphs["pre-sym"].inputs[0]].output.shape[0]
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
-def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch):
-    """The twins of a tiny Qwen3.8-Flash-Next coded as RadixArk's NVFP4 is, from its config and weight index alone."""
+def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, text=None, **capture):
+    """The twins of a tiny Qwen3.8-Flash-Next coded as RadixArk's NVFP4 is, from its config and weight index alone
+    (``text``: overrides of the tiny text config)."""
     pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("transformers.models.qwen4_exp")
@@ -485,7 +489,7 @@ def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch):
     group = {"weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16}, "targets": ["Linear"]}
     qc = {"quant_method": "modelopt", "quant_algo": "NVFP4", "config_groups": {"group_0": group}, "ignore": ignore}
     vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32)
-    config = transformers.Qwen4ExpConfig(text_config=QWEN4_EXP_TINY, vision_config=vision, quantization_config=qc)
+    config = transformers.Qwen4ExpConfig(text_config={**QWEN4_EXP_TINY, **(text or {})}, vision_config=vision, quantization_config=qc)
     config.save_pretrained(tmp_path)
     head = "model.language_model.layers"
     keys = [f"{head}.{i}.{m}_hyper_connection.hc_norm.weight" for i in range(4) for m in ("attn", "mlp")]
@@ -497,7 +501,7 @@ def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch):
         raise AssertionError("capture fetched the checkpoint")
 
     monkeypatch.setattr(safetensors, "_resolve_model_dir", no_fetch)
-    return capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    return capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, **capture)
 
 
 def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_checkpoint(tmp_path, monkeypatch):
@@ -515,6 +519,25 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
         "w_gate_up_scale": ((32, 2), "f8e4m3"), "w_gate_up_scale_2": ((32, 1), "f32"),
         "w_down_scale": ((32, 1), "f8e4m3"), "w_down_scale_2": ((32, 1), "f32"),
     }  # fmt: skip
+
+
+@pytest.mark.parametrize("rows", [4, 256])
+def test_qwen4_exp_nvfp4_sliced_experts_add_the_grouped_prefill_twins(tmp_path, monkeypatch, rows):
+    """Sliced across ranks, the experts also take the grouped prefill programs: ``EXPERT_GROUP`` experts per launch,
+    each against a block of the slot width's rows or of ``EXPERT_PREFILL_M`` rows, over the layer's E-stacked packed
+    experts. Each rank's slice of an expert keeps whole NVFP4 blocks: 64 intermediate channels over four ranks."""
+    from emmy.serving.release import EXPERT_GROUP
+
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, {"moe_intermediate_size": 64}, expert_slices=4, slot_width=4)
+    name = f"expert-group{EXPERT_GROUP}x{rows}@nvfp4"
+    assert {name, "expert-slots2@nvfp4", "expert-slots4@nvfp4"} <= set(graphs)
+    group, slots = graphs[name], graphs["expert-slots4@nvfp4"]
+    shapes = {i: (tuple(group.nodes[i].output.shape), group.nodes[i].output.dtype.name) for i in group.inputs}
+    stacked = {i: (tuple(slots.nodes[i].output.shape), slots.nodes[i].output.dtype.name) for i in slots.inputs}
+    assert shapes.pop("x") == ((EXPERT_GROUP, rows, 32), "f16")
+    assert shapes.pop("sel") == ((EXPERT_GROUP,), "i64")
+    assert shapes == {i: stacked[i] for i in shapes} and next(iter(shapes.values()))[0][0] == 4
+    assert tuple(group.nodes[group.outputs[0]].output.shape) == (EXPERT_GROUP, rows, 32)
 
 
 def test_qwen4_exp_nvfp4_twins_trace_into_the_inventory(tmp_path, monkeypatch):
@@ -560,6 +583,39 @@ def test_qwen4_exp_nvfp4_twins_trace_into_the_inventory(tmp_path, monkeypatch):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_qwen4_exp_nvfp4_slots_kernel_cuts_place_the_gathered_scale_under_its_expert(tmp_path, monkeypatch):
+    """Every cut the cut pass offers the fixed-slot kernel builds pieces that lower. A piece holding the gate/up
+    product reads each selected expert's global scale outside its reduce loop, indexed by the expert a sibling term
+    loads per slot: the lowering places that read under the slot loop, not above it, where it would read the expert
+    before any slot loaded one and the piece's identity could not order its body."""
+    from importlib import import_module
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import Match, Rule
+    from emmy.compiler.pipeline.search.golden.restamp import lift_targets
+    from emmy.compiler.wire import kernel_identity
+
+    cut = import_module("emmy.compiler.pipeline.passes.tile.cut.030_cut")
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path / "model", monkeypatch)
+    (tile,) = lift_targets(graphs["expert-slots@nvfp4"], Context.from_target((7, 0))).values()
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    arms = [option for option in cut.rewrite(match, graph.nodes[tile.name]) if "cut" in option.knobs.values()]
+    pieces = [
+        node.op.with_io(fragment, node)
+        for fragment in (arm.expand()[0] for arm in arms)
+        for node in fragment.nodes.values()
+        if isinstance(node.op, TileOp)
+    ]
+    assert pieces
+    for piece in pieces:
+        assert kernel_identity(piece) is not None
+
+
 @pytest.mark.parametrize(("inter", "slices"), [(32, 1), (64, 2)])
 def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp_path, inter, slices):
     """The pinned checkpoint declares an fp8 TRUNK while storing its routed experts as native MXFP4
@@ -568,7 +624,8 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     runs. ``w_down``'s packed shape also pins the layout the caller passes down: these experts are
     ``F.linear`` parameters, so the blocks lead with ``out``; the ``x @ W`` reading would produce
     (16, 2, 16) here instead. Served across tensor-parallel ranks, each rank holds a slice of every
-    expert, so the twin is the sliced program: intermediate 64 over two ranks records the 32 one."""
+    expert, so the twin is the sliced program: intermediate 64 over two ranks records the 32 one, and the
+    sliced experts also take the grouped prefill program."""
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     from safetensors.torch import save_file
@@ -622,7 +679,7 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
         "expert4@mxfp4",
         "expert256@mxfp4",
         "expert-sym@mxfp4",
-    } | {"expert-slots@mxfp4"}
+    } | {"expert-slots@mxfp4"} | ({"expert-group32x256@mxfp4"} if slices > 1 else set())
     expert = graphs["expert4@mxfp4"]
     assert set(expert.inputs) >= {"w_gate_up", "w_gate_up_scale", "w_down", "w_down_scale"}
     by_id = {i: expert.nodes[i].output for i in expert.inputs}

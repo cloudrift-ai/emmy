@@ -17,13 +17,15 @@ def test_generation_device_wrapper_preserves_bf16_input_and_output():
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
+    from tests.compiler.helpers import kernel_ptx
 
-    source = """
-    #include <cuda_bf16.h>
-    extern "C" __global__ void copy_bf16(__nv_bfloat16* y, const __nv_bfloat16* x) {
-        if (threadIdx.x < 4) y[threadIdx.x] = x[threadIdx.x];
-    }
+    body = """
+    Grid(axes=(t in 0..32), decode=(thread_idx.x), block_threads=32):
+        if t < 4:
+            bf16 v = load x[t]
+            bf16 y[t] = v
     """
+    source = kernel_ptx("copy_bf16", body, (("y", "output", "bf16"), ("x", "input", "bf16")))
     plan = ExecutionPlan(
         "cuda",
         ["x"],

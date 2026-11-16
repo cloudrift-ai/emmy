@@ -47,11 +47,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from importlib import import_module
 
-from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.address import clamp_to
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpBroadcast, WarpShuffle
 from emmy.compiler.ir.pure.fold import Fold
@@ -59,13 +59,12 @@ from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.schedule.classic.schedule import binds_root
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Statement, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.ir import observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_members, projection_regions, sched_of, tiled_edges
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
-    clamp_last,
     copy_cell,
     reduce_codegen,
     store_sink,
@@ -285,7 +284,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         plain = tuple(spec for spec in output_specs if id(spec) not in streamed_ids)
         # An output sweep whose axis the peeled root's cone reads cannot wrap here: the peel binds
         # the root OUTSIDE the projection, so no wrap position inside ``proj`` encloses the reduce
-        # and the sweep coordinate renders as an undefined identifier at nvcc (DeepSeek-V4's fused
+        # and the sweep coordinate is a name nothing defines (DeepSeek-V4's fused
         # ``k_div_36_reduce``, whose per-column mean read the store sweep's column). The serial
         # fold realizes the shape whole — bind the UNPEELED projection so ``apply_output_specs``
         # wraps operand and projection together.
@@ -391,10 +390,10 @@ def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
                 raise UnbindableProjection(f"output-tiled roots reuse top-level SSA names: {sorted(overlap)}")
             top_defs.update(stmt.defines())
             body.append(stmt)
-    return replace(first, body=Body(body))
+    return first.replace(body=Body(body))
 
 
-def _scope_bindings(stmt: Stmt) -> set[str]:
+def _scope_bindings(stmt: Statement) -> set[str]:
     """The names ``stmt`` binds in the scope it sits in: its own defines, plus the accumulators a
     loop exports (each ``Accum`` of its immediate body), which the code after the loop reads. Every
     other name bound inside exists only in that nested scope."""
@@ -408,13 +407,13 @@ def _one_value_per_name(stmts) -> list:
     other's. Two peel levels that carry the same cone bind the same names to the same statements and
     the dedup above collapses them, which is what the tag is for. A placement cut breaks the tie — it
     replaces one level's cone with a workspace read and leaves the other computing in place — so the
-    two bind one name to two values, and nvcc rejects the second declaration (DeepSeek-V4's
+    two bind one name to two values, an SSA fault (DeepSeek-V4's
     ``post1.k_div_64_reduce`` under a cut, where one ``in0`` is a broadcast constant and the other is
     the workspace the cut materialized, and both derive ``v73`` from it).
 
-    The sweep is positional, which is what makes it right in one C scope: a use before the second
-    binding means the first value and a use after it means the second, exactly as the redeclaration
-    nvcc refuses would have read. Exported accumulators count as bindings too: a partial copy of
+    The sweep is positional, which is what makes it right in one scope: a use before the second
+    binding means the first value and a use after it means the second, exactly as the second binding
+    would have read. Exported accumulators count as bindings too: a partial copy of
     a reduction is a different loop even when some outputs retain their original names.
     Nothing moves while the two agree.
 
@@ -466,7 +465,7 @@ def _bind_roots(op: Fold, ctx: Ctx, output_specs: tuple) -> Tile:
         # binds only where nothing partitions the reduce, as on the single-root peel.
         if (swept := _swept_axis(root, owned_specs)) is not None:
             _refuse_partitioned_sweep(root, ctx, swept)
-        epilogue: list[Stmt] = []
+        epilogue: list[Statement] = []
         if region is not root:
             epilogue = [*(s for edge in region.operands if edge is not root for s in edge.lower(axes=ctx.sched.tile.axes)), *region.step()]
         tail = tuple(apply_output_specs([*epilogue, *body], owned_specs))
@@ -474,7 +473,7 @@ def _bind_roots(op: Fold, ctx: Ctx, output_specs: tuple) -> Tile:
     return _merge_root_tiles(tuple(tiles))
 
 
-def has_write(stmts: list[Stmt]) -> bool:
+def has_write(stmts: list[Statement]) -> bool:
     """Any ``Write`` reachable in ``stmts`` (deep — a projection's output sweep nests its
     ``Write`` inside a per-cell ``Loop``)."""
     for s in stmts:
@@ -485,7 +484,7 @@ def has_write(stmts: list[Stmt]) -> bool:
     return False
 
 
-def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
+def with_store(stmts: list[Statement], output: str, grid, value: str) -> list[Statement]:
     """Append the output-store glue when the body has none — a bare reduction / contraction produces
     its finalized value as the SSA name ``value`` (the carrier state / accumulator, or a projection's
     last def) that must be written to the output buffer at the grid cell. A body that already carries
@@ -494,7 +493,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     if has_write(stmts):
         return stmts
     index = tuple(Var(ax.name) for ax in grid)
-    return [*stmts, Write(output=output, index=index, value=value)]
+    return [*stmts, Write(output=output, index=index, values=(value,))]
 
 
 def _inner_site(c, ctx: Ctx) -> tuple | None:
@@ -539,7 +538,23 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
     c = op
     tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction() is not None else None
     stage = ctx.sched.get("STAGE", op) if tile is not None else None
-    if tile is not None and tile.axes is not None and len(grid) >= 2:
+    tiled = tile is not None and tile.axes is not None and len(grid) >= 2
+    # The NESTED site this node folds a chunk of at a time — the twisted carrier's score, whose
+    # own ``TILE`` the schedule decided beside this one; only the tensor-core tier folds it. The
+    # fragment seam already made the two agree (one warp column on the score, its N tile the chunk);
+    # the emission needs the node and its placed geometry to build the chunk's score tile.
+    inner = _inner_site(c, ctx) if tiled and tile.is_warp else None
+    # Any other tile at or below this node, and any transport below it, would be dropped: the serial
+    # arm lowers the whole subtree per cell, and the tiled arm evaluates its cone per cell in the fill.
+    kept = {id(node) for node in (op if tiled else None, inner[0] if inner is not None else None) if node is not None}
+    root_site = ctx.sched.site_of(op)
+    for site in ctx.sched.tile.sites:
+        below = site.under(root_site)
+        if (below or site.node is op) and id(site.node) not in kept and ctx.sched.tile_of(site.node) is not None:
+            raise UnbindableProjection(f"{'tiled' if tiled else 'serial'} lowering of {root_site.path} cannot realize TILE at {site.path}")
+        if below and ctx.sched.get("STAGE", site.node) is not None:
+            raise UnbindableProjection(f"lowering of {root_site.path} cannot realize STAGE at {site.path}")
+    if tiled:
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, c.exposes[0])
@@ -556,11 +571,6 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # grid (N 32 beside N 64), the pair binds one of them, and a positional ``grid[:-2]`` then
         # dropped the other — leaving an axis no block, unit or lead var defines.
         lead = tuple(axis for axis in grid if axis.name not in {bound.name for bound in tile.axes})
-        # The NESTED site this node folds a chunk of at a time — the twisted carrier's score, whose
-        # own ``TILE`` the schedule decided beside this one. The fragment seam already made the two
-        # agree (one warp column on the score, its N tile the chunk); the emission needs the node
-        # and its placed geometry to build the chunk's score tile.
-        inner = _inner_site(c, ctx)
         # A launch that fits the card in one wave at one CTA per SM takes as long as its longest
         # CTA, so a per-CTA early stop cannot shorten it and only costs the static trip count;
         # the chunk tier keeps the whole stream there. The CTA-per-SM half is not known here
@@ -600,10 +610,6 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:
-        root_site = ctx.sched.site_of(op)
-        for site in ctx.sched.tile.sites:
-            if (site.node is op or site.under(root_site)) and ctx.sched.tile_of(site.node) is not None:
-                raise UnbindableProjection(f"serial lowering of {root_site.path} cannot realize TILE at {site.path}")
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
         # ``Fold`` node (a projecting zero-axis
@@ -697,7 +703,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
 # shared with the other tiers; only the partition changes.
 
 
-def _mask_streamed(body: list[Stmt], axis: str, offset: int, extent, stream_identity: tuple[str, float] | None = None) -> list[Stmt]:
+def _mask_streamed(
+    body: list[Statement], axis: str, offset: int, extent, stream_identity: tuple[str, float] | None = None
+) -> list[Statement]:
     """Clamp-to-identity a masked tail copy's contribution. Two forms, selected by the CARRIER:
 
     **Plain (``id``) carrier** (``stream_identity is None``): mask each ``Accum``'s folded
@@ -721,8 +729,8 @@ def _mask_streamed(body: list[Stmt], axis: str, offset: int, extent, stream_iden
 
     Either way the streamed ``Load`` index is already wrapped in-bounds (``% extent`` via the
     caller's σ), so the read itself is safe."""
-    cond = BinaryExpr("<", BinaryExpr("+", Var(axis), Literal(offset, "int")), extent)
-    out: list[Stmt] = []
+    cond = BinaryExpression("<", BinaryExpression("+", Var(axis), Literal(offset, "int")), extent)
+    out: list[Statement] = []
     if stream_identity is not None:
         term, identity = stream_identity
         renames: dict[str, str] = {}
@@ -743,18 +751,31 @@ def _mask_streamed(body: list[Stmt], axis: str, offset: int, extent, stream_iden
         return out
     for s in body:
         if isinstance(s, Accum):
-            ident, masked = f"{s.value}__id", f"{s.value}__m"
+            ident, masked = f"{s.name}__id", f"{s.name}__m"
             out.append(Init(name=ident, identity=s.op.identity, dtype=F32))
-            out.append(Select(name=masked, branches=(SelectBranch(s.value, cond), SelectBranch(ident, Literal(1, "int")))))
-            out.append(replace(s, value=masked))
+            out.extend(_named(s, f"{s.name}__v"))
+            kept = SelectBranch(_named_value(s, f"{s.name}__v"), cond)
+            out.append(Select(name=masked, branches=(kept, SelectBranch(ident, Literal(1, "int")))))
+            out.append(s.replace(value=masked))
         else:
             out.append(s)
     return out
 
 
+def _named(accum: Accum, name: str) -> list[Statement]:
+    """The statement binding an accumulation's operand to ``name`` where a select branch needs a name: none when
+    the operand is a name already."""
+    return [] if isinstance(accum.value, Var) else [Assign(name, accum.value, dtype=F32)]
+
+
+def _named_value(accum: Accum, name: str) -> str:
+    """The name an accumulation's operand goes by after :func:`_named`."""
+    return accum.value.name if isinstance(accum.value, Var) else name
+
+
 def _replicate(
     body: Body, r: int, coop: int, axis: Axis, masked: bool, protected: frozenset[str], stream_identity: tuple[str, float] | None = None
-) -> list[Stmt]:
+) -> list[Statement]:
     """Copy ``r`` of the reduce body for the REG (ILP) fold. Copy 0 is the body verbatim.
     Copy ``r > 0`` suffixes every per-copy SSA name with ``__r{r}`` (its accumulator + temps
     are an independent chain) — EXCEPT the shared iteration coordinates in ``protected`` (the
@@ -765,9 +786,9 @@ def _replicate(
     if r == 0:
         return list(body)
     offset = r * coop
-    shifted = BinaryExpr("+", Var(axis.name), Literal(offset, "int"))
-    index_expr = BinaryExpr("%", shifted, axis.extent_expr()) if masked else shifted
-    sigma = Sigma({axis.name: index_expr})
+    shifted = BinaryExpression("+", Var(axis.name), Literal(offset, "int"))
+    index_expression = BinaryExpression("%", shifted, axis.extent_expression()) if masked else shifted
+    sigma = Sigma({axis.name: index_expression})
     out = copy_cell(body, sigma, f"__r{r}", protected)
     if not masked:
         return out
@@ -775,17 +796,17 @@ def _replicate(
         term, identity = stream_identity
         # The pivot term is body-defined, so this copy's spelling carries the copy suffix.
         stream_identity = (term if term in protected else f"{term}__r{r}", identity)
-    return _mask_streamed(out, axis.name, offset, axis.extent_expr(), stream_identity)
+    return _mask_streamed(out, axis.name, offset, axis.extent_expression(), stream_identity)
 
 
-def _restage_loads(stmts: list[Stmt], buf: str, smem: str, n_grid: int, grid_vars: tuple) -> list[Stmt]:
+def _restage_loads(stmts: list[Statement], buf: str, smem: str, n_grid: int, grid_vars: tuple) -> list[Statement]:
     """Rewrite every ``(grid…, k)`` scalar ``Load`` of ``buf`` to read ``smem[k]`` (the staged
     row), recursing into nested bodies. Other loads (and ``buf`` loads with a different index
     shape) pass through untouched."""
-    out: list[Stmt] = []
+    out: list[Statement] = []
     for s in stmts:
         if isinstance(s, Load) and s.is_scalar and s.input == buf and len(s.index) == n_grid + 1 and tuple(s.index[:n_grid]) == grid_vars:
-            out.append(Load(name=s.name, input=smem, index=(s.index[-1],)))
+            out.append(Load(names=(s.name,), input=smem, index=(s.index[-1],)))
             continue
         bodies = s.nested()
         if bodies:
@@ -796,7 +817,7 @@ def _restage_loads(stmts: list[Stmt], buf: str, smem: str, n_grid: int, grid_var
 
 def emit_combine(
     fold: Fold, t: str, n_threads: int, *, warp_size: int = 32, segmented: bool = False, inner: tuple[str, int] | None = None
-) -> list[Stmt]:
+) -> list[Statement]:
     """Build the cross-thread combine of a cooperative reduce — the algebra read off the
     ``red`` fold NODE's stored ``combine`` — over ``n_threads`` cooperating threads,
     reassigning the carried state in place.
@@ -808,7 +829,7 @@ def emit_combine(
       per-row combine for strided-cooperative rows (caller passes ``segmented=True``).
     - a ``SMEM`` fold **after** a ``SHFL`` → the hierarchical cross-warp slab: lane-0 of each
       warp stages its broadcast state to a ``smem[n_warps]`` slab per component; one ``Sync``
-      + ``TreeHalve(tid_var="warp")`` collapses across warps and broadcasts.
+      + ``TreeHalve(tid_var=warp, lane=lane)`` collapses across warps and broadcasts.
     - a standalone ``SMEM`` → the block slab: every thread stages its partial, one ``Sync``,
       a single ``TreeHalve`` reduces + broadcasts in place.
 
@@ -821,7 +842,6 @@ def emit_combine(
     prog = tuple(fold.combine.body)
     dtype = next((a.dtype for a in prog if a.dtype is not None), None) or F32
 
-    smem_c = cuda_name(dtype)
     bufs = tuple(f"{st}_smem" for st in state)
     if inner is not None:
         # The transposed (``coop-t``) combine: threads sharing an output lane sit ``scale``
@@ -833,17 +853,26 @@ def emit_combine(
         if n_threads > warp_size:
             # The flat tree's high bits fold first. Rotate the warp bits to keep the same
             # within-warp, then cross-warp order as the ordinary cooperative combine.
-            slot = BinaryExpr(
+            slot = BinaryExpression(
                 "+",
-                BinaryExpr("*", slot % warp_size, Literal(n_threads // warp_size, "int")),
-                BinaryExpr("/", slot, Literal(warp_size, "int")),
+                BinaryExpression("*", slot % warp_size, Literal(n_threads // warp_size, "int")),
+                BinaryExpression("/", slot, Literal(warp_size, "int")),
             )
-        idx = BinaryExpr("+", BinaryExpr("*", slot, Literal(scale, "int")), Var(iv))
-        out: list[Stmt] = [Smem(name=b, extents=(n_threads * scale,), dtype=smem_c) for b in bufs]
-        out += [Write(output=b, index=(idx,), value=st) for b, st in zip(bufs, state, strict=True)]
+        idx = BinaryExpression("+", BinaryExpression("*", slot, Literal(scale, "int")), Var(iv))
+        out: list[Statement] = [Smem(name=b, extents=(n_threads * scale,), dtype=dtype) for b in bufs]
+        out += [Write(output=b, index=(idx,), values=(st,)) for b, st in zip(bufs, state, strict=True)]
         out.append(Sync())
         out.append(
-            TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=n_threads, tid_var=t, dtype=dtype, inner=inner)
+            TreeHalve(
+                bufs=bufs,
+                state=state,
+                state_b=state_b,
+                combine_states=prog,
+                length=n_threads,
+                tid_var=Var(t),
+                dtype=dtype,
+                inner=(Var(iv), scale),
+            )
         )
         return out
     folds = ReduceStage(Level.BLOCK, n_threads).combine(warp_size=warp_size, segmented=segmented)
@@ -858,25 +887,30 @@ def emit_combine(
             hierarchical = i > 0 and folds[i - 1] is FoldMove.SHFL
             width = n_threads // warp_size if hierarchical else n_threads
             tid_var = "warp" if hierarchical else t
-            out += [Smem(name=b, extents=(width,), dtype=smem_c) for b in bufs]
+            out += [Smem(name=b, extents=(width,), dtype=dtype) for b in bufs]
             if hierarchical:
                 # Lane-0 of each warp stages that warp's broadcast state, indexed by ``warp``.
                 out.append(
                     Cond(
-                        cond=BinaryExpr("==", Var("lane"), Literal(0, "int")),
-                        body=tuple(Write(output=b, index=(Var("warp"),), value=st) for b, st in zip(bufs, state, strict=True)),
+                        cond=BinaryExpression("==", Var("lane"), Literal(0, "int")),
+                        body=tuple(Write(output=b, index=(Var("warp"),), values=(st,)) for b, st in zip(bufs, state, strict=True)),
                     )
                 )
             else:
-                out += [Write(output=b, index=(Var(tid_var),), value=st) for b, st in zip(bufs, state, strict=True)]
+                out += [Write(output=b, index=(Var(tid_var),), values=(st,)) for b, st in zip(bufs, state, strict=True)]
             out.append(Sync())
-            out.append(TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=width, tid_var=tid_var, dtype=dtype))
+            lane = Var("lane") if hierarchical else None
+            out.append(
+                TreeHalve(
+                    bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=width, tid_var=Var(tid_var), dtype=dtype, lane=lane
+                )
+            )
         else:  # FoldMove.ATOMIC / FoldMove.REG — cross-CTA / register tiers, not emitted by the intra-CTA walk.
             raise NotImplementedError(f"intra-CTA combine cannot emit {fold} (cta/reg tiers are future work)")
     return out
 
 
-def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
+def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Statement]:
     """The algebra-driven **partial merge** that follows a partitioned reduce loop — the one place the
     two partial-fold geometries are assembled: the REG-tree fold of the ``reg`` ILP register copies
     into copy 0 (:meth:`Fold.merge`), then — when threads cooperate (``lane`` is a lane :class:`Axis`,
@@ -887,7 +921,7 @@ def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
     contraction's degenerate additive fold identically, so a cooperative reduce and a (future)
     cooperative-K contraction share this tail. ``Fold.merge`` keys a twisted combine's temps on
     the copy name, so each fold's internals are already unique."""
-    merge: list[Stmt] = [st for r in range(1, reg) for st in fold.merge(tuple(f"{n}__r{r}" for n in fold.combine.results))]
+    merge: list[Statement] = [st for r in range(1, reg) for st in fold.merge(tuple(f"{n}__r{r}" for n in fold.combine.results))]
     if lane is not None:
         merge += emit_combine(fold, t=lane.name, n_threads=coop)
     return merge
@@ -895,7 +929,7 @@ def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
 
 def _tile_reduce_axis_transposed(
     op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str
-) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...], Axis]:
+) -> tuple[list[Statement], list[Statement], list[Statement], tuple[Axis, ...], Axis]:
     """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition:
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
     every k step, and ``coop/output_lanes`` ``k_co`` slices ride the upper thread bits. The emitted body
@@ -926,12 +960,12 @@ def _tile_reduce_axis_transposed(
     if GUARD_REDUCTIONS.narrow((True,))[0]:
         guarded = _guard_reductions._guard(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in (*grid, *ctx.serial)))
         candidate = guarded[len(hoisted)]
-    predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpr) else None
+    predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpression) else None
 
-    def uniform_parts(expr):
-        if isinstance(expr, BinaryExpr) and expr.op == "&&":
-            return (*uniform_parts(expr.left), *uniform_parts(expr.right))
-        return (expr,) if out_ax.name not in expr.free_vars() else ()
+    def uniform_parts(expression):
+        if isinstance(expression, BinaryExpression) and expression.op == "&&":
+            return (*uniform_parts(expression.left), *uniform_parts(expression.right))
+        return (expression,) if out_ax.name not in expression.free_vars() else ()
 
     uniform = uniform_parts(predicate) if predicate is not None else ()
     view = op.as_reduction()
@@ -946,69 +980,80 @@ def _tile_reduce_axis_transposed(
     # The swept cell this lane owns. An extent not divisible by the output span leaves
     # the last block's upper lanes OVERHANGING: they clamp-read the last valid
     # column (a duplicate sweep, in-bounds) and their store is discarded by the guard below — the
-    # same masked-overhang contract the tiled contraction's ``clamp_last`` / ``Cond`` pair states.
+    # same masked-overhang contract the tiled contraction's ``clamp_to`` / ``Cond`` pair states.
     span = lanes_n * columns
-    base = BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(span, "int")), BinaryExpr("*", Var(n_lane.name), Literal(columns, "int")))
-    cells = (
-        [BinaryExpr("+", base, Literal(j, "int")) for j in range(columns)]
-        if columns > 1
-        else [BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))]
+    base = BinaryExpression(
+        "+", BinaryExpression("*", Var(blk_name), Literal(span, "int")), BinaryExpression("*", Var(n_lane.name), Literal(columns, "int"))
     )
-    out_ext = out_ax.extent_expr()
+    cells = (
+        [BinaryExpression("+", base, Literal(j, "int")) for j in range(columns)]
+        if columns > 1
+        else [BinaryExpression("+", BinaryExpression("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))]
+    )
+    out_ext = out_ax.extent_expression()
     overhang = not (out_ax.extent.is_static and out_ax.extent.as_static() % span == 0)
 
     defined = {nm for s in rloop.body.iter() for nm in s.defines()}
-    expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
+    expression_external = {v for s in rloop.body.iter() for e in s.expressions() for v in e.free_vars()} - defined
     # A value defined ahead of the loop and read inside it (a hoisted operand's) is one value
     # shared by every register copy — the same exclusion :func:`_strided_fold` makes.
     deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
     protected = frozenset(
-        {axis.name, *(ax.name for ax in grid), blk_name, n_lane.name, *axis.extent_expr().free_vars(), *out_ext.free_vars(), *expr_external}
+        {
+            axis.name,
+            *(ax.name for ax in grid),
+            blk_name,
+            n_lane.name,
+            *axis.extent_expression().free_vars(),
+            *out_ext.free_vars(),
+            *expression_external,
+        }
         | deps_external
         | ({k_co.name} if k_co is not None else set())
     )
     stream_identity = (str(view.terms[0]), ElementwiseImpl("maximum").identity) if view.twisted else None
-    copies: list[Stmt] = []
+    copies: list[Statement] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, k_ways, axis, masked, protected, stream_identity))
     tail_stmts = with_store(list(tail), ctx.output, grid, out_val)
 
     # One copy of the prologue, the body and the projection per column. The prologue's names are
     # renamed with its column, so they come off ``protected``; everything shared (grid, reduce and
-    # lane coordinates) passes through.
-    hoisted_defs = {name for stmt in hoisted for name in stmt.defines()}
+    # lane coordinates) passes through. A name the prologue defines inside a loop (a hoisted fold's
+    # carrier) is one of them: two columns folding one carrier would seed it twice in one scope.
+    hoisted_defs = Body(tuple(hoisted)).defined
     per_column = protected - hoisted_defs if columns > 1 else protected
-    sweep: list[Stmt] = []
-    body: list[Stmt] = []
-    stores: list[Stmt] = []
+    sweep: list[Statement] = []
+    body: list[Statement] = []
+    stores: list[Statement] = []
     for j, cell in enumerate(cells):
         suffix = f"__v{j}" if j else ""
-        read = Sigma({out_ax.name: clamp_last(cell, out_ext) if overhang else cell})  # the sweep's reads
+        read = Sigma({out_ax.name: clamp_to(cell, out_ext) if overhang else cell})  # the sweep's reads
         sweep += copy_cell(hoisted, read, suffix, per_column)
         body += copy_cell(copies, read, suffix, per_column)
         # The guarded projection: in range by the guard, so no clamp.
         store = copy_cell(tail_stmts, Sigma({out_ax.name: cell}), suffix, per_column)
-        stores += [Cond(cond=BinaryExpr("<", cell, out_ext), body=tuple(store))] if overhang else store
+        stores += [Cond(cond=BinaryExpression("<", cell, out_ext), body=tuple(store))] if overhang else store
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(body)), unroll=_lane_unroll(axis, stride))
 
-    merge: list[Stmt] = [st for r in range(1, reg) for st in op.merge(tuple(f"{n}__r{r}" for n in view.states))]
+    merge: list[Statement] = [st for r in range(1, reg) for st in op.merge(tuple(f"{n}__r{r}" for n in view.states))]
     if k_co is not None:
         merge += emit_combine(_column_states(op, columns), t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
 
     if k_co is not None:
-        stores = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(stores))]
+        stores = [Cond(cond=BinaryExpression("==", Var(k_co.name), Literal(0, "int")), body=tuple(stores))]
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
     if uniform:
         condition = uniform[0]
         for part in uniform[1:]:
-            condition = BinaryExpr("&&", condition, part)
+            condition = BinaryExpression("&&", condition, part)
         # Output-axis predicates can differ between lanes. Only their independent conjuncts
         # guard the collective; every thread reaches its barriers together. Seeds stay visible
         # to the projection even when the whole block skips the reduction.
         accums = {stmt.name: stmt for stmt in strided.body if isinstance(stmt, Accum)}
         seeds = [Init(name=stmt.name, identity=stmt.op.identity, dtype=stmt.dtype or F32) for stmt in accums.values()]
-        strided = replace(strided, seed=False)
+        strided = strided.replace(seed=False)
         return seeds, [*sweep, Cond(cond=condition, body=(strided, *merge))], stores, lanes_axes, out_ax
     return [], [*sweep, strided, *merge], stores, lanes_axes, out_ax
 
@@ -1063,7 +1108,7 @@ def _lane_unroll(axis: Axis, stride: int) -> bool:
     return axis.extent.is_static and unroll_ok_n(-(-axis.extent.as_static() // stride), 16)
 
 
-def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Stmt]:
+def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Statement]:
     """The partitioned reduce loop for ONE fold — ``reg`` ILP chains striding ``coop·reg`` from the
     lane's start, then the REG-tree merge and (when threads cooperate) the cross-thread combine.
     ``rloop`` is the fold's already-emitted serial reduce ``Loop``; the caller owns any prologue
@@ -1081,35 +1126,35 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % (run if run > 1 else stride) == 0)
     start = Literal(0, "int") if lane is None else Var(lane.name)
     if run > 1 and lane is not None:
-        start = BinaryExpr("*", start, Literal(run, "int"))
+        start = BinaryExpression("*", start, Literal(run, "int"))
 
     # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
     # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
-    # accumulator (``StridedLoop.render``).
+    # accumulator (``StridedLoop``'s render).
     # The shared iteration coordinates (grid + reduce + lane axis vars) and the symbolic
     # extent's runtime arg(s) (e.g. ``seq_len``) are common to every register copy — exclude
     # them from the per-copy SSA rename. ``copy_cell`` also protects nested loop coordinates.
-    # ... and ANY external name the body's index/extent Exprs read without defining — a symbolic
+    # ... and ANY external name the body's index/extent Expressions read without defining — a symbolic
     # dim can enter through a buffer's flattened STRIDES (a 4-D tensor's ``seq_len``) on an op
     # whose own reduce extent is static, where none of the named sets above cover it; renaming
     # such a use (``seq_len__r3``) emits an undeclared identifier (surfaced by the 2026-07-09
     # offline-weights refit steering dynamic scalar SDPA onto the ILP fold).
     defined = {nm for s in rloop.body.iter() for nm in s.defines()}
-    expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
+    expression_external = {v for s in rloop.body.iter() for e in s.expressions() for v in e.free_vars()} - defined
     # ... and the same for the SSA-deps channel: an ``Assign``'s args are name strings ``deps()``
-    # reports and ``exprs()`` does not, so a value defined ahead of the loop (a hoisted scalar
+    # reports and ``expressions()`` does not, so a value defined ahead of the loop (a hoisted scalar
     # load, a provider chain a cut left before the reduce) and read inside it is invisible to the
-    # Expr scan above. It is one value shared by every copy — renaming its uses (``in3__r1``)
+    # Expression scan above. It is one value shared by every copy — renaming its uses (``in3__r1``)
     # emits an undeclared identifier (surfaced by DeepSeek-V4 post4096's two-cut piece).
     deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
     protected = frozenset(
-        {axis.name, *(ax.name for ax in ctx.grid), *axis.extent_expr().free_vars(), *expr_external, *deps_external}
+        {axis.name, *(ax.name for ax in ctx.grid), *axis.extent_expression().free_vars(), *expression_external, *deps_external}
         | ({lane.name} if lane is not None else set())
     )
     # A twisted fold's masked tail clamps the STREAMED VALUE to the pivot fold's identity
     # (the ``exp`` family's running max, −inf) — see :func:`_mask_streamed`'s twisted form.
     stream_identity = (str(view.terms[0]), ElementwiseImpl("maximum").identity) if view.twisted else None
-    copies: list[Stmt] = []
+    copies: list[Statement] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, 1 if run > 1 else coop, axis, masked, protected, stream_identity))
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=_lane_unroll(axis, stride))
@@ -1123,7 +1168,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
 
 def _tile_chain_members(
     op: Fold, parts: tuple, ctx: Ctx, tail: tuple, out_val: str
-) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
+) -> tuple[list[Statement], list[Statement], list[Statement], Axis | None]:
     """Bind a chain root whose members carry partitioned reduce plans. The root's lowering emits
     its members' hoisted reduce loops ahead of its own, in dependency order, with the segments
     between them (a provider chain, the cone a later member closes over) per cell on every lane —
@@ -1138,7 +1183,7 @@ def _tile_chain_members(
     assert len({plan.coop for _, plan in parts if plan.coop > 1}) <= 1, "cooperating chain members must share one coop width"
     head = next(member for member, plan in parts if plan.coop == coop)
     lane = Axis(name=f"{head.axis}_co", extent=coop) if coop > 1 else None
-    fold: list[Stmt] = []
+    fold: list[Statement] = []
     for stmt in op.lower(axes=ctx.sched.tile.axes):
         member = None
         if isinstance(stmt, Loop) and stmt.is_reduce:
@@ -1152,7 +1197,7 @@ def _tile_chain_members(
     return [], fold, _lane_close(list(tail), lane, coop, ctx, out_val), lane
 
 
-def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_val: str) -> list[Stmt]:
+def _lane_close(tail: list[Statement], lane: Axis | None, coop: int, ctx: Ctx, out_val: str) -> list[Statement]:
     """The post-reduce projection close. A full-row output (softmax / RMSNorm) distributes its FREE
     sweep across the coop lanes; a scalar output is written once, guarded to lane 0. With no
     cooperation (coop == 1) the single thread runs the projection as-is. A raw REDUCE loop in the
@@ -1173,13 +1218,13 @@ def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_va
         body_tail = list(tail)  # reduce-bearing scalar tail: identical per lane, stores deterministic
     else:
         stored = with_store(tail, ctx.output, ctx.grid, out_val)
-        body_tail = [Cond(cond=BinaryExpr("==", Var(lane.name), Literal(0, "int")), body=tuple(stored))]
+        body_tail = [Cond(cond=BinaryExpression("==", Var(lane.name), Literal(0, "int")), body=tuple(stored))]
     return body_tail
 
 
 def _tile_reduce_axis(
     op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str, output_specs=()
-) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
+) -> tuple[list[Statement], list[Statement], list[Statement], Axis | None]:
     """Tile the REDUCE axis per the node's cooperating :class:`Reduce` — the reduce counterpart
     of the output ``unit_tile`` / ``register_tile`` levels: ``coop`` lanes across threads (the
     ``_co`` lane axis, the axis's UNIT level) and ``reg`` ILP chains across per-thread accumulators
@@ -1214,7 +1259,7 @@ def _tile_reduce_axis(
     # the slab. Only the cooperative tier (coop > 1) is ever stamped; a contraction operand ``Stage``
     # (the coop-K matmul's pinned pipeline) never sets ``smem``, so it passes through untouched.
     tail_src = list(tail)
-    fill_stmts: list[Stmt] = []
+    fill_stmts: list[Statement] = []
     op_stage = ctx.sched.get("STAGE", op)
     if lane is not None and op_stage is not None and op_stage.smem:
         (staged,) = op_stage.smem
@@ -1227,10 +1272,10 @@ def _tile_reduce_axis(
             grid_vars=grid_vars,
             linear_tid=start,
             n_threads=coop,
-            dtype=cuda_name(ctx.inputs[staged].dtype),
+            dtype=ctx.inputs[staged].dtype,
         )
         n_grid = len(grid)
-        rloop = replace(rloop, body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))
+        rloop = rloop.replace(body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))
         tail_src = _restage_loads(tail_src, staged, smem_name, n_grid, grid_vars)
 
     fold = _scan_fold(op, rloop, plan, lane) if op.observe is not None else _strided_fold(op, rloop, plan, ctx, lane)
@@ -1238,7 +1283,7 @@ def _tile_reduce_axis(
     return fill_stmts, [*hoisted, *fold], close, lane
 
 
-def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Stmt]:
+def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Statement]:
     """Scan consecutive lane groups, retaining each prefix for the observer and broadcasting
     the group's final state before the next group. Padded lanes contribute the monoid identity;
     every lane participates in the shuffles, while only valid prefixes reach the boundary."""
@@ -1246,22 +1291,24 @@ def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Stmt]:
     state = op.combine.results
     previous = tuple(f"{name}__previous" for name in state)
     chunk = Axis(name=f"{axis.name}_chunk", extent=axis.extent)
-    coordinate = BinaryExpr("+", Var(chunk.name), Var(lane.name))
-    valid = BinaryExpr("<", coordinate, axis.extent_expr())
+    coordinate = BinaryExpression("+", Var(chunk.name), Var(lane.name))
+    valid = BinaryExpression("<", coordinate, axis.extent_expression())
     padded = not (axis.extent.is_static and axis.extent.as_static() % width == 0)
-    read = Sigma({axis.name: BinaryExpr("%", coordinate, axis.extent_expr()) if padded else coordinate})
+    read = Sigma({axis.name: BinaryExpression("%", coordinate, axis.extent_expression()) if padded else coordinate})
     last = max(i for i, stmt in enumerate(rloop.body) if isinstance(stmt, Accum) and stmt.name in state)
-    body: list[Stmt] = [Assign(name=other, op="copy", args=(name,), dtype=F32) for name, other in zip(state, previous, strict=True)]
+    body: list[Statement] = [Assign(other, Var(name), dtype=F32) for name, other in zip(state, previous, strict=True)]
     for stmt in rloop.body[: last + 1]:
         stmt = stmt.rewrite(lambda name: name, sigma=read)
         if isinstance(stmt, Accum) and stmt.name in state:
             empty = f"{stmt.name}__empty"
             body.append(Init(name=empty, identity=stmt.op.identity, dtype=F32))
             if padded:
-                masked = f"{stmt.value}__scan_mask"
-                body.append(Select(name=masked, branches=(SelectBranch(stmt.value, valid), SelectBranch(empty, Literal(1, "int")))))
-                stmt = replace(stmt, value=masked)
-            stmt = replace(stmt, base=empty, axes=(chunk.name,), dtype=F32)
+                masked = f"{stmt.name}__scan_mask"
+                body.extend(_named(stmt, f"{stmt.name}__v"))
+                kept = SelectBranch(_named_value(stmt, f"{stmt.name}__v"), valid)
+                body.append(Select(name=masked, branches=(kept, SelectBranch(empty, Literal(1, "int")))))
+                stmt = stmt.replace(value=masked)
+            stmt = stmt.replace(base=empty, axes=(chunk.name,), dtype=F32)
         body.append(stmt)
     body.append(
         WarpShuffle(state=state, state_b=op.combine.params[len(state) :], combine_states=tuple(op.combine.body), length=width, prefix=True)

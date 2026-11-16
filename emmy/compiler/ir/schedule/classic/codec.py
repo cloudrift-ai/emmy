@@ -17,6 +17,7 @@ from .schedule import (
     NodeSchedule,
     ProjectionSchedule,
     ReductionSchedule,
+    classic_keys,
     classic_node_key,
     classic_stage_key,
     node_id_spelling,
@@ -37,17 +38,7 @@ class ClassicScheduleCodec:
             raise TypeError("classic codec requires a ClassicScheduleContext")
         self.context = context
         self.tile_op = context.tile_op
-        stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.tile_op.stage_edges))
-        self._key_order = (
-            "WORK",
-            "RASTER",
-            *(classic_node_key(self.tile_op, "TILE", site) for site in self.tile_op.family_sites["TILE"]),
-            *(classic_node_key(self.tile_op, "REDUCE", site) for site in self.tile_op.family_sites["REDUCE"]),
-            *(
-                classic_stage_key(self.tile_op, next(edge for edge in self.tile_op.stage_edges if edge[0] == site))
-                for site in stage_consumers
-            ),
-        )
+        self._key_order = classic_keys(self.tile_op)
         self._keys = frozenset(self._key_order)
 
     def encode(self, schedule: ClassicSchedule) -> dict[str, str]:

@@ -75,23 +75,13 @@ async def _handle_cloud(args):
         logger.error(str(exc))
         sys.exit(1)
 
-    if bool(args.node) != bool(args.node_instance_type):
-        logger.error("--node and --node-instance-type go together: the rental is priced by the node's instance type")
-        sys.exit(2)
-    if args.node and args.provider == "gcp":
-        logger.error("--node pins a CloudRift node; it cannot be combined with --provider gcp")
-        sys.exit(2)
-
     providers_config = None
-    if args.billing_exempt or args.network or args.node:
+    if args.billing_exempt or args.network:
         providers_config = {"cloudrift": {}}
         if args.billing_exempt:
             providers_config["cloudrift"]["billing_exempt"] = True
         if args.network:
             providers_config["cloudrift"]["network"] = args.network
-        if args.node:
-            providers_config["cloudrift"]["node"] = args.node
-            providers_config["cloudrift"]["node_instance_type"] = args.node_instance_type
 
     # One host port per service, plus the load balancer's. A plan rents exactly its shape:
     # a larger box would only idle the extra devices while billing for them.
@@ -106,12 +96,14 @@ async def _handle_cloud(args):
                 providers_config=providers_config,
                 server_name=args.name,
                 dry_run=args.dry_run,
-                provider="cloudrift" if args.node else args.provider,
+                provider=args.provider,
                 extra_authorized_keys=extra_authorized_keys,
                 allocation_observer=observer,
                 exact_gpu_count=args.plan is not None,
                 ports=ports,
                 vm_active_timeout=args.vm_active_timeout,
+                node=args.node,
+                instance_type=args.instance_type,
             )
         except (CapacityExhausted, TerminalProvisionError, RuntimeError, ValueError) as exc:
             logger.error(str(exc))
@@ -193,17 +185,6 @@ def register_cloud_target(subparsers):
         default=None,
         help="CloudRift network name (must exist in target datacenter; default: provider picks a public network)",
     )
-    parser.add_argument(
-        "--node",
-        default=None,
-        help="Pin the rental to this CloudRift node (UUID or hostname); requires --node-instance-type",
-    )
-    parser.add_argument(
-        "--node-instance-type",
-        default=None,
-        metavar="TYPE",
-        help="The pinned node's base instance type (e.g. h200-8-generic); the rental uses its variant for the GPU count",
-    )
     parser.add_argument("--gpu", help="GPU name (selects matching matrix entry; required with --recipe)")
     parser.add_argument("--gpu-count", type=int, help="GPU count (selects matching matrix entry; required with --recipe)")
     parser.add_argument(
@@ -211,6 +192,18 @@ def register_cloud_target(subparsers):
         choices=["gcp", "cloudrift"],
         default=None,
         help="Force cloud provider (default: first listed for the GPU in the hardware table)",
+    )
+    parser.add_argument(
+        "--node",
+        default=None,
+        help="Rent on exactly this CloudRift node, by node ID or hostname (hostname resolution requires operator "
+        "access); a failure there ends the deploy instead of trying another machine",
+    )
+    parser.add_argument(
+        "--instance-type",
+        default=None,
+        help="Rent this CloudRift base instance type (e.g. h200-8-generic, without the GPU count) instead of the "
+        "ones the hardware table lists for the GPU; no other type is tried",
     )
     parser.add_argument(
         "--vm-active-timeout",

@@ -58,10 +58,10 @@ def test_an_image_prompt_gives_transformers_logits(tmp_path, monkeypatch, vision
     """The tower runs at the narrow width over a padded 8 x 12 patch grid (24 image tokens), the trunk merges its rows
     in place of the image tokens through chunked prefill and the one-token tail, and every logit from the prompt's last
     token through three decode steps matches transformers' vision-language model at the M-RoPE positions it computes;
-    a text request on the same pack matches too. With one block of the tower's two on the device, the other moves
-    through the pager's slot, and every program runs captured. With a multi-token-prediction head drafting two tokens,
-    the verify steps from the prompt's last token on give each token they generate its row of those logits, at the
-    M-RoPE positions past the prompt."""
+    a text request on the same pack matches too, two whole chunks whose second generates the first token. With one
+    block of the tower's two on the device, the other moves through the pager's slot, and every program runs captured.
+    With a multi-token-prediction head drafting two tokens, the verify steps from the prompt's last token on give each
+    token they generate its row of those logits, at the M-RoPE positions past the prompt."""
     from transformers.vision_utils import get_vision_interpolation_indices_and_weights, get_vision_position_ids
 
     executable = shutil.which("emmy-runtime-worker")
@@ -137,7 +137,7 @@ def test_an_image_prompt_gives_transformers_logits(tmp_path, monkeypatch, vision
         worker = NativeWorker(executable=executable)
         try:
             await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=120)
-            text = prompt if image else [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+            text = prompt if image else list(range(5, 21))
             np.asarray(text, np.int64).tofile(path)
             start = {"op": "start_generation", "prompt": str(path)}
             if image:
@@ -148,7 +148,7 @@ def test_an_image_prompt_gives_transformers_logits(tmp_path, monkeypatch, vision
                 result = await worker.run_job(
                     {"op": "generation_step", "capture": capture, "prefill": True, "logits": str(logits_path)}, wall_timeout_s=120
                 )
-                # Each generated token's row of logits: a verify step's tokens, or a decode step's one.
+                # Each generated token's row of logits: a verify step's tokens, or a chunk's or decode step's one.
                 rows = np.fromfile(logits_path, np.float32).reshape(len(result["tokens"]), -1) if result["tokens"] else ()
                 for actual, token in zip(rows, result["tokens"], strict=True):
                     np.testing.assert_allclose(actual, reference(prefix), rtol=2e-2, atol=2e-2)

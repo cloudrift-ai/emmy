@@ -4,11 +4,12 @@ The staged path reads a packed weight a checkpoint already quantized. Producing 
 direction, and the hardware's block-scaled mma needs it: that instruction wants BOTH multiplicands
 packed, and an activation arrives as f16 or bf16.
 
-``to_f4e2m1`` is the encode op. It cannot work the way the fp8 encodes do. Those render as an
-identity and let the conversion to an fp8 type do the rounding; these codes land on an ordinary
-integer carrier, where that same identity would truncate the value instead of encoding it. So the
-render spells the rounding itself, which leaves the CUDA spelling and ``dtype.encode_f4`` as two
-independent implementations of one contract — what the device test below holds together.
+``to_f4e2m1`` is the encode op. It cannot work the way the fp8 encodes do. Those are an identity
+and let the conversion to an fp8 type do the rounding; these codes land on an ordinary integer
+carrier, where that same identity would truncate the value instead of encoding it. So the code
+generator spells the rounding itself, which leaves the PTX compiler's encode and
+``dtype.encode_f4`` as two independent implementations of one contract — what the device test
+below holds together.
 """
 
 from __future__ import annotations
@@ -20,8 +21,9 @@ from emmy.compiler.dtype import decode_f4, encode_f4
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.loop.render import render_expression
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import operations, recording_kernels, requires_cuda
 
 #: Every exact midpoint of the e2m1 grid, where the rounding rule is decided.
 MIDPOINTS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
@@ -45,43 +47,38 @@ def test_to_f4e2m1_is_registered_with_the_numpy_encode():
     np.testing.assert_array_equal(decode_f4(got), [1.0, -1.5, 6.0, 0.0])
 
 
-def test_the_render_emits_the_encode_helper_rather_than_a_dtype_conversion():
+def test_the_host_render_emits_the_encode_helper_rather_than_a_dtype_conversion():
     """The fp8 encodes render as an identity and let the result dtype convert. This one must not:
     a raw uint8 store would move the wrong bits entirely."""
-    from emmy.compiler.ir.expr import FuncCallExpr, Var
-    from emmy.compiler.ir.stmt.base import op_to_expr
+    from emmy.compiler.ir.expression import FunctionCallExpression, Var
+    from emmy.compiler.ir.loop.render import op_to_expression
 
-    expr = op_to_expr("to_f4e2m1", [Var("v")])
-    assert isinstance(expr, FuncCallExpr)
-    assert expr.name == "emmy_to_f4e2m1"
+    expression = op_to_expression("to_f4e2m1", [Var("v")])
+    assert isinstance(expression, FunctionCallExpression)
+    assert expression.name == "emmy_to_f4e2m1"
 
 
-def test_round_to_nearest_f32_division_has_reference_and_target_spellings():
-    from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
-    from emmy.compiler.backend.loop.render_target import LoopRenderTarget
-    from emmy.compiler.ir.expr import FuncCallExpr, Var
-    from emmy.compiler.ir.kernel.render import _INTRINSIC_TO_CUDA
+def test_round_to_nearest_f32_division_has_a_host_reference_spelling():
+    from emmy.compiler.ir.expression import FunctionCallExpression, Var
+    from emmy.compiler.ir.loop.render import RenderCtx, op_to_expression
     from emmy.compiler.ir.loop.runner import _INTRINSICS_CPP, PRELUDE
-    from emmy.compiler.ir.stmt.base import RenderCtx, op_to_expr
 
     numerator = np.array([0.75, -1.25], dtype=np.float32)
     denominator = np.array([1.0, 2.0], dtype=np.float32)
     op = ElementwiseImpl("divide_rn_f32")
     assert op.arity == 2
     np.testing.assert_array_equal(op(numerator, denominator), numerator / denominator)
-    expr = op_to_expr("divide_rn_f32", [Var("x"), Var("scale")], dtype="f32")
-    assert isinstance(expr, FuncCallExpr)
-    np.testing.assert_array_equal(expr.eval({"x": numerator, "scale": denominator}), numerator / denominator)
-    ctx = RenderCtx(target=CudaRenderTarget(), intrinsics=_INTRINSIC_TO_CUDA)
-    assert expr.render(ctx) == "__fdiv_rn(x, scale)"
-    host = RenderCtx(target=LoopRenderTarget(), intrinsics=_INTRINSICS_CPP)
-    assert expr.render(host) == "emmy_divide_rn_f32(x, scale)"
+    expression = op_to_expression("divide_rn_f32", [Var("x"), Var("scale")], dtype="f32")
+    assert isinstance(expression, FunctionCallExpression)
+    np.testing.assert_array_equal(expression.eval({"x": numerator, "scale": denominator}), numerator / denominator)
+    host = RenderCtx(intrinsics=_INTRINSICS_CPP)
+    assert render_expression(expression, host) == "emmy_divide_rn_f32(x, scale)"
     assert "float emmy_divide_rn_f32(float x, float y)" in PRELUDE
 
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_the_cuda_encode_matches_the_numpy_encode():
+def test_the_device_encode_matches_the_numpy_encode():
     """A real kernel over a dense sweep plus every midpoint and both saturation ends. The two
     implementations share no code, so agreement here is evidence rather than tautology."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -96,9 +93,9 @@ def test_the_cuda_encode_matches_the_numpy_encode():
         ]
     )
     backend = CudaBackend()
-    compiled = backend.compile(_encode_graph(x.size))
-    source = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert "emmy_to_f4e2m1" in source, "the encode helper never reached the kernel"
+    with recording_kernels() as kernels_of:
+        compiled = backend.compile(_encode_graph(x.size))
+    assert "to_f4e2m1" in operations(kernels_of(compiled)), "the encode never reached the kernel"
 
     result, _ = backend.run(compiled, input_data={"x": x})
     got = np.asarray(result.outputs[compiled.outputs[0]]).astype(np.uint8).ravel()

@@ -19,10 +19,10 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Loop
+from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
 _DELTA = """
 import torch, torch.nn as nn
@@ -54,16 +54,16 @@ def _carriers(graph) -> list[LoopOp]:
 
 
 @pytest.mark.parametrize(
-    ("expr", "want"),
+    ("expression", "want"),
     [
         ("0.5*x*(1+torch.tanh(0.797*(x+0.044*x*x*x)))", lambda x: 0.5 * x * (1 + np.tanh(0.797 * (x + 0.044 * x * x * x)))),
         ("torch.tanh(torch.tanh(torch.tanh(torch.tanh(x))))", lambda x: np.tanh(np.tanh(np.tanh(np.tanh(x))))),
     ],
 )
-def test_a_chain_that_re_derives_no_state_fuses_without_carried_state(expr: str, want) -> None:
+def test_a_chain_that_re_derives_no_state_fuses_without_carried_state(expression: str, want) -> None:
     from emmy.compiler.backend.numpy import NumpyBackend
 
-    graph, _, _ = graph_from_code(f"x=torch.randn(8);{expr}")
+    graph, _, _ = graph_from_code(f"x=torch.randn(8);{expression}")
     fused = Pipeline.build(LOOP_PASSES).run(graph)
     kernels = [node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
     assert len(kernels) == 1 and not _carriers(fused)
@@ -89,6 +89,16 @@ def test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state() -
     readers = [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp) and store in node.inputs]
     reads = sorted(load.index[0].value for op in readers for load in op.body.loads if load.input == store)
     assert reads == [0, 1, 2] and all(len(op.body.accums) == 1 for op in readers)
+
+
+def test_a_step_with_a_float_offset_rolls() -> None:
+    """The literal abstraction lifts integer anchors alone: a step's float offset (an epsilon the normal form spells
+    inside the sum) stays as spelled instead of truncating to an integer, so the first step advanced zero times is
+    still the first step and the chain rolls."""
+    code = _delta().replace("S = S * torch.exp(gc) + kc.transpose(1, 2) @ vc", "S = S * torch.exp(gc) + kc.transpose(1, 2) @ vc + 1e-3")
+    graph, _, _ = graph_from_code(code)
+    graph = Pipeline.build(LOOP_PASSES).run(graph)
+    assert len(_carriers(graph)) == 1
 
 
 def _run(graph) -> dict[str, np.ndarray]:
@@ -197,6 +207,38 @@ def test_a_chain_whose_masks_and_extents_grow_with_the_step_rolls_and_matches_ea
     np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)
 
 
+_INVERSE = """
+import torch, torch.nn as nn
+class Inverse(nn.Module):
+    # forward substitution, a row a step: the inverse of a unit lower triangular matrix, as a chunked
+    # gated delta rule computes it. A step reads rows of its state above the one it writes.
+    def forward(self, a):
+        a = a.tril(-1)
+        for i in range(1, {n}):
+            row = a[..., i, :i].clone()
+            sub = a[..., :i, :i].clone()
+            a = a.clone()
+            a[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+        return a + torch.eye({n})
+m = Inverse()
+m(torch.randn(2, {n}, {n}) * 0.1)
+"""
+
+
+def test_a_scan_whose_states_only_the_next_step_reads_stores_the_last_one_alone() -> None:
+    """Nothing reads a row substitution's state but the next row's, so the rolled kernel's store has the
+    state's shape, with no step axis: each step stores over the last one's."""
+    graph, _, _ = graph_from_code(_INVERSE.format(n=8))
+    rolled = Pipeline.build(LOOP_PASSES).run(graph)
+    ((scan, store),) = ((node.op, node.outputs) for node in rolled.nodes.values() if isinstance(node.op, LoopOp) and node.op.body.carries)
+    (steps,) = (stmt for stmt in scan.body if isinstance(stmt, Loop))
+    assert steps.axis.extent.as_static() > 2, "the rows between the first step's and the reader's roll"
+    assert [tuple(dim.as_static() for dim in tensor.shape) for tensor in store] == [(2, 8, 8)]
+
+    got, reference = _lifted_output(_INVERSE.format(n=8), "a")
+    np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)
+
+
 def test_steps_that_are_not_one_body_at_a_stride_do_not_roll() -> None:
     """The second chunk decays by a different tensor, so its step is not the first step read one
     stride later. Rolling it would fold ``h`` where the program said ``g``."""
@@ -255,13 +297,14 @@ def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
     """The serial axis reaches the CUDA op as a runtime ``int`` and a launch count; the body holds
     no loop over it and reads the previous step behind the guard."""
     graph, _, _ = graph_from_code(_delta())
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((9, 0)))
+    lowered, kernels = compile_with_kernels(graph, ctx=Context.from_target((9, 0)))
 
-    (step,) = (node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and node.op.serial)
+    ((node_id, step),) = ((node_id, node.op) for node_id, node in lowered.nodes.items() if isinstance(node.op, CudaOp) and node.op.serial)
     ((axis, launches),) = step.serial
     assert launches == 3 and axis in step.runtime_args
-    assert f"int {axis}" in step.kernel_source and f"for (int {axis}" not in step.kernel_source
-    assert f"({axis} > 0) ? ({axis} - 1) : (0)" in step.kernel_source
+    assert not [loop for loop in statements(kernels[node_id], Loop, StridedLoop) if loop.axis.name == axis]
+    assert axis in text(kernels[node_id]), "the body reads the step it runs"
+    assert f"0 < {axis} ? {axis} - 1 : 0" in text(kernels[node_id])  # the comparison in its canonical form
 
 
 @requires_cuda

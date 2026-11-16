@@ -100,7 +100,7 @@ def kernel_sig(feats: Mapping) -> str:
 
 def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dict[str, int]]:
     """Measured ``perf`` rows (:class:`~..db.PerfRow`) as groups labelled with measured µs, keyed
-    ``(gpu, kernel_sig, opt, flags)`` — one group per set of configs that genuinely competed, plus a count
+    ``(gpu, kernel_sig, regime)`` — one group per set of configs that genuinely competed, plus a count
     of what was dropped and why. ``kernel_op`` gives a row its kernel's op, which the featurizer reads.
 
     Each part of the key is load-bearing, and each has a plausible wrong answer:
@@ -110,9 +110,8 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
       Keying on where a decision was OFFERED instead gets it wrong in both directions: a site realized
       as several kernels files a piece beside the whole (the RTX 5090 freeze once paired a 5.9 µs norm
       kernel with a 131 ms whole-op row), and one kernel reached from two sites is tuned twice.
-    - **The opt level and the precision regime.** The regimes must not pool — ``-O1`` and ``-O3`` invert
-      often enough that a merged group measures neither, and fast math changes the code a kernel runs as.
-      No other compiler flag is a regime.
+    - **The precision regime and cache mode.** The regimes must not pool: fast math changes the code a kernel
+      runs as, and a cold-cache launch times other memory traffic.
     - **``gpu``.** Cards never pool.
 
     Admission is :func:`~.freeze.freeze_reason`, the rule a freeze is written under, failures excluded
@@ -132,15 +131,15 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
-            buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), float(r.opt), regime_of(r.cold_cache, r.precision))].append(r)
+            buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), regime_of(r.cold_cache, r.precision))].append(r)
 
     groups = []
-    for (gpu, sig, h_opt, regime), grp in sorted(buckets.items()):
+    for (gpu, sig, regime), grp in sorted(buckets.items()):
         grp.sort(key=lambda r: (r.kernel, knobs_json(r.knobs)))  # a pool's row order is its own, not the DB's
         with pinned_knobs(REGIME_PINS[regime]):  # a row's features are read in the regime it was measured under
             feats = [measured_features(r, kernel_op(r)) for r in grp]
-        key = f"{gpu}/{sig}@O{h_opt:g}" + (f" {regime}" if regime else "")
-        groups.append(MeasuredGroup.from_measured(key, gpu, sig, h_opt, [r.stats.median for r in grp], feats))
+        key = f"{gpu}/{sig}" + (f" {regime}" if regime else "")
+        groups.append(MeasuredGroup.from_measured(key, gpu, sig, [r.stats.median for r in grp], feats))
     return groups, dict(dropped)
 
 

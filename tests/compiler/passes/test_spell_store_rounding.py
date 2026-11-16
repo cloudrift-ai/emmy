@@ -15,36 +15,42 @@ from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.loop import Accum, Assign, Axis, Load, Loop, LoopOp, Write
-from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
+from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 _RULE = "090_spell_store_rounding"
-A0 = Axis("a0", 4)
-K = Axis("k", 16)
+
+
+def _names(stmt) -> tuple[str, ...]:
+    """The names an ``Assign``'s value reads as direct operands (a bare-name value is its one operand)."""
+    operands = (stmt.value,) if isinstance(stmt.value, Var) else stmt.value.operands
+    return tuple(operand.name for operand in operands)
+
+
+def _is_copy(stmt) -> bool:
+    """An ``Assign`` that copies one name: an alias (a bare name) or a typed ``copy`` that spells a rounding."""
+    if not isinstance(stmt, Assign):
+        return False
+    op = stmt.value.operation
+    return isinstance(stmt.value, Var) or (op is not None and op.name == "copy" and len(stmt.value.operands) == 1)
 
 
 def _reduce_kernel() -> LoopOp:
     """``out[a0] = sum_k x[a0, k]`` — the accumulator is unstamped, so it accumulates in f32."""
     return LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=K,
-                        body=(
-                            Load(name="value", input="x", index=(Var("a0"), Var("k"))),
-                            Accum(name="acc", value="value", op="add"),
-                        ),
-                    ),
-                    Write(output="out", index=(Var("a0"),), value="acc"),
-                ),
-            ),
+        body=parse_body(
+            """
+            for a0 in 0..4:
+                for k in 0..16:
+                    value = load x[a0, k]
+                    acc <- add(acc, value)
+                out[a0] = acc
+            """
         ),
     )
 
@@ -52,45 +58,39 @@ def _reduce_kernel() -> LoopOp:
 def _pointwise_kernel() -> LoopOp:
     """``out[a0] = exp(x[a0])`` — an Assign already carries its input's width."""
     return LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="value", input="x", index=(Var("a0"),)),
-                    Assign(name="activated", op="exp", args=("value",)),
-                    Write(output="out", index=(Var("a0"),), value="activated"),
-                ),
-            ),
+        body=parse_body(
+            """
+            for a0 in 0..4:
+                value = load x[a0]
+                activated = exp(value)
+                out[a0] = activated
+            """
         ),
     )
 
 
 def _copy_kernel(source: str, output: str) -> LoopOp:
     return LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="value", input=source, index=(Var("a0"),)),
-                    Write(output=output, index=(Var("a0"),), value="value"),
-                ),
-            ),
+        body=parse_body(
+            f"""
+            for a0 in 0..4:
+                value = load {source}[a0]
+                {output}[a0] = value
+            """
         ),
     )
 
 
 def _add_kernel(left: str, right: str, output: str) -> LoopOp:
     return LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="left", input=left, index=(Var("a0"),)),
-                    Load(name="right", input=right, index=(Var("a0"),)),
-                    Assign(name="sum", op="add", args=("left", "right")),
-                    Write(output=output, index=(Var("a0"),), value="sum"),
-                ),
-            ),
+        body=parse_body(
+            f"""
+            for a0 in 0..4:
+                left = load {left}[a0]
+                right = load {right}[a0]
+                sum = add(left, right)
+                {output}[a0] = sum
+            """
         ),
     )
 
@@ -139,7 +139,7 @@ def _run(kernel: LoopOp, out: Tensor, *, input_shape: tuple = (4, 16), consumed:
 
 
 def _conversions(op: LoopOp) -> list[DataType]:
-    return [s.dtype for s in op.body.iter() if isinstance(s, Assign) and s.op.name == "copy" and s.dtype is not None]
+    return [s.dtype for s in op.body.iter() if _is_copy(s) and s.dtype is not None]
 
 
 def test_narrowing_store_to_a_real_buffer_spells_its_rounding() -> None:
@@ -147,10 +147,10 @@ def test_narrowing_store_to_a_real_buffer_spells_its_rounding() -> None:
     op = _run(_reduce_kernel(), Tensor("out", (4,), F16))
     assert _conversions(op) == [F16]
     write = next(s for s in op.body.iter() if isinstance(s, Write))
-    converted = next(s for s in op.body.iter() if isinstance(s, Assign) and s.op.name == "copy")
+    converted = next(s for s in op.body.iter() if _is_copy(s))
     accum = next(s for s in op.body.iter() if isinstance(s, Accum))
     assert write.value == converted.name  # the store reads the rounded value...
-    assert converted.args == (accum.name,)  # ...which converts the accumulator
+    assert _names(converted) == (accum.name,)  # ...which converts the accumulator
 
 
 def test_transient_buffer_spells_nothing() -> None:
@@ -202,7 +202,7 @@ def test_public_copy_of_private_reduction_keeps_its_rounding_through_placement()
         placed = Pipeline.build(TILE_PASSES).run(graph, ctx=Context.from_target((7, 0)))
     tiles = [node.op for node in placed.nodes.values() if isinstance(node.op, TileOp)]
     consumer = next(tile for tile in tiles if "out" in tile.outputs)
-    copies = [stmt.dtype for stmt in Body(consumer.op.lower()).iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
+    copies = [stmt.dtype for stmt in Body(consumer.op.lower()).iter() if _is_copy(stmt)]
     assert len(tiles) == 2
     assert copies == [F16]
 

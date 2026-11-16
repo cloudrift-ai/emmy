@@ -15,10 +15,17 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import Assign, LoopOp
+from emmy.compiler.ir.stmt import Accum, Loop, StridedLoop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: F401
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import matmul_graph, requires_cuda
+from tests.compiler.helpers import compile_with_kernels, matmul_graph, operations, requires_cuda, statements, text
+
+
+def _folds_in_a_loop(kernel, op: str) -> bool:
+    """Whether ``kernel`` holds a loop whose body folds an accumulator with ``op``."""
+    loops = statements(kernel, Loop, StridedLoop)
+    return any(isinstance(stmt, Accum) and stmt.op.name == op for loop in loops for stmt in loop.body.iter())
 
 
 def _pointwise_add_graph() -> Graph:
@@ -32,10 +39,10 @@ def _pointwise_add_graph() -> Graph:
 
 
 def _reduce_sum_graph() -> Graph:
-    # K=128 > _MAX_UNROLL so the K loop survives in emitted CUDA;
-    # smaller extents would be fully unrolled by the unroll pass.
+    # K=256: the size rule steps the K loop 32 copies a trip, eight trips, so a loop survives in the kernel; at K=128
+    # the four trips left are written out in full, as ptxas wrote them out.
     g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 128)), node_id="x")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 256)), node_id="x")
     g.add_node(op=ReduceOp(op="sum", axis=-1), inputs=["x"], output=Tensor("y", (4, 1)), node_id="y")
     g.inputs = ["x"]
     g.outputs = ["y"]
@@ -52,7 +59,7 @@ def _boolean_not_graph() -> Graph:
 
 
 def _matmul_graph() -> Graph:
-    # K=128 > _MAX_UNROLL so the K loop survives in emitted CUDA.
+    # K=128: the size rule keeps a K loop of this contraction stepping, so it survives in the kernel.
     return matmul_graph(4, 128, 4)
 
 
@@ -87,36 +94,39 @@ def test_pointwise_emits_correct_source():
     nodes = _cuda_nodes(compiled)
     assert len(nodes) == 1
     source = nodes[0].op.kernel_source
-    assert "blockIdx.x" in source
-    assert "x[" in source and "y[" in source
+    assert "%tid.x" in source
+    assert "ld.global" in source and "st.global" in source
+    assert "buf0[" in source and "buf1[" in source  # buffers are spelled by their role, in the statement comments
 
 
-def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
+def test_boolean_bitwise_not_lowers_from_graph_loop_to_a_logical_not():
     loop_graph = Pipeline.build(LOOP_PASSES).run(_boolean_not_graph())
     loops = [node.op for node in loop_graph.nodes.values() if isinstance(node.op, LoopOp)]
     assert len(loops) == 1
-    next(stmt for stmt in loops[0] if isinstance(stmt, Assign) and stmt.op.name == "bitwise_not")
+    next(
+        stmt
+        for stmt in loops[0]
+        if isinstance(stmt, Assign) and stmt.value.operation is not None and stmt.value.operation.name == "bitwise_not"
+    )
 
     compiled = CudaBackend().compile(loop_graph)
+    # The negation is a comparison of the mask with zero, its truth stored as a byte.
     source = _cuda_nodes(compiled)[0].op.kernel_source
-    assert "== 0.0f" in source
+    assert "setp." in source and "st.global.u8" in source
 
 
 def test_reduce_emits_k_loop():
     # The scalar serial emitter with its K loop retained; the greedy pick may unroll the loop away.
     with pinned_knobs({"UNROLL": 0, "TILE": "", "REDUCE": ""}):
-        compiled = CudaBackend().compile(_reduce_sum_graph())
-    source = _cuda_nodes(compiled)[0].op.kernel_source
-    assert "for (int" in source
-    assert "+=" in source
+        _, kernels = compile_with_kernels(_reduce_sum_graph())
+    assert _folds_in_a_loop(next(iter(kernels.values())), "add")
 
 
 def test_contraction_emits_matmul():
     # Inspect the scalar serial emitter with its K loop retained.
     with pinned_knobs({"UNROLL": 0, "TILE": "", "REDUCE": ""}):
-        compiled = CudaBackend().compile(_matmul_graph())
-    sources = [n.op.kernel_source for n in _cuda_nodes(compiled)]
-    assert any("for (int " in s and "+=" in s for s in sources)  # accumulator fold
+        _, kernels = compile_with_kernels(_matmul_graph())
+    assert any(_folds_in_a_loop(kernel, "add") for kernel in kernels.values())  # accumulator fold
 
 
 def test_buffer_roles():
@@ -126,29 +136,36 @@ def test_buffer_roles():
     assert len(compiled.outputs) == 1
 
 
-def test_softmax_emits_multiple_k_loops():
-    """Softmax emits separate K-loops: the online reduce (running ``fmaxf`` max + the
-    rescaled running denominator, the twisted state-merge) then the per-element div —
-    two loops, not a single collapsed pass. (The online formulation folds max + sum in
-    one loop via the ``exp(x−m)`` twist, so the sum accumulates as a state-merge, not a
-    literal ``+=``.)"""
+def test_softmax_sweeps_k_twice():
+    """Softmax sweeps K twice: the online reduce (running max + the rescaled running
+    denominator, the twisted state-merge) then the per-element div — not a single
+    collapsed pass. (The online formulation folds max + sum in one sweep via the
+    ``exp(x−m)`` twist, so the sum accumulates as a state-merge, not a literal ``+=``.)
+    At K=8 the unroll passes write both sweeps out, so they are told apart by order:
+    every fold of the reduce stands ahead of every store of the output, and no loop
+    holds both."""
     with pinned_knobs({"PLACE": "fuse"}):
-        compiled = CudaBackend().compile(_softmax_graph())
-    sources = [n.op.kernel_source for n in _cuda_nodes(compiled)]
-    # Find the softmax-bearing kernel (contains fmaxf for max reduction).
-    softmax_src = next((s for s in sources if "fmaxf" in s), None)
-    assert softmax_src is not None, f"no kernel with fmaxf found; sources={sources}"
-    loop_count = softmax_src.count("for (int")
-    assert loop_count >= 2, f"expected >= 2 K-loops, got {loop_count}\n{softmax_src}"
-    assert "expf" in softmax_src  # the softmax numerator / online-reduce normalizer
+        compiled, kernels = compile_with_kernels(_softmax_graph())
+    # Find the softmax-bearing kernel (it folds a maximum).
+    softmax = next((kernel for kernel in kernels.values() if "maximum" in operations(kernel)), None)
+    assert softmax is not None, f"no kernel folds a maximum: {text(kernels)}"
+    order = statements(softmax)
+    folds = [at for at, stmt in enumerate(order) if isinstance(stmt, Accum)]
+    stores = [at for at, stmt in enumerate(order) if isinstance(stmt, Write) and stmt.output == compiled.outputs[0]]
+    assert folds and stores and folds[-1] < stores[0], f"the reduce must finish before the div stores\n{text(softmax)}"
+    for loop in statements(softmax, Loop, StridedLoop):
+        inner = list(loop.body.iter())
+        assert not (any(isinstance(s, Accum) for s in inner) and any(isinstance(s, Write) for s in inner)), text(softmax)
+    assert operations(softmax) & {"exp", "exp_fast"}  # the softmax numerator / online-reduce normalizer
 
 
-def test_softmax_emits_per_element_store():
-    """Softmax output is per-element: the final div stores inside a K-loop."""
-    compiled = CudaBackend().compile(_softmax_graph())
+def test_softmax_stores_every_element():
+    """Softmax output is per-element: each of a row's eight elements is stored as its
+    own value (the unroll passes write the K loop out, so the stores stand in its copies)."""
+    compiled, kernels = compile_with_kernels(_softmax_graph())
     out_name = compiled.outputs[0]
-    sources = [n.op.kernel_source for n in _cuda_nodes(compiled)]
-    assert any(f"{out_name}[" in s for s in sources)
+    stored = {str(value) for write in statements(kernels, Write) if write.output == out_name for value in write.values}
+    assert len(stored) == 8, text(kernels)
 
 
 def test_chained_pointwise_single_kernel():
@@ -178,9 +195,9 @@ def test_pointwise_runs_on_gpu():
 @requires_cuda
 def test_reduce_runs_on_gpu():
     compiled = CudaBackend().compile(_reduce_sum_graph())
-    x_data = [float(i) for i in range(4 * 128)]
+    x_data = [float(i) for i in range(4 * 256)]
     result, _ = CudaBackend().run(compiled, input_data={"x": x_data})
-    expected = [sum(x_data[row * 128 : (row + 1) * 128]) for row in range(4)]
+    expected = [sum(x_data[row * 256 : (row + 1) * 256]) for row in range(4)]
     assert list(result.outputs.values())[0].flatten().tolist() == pytest.approx(expected)
 
 

@@ -3,33 +3,27 @@
 Until this pass, the body of every materialized kernel carries scalar
 ``Load`` Stmts. Some sequences of those Loads have a "vector" shape: N
 consecutive Loads from the same source buffer whose last-dim indices differ
-by 0, 1, ..., N-1. The CUDA backend can emit those as a single
-``float<N>`` / ``__half2`` reinterpret-cast read followed by N ``.x/.y/.z/.w``
-unpacks. Folding the run into one ``Load(names=(n0, n1, ...), input, index)``
+by 0, 1, ..., N-1. The PTX compiler emits those as one vector load of N
+registers. Folding the run into one ``Load(names=(n0, n1, ...), input, index)``
 makes the optimization visible in the IR (``--ir kernel`` shows one Load with
-multiple LHS names) while keeping the renderer simple — ``Load.render``
-branches on the vector form.
+multiple LHS names).
 
 ## What the pass does
 
 For each ``Body`` (every nested Tile / Loop / StridedLoop / Cond body,
 post-order):
 
-1. Walk the stmts. At each scalar ``Load``, gather the later scalar Loads
-   of the same buffer that can move up to it: nothing between them defines
-   a name their index reads, and nothing between them writes the buffer.
-   An unrolled pointwise body interleaves each element's load with its
-   arithmetic, so a run is rarely adjacent.
-2. Try widths 16 then 8 then 4 then 2 over that group (16 only for 1-byte dtypes): the complete flat addresses
-   must form ``anchor, anchor+1, ..., anchor+n-1`` with an aligned anchor
-   for every free coordinate. If the target also supports
-   ``vector_type(elem_dtype, n)`` for the source-buffer dtype, replace the
-   loads with one widened ``Load`` at the first one's position.
-3. Otherwise advance one stmt.
+1. Take the scalar ``Load``s of each buffer and their complete flat addresses.
+2. Try widths 16 then 8 then 4 then 2 (16 only for 1-byte dtypes): ``n`` loads whose addresses form ``anchor,
+   anchor+1, ..., anchor+n-1`` with an aligned anchor for every free coordinate, which the scope's ordering
+   constraints let stand together (``Siblings``: nothing that must run between two of them, such as a write of the
+   buffer). Where they stand says nothing: an unrolled pointwise body interleaves each element's load with its
+   arithmetic. If the target also supports
+   ``vector_type(elem_dtype, n)`` for the source-buffer dtype, the loads become one widened ``Load``.
 
 Before grouping, a Load index ``(Y + r) / d`` whose ``Y`` is a non-negative multiple of ``g`` (variable coefficients
 times the strided-loop alignment), with ``g`` dividing ``d`` and ``0 < r < g``, reads ``Y / d``: every element of a
-lane's run then reads a block-scaled weight's scale at the run's own index, which nvcc loads once. On the V100 the
+lane's run then reads a block-scaled weight's scale at the run's own index, which is loaded once. On the V100 the
 width-1 fp8 down projection read 8 scales per 8-byte run and ran 181 us; read once per run it runs 127 us.
 
 ## Why this needs the source-buffer dtype
@@ -50,23 +44,15 @@ a manual override.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import replace
-from math import gcd
 
-from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Load, Stmt, StridedLoop
-from emmy.compiler.ir.stmt.passes import map_exprs
 from emmy.compiler.pipeline import Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.lowering.kernel._vector import strided_alignment, vector_run
+from emmy.compiler.pipeline.passes.lowering.kernel._vector import vectorize_loads
 from emmy.compiler.pipeline.search.space import VECTORIZE_LOADS
 
 PATTERN = [Pattern("root", KernelOp)]
-
-_TARGET = CudaRenderTarget()
 
 
 def rewrite(root: Node) -> KernelOp | None:
@@ -81,134 +67,5 @@ def rewrite(root: Node) -> KernelOp | None:
         return replace(top, body=top.body, knobs={**top.knobs, VECTORIZE_LOADS.name: False})
     # Stamp the policy (True) even when no run is foldable — the realized config
     # records that vectorization was enabled, keeping a uniform knob set.
-    new_body = _vectorize_body(top, top.body)
+    new_body = vectorize_loads(top, top.body)
     return replace(top, body=new_body, knobs={**top.knobs, VECTORIZE_LOADS.name: True})
-
-
-def _vectorize_body(top: KernelOp, body: Body, aligned: dict[str, int] | None = None) -> Body:
-    """Post-order body transform: recurse into nested bodies first, then
-    scan this scope for consecutive-Load runs. Threads ``top`` through so
-    constant-input filtering can resolve against the surrounding op, and
-    ``aligned`` — the alignment of each enclosing strided loop's variable."""
-    aligned = aligned or {}
-    descended: list[Stmt] = []
-    for s in body:
-        nested = s.nested()
-        if nested:
-            inner = {**aligned, s.axis.name: strided_alignment(s.start, s.step, aligned)} if isinstance(s, StridedLoop) else aligned
-            descended.append(s.with_bodies(tuple(_vectorize_body(top, b, inner) for b in nested)))
-        else:
-            descended.append(s)
-
-    descended = [map_exprs(s, lambda e: _fold_run_offset(e, aligned)) if isinstance(s, Load) else s for s in descended]
-    out: list[Stmt] = []
-    taken: set[int] = set()
-    for i, stmt in enumerate(descended):
-        if i in taken:
-            continue
-        group = _movable_loads(descended, i) if isinstance(stmt, Load) and stmt.is_scalar else [i]
-        for run_n in (16, 8, 4, 2):
-            vec = _try_vec_load([descended[j] for j in group], 0, run_n, top, aligned)
-            if vec is not None:
-                out.append(vec)
-                taken.update(group[:run_n])
-                break
-        else:
-            out.append(stmt)
-    vectorized = Body(tuple(out))
-    return body if vectorized == body else vectorized
-
-
-def _movable_loads(stmts: list[Stmt], start: int) -> list[int]:
-    """Positions of the Load at ``start`` and of every later scalar Load of the same buffer that
-    can move up to ``start``: no stmt between defines a name its index reads, and none writes
-    the buffer. A stmt with a nested body ends the search — it may write anything."""
-    first = stmts[start]
-    group = [start]
-    defined: set[str] = set(first.defines())
-    for j in range(start + 1, len(stmts)):
-        stmt = stmts[j]
-        if stmt.nested() or getattr(stmt, "output", None) == first.input:
-            break
-        if isinstance(stmt, Load) and stmt.is_scalar and stmt.input == first.input and not set(stmt.deps()) & defined:
-            group.append(j)
-        defined.update(stmt.defines())
-    return group
-
-
-def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp, aligned: dict[str, int]) -> Load | None:
-    """If ``stmts[start:start+n]`` matches the consecutive-Load pattern
-    and the target supports ``vector_type(elem_dtype, n)`` for the
-    source buffer's dtype, return the widened :class:`Load`. Otherwise
-    return ``None``."""
-    stmts_list = list(stmts)
-    if start + n > len(stmts_list):
-        return None
-    loads = stmts_list[start : start + n]
-    if not all(isinstance(s, Load) for s in loads):
-        return None
-    # Already-widened Loads in the run aren't safe to re-merge — bail.
-    if any(s.is_vector for s in loads):
-        return None
-    # No literal-constant loads (those render as embedded scalar floats).
-    if any(getattr(s, "input", None) is None for s in loads):
-        return None
-    # Every Load in the run must carry a stamped dtype (set by
-    # ``030_stamp_types``). If not, bail — the source dtype is the
-    # decision point for picking a vector type, and falling back to f32
-    # would silently mis-vectorize fp16 chains.
-    if any(s.dtype is None for s in loads):
-        return None
-
-    inputs = {s.input for s in loads}
-    if len(inputs) != 1:
-        return None
-    (input_name,) = inputs
-    src_tensor = top.inputs.get(input_name)
-    if src_tensor is not None and src_tensor.constant and src_tensor.value is not None:
-        # Scalar-constant inputs get inlined at CUDA lowering — the
-        # surrounding kernel doesn't take that buffer as a parameter,
-        # so a vectorized reinterpret_cast would reference an undefined
-        # symbol.
-        return None
-    src_dt = loads[0].dtype.name
-    if _TARGET.vector_type(src_dt, n) is None:
-        return None
-
-    if not vector_run([load.index for load in loads], src_tensor, n, aligned):
-        return None
-
-    return Load(
-        names=tuple(s.name for s in loads),
-        input=input_name,
-        index=loads[0].index,
-        dtype=loads[0].dtype,
-    )
-
-
-def _fold_run_offset(expr: Expr, aligned: dict[str, int]) -> Expr:
-    """``(Y + r) / d`` as ``Y / d`` where ``Y`` is a non-negative multiple of ``g`` (its variables' coefficients
-    times their known alignment), ``g`` divides ``d`` and ``0 < r < g``: the elements of a lane's run then read
-    a block scale at one index, the run's own."""
-    if not isinstance(expr, BinaryExpr):
-        return expr
-    left, right = _fold_run_offset(expr.left, aligned), _fold_run_offset(expr.right, aligned)
-    if expr.op == "/" and isinstance(right, Literal) and isinstance(right.value, int) and right.value > 0:
-        form = affine_form(left, left.free_vars())
-        anchor = form[0].simplify(SimplifyCtx.empty()) if form is not None else None
-        if isinstance(anchor, Literal) and isinstance(anchor.value, int) and anchor.value >= 0 and form[1]:
-            terms = [c * aligned.get(v, 1) for v, c in form[1].items()]
-            if all(t > 0 for t in terms):
-                offset = anchor.value % gcd(right.value, *terms)
-                if offset:
-                    left = _affine(form[1], anchor.value - offset)
-    return expr if (left, right) == (expr.left, expr.right) else BinaryExpr(expr.op, left, right)
-
-
-def _affine(coefficients: dict[str, int], constant: int) -> Expr:
-    """``Σ c·v + constant`` spelled the way the run's first element spells it."""
-    terms = [Var(v) if c == 1 else BinaryExpr("*", Var(v), Literal(c, "int")) for v, c in coefficients.items()]
-    expr = terms[0]
-    for term in terms[1:]:
-        expr = BinaryExpr("+", expr, term)
-    return BinaryExpr("+", expr, Literal(constant, "int")) if constant else expr

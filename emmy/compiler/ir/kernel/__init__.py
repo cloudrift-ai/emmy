@@ -1,24 +1,25 @@
-"""Kernel IR — fully-scheduled kernel form, lowered directly to CUDA source.
+"""Kernel IR — fully-scheduled kernel form, compiled to PTX.
 
 - :mod:`.ir` — dataclass definitions: the ``KernelOp`` wrapper plus the hardware
   primitives (launch geometry, shared memory, barriers, the transports into shared
   memory, the cross-thread combines, the tensor-core fragment nodes). Shared leaves and
   structural types (``Load``, ``Assign``, ``Loop``, ``StridedLoop``, …) come from
   ``ir.stmt``.
-- :mod:`.render` — ``render_kernelop`` emitting CUDA source.
+- :mod:`.ptx` — ``compile_kernel`` emitting PTX text.
 """
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.kernel.ir import (
     Accum,
     Assign,
-    BinaryExpr,
+    BinaryExpression,
     Builtin,
-    CastExpr,
+    CastExpression,
     Cond,
     ElementwiseImpl,
-    Expr,
-    FuncCallExpr,
+    Expression,
+    FunctionCallExpression,
+    Grid,
     KernelOp,
     Literal,
     Load,
@@ -26,10 +27,10 @@ from emmy.compiler.ir.kernel.ir import (
     Select,
     SelectBranch,
     Smem,
-    Stmt,
+    Statement,
     StridedLoop,
     Sync,
-    TernaryExpr,
+    TernaryExpression,
     Tile,
     TreeHalve,
     Var,
@@ -40,12 +41,12 @@ from emmy.compiler.ir.kernel.ir import (
 __all__ = [
     "Var",
     "Literal",
-    "BinaryExpr",
+    "BinaryExpression",
     "Builtin",
-    "FuncCallExpr",
-    "TernaryExpr",
-    "CastExpr",
-    "Expr",
+    "FunctionCallExpression",
+    "TernaryExpression",
+    "CastExpression",
+    "Expression",
     "Load",
     "Assign",
     "Select",
@@ -55,12 +56,13 @@ __all__ = [
     "Cond",
     "Loop",
     "Tile",
+    "Grid",
     "Smem",
     "Sync",
     "TreeHalve",
     "WarpShuffle",
     "StridedLoop",
-    "Stmt",
+    "Statement",
     "KernelOp",
     "Axis",
     "ElementwiseImpl",

@@ -36,7 +36,7 @@ from emmy.compiler.pipeline.search import Candidate
 # Canonical pass lists, indexed by the --ir stage they produce. Backends
 # and tests should reference these rather than re-listing pass names.
 TENSOR_PASSES = ["frontend/decomposition", "frontend/optimization"]
-LOOP_PASSES = [*TENSOR_PASSES, "loop/lowering", "loop/fusion", "loop/stamp"]
+LOOP_PASSES = [*TENSOR_PASSES, "loop/lowering", "loop/fusion"]
 # The tile passes: Loop IR to an unmapped tile, the kernel-set cuts to their fixpoint, then a schedule per
 # kernel. A pipeline that ends after ``tile/cut`` shows the cuts a kernel offers without scheduling any piece.
 TILE_LOWERING = ["tile/lift", "tile/cut", "tile/schedule"]

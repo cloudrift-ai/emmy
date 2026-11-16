@@ -16,6 +16,18 @@ from emmy.publish import model_slug
 # (decode_bucket, 256] ride this twin via the prefix upload (pad-up; per-token-independent),
 # wider row sets fall to the symbolic program. Every boot with an any-width program builds it.
 EXPERT_PREFILL_M = 256
+# The grouped prefill programs' expert count: on experts sliced across ranks, a prefill step runs its experts in
+# launches of this many, each against blocks of its rows: the decode bucket's for the experts routed that many rows or
+# fewer, ``EXPERT_PREFILL_M`` for the rest. The wide program's decoded weights are the launch's transient, 2.4 MB per
+# expert for Qwen3.8-Flash-Next's slices.
+EXPERT_GROUP = 32
+
+
+def slot_widths(bucket: int) -> tuple[int, ...]:
+    """The fixed-slot program's widths past one row, on experts sliced across ranks: the decode bucket and its halvings
+    down to two rows. A decode step runs the narrowest that holds its rows, so it reads no more experts than it must."""
+    return tuple(sorted({w for i in range(bucket.bit_length()) if (w := bucket >> i) > 1}))
+
 
 _KEY = re.compile(r"[A-Z][A-Z0-9_]*")
 _HEX_REVISION = re.compile(r"[0-9a-f]{7,40}")
@@ -60,6 +72,12 @@ class ServingConfig:
     #: programs at these widths.
     decode_width: int = 1
     prefill_width: int = 0
+    #: Native generation's own prefill chunk (``SERVE_NATIVE_PREFILL``, its ``--prefill-size``) where it is wider than
+    #: the plugin's, which it keeps for a prompt's tail; 0 when it runs the plugin's. The trunk's twins at it are rows
+    #: of the server's lane.
+    native_prefill: int = 0
+    #: The decode bucket (``SERVE_DECODE_BUCKET``): on experts sliced across ranks, the fixed-slot program's width.
+    decode_bucket: int = 0
     #: Whether the server runs the fast-math lane (``SERVE_ENV`` sets ``EMMY_FAST_MATH=1``), the one lane native
     #: generation compiles in.
     fast_math: bool = False
@@ -260,6 +278,10 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
         if min(decode, prefill) < 0 or maximum <= 0:
             raise ValueError(f"{source}: warm shape {spec!r} requires non-negative buckets and positive max tokens")
         lanes.append((decode, prefill, maximum, lane_pins[lane == "fm"]))
+    # Native generation's wider chunk: the trunk's static twins at it, in the server's lane, and no any-width row.
+    native_prefill = _integer(values, "SERVE_NATIVE_PREFILL", default=0, minimum=0)
+    if native_prefill:
+        lanes.append((0, native_prefill, 0, lane_pins[False]))
 
     standard_m1 = (1, 0, 1, lane_pins[False])
     if static_only and any(lane != standard_m1 for lane in lanes):
@@ -326,6 +348,8 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         native=values.get("SERVE_NATIVE") == "1",
         decode_width=1 if _integer(values, "SERVE_M1_TIER", default=1) else max(1, _integer(values, "SERVE_DECODE_BUCKET", minimum=0)),
         prefill_width=_integer(values, "SERVE_PREFILL_BUCKET", default=0, minimum=0),
+        native_prefill=_integer(values, "SERVE_NATIVE_PREFILL", default=0, minimum=0),
+        decode_bucket=_integer(values, "SERVE_DECODE_BUCKET", minimum=0),
         fast_math=_serve_env_flag(values, source, FAST_MATH),
         experts_gpu=_integer(values, "SERVE_EXPERTS_GPU", minimum=1) if values.get("SERVE_EXPERTS_GPU") else None,
         embed_gpu=_integer(values, "SERVE_EMBED_GPU", minimum=0) if values.get("SERVE_EMBED_GPU") else None,

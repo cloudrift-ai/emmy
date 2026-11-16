@@ -12,7 +12,7 @@ import numpy as np
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Let
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped

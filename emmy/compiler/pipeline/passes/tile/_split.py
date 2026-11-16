@@ -37,28 +37,25 @@ from dataclasses import replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.address import gmem_axis_step
+from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
-from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, apply
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Write
-from emmy.compiler.ir.stmt.passes import projection_distributes
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
 from emmy.compiler.pipeline.passes.tile._fromloop import carrying_loops, stored_states
-from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
+from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_nest, reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
-from emmy.compiler.structural import digest
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +81,12 @@ def splitk_width(k_axis: Axis, width: int) -> str | None:
 def _stream_refusal(node: Fold, k_axis: Axis, width: int) -> str | None:
     """Why the head fold's stream cannot split ``width`` ways (``None`` when it can): :func:`splitk_width` over a static
     stream. A symbolic one splits into slices of ``⌈K/w⌉`` positions, the last overhanging ``K``, whose loads clamp
-    to the stream's last position and whose lift folds the monoid's seed past its end (:func:`_masked`). The seed is
-    the identity of a plain monoid or a contraction, never of a twisted carrier's injected singleton, a carried state
-    or an observed scan."""
+    to the stream's last position and whose lift masks every position past its end (:func:`_masked`) — a monoid's or
+    a twisted carrier's, never a carried state's or an observed scan's."""
     if k_axis.extent.is_static:
         return splitk_width(k_axis, width)
-    if node.twist is not None or node.carries or node.observe is not None:
-        return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is built for a plain monoid or a contraction"
+    if node.carries or node.observe is not None:
+        return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is built for a monoid or a twisted carrier"
     return None
 
 
@@ -98,32 +94,48 @@ def _slice_length(k_axis: Axis, width: int):
     """The positions one partition's slice of the stream spans: ``K/w``, or ``⌈K/w⌉`` of a symbolic stream."""
     if k_axis.extent.is_static:
         return Literal(k_axis.extent.as_static() // width, "int")
-    return BinaryExpr("/", BinaryExpr("+", k_axis.extent.expr, Literal(width - 1, "int")), Literal(width, "int"))
+    return BinaryExpression("/", BinaryExpression("+", k_axis.extent.expression, Literal(width - 1, "int")), Literal(width, "int"))
 
 
 def _clamped(k_axis: Axis, position):
-    """``position`` as the stream's loads read it: a symbolic stream's overhanging slice reads its last position."""
-    if k_axis.extent.is_static:
-        return position
-    end = k_axis.extent.expr
-    return TernaryExpr(BinaryExpr("<", position, end), position, BinaryExpr("-", end, Literal(1, "int")))
+    """``position`` as the stream's loads read it: a symbolic stream's overhanging slice reads its last position
+    (:func:`~emmy.compiler.ir.address.clamp_to`, which the gmem-direct fragment loaders read back)."""
+    return position if k_axis.extent.is_static else clamp_to(position, k_axis.extent.expression)
 
 
 def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
-    """``fold`` folding its monoid's seed at every ``position`` past a symbolic stream's end, which the last slice
-    overhangs; a static stream's slices tile it exactly."""
+    """``fold`` folding nothing at any ``position`` past a symbolic stream's end, which the last slice overhangs; a
+    static stream's slices tile it exactly. A monoid folds its seed there. A twisted carrier's score takes the
+    pivot's identity, added through the `where` selects a program's own mask spells — the coordinate mask the chunk tier
+    lands — so the carrier past the end weighs its channels by nothing, and an all-overhang slice folds a finite
+    state the combine then scales away."""
     if k_axis.extent.is_static:
         return fold
-    inside = BinaryExpr("<", position, k_axis.extent.expr)
-    stmts, results = [], []
-    for name, seed in zip(fold.lift.results, fold.init, strict=True):
+    end = k_axis.extent.expression
+    stmts: list[Statement] = []
+    if fold.twist is None:
+        inside = BinaryExpression("<", position, end)
+        results = []
+        for name, seed in zip(fold.lift.results, fold.init, strict=True):
+            stmts += [
+                Let(name=f"{name}__seed", value=seed),
+                Select(name=f"{name}__in", branches=(SelectBranch(name, inside), SelectBranch(f"{name}__seed", Literal(True, "bool")))),
+            ]
+            results.append(f"{name}__in")
+    else:
+        score, *channels = fold.lift.results
         stmts += [
-            Let(name=f"{name}__seed", value=seed),
-            Select(name=f"{name}__in", branches=(SelectBranch(name, inside), SelectBranch(f"{name}__seed", Literal(True, "bool")))),
+            Let(name=f"{score}__key", value=position),
+            Let(name=f"{score}__end", value=end),
+            Let(name=f"{score}__keep", value=Literal(0.0, "float")),
+            Let(name=f"{score}__fill", value=Literal(float(fold.init[0]), "float")),
+            Assign(f"{score}__inside", apply("less", f"{score}__key", f"{score}__end")),
+            Assign(f"{score}__mask", apply("where", f"{score}__inside", f"{score}__keep", f"{score}__fill")),
+            Assign(f"{score}__in", apply("add", score, f"{score}__mask")),
         ]
-        results.append(f"{name}__in")
+        results = [f"{score}__in", *channels]
     body = Body((*fold.lift.body, *stmts))
-    return replace(fold, lift=Lambda.closing(fold.lift.params, body, tuple(results)))
+    return fold.replace(lift=Lambda.closing(fold.lift.params, body, tuple(results)))
 
 
 def _direct_atomic_output(outputs) -> str | None:
@@ -212,17 +224,10 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
     offered: an independent-projection kernel must partition into output-owning regions and the
     split fold must own one of them (a projection reading SEVERAL roots into one output has no
     piece to hand the epilogue to). The residence guard leads: a head fold the realization cannot
-    STRIP from the projection — neither the kernel's own node, an operand edge, nor a top-level
-    projection member (``head``'s sweep case: a fold reading the boundary store's sweep axis lands
-    inside the sweep ``Loop`` ``apply_output_specs`` wraps) — would leave the epilogue re-running
-    the whole reduction and shadowing the workspace states, so the split declines there."""
+    STRIP from the projection — one reading the boundary store's sweep axis lands inside the sweep
+    ``Loop`` ``apply_output_specs`` wraps — would leave the epilogue re-running the whole reduction
+    and shadowing the workspace states, so the split declines there."""
     op = tile.op
-    if (
-        op is not node
-        and all(edge is not node for edge in getattr(op, "operands", ()))
-        and not any(stmt is node for stmt in projection_tail(tile))
-    ):
-        return "the head fold is nested inside the projection's sweep loop; the split cannot strip it"
     if any(axis.name in node.free_axes for spec in tile.output_specs for axis in spec.sweep):
         return "the head fold is evaluated inside the boundary store's sweep loop; the split cannot strip it"
     if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
@@ -295,14 +300,13 @@ def split_forks(match: Match | None, root: Node, *, unsplit_tile: TileOp | None 
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
     element = axis_of(key)
-    # A kernel pin names the piece by its name, a ``node_`` pin the uncut root by its node id; the
-    # schedule pass reads them the same way (``040_schedule.pin_row``).
-    pin = kernel_pin("REDUCE", tile.name, root.id)
+    # A kernel pin names the kernel by its name; the schedule pass reads them the same way (``040_schedule.pin_row``).
+    pin = kernel_pin("REDUCE", tile.name)
     if pin is None:
         pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
     tail = projection_tail(tile)
     if pin is not None:
-        work = kernel_pin("WORK", tile.name, root.id)
+        work = kernel_pin("WORK", tile.name)
         plan = Reduce.parse(pin, Work.parse(work if work is not None else WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
@@ -355,7 +359,7 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(tile, split_consumed=True), {key: ""})
     element = axis_of(key)
-    pin = kernel_pin("REDUCE", tile.name, root.id)
+    pin = kernel_pin("REDUCE", tile.name)
     if pin is None:
         pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
 
@@ -366,7 +370,7 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
         return DeferredFork(lambda: realize_carry_split(match, root, cta), {key: spelling}, structural=True, output=output)
 
     if pin is not None:
-        work = kernel_pin("WORK", tile.name, root.id)
+        work = kernel_pin("WORK", tile.name)
         plan = Reduce.parse(pin, Work.parse(work if work is not None else WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
@@ -435,7 +439,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     loop, before, after = body[position], tuple(body[:position]), tuple(body[position + 1 :])
     part, probe = Axis("_part", Dim(cta)), Axis("_probe", Dim(2))
     sliced = replace(loop.axis, extent=Dim(steps), window=Window(parent=loop.axis.source_axis or loop.axis, partition=True))
-    sigma = Sigma({loop.axis.name: BinaryExpr("+", BinaryExpr("*", Var(part.name), Literal(steps, "int")), Var(loop.axis.name))})
+    sigma = Sigma(
+        {loop.axis.name: BinaryExpression("+", BinaryExpression("*", Var(part.name), Literal(steps, "int")), Var(loop.axis.name))}
+    )
     step = Body(tuple(stmt.substitute(sigma) for stmt in loop.body))
     probe_seed, probe_states, starts = f"{out.name}__probe_seed", f"{out.name}__probe", f"{out.name}__start"
 
@@ -445,9 +451,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
 
         def rewrite(stmt):
             if isinstance(stmt, Carry):
-                return replace(stmt, index=(*prefix, *stmt.index), seed=seed)
+                return stmt.replace(index=(*prefix, *stmt.index), seed=seed)
             if isinstance(stmt, Pre) and stmt.carrier == state:
-                return replace(stmt, index=(*prefix, *stmt.index))
+                return stmt.replace(index=(*prefix, *stmt.index))
             return stmt
 
         return stmts.map(rewrite)
@@ -459,22 +465,22 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         if isinstance(stmt, Loop) and not stmt.is_reduce and not stmt.body.carries and not stmt.body.iter_of_type(Write):
             return None  # an output sweep with nothing left to store
         if isinstance(stmt, Carry):
-            return (stmt, Write(output=probe_states, index=(Var(probe.name), Var(part.name), Var(sliced.name), *own), value=stmt.value))
+            return (stmt, Write(output=probe_states, index=(Var(probe.name), Var(part.name), Var(sliced.name), *own), values=(stmt.value,)))
         return stmt
 
     walk = indexed(step, (probe, part), probe_seed).map(probed)
     probe_body = Body((*before, *_nest(walk, (sliced, probe, part)), *after))
     # The probe's seeds: zero, and the identity between the mixed and the kept cell — ones
     # everywhere for a step reading its own cell alone, whose map is diagonal.
-    hit = BinaryExpr(">", Var(probe.name), Literal(0, "int"))
+    hit = BinaryExpression(">", Var(probe.name), Literal(0, "int"))
     if view.mixed is not None:
-        hit = BinaryExpr("&&", hit, BinaryExpr("==", own[view.mixed], own[view.kept]))
+        hit = BinaryExpression("&&", hit, BinaryExpression("==", own[view.mixed], own[view.kept]))
     seed_body = Body(
         (
             Let(name="_one", value=1.0),
             Let(name="_zero", value=0.0),
             Select(name="_seed", branches=(SelectBranch("_one", hit), SelectBranch("_zero", Literal(True, "bool")))),
-            Write(output=probe_seed, index=(Var(probe.name), Var(part.name), *own), value="_seed"),
+            Write(output=probe_seed, index=(Var(probe.name), Var(part.name), *own), values=("_seed",)),
         )
     )
     seed_kernel = _nest(seed_body, (probe, part, *cell_axes))
@@ -484,17 +490,17 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     last = Literal(steps - 1, "int")
     carried = f"{state}__across"
 
-    def at(position: int | None, expr) -> tuple:
-        return tuple(expr if index == position else coordinate for index, coordinate in enumerate(own))
+    def at(position: int | None, expression) -> tuple:
+        return tuple(expression if index == position else coordinate for index, coordinate in enumerate(own))
 
     def applied(along) -> tuple:
         # ``A_p`` at this cell's row and column ``along`` times the state at column ``along``.
         return (
-            Load(name="_one_walk", input=probe_states, index=(Literal(1, "int"), Var(part.name), last, *at(view.kept, along))),
-            Load(name="_zero_walk", input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *at(view.kept, along))),
-            Assign(name="_a", op="subtract", args=("_one_walk", "_zero_walk")),
+            Load(names=("_one_walk",), input=probe_states, index=(Literal(1, "int"), Var(part.name), last, *at(view.kept, along))),
+            Load(names=("_zero_walk",), input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *at(view.kept, along))),
+            Assign("_a", apply("subtract", "_one_walk", "_zero_walk")),
             Pre(name="_s", carrier=carried, index=at(view.mixed, along)),
-            Assign(name="_as", op="multiply", args=("_a", "_s")),
+            Assign("_as", apply("multiply", "_a", "_s")),
         )
 
     if view.mixed is None:
@@ -508,11 +514,11 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         Body(
             (
                 *mapped,
-                Load(name="_b", input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *own)),
+                Load(names=("_b",), input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *own)),
                 Pre(name="_from", carrier=carried, index=own),
-                Assign(name="_next", op="add", args=(product, "_b")),
+                Assign("_next", apply("add", product, "_b")),
                 Carry(name=carried, value="_next", index=own, seed=node.init[0]),
-                Write(output=starts, index=(Var(part.name), *own), value="_from"),
+                Write(output=starts, index=(Var(part.name), *own), values=("_from",)),
             )
         ),
         (part, *cell_axes),
@@ -528,21 +534,21 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         starts: (Dim(cta), *extents),
     }
 
-    def piece(body: Body, name: str) -> TileOp:
-        lifted = lift_kernel(LoopOp(body=body), name=name, shapes=shapes)
+    def piece(body: Body) -> TileOp:
+        lifted = lift_nest(body, shapes)
         return replace(lifted, knobs=consume_kernel_row(lifted.knobs))
 
     frag = _frag(match, root)
-    seed_tile = piece(seed_kernel, f"{tile.name}__probe_seed")
+    seed_tile = piece(seed_kernel)
     frag.add_node(op=seed_tile, inputs=[], output=Tensor(probe_seed, shapes[probe_seed], F32), node_id=probe_seed)
-    probe_tile = piece(probe_body, f"{tile.name}__probe")
+    probe_tile = piece(probe_body)
     frag.add_node(
         op=probe_tile,
         inputs=_piece_inputs(root, probe_tile, probe_seed),
         outputs=(Tensor(probe_states, shapes[probe_states], F32), *state_ports(probe_tile, probe_states)),
         node_id=probe_states,
     )
-    prefix_tile = replace(piece(prefix_body, f"{tile.name}__prefix"), split_consumed=True)
+    prefix_tile = replace(piece(prefix_body), split_consumed=True)
     seeded = [node.init[0]] if isinstance(node.init[0], str) else []
     frag.add_node(
         op=prefix_tile,
@@ -550,7 +556,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         outputs=(Tensor(starts, shapes[starts], F32), *state_ports(prefix_tile, starts)),
         node_id=starts,
     )
-    walk_tile = piece(walk_body, tile.name)
+    walk_tile = piece(walk_body)
     # The walk owns the outputs the kernel stored, not the state port the lift gave the kernel:
     # its own port replaces that one, travelling under a temporary until the splice hands it the
     # name, the way every replaced buffer does.
@@ -570,7 +576,7 @@ def _slice_fold(fold: Fold, axis: Axis, width: int, split: Axis) -> tuple[Axis, 
     """``(the sliced axis, the same monoid Fold over one CTA's absolute contiguous slice)`` — the
     generic (non-contraction) slicer: the whole fold rides ``Fold.rewrite`` under the σ-offset."""
     b = _slice_length(axis, width)
-    offset = BinaryExpr("+", Var(axis.name), BinaryExpr("*", Var(_SPLIT), b))
+    offset = BinaryExpression("+", Var(axis.name), BinaryExpression("*", Var(_SPLIT), b))
     sigma = Sigma({axis.name: _clamped(axis, offset)})
     sliced_axis = replace(axis, extent=Dim(b), window=Window(parent=axis.source_axis or axis, partition=True))
     # RE-DERIVED over a narrower axis, not renamed and not substituted-through: the fold keeps its
@@ -585,10 +591,10 @@ def _slice_fold(fold: Fold, axis: Axis, width: int, split: Axis) -> tuple[Axis, 
     # piece whose head IS such a masked reduce makes the split pass offer ``g<n>k`` on it, and greedy
     # prices a fork by materializing every arm, so merely OFFERING the split raised.
     lift = Lambda.closing(fold.lift.params, body, fold.lift.results)
-    return sliced_axis, _masked(replace(fold, operands=operands, lift=lift), axis, offset)
+    return sliced_axis, _masked(fold.replace(operands=operands, lift=lift), axis, offset)
 
 
-def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpr]:
+def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpression]:
     """Factor a contraction axis into ``ksplit × kslice``. ``ksplit`` (extent ``w``, name
     ``_<k>_ks``) becomes the partial's lead grid axis, parallelized across CTAs and combined in
     the finalize; ``kslice`` (extent ``K/w``, or ``⌈K/w⌉`` of a symbolic axis, the ORIGINAL name)
@@ -600,7 +606,7 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpr]:
     b = _slice_length(k_axis, w)
     ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
     kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))
-    position = BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), b), Var(k_axis.name))
+    position = BinaryExpression("+", BinaryExpression("*", Var(ksplit.name), b), Var(k_axis.name))
     return ksplit, kslice, Sigma({k_axis.name: _clamped(k_axis, position)}), position
 
 
@@ -614,7 +620,7 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | No
     every partition, each recomputing it — the REDUNDANT-STATISTIC split. That redundancy is what
     the split trades for parallelism; whether it pays on a given shape is evidence's decision."""
     if isinstance(edge, Load):
-        return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
+        return edge.replace(index=tuple(sigma.apply(e) for e in edge.index))
 
     ops = tuple(_sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
     body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
@@ -624,7 +630,7 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | No
     # moved with the hash seed and ``_prune_unread`` then dropped a param the body still read.
     # Closing keeps the prefix exactly and appends the partition coordinate where a coordinate sits.
     lift = Lambda.closing(edge.lift.params, body, edge.lift.results)
-    return replace(edge, operands=ops, lift=lift)
+    return edge.replace(operands=ops, lift=lift)
 
 
 def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, Fold]:
@@ -643,13 +649,16 @@ def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, F
     # no k and this changes nothing; one that reads the contraction coordinate DIRECTLY is
     # comparing against a partition-local index while its operands already reach absolute k.
     # Causal attention is exactly that lift: its mask is ``row < key``, and left unreindexed every
-    # partition above the first admits keys far above the diagonal.
+    # partition above the first admits keys far above the diagonal. The lift reads the absolute key
+    # UNCLAMPED: only a load needs the clamp, and a mask that compared a clamped key would admit the
+    # overhang as the stream's last position — :func:`_masked` masks it, and the chunk tier reads
+    # the comparison for its stream bounds, which a clamp would hide.
     # Re-CLOSED, not re-spelled: the head's first param is its iteration binder, which must keep
     # its position, so the partition coordinate the substituted body now reads joins as a TRAILING
     # param — where a coordinate already sits, and past the operand correspondence.
-    body = Body(tuple(stmt.substitute(sigma) for stmt in node.lift.body))
+    body = Body(tuple(stmt.substitute(Sigma({node.axis: position})) for stmt in node.lift.body))
     lift = Lambda.closing(node.lift.params, body, node.lift.results)
-    return ksplit, kslice, _masked(replace(node, operands=operands, lift=lift), k_axis, position)
+    return ksplit, kslice, _masked(node.replace(operands=operands, lift=lift), k_axis, position)
 
 
 # ---- the piece / fragment builders ------------------------------------------------------------ #
@@ -700,8 +709,7 @@ def add_output_piece(frag: Graph, root: Node, piece: TileOp, inputs: list[str], 
     piece = replace(
         piece,
         output_specs=tuple(
-            replace(spec, write=replace(spec.write, output=renamed.get(spec.write.output, spec.write.output)))
-            for spec in piece.output_specs
+            replace(spec, write=spec.write.replace(output=renamed.get(spec.write.output, spec.write.output))) for spec in piece.output_specs
         ),
     )
     tensors = (
@@ -735,11 +743,11 @@ def _with_axes(axes: tuple, *new: Axis) -> tuple:
     return tuple({**{axis.name: axis for axis in axes}, **{axis.name: axis for axis in new}}.values())
 
 
-def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple, name: str = "", shapes: dict) -> TileOp:
+def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple, shapes: dict) -> TileOp:
     """One fresh unscheduled Tile kernel over ``op`` and the axis table ``axes``, formed as its own kernel
     (:func:`~._row.reformed`) over the buffers ``shapes`` names: its nest lowered and lifted again, the loop op it
-    came from kept as its source. An unnamed piece launches under its graph node's id."""
-    piece = reformed(TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes, name=name), shapes)
+    came from kept as its source."""
+    piece = reformed(TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes), shapes)
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
     # identity. Built fresh here, so this states the contract rather than doing work — and the rule
     # that mints a kernel is where that has to be said.
@@ -775,7 +783,7 @@ def _rebind(term: Fold, node: Fold, replacement: Fold) -> Fold:
     if term is node:
         return replacement
     operands = tuple(_rebind(edge, node, replacement) for edge in term.operands)
-    return term if operands == term.operands else replace(term, operands=operands)
+    return term if operands == term.operands else term.replace(operands=operands)
 
 
 def output_root(root: Node, outputs: set[str]) -> Node:
@@ -809,21 +817,6 @@ def _split_projection(tile: TileOp, root: Node, selected: Fold):
     return (*chosen, tuple(pieces))
 
 
-def _projection_piece_name(root: Node) -> str:
-    """Keep a cut producer's output token when a split detaches its other projection roots.
-
-    The output buffer already names the cut that produced it. A split can separate several
-    independent roots of that producer, so each fresh sibling needs its own last ``__place_``
-    token for child-scoped PLACE pins. Ordinary outputs use their own stable buffer identity.
-    """
-    parent = root.op.name
-    suffix = root.id.rpartition("__place_")[2]
-    token, separator, ordinal = suffix.rpartition("_")
-    if not (separator and len(token) == 10 and all(c in "0123456789abcdef" for c in token) and ordinal.isdigit()):
-        token = digest(*root.buffer_names())[:10]
-    return f"{parent}__place_{token}"
-
-
 def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple, shapes: dict) -> Graph:
     """Add the unsplit independent projection Folds as fresh schedulable kernels. Each is a piece
     of the REALIZED split — the kernel-set decision was consumed by the kernel it addressed, and
@@ -837,7 +830,6 @@ def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple
                 free,
                 output_specs=stores,
                 axes=root.op.axes,
-                name=_projection_piece_name(root),
                 shapes=shapes,
             ),
             split_consumed=True,
@@ -890,7 +882,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         # projection (the offer read the whole tail, a conservative superset — see its docstring).
         _enforce(atomic_finalize(partial_fold, projection, tile.outputs))
         if stores:
-            p_stores = tuple(replace(store, write=replace(store.write, atomic=True)) for store in stores)
+            p_stores = tuple(replace(store, write=store.write.replace(atomic=True)) for store in stores)
         else:
             p_stores = (OutputSpec(write=Write(output=out.name, index=cell, values=states, atomic=True)),)
         piece = _piece(
@@ -898,7 +890,6 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
             (split, *free),
             output_specs=p_stores,
             axes=axes,
-            name=tile.name,
             shapes=shapes,
         )
         result = _one(frag, root, piece)
@@ -916,7 +907,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # saturate outlier partials to ±inf before the combine and costs the mantissa of every
     # partition sum).
     def output_stride(axis):
-        steps = (gmem_axis_step(Load("", store.write.output, store.write.index), axis.name, tile.outputs) for store in stores)
+        steps = (gmem_axis_step(Load(("",), store.write.output, store.write.index), axis.name, tile.outputs) for store in stores)
         return min((abs(step[0]) for step in steps if step is not None and step[0]), default=float("inf"))
 
     # Preserve the output's contiguous axes across the split. Free-axis order is a traversal
@@ -934,13 +925,8 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # --- partial kernel: reduce a CTA's slice, write its carrier state to the workspace. The
     # split axis joins as a lead grid axis via the partial tile's OWN placement — the view derives
     # lead axes from the placement, so nothing is restamped on the node.
-    ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
-    # The partial and the finalize keep the name of the kernel they split, so a kernel pin naming a
-    # piece (``place_<token>_1``) still names both halves of its split; an unnamed kernel (a route's
-    # uncut root) keeps launching under its graph node's id, which a ``node_`` pin names.
-    partial_tile = _piece(
-        partial_fold, (split, *free), output_specs=ws_stores, axes=axes, name=tile.name and f"{tile.name}__partial", shapes=shapes
-    )
+    ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), values=(states[i],))) for i in range(n_comp))
+    partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores, axes=axes, shapes=shapes)
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the
@@ -949,14 +935,14 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # finalize too and its workspace collides with the partial's (``<out>__partial`` exists).
     fin_axis = replace(split, window=Window(parent=split, partition=True))
     other = tuple(f"{nm}__p" for nm in states)
-    loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
+    loads = tuple(Load(names=(other[i],), input=ws_name, index=ws_index(i)) for i in range(n_comp))
     fin_fold = _state_fold(fin_axis, partial_fold, loads)
     fin_stores = stores
     if not fin_stores:
         # A bare carrier's grid-cell store is materializer glue; the finalize spells it over the
         # value the region exposes, or the carrier's primary state.
         out_val = region.exposes[0] if region.exposes else states[0]
-        fin_stores = (OutputSpec(write=Write(output=out.name, index=cell, value=out_val)),)
+        fin_stores = (OutputSpec(write=Write(output=out.name, index=cell, values=(out_val,))),)
     # The finalize is stamped AFTER the workspace joins the fragment: it reads that buffer, and a
     # kernel's structural features fold in its operands' dtypes, which only resolve once the
     # buffer is a graph node.
@@ -966,7 +952,6 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         free,
         output_specs=fin_stores,
         axes=_with_axes(tile.axes, fin_axis),
-        name=tile.name,
         shapes=shapes,
     )
     result = add_output_piece(frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
@@ -974,3 +959,62 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
 
 
 __all__ = ["atomic_finalize", "realize_carry_split", "realize_split", "split_forks", "splitk_width", "state_ports"]
+
+
+def projection_distributes(body, states: tuple[str, ...]) -> bool:
+    """True if the kernel's projection epilogue is a **linear-homogeneous** map of the carried
+    state(s) — i.e. it distributes over the atomic-add combine, so applying it to each CTA's
+    partition before the ``atomicAdd`` equals applying it once after the cross-CTA sum
+    (``Σ c·xₛ = c·(Σ xₛ)``). A bare state write (``proj = id``) trivially distributes; a constant
+    *scale* — ``mean``'s ``/N`` — does; an additive offset (a fused bias), a nonlinear unary
+    (``relu`` / ``reciprocal`` of the *state*), or a product of two state-derived values do NOT.
+
+    Conservative forward dataflow: ``linear`` is the set of SSA names that are a
+    linear-homogeneous function of the state. Multiplication by or division by a state-independent
+    operand grows this set; division requires the state in the numerator. Any other op that consumes a
+    ``linear`` value — or any projection stmt we can't reason about — refuses. The final ``Write``
+    must store only ``linear`` values."""
+    linear = set(states)
+    for s in body:
+        if isinstance(s, Write):
+            return all(v in linear for v in s.values)
+        if isinstance(s, Load):
+            continue  # reads memory (the count / a per-output operand) — state-independent
+        if isinstance(s, Let):
+            if s.value.free_vars() & linear:
+                return False
+            continue  # a literal or coordinate expression independent of the carried state
+        if not isinstance(s, Assign):
+            return False  # an unfamiliar projection stmt — can't prove distributivity
+        kind = _homogeneity(s.value, linear)
+        if kind == "constant":
+            continue  # state-independent — a constant w.r.t. the split
+        if kind is None:
+            return False  # offset / inverse / nonlinear of a state value breaks distributivity
+        linear.add(s.name)
+    return False  # no Write reached
+
+
+def _homogeneity(value, linear: set[str]) -> str | None:
+    """How ``value`` depends on the carried state: ``"linear"`` for a linear-homogeneous function of the ``linear``
+    names (a sum of them, one scaled or divided by a constant), ``"constant"`` for none of them, ``None`` for anything
+    else (an offset beside a state term, a product of two state values, a nonlinear unary of one)."""
+    if isinstance(value, Var):
+        return "linear" if value.name in linear else "constant"
+    if isinstance(value, Literal):
+        return "constant"
+    op = value.operation
+    if op is None:
+        return None
+    kinds = [_homogeneity(operand, linear) for operand in value.operands]
+    if any(kind is None for kind in kinds):
+        return None
+    if all(kind == "constant" for kind in kinds):
+        return "constant"
+    if op.name in ("add", "subtract", "negative"):
+        return "linear" if all(kind == "linear" for kind in kinds) else None
+    if op.name == "multiply" and kinds.count("linear") == 1:
+        return "linear"
+    if op.name == "divide" and kinds == ["linear", "constant"]:
+        return "linear"
+    return None

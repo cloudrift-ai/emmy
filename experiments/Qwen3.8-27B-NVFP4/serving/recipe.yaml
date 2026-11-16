@@ -79,6 +79,16 @@ matrices:
     benchmark.random_output_len: 256
     benchmark.max_concurrency: 64
     benchmark.num_prompts: 320
+  # Full-context latency lane: three non-streaming requests, one at a time, each filling the 114,688 context
+  # (114,176 prompt tokens, 512 generated). A request has the 290 s a deployed request has before Relay abandons it.
+  - <<: *rtx5090
+    benchmark.session_calls: 1
+    benchmark.session_request_timeout_s: 290
+    benchmark.random_input_len: 114176
+    benchmark.random_output_len: 512
+    benchmark.max_concurrency: 1
+    benchmark.num_prompts: 3
+    benchmark.num_warmups: 0
   # Comparison lane: 8,192-token prefill chunk. The larger chunk leaves a little less pool, so the context drops.
   - <<: *rtx5090
     engine.llm.context_length: 98304

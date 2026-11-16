@@ -17,13 +17,14 @@ from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.loop import Accum, Affine, Assign, LoopOp, Write
+from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp, ScanOp
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import compile_with_kernels, statements
 
 _backend = NumpyBackend()
 rng = np.random.default_rng(0)
@@ -56,13 +57,70 @@ def _input(g: Graph, name: str, shape: tuple) -> str:
     return g.add_node(op=InputOp(), inputs=[], output=Tensor(name, shape), node_id=name)
 
 
+def _spine(value, out=None):
+    """The shape of every maximal sum in ``value``, outermost first: its sorted literal coefficients and its offset, one
+    entry per affine region (additions, subtractions, negations and literal scales), the analog of one sum statement.
+    A term below a non-affine operation (``exp(-x)``) is its own region."""
+    out = [] if out is None else out
+    op = value.operation
+    name = op.name if op is not None else None
+    scaled = name == "multiply" and any(isinstance(operand, Literal) for operand in value.operands)
+    if name in ("add", "subtract", "negative") or scaled:
+        terms: list = []
+        offset = _terms(value, 1.0, terms)
+        out.append((tuple(sorted(coefficient for coefficient, _ in terms)), offset))
+        for _, leaf in terms:
+            _spine(leaf, out)
+    else:
+        for child in value.children():
+            _spine(child, out)
+    return out
+
+
+def _terms(value, scale: float, terms: list) -> float:
+    """Collect ``value``'s affine terms as ``(coefficient, leaf)`` under ``scale``; the literal offset is returned."""
+    if isinstance(value, Literal):
+        return scale * float(value.value)
+    op = value.operation
+    name = op.name if op is not None else None
+    operands = value.operands
+    if name == "add":
+        return sum(_terms(operand, scale, terms) for operand in operands)
+    if name == "subtract":
+        return _terms(operands[0], scale, terms) + _terms(operands[1], -scale, terms)
+    if name == "negative":
+        return _terms(operands[0], -scale, terms)
+    if name == "multiply" and any(isinstance(operand, Literal) for operand in operands):
+        literal, other = sorted(operands, key=lambda operand: not isinstance(operand, Literal))
+        return _terms(other, scale * float(literal.value), terms)
+    terms.append((scale, value))
+    return 0.0
+
+
+def _operations(body) -> list[str]:
+    """The elementwise operations a body computes beyond its sums: every operation node of an ``Assign`` or ``Accum``
+    value that is not part of an affine region (an addition, a subtraction, a negation, a literal scale)."""
+    names = []
+    for stmt in body.iter():
+        if not isinstance(stmt, (Assign, Accum)):
+            continue
+        for node in stmt.value.subterms():
+            op = node.operation
+            if op is None or op.name in ("add", "subtract", "negative"):
+                continue
+            if op.name == "multiply" and any(isinstance(operand, Literal) for operand in node.operands):
+                continue
+            names.append(op.name)
+    return names
+
+
 def _elementwise_fns(body) -> list[str]:
-    return [s.op.name for s in body.iter() if isinstance(s, Assign)]
+    return _operations(body)
 
 
 def _affine_shapes(body) -> list[tuple[tuple[float, ...], float]]:
-    """Every Affine's sorted coefficients and offset: the folded form a sum, difference or negation takes."""
-    return sorted((tuple(sorted(s.coefficients)), s.offset) for s in body.iter() if isinstance(s, Affine))
+    """Every sum's top-level shape in a body (see ``test_fusion_rules._affine_shapes``)."""
+    return sorted(shape for s in body.iter() if isinstance(s, (Assign, Accum)) for shape in _spine(s.value))
 
 
 def _has_update(body) -> bool:
@@ -137,11 +195,11 @@ def test_scan_sum_lifts_and_preserves_prefix_values():
     assert any(accum.op.name == "add" for accum in launches[0].op.body.accums)
     _assert_pipeline_preserves_semantics(make_graph, {"x": np.arange(8, dtype=np.float32).reshape(2, 4)}, rtol=0, atol=0)
 
-    lowered = Pipeline.build(CUDA_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
-    cuda_ops = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(cuda_ops) == 1
-    source = cuda_ops[0].kernel_source
-    assert source.index("+=") < source.index("out[")
+    _, kernels = compile_with_kernels(make_graph(), ctx=Context.from_target((8, 9)))
+    assert len(kernels) == 1
+    order = statements(kernels, Accum, Write)
+    fold = next(i for i, stmt in enumerate(order) if isinstance(stmt, Accum) and stmt.op.name == "add")
+    assert fold < next(i for i, stmt in enumerate(order) if isinstance(stmt, Write) and stmt.output == "out")
 
 
 def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
@@ -176,21 +234,23 @@ def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
     assert pinned_scan.schedule is not None and pinned_scan.place.is_mapped
     assert family_value(pinned_scan.knobs, "REDUCE") == "coop" and pinned_scan.knobs["WORK"] == "t4"
 
-    lowered = Pipeline.build(CUDA_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
-    source = next(
-        node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and "out[" in node.op.kernel_source
-    )
-    lines = source.splitlines()
-    update = next(i for i, line in enumerate(lines) if "acc0 +=" in line)
-    # The stored value is the observer's fresh name (``acc0__obs``), never the raw accumulator —
-    # the boundary distinguishes a streamed store from a post-fold store by exactly that name.
-    write = next(i for i, line in enumerate(lines) if line.lstrip().startswith("out[") and " = acc0__obs;" in line)
-    loop_open = max(i for i in range(update) if lines[i].lstrip().startswith("for ("))
-    loop_indent = len(lines[loop_open]) - len(lines[loop_open].lstrip())
-    loop_close = next(
-        i for i in range(update + 1, len(lines)) if lines[i].strip() == "}" and len(lines[i]) - len(lines[i].lstrip()) == loop_indent
-    )
-    assert update < write < loop_close, "the prefix store must execute after each accumulator update"
+    _, kernels = compile_with_kernels(make_graph(), ctx=Context.from_target((8, 9)))
+    kernel = next(kernel for kernel in kernels.values() if any(write.output == "out" for write in statements(kernel, Write)))
+    # The kernel body's normal form drops the observer's copy of the accumulator: the store reads the updated value,
+    # in the scope that updates it, ahead of the next update. The scope is the loop's body while it rolls, and the
+    # kernel's own once the unroll passes write the trips out.
+    folds = 0
+    for body in (kernel.body, *(nested for stmt in kernel.body.iter() for nested in stmt.nested())):
+        pending: set[str] = set()
+        for stmt in body:
+            if isinstance(stmt, Accum) and stmt.op.name == "add":
+                assert stmt.name not in pending, "the prefix store must execute after each accumulator update"
+                pending.add(stmt.name)
+                folds += 1
+            elif isinstance(stmt, Write) and stmt.output == "out":
+                pending -= {name for name in pending if tuple(stmt.values) == (name,)}
+        assert not pending, "the prefix store must execute after each accumulator update"
+    assert folds, "the scan folds its prefix"
 
 
 def test_matmul():

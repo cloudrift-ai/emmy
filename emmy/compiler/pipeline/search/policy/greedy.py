@@ -54,11 +54,8 @@ is off the kernel-set ballot while another arm remains. Still evidence, still no
 preference — the alternative is that an all-failed kernel has no ``ok`` row,
 therefore no evidence at all, and falls through to the prior as though nothing
 were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
-every benched variant hung. The kernel a cut leaves standing keeps its parent's
-fusion minus one producer, so a failure of the kernel or of such a remainder also
-takes the keep-whole arm off every fork down that remainder chain
-(:func:`_kernel_set_pick`): a GDN layer whose fused form hung was otherwise traded
-for its one-producer-lighter sibling, which hung too, compile after compile.
+every benched variant hung. A failure of a kernel, or of a piece one of its cuts
+leaves, also takes the keep-whole arm off that kernel's fork (:func:`_kernel_set_pick`).
 """
 
 from __future__ import annotations
@@ -74,8 +71,8 @@ from emmy import config
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import iter_leaves, leaf_for, leaf_knobs, parallel_descent_rows, parallel_expand
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
-from emmy.compiler.pipeline.search.features import Featurizer
-from emmy.compiler.wire import kernel_identity
+from emmy.compiler.pipeline.search.features import Featurizer, kernel_pieces
+from emmy.compiler.wire import kernel_bindings, kernel_identity, kernel_tile
 
 logger = logging.getLogger(__name__)
 
@@ -187,23 +184,18 @@ def _load_placement_prior():
     return prior if prior.space == "placement" else None
 
 
-def _kernel_set_pick(fp: ForkPoint, prior, failed: dict, refused: set[str] | None = None) -> object:
+def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
     """The placement prior's argmin over a kernel-set fork's arms — keep the kernel whole and every cut, split or
     layout the pass offers — each featurized from the kernels it leaves (``Featurizer.features``), exactly as the
     arms of the placement dataset the prior was fit on (``ranking.walk_placement``). An arm that leaves a kernel
     whose every measured variant failed (``failed``, :class:`_Measured`) is off the ballot while another arm
     remains. With no ``prior`` the first arm left wins, and the first of equally scored arms wins.
 
-    A failure also rules out keeping whole every kernel that contains the kernel that failed: each piece a cut
-    leaves computes part of its parent, and a kernel that never finished does not finish inside a bigger one. So the
-    arm that keeps a kernel whole is off where the kernel failed, where a piece one of its cuts leaves failed, or
-    where it is the remainder (the piece that keeps the parent's name) of a kernel an earlier fork of this compile
-    refused to keep whole (``refused``, exact identities); the remainders its cuts leave are refused in turn. One
-    failure then cuts the whole remainder chain in one compile, instead of trading the fused variant that hung for its
-    one-producer-lighter sibling compile after compile. Refusal outranks the arms rule: a cut that leaves a failed
-    piece stays on the ballot when no other cut does, because that piece meets its own fork and is cut there."""
+    A failure also rules out keeping the kernel whole wherever it or a piece one of its cuts leaves failed: each
+    piece computes part of its parent, and a kernel that never finished does not finish inside a bigger one. That
+    outranks the arms rule: a cut that leaves a failed piece stays on the ballot when no other cut does, because that
+    piece meets its own fork and is cut there."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.features import kernel_pieces  # noqa: PLC0415
 
     leaves = fp.flat()
     if len(leaves) == 1:
@@ -212,14 +204,11 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict, refused: set[str] | Non
     parallel_expand([o for o in leaves if _is_structural_option(o)], workers=config.workers())
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
     live = list(range(len(leaves)))
-    if failed or refused:  # the exact identity of every piece of every arm is computed only to be looked up here
-        left = [[(op.name, _read(kernel_identity(op))) for op, _ in kernel_pieces(piece)] for piece in pieces]
-        refuse = refused is not None and (kernel_identity(root) in refused or any(key in failed for kept in left for _, key in kept))
-        if refuse:
+    if failed:  # the exact identity of every piece of every arm is computed only to be looked up here
+        left = [[_read(kernel_identity(op)) for op, _ in kernel_pieces(piece)] for piece in pieces]
+        if any(key in failed for kept in left for key in kept):
             live = [i for i in live if _is_structural_option(leaves[i])] or live
-        live = [i for i in live if not any(key in failed for _, key in left[i])] or live
-        if refuse:
-            refused.update(key for i in live for name, key in left[i] if name == root.name)
+        live = [i for i in live if not any(key in failed for key in left[i])] or live
     if prior is None:
         return leaves[live[0]]
     featurizer = Featurizer.of(fp.ctx)
@@ -277,7 +266,7 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
 
 
 # Process-wide memo for the built DB index, keyed on (db path, mtime, context key, card).
-# The index depends only on the DB file, the card and cc+nvcc-flags (NOT the
+# The index depends only on the DB file, the card and the context key (NOT the
 # op shape — ``structural_key`` folds neither), so for a serve boot it is identical
 # across all ~96 program compiles; without this the 527 MB perf scan reran each time.
 # Bounded to the current key (cleared on miss), like ``_load_prior_cached``.
@@ -318,17 +307,35 @@ def _db_measured_index(db, ctx) -> _Measured:
 class _Measured(NamedTuple):
     """One evidence scan's answers, because the scan is expensive and both come from the same rows.
 
-    ``ok`` RANKS — the measured schedule rows a pick argmins over, by the kernel's exact identity.
+    ``ok`` RANKS — the measured schedule rows a pick argmins over, by the kernel's exact identity and the sizes
+    they were measured at (:func:`_measured_at` reads them).
     ``failed`` DISQUALIFIES — the kernels whose every measured variant failed, a different kind of answer
     that cannot be expressed as a latency. A kernel-set decision is no row here: it is a routing
     row on the exact kernel, priced per kernel from the pieces' own measurements
     (:meth:`SearchDB.priced_arms`) when the fork is decided."""
 
-    ok: dict[str, list[tuple[dict, float]]]
+    ok: dict[str, dict[tuple, list[tuple[dict, float]]]]
     failed: dict[str, list[float]]
 
 
 _EMPTY_MEASURED = _Measured({}, {})
+
+
+def _measured_at(ok: dict, kernel: str | None, bindings: dict) -> list[tuple[dict, float]]:
+    """The measured rows of ``kernel`` at ``bindings``, the sizes the compile binds its symbolic dims to
+    (:func:`~emmy.compiler.wire.kernel_bindings`): a row measured at other sizes timed another run of the kernel.
+    Native's attention, priced per range of windows, is one kernel measured at two windows, and its unsplit fold at
+    131,072 must not rank at its 4,096 time. A row that names no size (a dynamic kernel's, recorded before rows
+    named one) stays evidence at every size."""
+    by_size = ok.get(kernel) or {}
+    key = tuple(sorted(bindings.items()))
+    return [*by_size.get(key, ()), *(by_size.get((), ()) if key else ())]
+
+
+def _kernel_rows(ok: dict, op) -> list[tuple[dict, float]]:
+    """The measured rows of the kernel ``op`` realizes (:func:`~emmy.compiler.wire.kernel_tile`), at its sizes."""
+    tile = kernel_tile(op)
+    return _measured_at(ok, _read(kernel_identity(op)), kernel_bindings(tile) if tile is not None else {})
 
 
 def _db_measured_index_build(db, ctx) -> _Measured:
@@ -339,10 +346,9 @@ def _db_measured_index_build(db, ctx) -> _Measured:
 
     Rows are indexed by the exact identity of the kernel they measured — the one evidence join: the same
     identity is the same kernel, and nothing else about a kernel takes part (knob values are stringified
-    because perf knobs round-trip JSON). One context key is sufficient: tune measures in the deployable regime, and
-    ``Context.structural_key`` gives that regime one key however its flags are spelled. Rows from a
-    deliberately non-deployable compile key elsewhere and are not consulted, and neither are rows
-    another card measured (``SearchDB.iter_perf`` reads this card's rows in this regime).
+    because perf knobs round-trip JSON). Rows measured in another precision or cache regime key elsewhere and are not
+    consulted, and neither are rows another card measured (``SearchDB.iter_perf`` reads this card's rows in this
+    regime).
 
     A non-``ok`` row is evidence too — the bench watchdog measured that variant not finishing — but
     it is evidence a ranker cannot use, since its sentinel latency is a timeout constant rather
@@ -351,7 +357,7 @@ def _db_measured_index_build(db, ctx) -> _Measured:
 
     Best-effort: any failure returns an empty index so deploy falls back to the prior.
     """
-    index: dict[str, list[tuple[dict, float]]] = {}
+    index: dict[str, dict[tuple, list[tuple[dict, float]]]] = {}
     survived: set[str] = set()
     failures: dict[str, list[float]] = {}
     try:
@@ -362,7 +368,8 @@ def _db_measured_index_build(db, ctx) -> _Measured:
             survived.add(row.kernel)
             if row.stats.median <= 0:
                 continue
-            index.setdefault(row.kernel, []).append(({k: str(v) for k, v in row.knobs.items()}, float(row.stats.median)))
+            sized = index.setdefault(row.kernel, {}).setdefault(tuple(sorted(row.bindings.items())), [])
+            sized.append(({k: str(v) for k, v in row.knobs.items()}, float(row.stats.median)))
     except Exception:  # noqa: BLE001 — an evidence consult failure must never break compile
         logger.debug("measured-evidence index build failed", exc_info=True)
         return _EMPTY_MEASURED
@@ -466,7 +473,6 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import fork_ahead, spelled_arm  # noqa: PLC0415
-    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None or _schedule_fork(fp):
@@ -474,7 +480,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",)):
         return []
     kernel = _read(root.identity_key(structural=False, with_io=True))
-    measured = list(index.ok.get(kernel, ()))
+    measured = list(_measured_at(index.ok, kernel, kernel_bindings(root)))
     if db is not None and kernel is not None:
         measured.extend((arm, us) for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root)) if fork_ahead(root, arm))
     out: list[tuple[object, float]] = []
@@ -502,7 +508,6 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
     from emmy.compiler.pipeline.pipeline import _is_structural_option, _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import fork_ahead  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
-    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     if _structural_domain(fp.options) != ("LAYOUT",):
         return []
@@ -521,7 +526,7 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
             continue
         # The kernel the arm leaves: a structural arm's fresh kernel, or the root carrying this fork's folded receipt.
         left = tile if structural else option.expand()[0]
-        times = [us for _, us in index.ok.get(kernel, ())]
+        times = [us for _, us in _measured_at(index.ok, kernel, kernel_bindings(tile))]
         if db is not None:
             times.extend(us for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(tile)) if fork_ahead(left, arm))
         if not times:
@@ -531,7 +536,7 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
         for node in readers:
             reader = reader_kernel(fp.match.graph, node, source)
             own = _read(reader.identity_key(structural=False, with_io=True))
-            prices = [us for _, us in index.ok.get(own, ())]
+            prices = [us for _, us in _measured_at(index.ok, own, kernel_bindings(reader))]
             if db is not None and (us := db.best_per_op_time(fp.ctx, own, bindings=kernel_bindings(reader))) is not None:
                 prices.append(us)
             if db is not None and source and not node.op.placement_decided:
@@ -553,7 +558,6 @@ def _pieces_price(splice: object, ctx: Context, db) -> float | None:
     """A splice's price as the sum of its pieces' best rows (:meth:`SearchDB.best_per_op_time`), each piece
     named by the exact identity it carries once spliced, all-or-nothing — the price a routing row gets, for
     an arm whose pieces were benched with no routing row recorded (a sweep's split)."""
-    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     fragment = _leaf_graph(splice)
     total = 0.0
@@ -591,7 +595,7 @@ def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[objec
                 return hit[0], hit[1], float(price)
         return None
 
-    records = db_index.get(_read(kernel_identity(fp.root_op))) if db_index else None
+    records = _kernel_rows(db_index, fp.root_op) if db_index else None
     return offered(records) if records else None
 
 
@@ -660,7 +664,7 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
     from emmy.compiler.pipeline.search.ranking import later_arms  # noqa: PLC0415
 
     featurizer = Featurizer.of(fp.ctx)
-    measured = db_idx.get(_read(kernel_identity(fp.root_op)), []) if db_idx else []
+    measured = _kernel_rows(db_idx, fp.root_op) if db_idx else []
     arms = later_arms()
     # Per-source running bests: (price, canonical_row_key, leaf, knobs).
     best_db: tuple | None = None
@@ -776,9 +780,6 @@ def greedy_decide(
     #: offer replays by :func:`~emmy.compiler.pipeline.fork.find_leaf` descent; only genuinely new (key,
     #: blocklist) states pay the stream-and-score.
     decisions: dict = {}
-    #: The kernels this compile may not keep whole (:func:`_kernel_set_pick`): remainders of a kernel a failure
-    #: ruled out keeping whole, by exact identity — one compile attempt, like ``decisions``.
-    refused: set[str] = set()
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
     placement = placement_prior if placement_prior is not _LOAD_PRIOR else _load_placement_prior()
@@ -786,6 +787,7 @@ def greedy_decide(
     # context keys): the tune DB's rows and the golden rows in scope, one index.
     # ``None`` sentinel = not built yet.
     db_state: list = [None]
+    from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
 
     def db_index() -> dict:
         return (db_state[0].ok if db_state[0] is not None else None) or {}
@@ -818,9 +820,7 @@ def greedy_decide(
             return chosen
         if len(fp.options) > 1:
             _require_evidence(fp, "no measured row spells a kernel-set arm")
-        # A layout keeps every kernel whole either way, so only a cut or a split takes a refusal.
-        chain = refused if domain != ("LAYOUT",) else None
-        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, index.failed, chain)
+        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, index.failed)
 
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
@@ -860,7 +860,7 @@ def greedy_decide(
             leaves = (leaf for leaf in fp.leaves() if node_blocked is None or not _tile_blocked(leaf_knobs(leaf), node_blocked))
             first = next(leaves, None)
             if first is None:
-                return next(fp.leaves())
+                return next(fp.leaves(), NO_OPTION)
             if next(leaves, None) is not None:
                 _require_evidence(
                     fp,

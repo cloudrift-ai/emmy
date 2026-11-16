@@ -32,15 +32,19 @@ relevant `ARCHITECTURE.md` before answering.
 ## Prerequisites
 
 - Python 3.12+ with `venv`
-- A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime, which `make setup` builds into the
-  package as the `emmy.emmy_runtime` extension; use the README architecture index for the runtime's design.
+- A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime (the `emmy.emmy_runtime`
+  extension), and the compiler's statements, expressions and pure terms are the `emmy.emmy_ir` extension; `make setup` builds
+  both into the package. The `emmy.emmy_ir` extension also holds the Kernel IR to PTX compiler, the only code
+  generator. Use the README architecture index for their design.
+- The CUDA toolkit's `ptxas` (on `PATH` or under `CUDA_HOME`), which assembles each kernel's PTX; NVIDIA ships it in
+  the `cuda-nvcc` package. nvcc itself is not used.
 - `make setup` to create the virtual environment and install dependencies
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, compiler stages dump intermediate debug artifacts
-  (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `run --bench` stay
-  in memory; stable Torch IR is persisted only inside golden files. Kernels are named after the operations they realize
-  (`k_rms_norm`, `k_sdpa_reduce`).
+  (graphs, each kernel's PTX, execution plans) to this directory. Frontend provenance slices used by `run --bench` stay
+  in memory; stable Torch IR is persisted only inside golden files. A kernel's name is `k_` and the first 12 hex digits
+  of its exact identity (`k_3f2a1b9c04de`), so it says nothing about the operations the kernel realizes.
 - `EMMY_FREEZE_DIR` environment variable (optional) — the directory a `run --bench --tune N` freezes its rows into as
   a file beside the card's: the repository freeze of an editable checkout when unset, none when set empty (the test
   suite), else that directory. README "Keep what a tune measured".
@@ -60,7 +64,7 @@ relevant `ARCHITECTURE.md` before answering.
 All `EMMY_*` config env vars are read and written through one module — `emmy/config.py`, the sole owner of
 `os.environ` for these vars (the `EMMY_<KNOB>` namespace is the one exception, owned by
 `compiler/pipeline/knob.py`; provider/secret vars stay with `emmy/redact.py`). CLI `--flag` overrides (e.g.
-`--nvcc-flags`) resolve through `config.py` inside the library, not the command layer, so programmatic callers and tests
+`--golden`) resolve through `config.py` inside the library, not the command layer, so programmatic callers and tests
 get the same precedence. `config.py` is the source of truth for the full var list — do not maintain a copy here.
 
 ## Compiler Invariant: Loop Fusion Is Maximal
@@ -80,36 +84,39 @@ The passes `ARCHITECTURE.md` owns the design; `tests/compiler/passes/test_maxima
 
 ## Compiler Invariant: Normalization Carries No Knob
 
-Body normalization (`ir/stmt/normalize.py`, the `normalize_body` driver) is the canonical form every Loop IR body
-takes at construction and inside every identity digest. It runs the same on every body, so it answers to no knob, pin
-or evidence, and nothing under `ir/` imports the pipeline that holds them.
+Body normalization (the `normalize` module of the `emmy-ir` crate, behind the one entry point `normalize_body` the
+`ir/stmt` package exports) is the canonical form every Loop IR body takes at construction and inside every identity
+digest. It runs the same on every body, so it answers to no knob, pin or evidence, and nothing under `ir/` imports
+the pipeline that holds them. A Kernel IR body takes its optimizing steps alone (`optimize_body`: the exact
+simplifications and every value computed once): no identity reads a kernel body, so it keeps the order and the names
+its passes wrote. The same rule holds for those steps: no knob, pin or evidence.
 
 - **A transform that something decides is a pipeline pass.** A knob the search sets, a pin, a pass stage: the
   transform lives in the pass file that owns the decision under `pipeline/passes/`, even when it is a pure body → body
-  function another pass could reuse. Every function in `normalize.py` runs inside `normalize_body`; one that does not
-  is a pass in the wrong place.
+  function another pass could reuse. Every step of the crate's `normalize` module runs inside `normalize_body`; one
+  that does not is a pass in the wrong place.
 - **A pass may call a normalization step; normalization never calls a pass.**
 - **Nothing is added to normalization to make a kernel faster.** A canonical form moves every kernel identity and
   every golden; whether a transform pays is the knob's evidence question. A simplification that always removes work
-  and never adds any is a canonical form, like constant folding or the fold of a sum into one `Affine` statement:
-  it decides nothing, and it is exact up to the reassociation of a sum and the rounding of a literal reciprocal,
-  which every reduce schedule and fast-math division already take.
+  and never adds any is a canonical form, like constant folding or the fold of a sum into its affine form:
+  it decides nothing, and it is exact up to the reassociation of a sum, which every reduce schedule already takes. It
+  decides no rounding a knob owns: a literal divisor becomes its reciprocal only where that is exact.
 
-The IR `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` guards the module's single entry
-point and the `ir/` → pipeline import boundary.
+The IR `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` guards the module's two entry
+points and the `ir/` → pipeline import boundary.
 
 ## Compiler Invariant: Kernel Facts Are Computed, Never Stored
 
 A source of truth — an op, a golden file, a corpus case — holds inputs only: the body, the io, the decisions, the
-measurements. Anything computed from them — a kernel's exact identity, its `S_*` structural features, whether its
-schedule space holds a warp plan — is computed where it is read. A stored copy has to be kept in agreement with the
-computation, and one that drifts fails silently: its row stops deciding its fork. A cache — the tune DB's kernel key, a
-dataset, the weights, a memo — may hold computed values under a version, and is re-created when stale.
+measurements. Anything computed from them — a kernel's exact identity, its name, its `S_*` structural features,
+whether its schedule space holds a warp plan — is computed where it is read. A stored copy has to be kept in agreement
+with the computation, and one that drifts fails silently: its row stops deciding its fork. A cache — the tune DB's
+kernel key, a dataset, the weights, a memo — may hold computed values under a version, and is re-created when stale.
 
 - **Never write a fact onto `op.knobs`.** An op's knobs are the decisions taken on it, every one a registered knob. A
   fact about the body or the card is a function to call, never a value to carry.
-- **Never add a computed field to the golden format.** A stored kernel is its Loop IR, its name and where it came
-  from; rows and decisions name it by its `ref` in the file. A new field is an input, or it does not go in the file.
+- **Never add a computed field to the golden format.** A stored kernel is its Loop IR and where it came from; rows
+  and decisions point at it by its position in the file. A new field is an input, or it does not go in the file.
 - **Evidence joins on the kernel's exact identity and the context, nothing else.** No feature takes part in the join.
 - **A new computed value in a cache needs a version.** A change to the computation bumps it and the cache is
   re-created; nothing migrates.
@@ -130,21 +137,15 @@ Contribution Instructions).
 make test                                                        # the whole suite — finalization only
 ```
 
-`make test` compiles CUDA kernels at **`-Xcicc -O1`** — the **correctness lane**: `-O1` changes runtime perf, not
-numerics, and the deployable perf tests (`tests/perf`, `-m perf`) are skipped here, running at `-O3` via
-`make bench-kernels`. It also sets `EMMY_GOLDEN_FILE=` (set, empty): no repository golden is evidence in this lane,
-because the lane never asks how fast a pick is and importing a card's goldens is work every worker process would
-repeat; a test that needs golden evidence scopes it itself (`--golden PATH`, `golden.records_override`). To re-run the suite at deployable `-O3`, prefix `EMMY_NVCC_FLAGS=` (empty) or run `pytest`
-directly. Every pytest session, `make test` or direct, also runs on a fresh tune DB (the root `tests/conftest.py`
+Every compile is the deployable one: the code a test builds is the code a served model runs. Under the default fast
+math a pick can be an f16-accumulate atom, so a test that checks numerics and leaves the schedule to the prior pins
+`FAST_MATH` off. The perf tests (`tests/perf`, `-m perf`) are skipped by `make test` and run via
+`make bench-kernels`. `make test` also sets `EMMY_GOLDEN_FILE=` (set, empty): no repository golden is evidence in
+the suite, because it never asks how fast a pick is and importing a card's goldens is work every worker process
+would repeat; a test that needs golden evidence scopes it itself (`--golden PATH`, `golden.records_override`). Every
+pytest session, `make test` or direct, also runs on a fresh tune DB (the root `tests/conftest.py`
 points `EMMY_TUNE_DB` at one unless the caller names one), so no test picks from a machine's stored measurements; a
 test that needs a DB sets its own.
-
-The lane saves far less than this file used to claim. Measured on an RTX 5090 (CUDA 13.0, 16 cores, one repo, only the
-opt level varying): cold cubin cache **923 s at `-O1` vs 1031 s at `-O3`** (1.12×); warm **718 s vs 760 s** (1.06×);
-identical results every run. The retired "~3× faster" was never re-measured after the WMMA→`mma.sync` migration
-removed the cicc unroll blowup it rested on. The cold/warm gap also puts kernel compilation at roughly a fifth of the
-suite's wall time, so it is not the dominant cost either. Keeping `-O1` here buys ~12% cold; dropping it would leave
-one compile regime everywhere in the repo.
 
 The default suite holds every repository golden — the hardware goldens and each maintained recipe's model golden —
 to the fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
@@ -180,13 +181,15 @@ filename: no suffix means every stage must pass, `_xfail_<stage>` means it is a 
   case.
 - A **stale case** failure means the lowering or a schedule codec changed and the stored kernels are no longer what
   the program lowers to. `make test` detects this on its own, on any machine; `make test-corpus-regen` is the fix —
-  the same restamp every golden gets. It refuses to write when a case's verdict also changed; that refusal is the
-  signal, not an obstacle to work around.
-- **The corpus never asks for something this machine cannot do.** With no GPU, the only obligation is the stale case
-  above, and it is always fixable where you are: `realized` runs at the case's declared capability, while `built` and
-  `correct` run only on a card whose capability equals it.
-- **Latency is measured in `tests/perf/`, whose case list IS the corpus.** `make test` compiles at `-O1` and never
-  measures; `make bench-kernels` benches every closed case the card can run, prints the comparison against eager and
+  the same restamp every golden gets. It refuses to write when the restamped case's verdict contradicts its filename;
+  that refusal is the signal, not an obstacle to work around.
+- **The corpus never asks for something this machine cannot do.** With no GPU, the obligations are the stale case
+  above, always fixable where you are, and `built`: `realized` runs at the case's declared capability, `built`
+  assembles that code with ptxas for the declared card on any machine whose ptxas takes the target (CUDA 13's no
+  longer takes `sm_70`, so a Volta case is built where an older toolkit is installed), and `correct` runs only on a
+  card whose capability equals it.
+- **Latency is measured in `tests/perf/`, whose case list IS the corpus.** `make test` never measures;
+  `make bench-kernels` benches every closed case the card can run, prints the comparison against eager and
   `torch.compile`, and reports a case slower than its stored number. A regression there is a finding, not a failure.
 - **Never write a benchmark script.** `emmy run --golden FILE --bench --record` benches a golden and writes its
   timings back. If it cannot express what you need, that is a missing flag to add, not a script to write.
@@ -227,7 +230,7 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N` | trace + run the compiler; print or save any IR stage; compile a golden's stored traced program |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy eval {prior,golden} …` | `eval prior DATASET [--pools {golden,measured}]` scores a dataset's pools with the prior of the dataset's space and re-decides each pool with no measurement in scope; `eval golden --golden PATH --serving-config PATH` audits a golden against its serving matrix |
-| `emmy golden {list,check,restamp} [PATH…]` | list measured rows beside `torch.compile`, slowest relative to it first; say what a restamp onto the fresh lowering of a golden's own programs would change; write that rewrite (every repository golden by default) |
+| `emmy golden {list,check,restamp,realize} [PATH…]` | list measured rows beside `torch.compile`, slowest relative to it first; say what a restamp onto the fresh lowering of a golden's own programs would change; write that rewrite (every repository golden by default); compile every row of the named files under its own schedule and say which the compiler no longer realizes, the check a measurement freeze admits, and with `--drop` write the files back without them |
 | `emmy fit DATASET WEIGHTS [--folds N]` | fit the prior of a dataset's space from its golden groups and cross-validate it; the whole refit is README's "Fit the priors" |
 | `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line, or every repository golden and the repository freeze (`--repository`; nothing by default, and never the tune DB), each file's rows filed under the identity computed from its stored kernel; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
@@ -260,9 +263,8 @@ Quick test models / scripts (for local iteration):
 ## Key Make Targets
 
 - `make setup` — create venv and install dependencies (includes ruff)
-- `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests). Compiles
-  kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
-  `make bench-kernels`)
+- `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests, which
+  `make bench-kernels` and the golden workflows run)
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a lowering or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
 - `make test-durations` — re-measure `tests/durations_cpu.json`, the checked-in CPU test timings the suite balances its

@@ -13,7 +13,7 @@ remain in the graph:
 - ``GatherOp`` / ``ScatterOp`` — data-dependent reads/writes along an axis.
 - ``IndexMapOp`` — unified layout-only op (subsumes slice / cat / transpose
   / reshape / unsqueeze) described by affine coord arithmetic over
-  placeholder vars from ``ir.expr``.
+  placeholder vars from ``ir.expression``.
 
 Plus the boundary sentinels ``InputOp`` and ``ConstantOp`` from ``ir.base``.
 The ``loop/lowering`` pass wraps each tensor op in a simple ``ir.loop.LoopOp``
@@ -21,7 +21,7 @@ and the ``fusion/`` pass splices adjacent LoopOp pairs via the
 tree-splicer in ``ir/loop/splicer.py``.
 
 Op metadata (arity / commutative / reducer identity) lives on
-``ir.expr.ElementwiseImpl`` — the single source of truth shared across
+``ir.expression.ElementwiseImpl`` — the single source of truth shared across
 elementwise, reduce, scan, and accumulator use sites; read straight from
 ``op.op.arity`` / ``op.op.identity`` etc.
 """
@@ -36,7 +36,7 @@ from emmy.compiler.dim import Dim, to_dim
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.base import Op, _keepdim_axis
 from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
-from emmy.compiler.ir.expr import Expr
+from emmy.compiler.ir.expression import Expression
 from emmy.compiler.wire import Wire
 
 # ---------------------------------------------------------------------------
@@ -326,19 +326,19 @@ class ScatterOp(Op):
 class IndexSource(Wire):
     """One input source for an IndexMapOp.
 
-    ``coord_map[i]`` is an ``Expr`` producing the input's i-th index from
+    ``coord_map[i]`` is an ``Expression`` producing the input's i-th index from
     placeholder vars ``Var("out_coord_0")``, ``Var("out_coord_1")``, ...
-    See ``emmy.compiler.ir.expr`` for the placeholder convention and
+    See ``emmy.compiler.ir.expression`` for the placeholder convention and
     substitution helpers.
 
     ``select`` is None for single-source ops; for multi-source IndexMaps
-    (cat) it's a boolean ``Expr`` selecting which output positions read
+    (cat) it's a boolean ``Expression`` selecting which output positions read
     this source.
     """
 
     input_idx: int  # position in IndexMapOp's input list
-    coord_map: tuple[Expr, ...]
-    select: Expr | None = None  # Expr | None
+    coord_map: tuple[Expression, ...]
+    select: Expression | None = None  # Expression | None
 
 
 @dataclass(frozen=True)
@@ -369,7 +369,7 @@ class IndexMapOp(Op):
         if not self.sources:
             return np.empty(shape, dtype=np.float32)
 
-        # Sparse coordinate grids make every Expr evaluate over whole axes without
+        # Sparse coordinate grids make every Expression evaluate over whole axes without
         # materializing one dense grid per dimension. NumPy advanced indexing then
         # broadcasts the derived input coordinates to the output shape. This is the
         # same clipping/select semantics as the old np.ndindex reference, expressed
@@ -381,7 +381,8 @@ class IndexMapOp(Op):
         for source in self.sources:
             input_tensor = inputs[source.input_idx]
             coords = tuple(
-                np.clip(np.asarray(expr.eval(env), dtype=np.intp), 0, input_tensor.shape[i] - 1) for i, expr in enumerate(source.coord_map)
+                np.clip(np.asarray(expression.eval(env), dtype=np.intp), 0, input_tensor.shape[i] - 1)
+                for i, expression in enumerate(source.coord_map)
             )
             values = input_tensor[coords]
             select = remaining if source.select is None else remaining & np.broadcast_to(source.select.eval(env), shape)
@@ -391,7 +392,7 @@ class IndexMapOp(Op):
 
     def is_identity(self, input_shape: tuple) -> bool:
         """True when this IndexMap is a pure pointer alias of its single input."""
-        from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX, Var
+        from emmy.compiler.ir.expression import PLACEHOLDER_PREFIX, Var
 
         if len(self.sources) != 1:
             return False

@@ -3,8 +3,8 @@
 Two layers:
 
 * :func:`lane_bank_distribution` — pure lane→bank oracle. Decodes an intra-CTA thread id
-  ``warp_id*32 + lane`` per the same axis flattening as ``Tile.render``, evaluates a Load's
-  slab-relative ``Expr`` index per lane against row-major strides over the slab extents, and
+  ``warp_id*32 + lane`` per the same axis flattening as ``Tile``'s render, evaluates a Load's
+  slab-relative ``Expression`` index per lane against row-major strides over the slab extents, and
   tallies per-bank distinct addresses (4-byte banks — a sub-word element dtype packs
   ``4 // elem_bytes`` elements per bank word). Free vars not in ``thread_axes`` and not in
   ``extra_env`` are zero-bound (bank distribution is invariant to warp-uniform offsets).
@@ -17,7 +17,7 @@ Two layers:
   ``simulate_graph`` lowers the graph through ``KERNEL_PASSES`` first (idempotent), evaluates
   each binding via :func:`lane_bank_distribution`, runs :func:`annotate_lds128` over sibling
   chains, and computes per-cell access provenance over the inner-loop sweep. Pure static — no
-  GPU run. ``LdmatrixLoad`` slab reads are NOT modeled (the ldmatrix 8×8 lane protocol has its
+  GPU run. ``LdmatrixLoad`` and ``FragmentLoad`` slab reads are NOT modeled (the ldmatrix 8×8 lane protocol has its
   own fixed address pattern); the oracle covers the scalar drains and fills.
 """
 
@@ -28,7 +28,7 @@ from math import prod
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr
+from emmy.compiler.ir.expression import Expression
 from emmy.compiler.ir.stmt import Load
 
 WARP_SIZE = 32
@@ -155,14 +155,14 @@ def find_all_bindings(graph: Graph, stage_filter: set[str] | None = None) -> lis
 
 
 # ---------------------------------------------------------------------------
-# Thread-axis decode (mirrors ir/stmt/blocks.py::_render_thread_axis_decode)
+# Thread-axis decode
 # ---------------------------------------------------------------------------
 
 
 def _thread_axis_env(thread_axes: tuple[Axis, ...], tid: int) -> dict[str, int]:
     """Reproduce the runtime decode of ``threadIdx.x`` into per-axis ints.
 
-    Identical to ``_render_thread_axis_decode`` in ``ir/stmt/blocks.py``:
+    The decode a thread tile renders:
     outermost axis = ``tid // inner_prod``, inner axes get
     ``(tid // stride) % extent`` with ``stride`` doubling rightward,
     and a single-axis tile collapses to ``tid``.
@@ -214,7 +214,7 @@ def _row_major_strides(extents: tuple[int, ...]) -> list[int]:
 
 
 def lane_bank_distribution(
-    cache_index: tuple[Expr, ...],
+    cache_index: tuple[Expression, ...],
     cache_extents: tuple[int, ...],
     thread_axes: tuple[Axis, ...],
     *,
@@ -238,7 +238,7 @@ def lane_bank_distribution(
     coord (e.g. ``{k_loop: 5}``).
 
     Returns ``None`` if ``len(cache_index) != len(cache_extents)`` or
-    if ``Expr.eval`` raises (KeyError / TypeError) for any lane.
+    if ``Expression.eval`` raises (KeyError / TypeError) for any lane.
     """
     if len(cache_index) != len(cache_extents) or not cache_extents:
         return None
@@ -288,7 +288,7 @@ def lane_bank_distribution(
 # LDS.128 vectorization model
 # ---------------------------------------------------------------------------
 #
-# nvcc fuses N consecutive scalar fp32 loads from smem into a single
+# ptxas fuses N consecutive scalar fp32 loads from smem into a single
 # ``ld.shared.v4`` (LDS.128) when they read 4 contiguous fp32. The warp
 # drains in 4 cycles regardless — so the first ``vec_width`` distinct
 # addresses per bank are "absorbed" into the natural drain (no extra
@@ -353,13 +353,10 @@ def annotate_lds128(results: list[BankConflictResult]) -> None:
 # ---------------------------------------------------------------------------
 
 
-_ELEM_BYTES = {"float": 4, "__half": 2, "__nv_bfloat16": 2, "double": 8, "int": 4}
-
-
 def _binding_result(b: StageBinding, k_iter: int, warp_id: int) -> BankConflictResult | None:
     """Evaluate one binding into a :class:`BankConflictResult` (or ``None`` — un-evaluable)."""
     extents = tuple(int(e) for e in b.slab.extents)
-    elem_bytes = _ELEM_BYTES.get(b.slab.dtype, 4)
+    elem_bytes = b.slab.dtype.nbytes
     extra_env: dict[str, int] = {}
     for ax in b.enclosing_loop_axes:
         hi = ax.extent.as_static() - 1 if ax.extent.is_static else 0
@@ -378,7 +375,7 @@ def _binding_result(b: StageBinding, k_iter: int, warp_id: int) -> BankConflictR
         smem_bytes=prod(extents) * elem_bytes,
         load_name=b.load.names[0],
         tile_op_name=b.tile_op_name,
-        index_repr=tuple(e.pretty() for e in b.load.index),
+        index_repr=tuple(str(e) for e in b.load.index),
         lane_banks=dist.lane_banks,
         lane_addrs=dist.lane_addrs,
         counts=dist.counts,
@@ -395,11 +392,11 @@ def _full_sweep(b: StageBinding, r: BankConflictResult, warp_id: int) -> None:
     """Populate the visualizer's per-cell provenance: sweep the innermost enclosing loop
     (static extents only), touch each lane's 2-D slab cell, and mark the cells of any bank with
     more than one distinct word that iteration. 2-D slabs only (the ring slot offset rides the
-    row expr, so it is swept naturally)."""
+    row expression, so it is swept naturally)."""
     extents = tuple(int(e) for e in b.slab.extents)
     if len(extents) != 2:
         return
-    elem_bytes = _ELEM_BYTES.get(b.slab.dtype, 4)
+    elem_bytes = b.slab.dtype.nbytes
     inner = b.enclosing_loop_axes[-1] if b.enclosing_loop_axes else None
     iters = inner.extent.as_static() if inner is not None and inner.extent.is_static else 1
     outer_env = {ax.name: 0 for ax in b.enclosing_loop_axes[:-1]}

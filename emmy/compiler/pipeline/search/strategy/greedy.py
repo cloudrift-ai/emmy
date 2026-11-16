@@ -41,25 +41,23 @@ _MAX_GREEDY_RETRIES = 8
 
 
 def piece_seams(graph: Graph, key: str) -> str:
-    """For an unmatched pin addressed to a cut piece (``PLACE@place_<token>/…``), the seams that piece offers in
-    ``graph`` — the spellings a pin on it can name, bare when it has one — so a guessed site path says what would
-    have resolved; ``""`` for any other key."""
-    from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, place_token  # noqa: PLC0415
+    """For an unmatched pin addressed to one kernel (``PLACE@<name>/…``), the seams that kernel offers in ``graph`` —
+    the spellings a pin on it can name, bare when it has one — so a guessed site path says what would have resolved;
+    ``""`` for any other key."""
+    from emmy.compiler.pipeline.knob import pinned_kernel  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams  # noqa: PLC0415
     from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
 
-    scope = axis_of(key) or ""
-    if not scope.startswith("place_"):
+    name = pinned_kernel(key)
+    if name is None:
         return ""
-    token = scope.split("/", 1)[0].removeprefix("place_")
     kernels = [
-        node.op
-        for node in graph.nodes.values()
-        if place_token(getattr(node.op, "kernel_name", None) or getattr(node.op, "name", "") or "") == token
+        node.op for node in graph.nodes.values() if (getattr(node.op, "kernel_name", None) or getattr(node.op, "name", None)) == name
     ]
     offered = sorted({seam.spelling for op in kernels if (tile := kernel_tile(op)) is not None for seam in cuttable_seams(tile)})
     if not kernels:
-        return f"; no kernel of the compile is the piece place_{token}"
-    return f"; that piece offers {', '.join(offered)}" if offered else "; that piece offers no seam"
+        return f"; no kernel of the compile is {name}"
+    return f"; that kernel offers {', '.join(offered)}" if offered else "; that kernel offers no seam"
 
 
 class GreedyStrategy(SearchStrategy):

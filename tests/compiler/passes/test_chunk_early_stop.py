@@ -11,14 +11,13 @@ from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp
-from emmy.compiler.ir.stmt import Assign, Select, SelectBranch
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.ir.stmt import Select, StridedLoop, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _mask_key_bounds
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import compile_with_kernels, statements
 
 KEY = Axis(name="a2", extent=Dim(512))
 ROW_BLOCK = AxisOffset(atom_dim=16, reg=1, block_var="a1_b", unit_var="a1_u", unit_count=4)  # a 64-row CTA
@@ -27,25 +26,20 @@ BK = 32
 
 def _mask(name: str, keep_op: str, mask_op: str, key_lead: int = 0, row_lead: int = 0) -> Select:
     """``zero when key <keep_op> row + lead, fill otherwise`` — one coordinate mask as the SDPA decomposition spells it."""
-    key = Var("a2") if not key_lead else BinaryExpr("+", Var("a2"), Literal(key_lead, "int"))
-    row = Var("a1") if not row_lead else BinaryExpr("+" if row_lead > 0 else "-", Var("a1"), Literal(abs(row_lead), "int"))
-    return Select(
-        name=name,
-        branches=(
-            SelectBranch(select=BinaryExpr(keep_op, key, row), value="zero"),
-            SelectBranch(select=BinaryExpr(mask_op, key, row), value="fill"),
-        ),
-    )
+    key = "a2" if not key_lead else f"a2 + {key_lead}"
+    row = "a1" if not row_lead else f"a1 {'+' if row_lead > 0 else '-'} {abs(row_lead)}"
+    [select] = parse_body(f"{name} = select:\n    `zero` when {key} {keep_op} {row}\n    fill when {key} {mask_op} {row}")
+    return select
 
 
 def _masked_score(*masks: Select) -> list:
     """``s3 = s2 + v1``, ``s4 = s3 + v2`` … — the prefix an SDPA lifts, one add per mask."""
-    stmts: list = []
+    lines: list[str] = []
     held = "s2"
     for index, mask in enumerate(masks, start=3):
-        stmts += [mask, Assign(name=f"s{index}", op="add", args=(mask.name, held))]
+        lines += [str(mask), f"s{index} = add({mask.name}, {held})"]
         held = f"s{index}"
-    return stmts
+    return list(parse_body("\n".join(lines)))
 
 
 CAUSAL = _mask("v1", "<=", ">")  # keep key <= row
@@ -56,14 +50,14 @@ def _bounds(stmts) -> tuple:
     return _mask_key_bounds(stmts, "s2", KEY, "a1", ROW_BLOCK, BK)
 
 
-def _pretty(expr) -> str:
-    return expr.pretty() if hasattr(expr, "pretty") else str(expr)
+def _pretty(expression) -> str:
+    return str(expression)
 
 
 def test_a_causal_mask_stops_the_stream_at_the_block_end() -> None:
     first, end = _bounds(_masked_score(CAUSAL))
     assert first is None
-    assert isinstance(end, TernaryExpr), "the stop is the block end clamped to the extent"
+    assert isinstance(end, TernaryExpression), "the stop is the block end clamped to the extent"
     assert _pretty(end.if_true) == _pretty(ROW_BLOCK.block_end())
     assert _pretty(end.if_false) == "512"
 
@@ -71,9 +65,9 @@ def test_a_causal_mask_stops_the_stream_at_the_block_end() -> None:
 def test_a_band_starts_the_stream_on_the_chunk_holding_the_first_row_near_edge() -> None:
     first, end = _bounds(_masked_score(BAND))
     assert end is None
-    edge = BinaryExpr("-", ROW_BLOCK.block_base(), Literal(31, "int"))  # key <= row - 32 masks every key below row - 31
-    clamped = TernaryExpr(cond=BinaryExpr(">", edge, Literal(0, "int")), if_true=edge, if_false=Literal(0, "int"))
-    assert _pretty(first) == _pretty(BinaryExpr("*", BinaryExpr("/", clamped, Literal(BK, "int")), Literal(BK, "int")))
+    edge = BinaryExpression("-", ROW_BLOCK.block_base(), Literal(31, "int"))  # key <= row - 32 masks every key below row - 31
+    clamped = TernaryExpression(cond=BinaryExpression(">", edge, Literal(0, "int")), if_true=edge, if_false=Literal(0, "int"))
+    assert _pretty(first) == _pretty(BinaryExpression("*", BinaryExpression("/", clamped, Literal(BK, "int")), Literal(BK, "int")))
 
 
 def test_a_causal_band_bounds_both_ends_whichever_mask_comes_first() -> None:
@@ -83,31 +77,18 @@ def test_a_causal_band_bounds_both_ends_whichever_mask_comes_first() -> None:
 
 
 def test_a_comparison_canonicalized_by_swapping_operands_still_bounds_the_stream() -> None:
-    causal = Select(
-        name="v1",
-        branches=(
-            SelectBranch(select=BinaryExpr("<=", Var("a2"), Var("a1")), value="zero"),
-            SelectBranch(select=BinaryExpr("<", Var("a1"), Var("a2")), value="fill"),
-        ),
-    )
+    [causal] = parse_body("v1 = select:\n    `zero` when a2 <= a1\n    fill when a1 < a2")
     first, end = _bounds(_masked_score(causal))
     assert first is None and end is not None
 
-    edge = BinaryExpr("-", Var("a1"), Literal(32, "int"))
-    band = Select(
-        name="v1",
-        branches=(
-            SelectBranch(select=BinaryExpr("<", edge, Var("a2")), value="zero"),
-            SelectBranch(select=BinaryExpr("<=", Var("a2"), edge), value="fill"),
-        ),
-    )
+    [band] = parse_body("v1 = select:\n    `zero` when a1 - 32 < a2\n    fill when a2 <= a1 - 32")
     first, end = _bounds(_masked_score(band))
     assert first is not None and end is None
 
 
 def test_a_lead_on_the_row_side_pushes_the_stop_out_and_a_strict_mask_pulls_it_in() -> None:
     _, lagged = _bounds(_masked_score(_mask("v1", "<=", ">", row_lead=32)))
-    assert _pretty(lagged.if_true) == _pretty(BinaryExpr("+", ROW_BLOCK.block_end(), Literal(32, "int")))
+    assert _pretty(lagged.if_true) == _pretty(BinaryExpression("+", ROW_BLOCK.block_end(), Literal(32, "int")))
     _, strict = _bounds(_masked_score(_mask("v1", "<", ">=", row_lead=1)))
     assert _pretty(strict.if_true) == _pretty(ROW_BLOCK.block_end()), "key >= row + 1 masks the same keys as key > row"
 
@@ -125,7 +106,7 @@ def test_a_lead_on_the_row_side_pushes_the_stop_out_and_a_strict_mask_pulls_it_i
             "key < row + 1 takes the row's own key: a block could start after its first row",
         ),
         (_masked_score(_mask("v1", ">", "<=")), "key <= row masks the row's own key from below"),
-        ([Assign(name="s3", op="add", args=("s2", "bias"))], "a bias is not a coordinate mask"),
+        (list(parse_body("s3 = add(s2, bias)")), "a bias is not a coordinate mask"),
     ],
 )
 def test_masks_that_could_take_a_row_own_key_leave_the_stream_whole(stmts, why) -> None:
@@ -137,7 +118,7 @@ def _sdpa(causal: bool, heads: int = 1, rows: int = 64) -> str:
     return f"F.scaled_dot_product_attention({q}, {q}, {q}{', is_causal=True' if causal else ''})"
 
 
-def _sources(code: str, window: int | None = None) -> list[str]:
+def _kernels(code: str, window: int | None = None) -> list:
     graph = graph_from_code(code)[0]
     if window is not None:  # the HF-wrapper stamp path: F.scaled_dot_product_attention has no window arg to trace
         for node in graph.nodes.values():
@@ -148,17 +129,17 @@ def _sources(code: str, window: int | None = None) -> list[str]:
         "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x4/k2",
         "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x4/k2",
         "STAGE@map.1/twist": "d2/smem-async",
-        "STAGE@map.1/twist.1/inner": "d2/smem-async",
+        "STAGE@map.1/twist.1/inner": "",
         "REDUCE": "",
         "WORK": "w1x1",
     }
     with pinned_knobs(pins):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
-    return [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
+    return list(kernels.values())
 
 
-def _chunk_loop(source: str) -> str:
-    return next(line.strip() for line in source.splitlines() if "for (int " in line and "__ck" in line)
+def _chunk_loops(kernel) -> list[StridedLoop]:
+    return [loop for loop in statements(kernel, StridedLoop) if loop.axis.name.endswith("__ck")]
 
 
 @pytest.mark.parametrize(
@@ -179,11 +160,11 @@ def _chunk_loop(source: str) -> str:
     ids=["causal-multi-wave", "causal-one-wave", "global", "band-multi-wave", "band-one-wave"],
 )
 def test_the_emitted_chunk_loop_carries_the_bounds_only_where_they_can_shorten_the_kernel(code, window, starts, stops, why) -> None:
-    sources = _sources(code, window)
-    assert len(sources) == 1 and "__ck" in sources[0], "one fused kernel with a chunk loop"
-    loop = _chunk_loop(sources[0])
-    assert ("__ck_end" in loop) is stops, f"{why}: {loop}"
-    assert ("__ck = 0" not in loop) is starts, f"{why}: {loop}"
+    kernels = _kernels(code, window)
+    assert len(kernels) == 1 and _chunk_loops(kernels[0]), "one fused kernel with a chunk loop"
+    loop = _chunk_loops(kernels[0])[0]
+    assert (loop.end is not None) is stops, f"{why}: {loop.end}"
+    assert (loop.start != Literal(0, "int")) is starts, f"{why}: {loop.start}"
 
 
 def test_the_launch_count_is_the_lead_extents_times_the_block_counts() -> None:
@@ -198,3 +179,15 @@ def test_the_launch_count_is_the_lead_extents_times_the_block_counts() -> None:
     ragged = Side(axis=Axis(name="a1", extent=Dim(100)), tile=64, units=4, reg=1, block="a1_b", unit="a1_u")
     assert launch_ctas((), (ragged, None)) == 2, "a partial block still launches"
     assert launch_ctas((Axis(name="s", extent=Dim("seq_len")),), (m, n)) is None, "a symbolic extent is unknown"
+
+
+def test_a_position_read_from_memory_bounds_the_stream_at_runtime() -> None:
+    """Native's causal mask compares ``key - row`` against a position the kernel loads: the anchor is a uniform value,
+    so the stop is the block end plus the position, the sign test kept at runtime, and nothing starts the stream."""
+    [select] = parse_body("v1 = select:\n    `zero` when -1 * a1 + a2 <= in0\n    fill when -1 * a1 + a2 > in0")
+    first, end = _mask_key_bounds(_masked_score(select), "s2", KEY, "a1", ROW_BLOCK, BK, frozenset({"in0"}))
+    assert first is None
+    shift = BinaryExpression("-", Literal(0, "int"), BinaryExpression("-", Literal(0, "int"), Var("in0")))  # the anchor, ``-in0``, negated
+    lead = TernaryExpression(cond=BinaryExpression(">", shift, Literal(0, "int")), if_true=shift, if_false=Literal(0, "int"))
+    assert _pretty(end.if_true) == _pretty(BinaryExpression("+", ROW_BLOCK.block_end(), lead))
+    assert _bounds(_masked_score(select)) == (None, None), "a value the caller does not name as uniform bounds nothing"

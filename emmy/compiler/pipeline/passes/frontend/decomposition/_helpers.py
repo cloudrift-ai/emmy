@@ -19,7 +19,7 @@ from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, placeholder
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to, squeeze_axis
 from emmy.compiler.pipeline.passes.frontend.decomposition._matmul_helpers import matmul_unsqueeze
@@ -84,7 +84,7 @@ def opmath_dtype(dtype):
 
 def const_bc(frag: Graph, *, name: str, value=None, context_value=None, target_shape: tuple, dtype: str) -> Node:
     """Add a scalar ConstantOp and broadcast it to ``target_shape``. Pass ``value`` for a
-    static scalar, or ``context_value`` (an ``Expr`` over symbolic-dim names) for a runtime
+    static scalar, or ``context_value`` (an ``Expression`` over symbolic-dim names) for a runtime
     scalar resolved at launch — e.g. a dynamic mean's divisor = the runtime reduce-axis size."""
     cid = frag.add_node(
         op=ConstantOp(name=name, value=value, context_value=context_value),
@@ -167,7 +167,7 @@ def gqa_broadcast(
     coord_map = []
     for d in range(len(target_shape)):
         p = placeholder(d)
-        coord_map.append(BinaryExpr("/", p, Literal(group_size, "int")) if d == head_axis else p)
+        coord_map.append(BinaryExpression("/", p, Literal(group_size, "int")) if d == head_axis else p)
     return single_indexmap(frag, src, out_shape=target_shape, coord_map=coord_map, name=name, dtype=dtype)
 
 
@@ -186,10 +186,12 @@ def padded_read(frag: Graph, x: Node, *, out_shape: tuple, channel: object, leng
     if isinstance(length, Literal) or in_length <= 0:
         return single_indexmap(frag, x, out_shape=out_shape, coord_map=coords, name=name)
 
-    in_bounds = BinaryExpr("&&", BinaryExpr(">=", length, Literal(0, "int")), BinaryExpr("<", length, Literal(in_length, "int")))
+    in_bounds = BinaryExpression(
+        "&&", BinaryExpression(">=", length, Literal(0, "int")), BinaryExpression("<", length, Literal(in_length, "int"))
+    )
     # Clamp the off-domain coord so the post-fusion unconditional Load stays in range; the
     # select is what actually discards the value.
-    clamped = TernaryExpr(cond=in_bounds, if_true=length, if_false=Literal(0, "int"))
+    clamped = TernaryExpression(cond=in_bounds, if_true=length, if_false=Literal(0, "int"))
     zero_id = frag.add_node(
         op=ConstantOp(name=f"{name}_zero", value=0.0),
         inputs=[],

@@ -298,20 +298,23 @@ the same tables. The pages and the pager outlive both programs.
 The pack key's `state` list names the buffers a step writes in place and carries to the next position — a Gated
 DeltaNet layer's recurrent state and convolution history. Each is a flat output of the decode program, which prefill
 borrows like the other outputs, and `start` zeroes it. With state a prefill chunk is taken only where every row is a
-prompt token before the last, since no later step overwrites what a row past the prompt folds into the state. A chunk
-is taken at the widest width that fits, so with chunks at the prefill width and the decode width a prompt's tail runs
-at the narrower one before the one-token program takes over: 256 tokens are three 64-row chunks, three 16-row chunks
-and 15 steps, not three chunks and 63 steps.
+prompt token, since no later step overwrites what a row past the prompt folds into the state. A chunk is taken at the
+widest width that fits, so with chunks at the prefill width and the decode width a prompt's tail runs at the narrower
+one before the one-token program takes over: 256 tokens are four 64-row chunks, the last of which generates the first
+token, and 255 tokens are three 64-row chunks, three 16-row chunks and 15 steps, not three chunks and 63 steps.
 
 `start` keeps the prompt on the host with the sampling controls and resets request state. `advance` processes one
 prefill chunk, one verify step or one decode token at the current absolute position and returns the tokens it
-generated, leaving the final prompt token to decode or verify and taking a chunk only where every one of its rows fits
-the context; the diagnostic `step` always processes one token. A pack whose key names `drafts` above zero has a verify
-program, which at temperature zero takes every step from the prompt's last token on where its reach fits the context:
+generated, taking a chunk only where every one of its rows fits the context; the diagnostic `step` always processes one
+token. A chunk's program ends at its last row's logits and greedy token, so the chunk whose last row is the prompt's
+last token generates the first token; a prompt no chunk ends leaves its final token to decode or verify. A pack whose
+key names `drafts` above zero has a verify program, which at temperature zero takes every step from the prompt's last
+token on, or past it where a chunk ended the prompt, wherever its reach fits the context:
 the step uploads the token it continues from and the last step's drafts, and reads back the picks, the accepted count
 and the next drafts, all decided on the device (native `ARCHITECTURE.md`, "Speculative decoding"). It generates the
 picks through the last accepted row, up to the first EOS, and the position advances past them. With a drafter every
-step also uploads `next_tokens`, the token after each of its rows, which the drafter's cache is written from. Each step
+step also uploads `next_tokens`, the token after each of its rows, which the drafter's cache is written from: past the
+prompt token zero in decode, and -1 in a chunk, whose program puts its own pick there. Each step
 uploads the tokens it embeds, its `tokens` input: a chunk's prompt tokens, token zero past the prompt, or the one
 token a decode step takes, the prompt's while it lasts and then the previous selection. No copy of the prompt lives
 on the device, so a prompt of the whole context costs the host its token IDs alone. Before prompt completion either
@@ -335,7 +338,11 @@ Attention reads the cache to a window, the programs' symbolic `cache_tokens` axi
 at its hint, the context. Before each step the generator sets it to the positions the step reads, rounded up to a
 step of 4,096 and capped at the context (`set_env`), so attention's work grows with the request rather than the
 context. A window replays its own graph (`Executor` keeps one per environment), so a request captures one per
-4,096 positions it reaches: 64 at a 262,144-token context, within the executor's graph cache.
+4,096 positions it reaches: 64 at a 262,144-token context, within the executor's graph cache. A step holds each
+attention program once per range of windows, each priced at one window of its range (the native export's
+`WINDOW_RANGES`), and each of their launches names its range (`size_range`, the size it reads and its first and last
+value): the executor skips a launch whose range misses the environment, so a window's graph holds its range's
+attention alone. The ranges' scratch shares one slab by liveness, since they run one after the other.
 Nothing the device runs is hand-written. Its explicit `ignore_eos` control permits fixed-output serving benchmarks to
 continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete prompt/decode loop
 and stops at EOS or the requested output count, and returns each token with the time since the request started at

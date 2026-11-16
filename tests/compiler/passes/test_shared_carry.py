@@ -10,60 +10,55 @@ from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16, F32, F64
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Load, Loop, Pre, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Loop, StridedLoop, Write, parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
 shared = import_module("emmy.compiler.pipeline.passes.lowering.kernel.035_shared_carry")
 _PINS = {"PLACE": "fuse", "WORK": "t512", "REDUCE": "coop-t/n8/v4", "FAST_MATH": True}
 
 
-def _body(n=40, *, masked=True, extra_reader=False):
-    t, b, r, c, k = (Var(name) for name in ("t", "b", "r", "c", "k"))
-    row = t + Literal(n - 5, "int")
-    predicate = BinaryExpr("&&", BinaryExpr("&&", r.lt(row + Literal(1, "int")), BinaryExpr("<=", row, r)), c.lt(row))
-    owner = TernaryExpr(predicate, b, Literal(0, "int")) if masked else b
-    reduction = Loop(
-        Axis("k", n),
-        (
-            Pre("left", "state", (owner, row if masked else r, k)),
-            Pre("right", "state", (owner, k, c)),
-            Assign("product", "multiply", ("left", "right")),
-            Accum(name="sum", op="add", value="product"),
-        ),
+def _body(n=40, *, masked=True, extra_reader=False, last=False):
+    row = f"t + {n - 5}"
+    predicate = f"r < {row} + 1 && {row} <= r && c < {row}"
+    owner = f"{predicate} ? b : 0" if masked else "b"
+    cell = "    " * 6
+    value = f"next = select:\n{cell}    updated when {predicate}\n{cell}    old when true" if masked else "next = copy(updated)"
+    extra = f"\n{cell}other[t, b, r, c] = sum" if extra_reader else ""
+    body = parse_body(
+        f"""
+        for t in 0..3:
+            for b in 0..2:
+                for r in 0..{n}:
+                    for c in 0..{n}:
+                        for k in 0..{n}:
+                            left = pre state[{owner}, {row if masked else "r"}, k]
+                            right = pre state[{owner}, k, c]
+                            product = multiply(left, right)
+                            sum <- add(sum, product)
+                        old = pre state[b, r, c]
+                        updated = add(old, sum)
+                        {value}
+                        state[b, r, c] <- next seed `seed`
+                        out[{"" if last else "t, "}b, r, c] = next{extra}
+        """
     )
-    value = (
-        Select("next", (SelectBranch("updated", predicate), SelectBranch("old", Literal(True, "bool"))))
-        if masked
-        else Assign("next", "copy", ("updated",))
-    )
-    carry = Carry("state", "next", (b, r, c), "seed")
-    cell = (
-        reduction,
-        Pre("old", "state", (b, r, c)),
-        Assign("updated", "add", ("old", "sum")),
-        value,
-        carry,
-        Write("out", (t, b, r, c), "next"),
-    )
-    if extra_reader:
-        cell += (Write("other", (t, b, r, c), "sum"),)
-    body = Body((Loop(Axis("t", 3), (Loop(Axis("b", 2), (Loop(Axis("r", n), (Loop(Axis("c", n), cell),)),)),)),))
+    carry = next(stmt for stmt in body.iter() if isinstance(stmt, Carry))
     return body, carry
 
 
-def _graph(dtype=F32, *, masked=True, n=40):
+def _graph(dtype=F32, *, masked=True, n=40, last=False):
+    """The scan storing every step's state, or (``last``) the state it ends with alone."""
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("seed", (2, n, n), dtype), node_id="seed")
-    graph.add_node(LoopOp(body=_body(n, masked=masked)[0], name="k_step"), ["seed"], Tensor("out", (3, 2, n, n), dtype), node_id="out")
+    out = Tensor("out", (2, n, n) if last else (3, 2, n, n), dtype)
+    graph.add_node(LoopOp(body=_body(n, masked=masked, last=last)[0]), ["seed"], out, node_id="out")
     graph.inputs, graph.outputs = ["seed"], ["out"]
     return graph
 
@@ -77,13 +72,14 @@ def test_discarded_clamps_do_not_change_the_state_owner():
 
 def test_shared_storage_keeps_the_ordered_loop_inside_one_launch():
     with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((7, 0)))
+        compiled, kernels = compile_with_kernels(_graph(), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     assert not op.serial
     assert op.arg_order == ("seed", "out")
     assert op.knobs["SHARED_CARRY"] == 1
-    assert "_carry_copy" in op.kernel_source
-    assert "__acc" not in op.kernel_source
+    (kernel,) = kernels.values()
+    assert "_carry_copy" in text(kernel)
+    assert "__acc" not in text(kernel)
     assert len(compiled.nodes["out"].outputs) == 1
 
 
@@ -124,15 +120,17 @@ def test_recorded_shared_storage_is_picked_again_without_a_pin(tmp_path):
 
 
 def _selected_stores() -> Body:
-    return Body(
-        (
-            Load(name="a", input="x", index=(Var("i"),), dtype=F32),
-            Assign(name="neg", op="negative", args=("a",), dtype=F32),
-            Load(name="b", input="fallback", index=(Var("i"),), dtype=F32),
-            Select("chosen", (SelectBranch("neg", Var("i").lt(3)), SelectBranch("b", Literal(True, "bool")))),
-            Write(output="out", index=(Var("i"),), value="chosen", value_dtype=F32),
-            Write(output="other", index=(Var("i"),), value="chosen", value_dtype=F32),
-        )
+    return parse_body(
+        """
+        f32 a = load x[i]
+        f32 neg = negative(a)
+        f32 b = load fallback[i]
+        chosen = select:
+            neg when i < 3
+            b when true
+        f32 out[i] = chosen
+        f32 other[i] = chosen
+        """
     )
 
 
@@ -146,7 +144,7 @@ def test_selected_stores_evaluate_only_the_chosen_private_cone():
     inputs = {"x": np.arange(6, dtype=np.float32), "fallback": np.arange(10, 16, dtype=np.float32)}
     outputs = {"out": (6,), "other": (6,)}
     for candidate in (body, changed):
-        op = KernelOp(body=Body((Loop(Axis("i", 6), candidate),)))
+        op = KernelOp(body=parse_body("for i in 0..6:\n" + "\n".join(f"    {line}" for line in str(candidate).splitlines())))
         for result in execute_loop_op_cpp(op, inputs, outputs):
             np.testing.assert_array_equal(result, np.array([0, -1, -2, 13, 14, 15], dtype=np.float32))
 
@@ -155,15 +153,15 @@ def test_selected_stores_evaluate_only_the_chosen_private_cone():
 def test_selected_stores_keep_memory_effects_and_other_readers(unsafe):
     stmts = list(_selected_stores())
     if unsafe == "reload":
-        stmts.insert(2, Write(output="x", index=(Var("i"),), value="replacement"))
+        stmts.insert(2, *parse_body("x[i] = replacement"))
     elif unsafe == "sync":
         stmts.insert(2, Sync())
     elif unsafe == "atomic":
-        stmts[-1] = replace(stmts[-1], atomic=True)
+        (stmts[-1],) = parse_body("f32 other[i] += chosen")
     elif unsafe == "extra_reader":
-        stmts.append(Assign("used", "abs", ("chosen",), dtype=F32))
+        stmts.extend(parse_body("f32 used = abs(chosen)"))
     else:
-        stmts[-1] = replace(stmts[-1], index=(Var("chosen"),))
+        (stmts[-1],) = parse_body("f32 other[chosen] = chosen")
     body = Body(stmts)
     assert shared._guard_stores(body) == body
 
@@ -174,10 +172,12 @@ def test_a_state_the_term_stores_every_step_has_no_port():
     lifted = Pipeline.build(["tile/lift"]).run(_graph(), ctx=Context.from_target((7, 0)))
     assert [t.name for t in lifted.nodes["out"].outputs] == ["out"]
     with pinned_knobs({**_PINS, "SHARED_CARRY": 0}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((7, 0)))
+        compiled, kernels = compile_with_kernels(_graph(), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
-    assert op.serial and op.arg_order == ("seed", "out") and "__acc" not in op.kernel_source
-    assert op.kernel_source.count("out[") >= 2, "the lagged read is a read of the term's own output"
+    (kernel,) = kernels.values()
+    assert op.serial and op.arg_order == ("seed", "out") and "__acc" not in text(kernel)
+    reads = [load for load in statements(kernel, Load) if load.input == "out"]
+    assert reads and statements(kernel, Write), "the lagged read is a read of the term's own output"
 
 
 @requires_cuda
@@ -188,8 +188,8 @@ def test_parallel_snapshot_copy_keeps_intermediate_casts():
         stmts = []
         for stmt in body:
             if isinstance(stmt, Write):
-                stmts.append(Assign("narrowed", "copy", (stmt.value,), dtype=F16))
-                stmt = replace(stmt, values=("narrowed",))
+                stmts.extend(parse_body(f"f16 narrowed = copy({stmt.value})"))
+                stmt = stmt.replace(values=("narrowed",))
             elif stmt.nested():
                 stmt = stmt.with_bodies(tuple(cast_snapshot(b) for b in stmt.nested()))
             stmts.append(stmt)
@@ -232,3 +232,47 @@ def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked)
         array = (np.random.default_rng(seed).standard_normal((2, 40, 40)) * 0.03).astype(dtype.np)
         outputs = [backend.run(program, input_data={"seed": array})[0].outputs["out"] for program in candidates]
         np.testing.assert_array_equal(*outputs)
+
+
+def test_ordered_launches_store_a_scan_s_last_state_at_the_last_launch_alone():
+    """A store the step does not index is stored over by the next launch, so only the last launch writes it."""
+    with pinned_knobs({**_PINS, "SHARED_CARRY": 0}):
+        compiled, kernels = compile_with_kernels(_graph(last=True), ctx=Context.from_target((7, 0)))
+    (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+    (kernel,) = kernels.values()
+    assert op.serial and op.knobs["SHARED_CARRY"] == 0
+    guarded = {id(store) for cond in statements(kernel, Cond) if "2 == " in str(cond.cond) for store in cond.nested()[0].iter()}
+    stores = [store for store in statements(kernel, Write) if store.output == "out"]
+    assert stores and all(id(store) in guarded for store in stores)
+
+
+def test_shared_storage_stores_a_scan_s_last_state_once_and_copies_only_the_row_the_last_step_changed():
+    """With no step's state to keep, the shared layout stores the state after its loop over the steps, and a
+    step's copy between the two buffers covers the one row the step before it wrote, not the whole state."""
+    with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
+        compiled, kernels = compile_with_kernels(_graph(last=True), ctx=Context.from_target((7, 0)))
+    (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+    (kernel,) = kernels.values()
+    assert not op.serial and op.arg_order == ("seed", "out") and op.knobs["SHARED_CARRY"] == 1
+    (steps,) = (loop for loop in statements(kernel, Loop) if loop.axis.name == "a0")
+    assert not [store for store in steps.body.iter() if isinstance(store, Write) and store.output == "out"]
+    (closing,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_last")
+    assert [store.output for store in closing.body.iter() if isinstance(store, Write)] == ["out"]
+    (copy,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_copy")
+    assert str(copy.end) == "40 * a0 + 1400" and str(copy.start) == "40 * a0 + thread_idx.x + 1360"
+
+
+@requires_cuda
+@pytest.mark.parametrize("storage", [0, 1], ids=["global", "shared"])
+@pytest.mark.parametrize("masked", [True, False], ids=["selected", "full"])
+def test_a_scan_that_keeps_its_last_state_matches_the_last_step_of_one_that_keeps_all(storage, masked):
+    array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
+    outputs = []
+    for last in (False, True):
+        # A row every card since Volta realizes, so the storage under test is the one compiled.
+        with pinned_knobs({**_PINS, "WORK": "t128", "REDUCE": "coop-t/v2", "SHARED_CARRY": storage}):
+            compiled = Pipeline.build(CUDA_PASSES).run(_graph(masked=masked, last=last), ctx=Context.probe())
+        (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+        assert op.knobs["SHARED_CARRY"] == storage
+        outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
+    np.testing.assert_array_equal(outputs[0][2], outputs[1])

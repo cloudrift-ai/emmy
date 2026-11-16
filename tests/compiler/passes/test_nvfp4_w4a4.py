@@ -13,18 +13,37 @@ program applies the two levels fused (see the tolerance the device tests below d
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 import pytest
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
+from emmy.compiler.ir.kernel.ir import (
+    BlockScaleLoad,
+    CpAsyncCopy,
+    FragmentLoad,
+    MbarrierWait,
+    MmaSyncPtx,
+    Smem,
+    TmaDescriptor,
+    TmaLoad,
+)
+from emmy.compiler.ir.stmt import StridedLoop
 from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations
 from emmy.compiler.tensor import Tensor
-from tests.compiler.helpers import device_compute_capability, requires_cuda, requires_sm
+from tests.compiler.helpers import compile_with_kernels, device_compute_capability, operations, requires_cuda, requires_sm, statements
 from tests.compiler.loader.test_quant import _w4a4_checkpoint
+
+
+def _native(kernels) -> list:
+    """The kernels that hold the block-scaled ``m16n8k64`` product, its two scale registers beside the operands."""
+    return [
+        kernel
+        for kernel in kernels.values()
+        if any(tuple(mma.shape) == (16, 8, 64) and mma.sfa_frag and mma.sfb_frag for mma in statements(kernel, MmaSyncPtx))
+    ]
+
 
 pytest.importorskip("torch")
 
@@ -49,20 +68,18 @@ def _w4a4_linear(tmp_path, *, m, n, k, dtype="f16", input_scale=0.02):
 
 def test_the_spelled_w4a4_program_lowers_whole(tmp_path, monkeypatch):
     """The full CUDA pass list consumes the spelled chain — quantize, pack, decode and matmul all
-    land in kernels, with the e2m1 encode reaching the emitted source. Structure only; which
+    land in kernels, with the e2m1 encode reaching a kernel. Structure only; which
     kernel carries which piece is the scheduler's call and not pinned here."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     g = _w4a4_linear(tmp_path, m=32, n=128, k=128)
-    lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((12, 0)))
-    sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    assert sources, "no kernel came out of the lowering"
+    lowered, kernels = compile_with_kernels(g, ctx=Context.from_target((12, 0)))
+    assert kernels, "no kernel came out of the lowering"
     leftovers = [nid for nid, n in lowered.nodes.items() if type(n.op).__name__ not in ("CudaOp", "ConstantOp", "InputOp")]
     assert not leftovers, f"lowering left tensor ops behind: {leftovers}"
-    assert any("emmy_to_f4e2m1" in s for s in sources), "the activation encode never reached a kernel"
-    assert any("__fdiv_rn" in s for s in sources), "fast math lost the precise quotient before the FP4 encode"
+    assert "to_f4e2m1" in operations(kernels), "the activation encode never reached a kernel"
+    assert "divide_rn_f32" in operations(kernels), "fast math lost the precise quotient before the FP4 encode"
 
 
 @requires_cuda
@@ -311,13 +328,13 @@ def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
     ref, _ = NumpyBackend().run(g, input_data={**data, **feed})
     backend = CudaBackend()
     with pinned_knobs(_fp4_tma_pins("d1/smem-async")):
-        compiled = backend.compile(g)
+        compiled, kernels = compile_with_kernels(g)
         got, _ = backend.run(compiled, input_data={**data, **feed})
-    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    assert any("emmy_mma_m16n8k64_e2m1_f32(" in s for s in sources), "the pinned block-scaled cell never reached a kernel"
-    native = next(s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s)
-    assert "emmy_mma_load_sfa_f4" in native and "emmy_mma_load_sfb_f4" in native, "the cell ran without its scale operands"
-    assert "EMMY_F4_LUT" not in native, "a native cell must not decode either operand through the value table"
+    assert _native(kernels), "the pinned block-scaled cell never reached a kernel"
+    native = _native(kernels)[0]
+    assert {load.role for load in statements(native, BlockScaleLoad)} == {"a", "b"}, "the cell ran without its scale operands"
+    decoded = [load for load in statements(native, FragmentLoad) if load.scale_buffer is not None]
+    assert not decoded, "a native cell must not decode either operand through the value table"
 
     for out in g.outputs:
         r = ref.outputs[out].astype(np.float32).reshape(-1)
@@ -489,12 +506,12 @@ def test_the_two_channel_block_scaled_cell_runs_and_holds_the_declared_tolerance
     ref, _ = NumpyBackend().run(g, input_data={**data, **feed})
     backend = CudaBackend()
     with pinned_knobs(_fp4_tma_pins("d1/smem-async")):
-        compiled = backend.compile(g)
+        compiled, kernels = compile_with_kernels(g)
         got, _ = backend.run(compiled, input_data={**data, **feed})
-    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    native = [s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s]
+    native = _native(kernels)
     assert len(native) == 1, "the pinned block-scaled cell never reached the gate/up kernel"
-    assert "_b1_smem" in native[0] and "_b1s_smem" in native[0], "the second channel has no slabs of its own"
+    slabs = {slab.name for slab in statements(native[0], Smem)}
+    assert {"_b1_smem", "_b1s_smem"} <= slabs, "the second channel has no slabs of its own"
 
     r = ref.outputs["act"].astype(np.float32).reshape(-1)
     c = np.asarray(got.outputs["act"]).astype(np.float32).reshape(-1)
@@ -523,21 +540,20 @@ def test_fp4_tma_copies_each_stored_buffer_by_box_ahead_of_the_mma(tmp_path, cha
     and each weight's), no cp.async left for them, and under a two-slot ring the next chunk's box
     copies issue before this chunk's wait and its native mma."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     g, _ = _fp4_tma_program(tmp_path, channels, m=16, k=1024)
     with pinned_knobs(_fp4_tma_pins("d2/smem-tma")):
-        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((12, 0)))
-    sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    native = [s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s]
+        _, kernels = compile_with_kernels(g, ctx=Context.from_target((12, 0)))
+    native = _native(kernels)
     assert native, "the pinned block-scaled cell never reached a kernel"
-    for src in native:
-        assert len(set(re.findall(r"CUtensorMap\* __restrict__ (_desc_\w+)", src))) == 2 + 2 * channels
-        assert "emmy_cp_async_cg" not in src
-        assert "unsigned long long _mbar[2]" in src
-        body = src[src.index("for (int _ks") :]
-        assert body.index("cp_async_bulk_tensor") < body.index("mbarrier_wait_parity") < body.index("emmy_mma_m16n8k64_e2m1_f32(")
+    for kernel in native:
+        assert len({descriptor.name for descriptor in statements(kernel, TmaDescriptor)}) == 2 + 2 * channels
+        assert not statements(kernel, CpAsyncCopy)
+        assert [tuple(slab.extents) for slab in statements(kernel, Smem) if slab.name == "_mbar"] == [(2,)]
+        chunk = next(loop for loop in statements(kernel, StridedLoop) if loop.axis.name.startswith("_ks"))
+        order = [type(stmt) for stmt in chunk.body.iter() if isinstance(stmt, (TmaLoad, MbarrierWait, MmaSyncPtx))]
+        assert order.index(TmaLoad) < order.index(MbarrierWait) < order.index(MmaSyncPtx)
 
 
 @requires_cuda
@@ -567,11 +583,9 @@ def test_fp4_tma_matches_cp_async_bit_for_bit(tmp_path, channels, ring, k):
     for transport in ("smem-async", "smem-tma"):
         backend = CudaBackend()
         with pinned_knobs(_fp4_tma_pins("/".join((depth, transport, *register)))):
-            compiled = backend.compile(g)
-            native = [
-                s for node in compiled.nodes.values() if "emmy_mma_m16n8k64_e2m1_f32(" in (s := getattr(node.op, "kernel_source", "") or "")
-            ]
-            assert native and all(("cp_async_bulk_tensor" in s) == (transport == "smem-tma") for s in native)
+            compiled, kernels = compile_with_kernels(g)
+            native = _native(kernels)
+            assert native and all(bool(statements(kernel, TmaLoad)) == (transport == "smem-tma") for kernel in native)
             runs = [backend.run(compiled, input_data={**data, **feed})[0] for _ in range(2)]
         outputs[transport] = [np.asarray(run.outputs[out]) for run in runs for out in g.outputs]
     async_out, tma_out = outputs["smem-async"], outputs["smem-tma"]

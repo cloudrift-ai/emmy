@@ -135,8 +135,8 @@ def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch):
 
 def test_a_batch_reads_its_routing_once(monkeypatch):
     """A sliced-expert rank routes a step to most of the experts, so the batch path must not wait on
-    the device per expert: one host read of the counts per layer, and the same sum as routing each
-    expert's rows found by ``where``, in the same order."""
+    the device per expert: one host read of the counts per layer, and the sum routing each expert's
+    rows found by ``where`` gives, up to rounding (the combine may fuse each product into its add)."""
     torch = pytest.importorskip("torch")
 
     from emmy.serving.gen_runner import combine_routed_experts
@@ -161,7 +161,7 @@ def test_a_batch_reads_its_routing_once(monkeypatch):
     monkeypatch.setattr(torch, "bincount", lambda *a, **k: pytest.fail("a batch counted its rows with bincount"))
     got = combine_routed_experts(xn, (scores, indices), per_expert(lambda e, rows: rows @ weights[e]), num_experts=experts)
 
-    assert torch.equal(got, reference)
+    torch.testing.assert_close(got, reference)
     assert len(reads) == 1
 
 

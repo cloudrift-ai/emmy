@@ -20,13 +20,12 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.schedule import Reduce, Tile, Work, derive_workers, resolve_site_tile
 from emmy.compiler.ir.schedule.catalog import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
 from emmy.compiler.ir.schedule.classic.schedule import packed_works
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
@@ -223,21 +222,16 @@ def _computed_b_term() -> TileOp:
     own axis (``b_k = Σ_j w[k, j]``, so the edge varies with ``k`` and the pair reads as bilinear).
     The parent fill realizes the computed edge, so only the contraction is a schedule site."""
     m, n, k, j = Axis("m", 64), Axis("n", 64), Axis("k", 256), Axis("j", 256)
-    inner = fold_from_loop(
-        Loop(
-            axis=j,
-            body=Body((Load(name="w_e", input="w", index=(Var("k"), Var("j"))), Accum(name="bacc", value="w_e", op="add", axes=("j",)))),
-        )
-    )
-    node = contraction(k, Load(name="a_e", input="a", index=(Var("m"), Var("k"))), (inner, "acc"))
+    inner = fold_from_loop(*parse_body("for j in 0..256:\n    w_e = load w[k, j]\n    bacc <- add(bacc, w_e) over j"))
+    node = contraction(k, *parse_body("a_e = load a[m, k]"), (inner, "acc"))
     return TileOp(op=node, place=Placement(free=(m, n)), axes=(m, n, k, j))
 
 
 def _computed_a_term() -> TileOp:
     """An f32 contraction whose A value is computed inline and shared across the N tile."""
     m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 16)
-    a = projection((), (Load(name="score", input="scores", index=(Var("m"), Var("k"))), Assign(name="prob", op="exp", args=("score",))))
-    node = contraction(k, a, (Load(name="value", input="values", index=(Var("k"), Var("n"))), "acc"))
+    a = projection((), parse_body("score = load scores[m, k]\nprob = exp(score)"))
+    node = contraction(k, a, (*parse_body("value = load values[k, n]"), "acc"))
     return TileOp(
         op=node,
         place=Placement(free=(m, n)),
@@ -256,7 +250,7 @@ def _rows_of(tile, ctx=None) -> list[dict]:
     from importlib import import_module
 
     classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
-    out = classic_forks(tile, "k", {}, ctx or Context.from_target((12, 0)))
+    out = classic_forks(tile, {}, ctx or Context.from_target((12, 0)))
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 
 
@@ -296,9 +290,8 @@ def _plain_matmul_term() -> TileOp:
     """A static f32 matmul as an unmapped ``TileOp`` — no warp atoms (f32 has no tensor-core cell),
     so the scalar catalog is the whole ``TILE`` offer."""
     m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
-    node = contraction(
-        k, Load(name="a_e", input="a", index=(Var("m"), Var("k"))), (Load(name="b_e", input="b", index=(Var("k"), Var("n"))), "acc")
-    )
+    a_e, b_e = parse_body("a_e = load a[m, k]\nb_e = load b[k, n]")
+    node = contraction(k, a_e, (b_e, "acc"))
     return TileOp(
         op=node,
         place=Placement(free=(m, n)),
@@ -340,8 +333,14 @@ def test_f32_computed_a_contraction_offers_a_tiled_scalar_row():
 
 def _row_reduce(m: Axis, k: Axis, buffer: str) -> TileOp:
     """A bare row reduce ``acc[m] = Σ_k buffer[m, k]`` as an unmapped ``TileOp``."""
-    load = Load(name=f"{buffer}_e", input=buffer, index=(Var(m.name), Var(k.name)))
-    fold = fold_from_loop(Loop(axis=k, body=Body((load, Accum(name="acc", value=load.name, op="add", axes=(k.name,))))))
+    [loop] = parse_body(
+        f"""
+        for {k.name} in 0..{k.extent.expression}:
+            {buffer}_e = load {buffer}[{m.name}, {k.name}]
+            acc <- add(acc, {buffer}_e) over {k.name}
+        """
+    )
+    fold = fold_from_loop(loop)
     return TileOp(op=fold, place=Placement(free=(m,)), axes=(m, k))
 
 
@@ -415,20 +414,19 @@ def _gemv_tile(ctx):
 
 
 def test_a_kernel_pin_with_no_split_keeps_its_piece_unsplit(monkeypatch):
-    """``REDUCE@place_<token>=coop-t`` names the piece by the token its name carries: the split fork
+    """``REDUCE@<name>=coop-t`` names the piece by its name: the split fork
     reads it like a bare pin with no ``g`` half and offers the unsplit tree alone, where it used to miss
     the pin and offer every split."""
-    from dataclasses import replace
     from types import SimpleNamespace
 
     from emmy.compiler.pipeline.passes.tile._split import split_forks
 
     for var in ("EMMY_REDUCE", "EMMY_WORK"):
         monkeypatch.delenv(var, raising=False)
-    root = SimpleNamespace(op=replace(_gemv_tile(Context.from_target((9, 0))), name="k_x__place_ab12"), id="add_7__place_ab12_0")
+    root = SimpleNamespace(op=_gemv_tile(Context.from_target((9, 0))), id="add_7__place_ab12_0")
     assert len(split_forks(None, root)) > 1, "unpinned, the GEMV offers its splits"
-    monkeypatch.setenv("EMMY_WORK@place_ab12", "t128")
-    monkeypatch.setenv("EMMY_REDUCE@place_ab12", "coop-t")
+    monkeypatch.setenv(f"EMMY_WORK@{root.op.name}", "t128")
+    monkeypatch.setenv(f"EMMY_REDUCE@{root.op.name}", "coop-t")
     assert len(split_forks(None, root)) == 1
 
 

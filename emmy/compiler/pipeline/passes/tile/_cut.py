@@ -29,8 +29,8 @@ rather than a sequence of them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
-from itertools import permutations, product
+from dataclasses import dataclass, replace
+from itertools import permutations
 from math import gcd, prod
 
 import numpy as np
@@ -42,8 +42,7 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -51,8 +50,7 @@ from emmy.compiler.ir.pure.fold import (
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Write
-from emmy.compiler.ir.stmt.passes import rewrite as rewrite_stmt
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import (
     UnbindableProjection,
@@ -65,7 +63,7 @@ from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of, wrap_multi_output_fragment
-from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
+from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, lift_nest, reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
@@ -120,7 +118,7 @@ class CutSite:
 class ContractionGroup:
     """One contraction's channels and its coordinate space.
 
-    ``members`` holds ``(node, position, exprs, ranges)`` per channel: the seam node, the exposed component that is
+    ``members`` holds ``(node, position, expressions, ranges)`` per channel: the seam node, the exposed component that is
     this contraction, the expression it reads each free operand index at, in placeholder order, and each expression's
     range as ``(lo, extent)``. ``space`` is the union of those ranges per placeholder, as ``(lo, extent)``."""
 
@@ -157,24 +155,30 @@ def storage_frontier(node: Fold) -> Frontier | None:
         return None
     lift = node.applied
     body = lift.body
-    if any(not isinstance(stmt, (Load, Affine, Assign, Let)) for stmt in body):
+    if any(not isinstance(stmt, (Load, Assign, Let)) for stmt in body):
         return None
-    computed = {name for stmt in body if isinstance(stmt, (Affine, Assign)) for name in stmt.defines()}
+    computed = {name for stmt in body if isinstance(stmt, Assign) for name in stmt.defines()}
+    # A decode of a value the body computes: a node whose operand is a computed name, or a computation of its own.
     decodes = [
-        stmt
+        (stmt, node)
         for stmt in body
-        if isinstance(stmt, Assign) and stmt.op.decodes is not None and len(stmt.args) == 1 and stmt.args[0] in computed
+        if isinstance(stmt, Assign)
+        for node in stmt.value.subterms()
+        if node.operation is not None
+        and node.operation.decodes is not None
+        and len(node.operands) == 1
+        and isinstance(node.operands[0], Var)
+        and node.operands[0].name in computed
     ]
     if len(decodes) != 1:
         return None
-    decode = decodes[0]
-    frontier = decode.args[0]
+    (decode, decoding), frontier = decodes[0], decodes[0][1].operands[0].name
     prefix = tuple(body.backward_cone((frontier,)).members)
     remaining = Body(stmt for stmt in body if frontier not in stmt.defines())
     residue = tuple(remaining.backward_cone(lift.results).members)
     if decode not in residue:
         return None
-    result = get_dtype(decode.op.decodes)
+    result = get_dtype(decoding.operation.decodes)
 
     operands = tuple(edge for edge in node.operands if set(edge.exposes) & Body(prefix).ssa_uses)
     params = tuple(name for edge in operands for name in edge.exposes)
@@ -223,7 +227,7 @@ def _narrowed_reads(tile: TileOp) -> dict[str, object]:
     casts: dict[str, set] = {}
     for site in sites(tile.op):
         for stmt in site.node.lift.body.iter():
-            narrowing = isinstance(stmt, Assign) and stmt.op == ElementwiseImpl("copy") and stmt.dtype is not None and len(stmt.args) == 1
+            narrowing = isinstance(stmt, Assign) and isinstance(stmt.value, Var) and stmt.dtype is not None
             for name in Body((stmt,)).ssa_uses:
                 casts.setdefault(name, set()).add(stmt.dtype if narrowing and stmt.dtype.nbytes < 4 else None)
     for store in tile.output_specs:
@@ -261,19 +265,11 @@ def _output_owners(tile: TileOp) -> dict[int, tuple]:
 
 
 def seam_token(parent: TileOp, spelling: str) -> str:
-    """The token a piece cut from ``parent`` at the seam ``spelling`` carries in its kernel name,
-    ``…__place_<token>``, and in the workspace buffers it writes: the parent's structural identity and
-    the seam's canonical ``PLACE`` key, digested — the keys of a seam set joined by ``+`` for the
-    producers one decision fuses. Two pieces of one shape cut at different seams, or at one seam of
-    two parents, are two kernels, and a ``place_<token>`` pin reaches exactly one."""
+    """The token the workspace buffers a cut of ``parent`` at the seam ``spelling`` writes carry,
+    ``<root>__place_<token>_<i>``: the parent's structural identity and the seam's canonical ``PLACE`` key,
+    digested — the keys of a seam set joined by ``+`` for the producers one decision fuses — so the workspaces of
+    two cuts in one graph never share a buffer name."""
     return digest(parent.identity_key(structural=False) or "", spelling)[:10]
-
-
-def place_token(name: str) -> str | None:
-    """The token the kernel ``name`` carries — what follows its last ``__place_``, up to what a split
-    or a nested cut appends after ``__`` — or ``None`` for a kernel that is no cut piece. A
-    ``place_<token>`` pin and a recorded route address the piece by it."""
-    return name.rsplit("__place_", 1)[1].split("__", 1)[0] if "__place_" in name else None
 
 
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
@@ -490,66 +486,36 @@ def join_pairs(seams) -> tuple[tuple[CutSite, CutSite], ...]:
     )
 
 
-def _pruned(body: Body, roots: frozenset[str]) -> Body:
-    """``body`` cut to what ``roots`` need — the statements a root reads through, in order, a
-    loop kept with what its own body keeps."""
-    from emmy.compiler.ir.stmt.body import free_names  # noqa: PLC0415
-
-    needed = set(roots)
-    while True:
-        before = needed.copy()
-        kept: list = []
-        for stmt in reversed(tuple(body)):
-            if stmt.nested():
-                inner = tuple(_pruned(child, frozenset(needed)) for child in stmt.nested())
-                if not any(inner):
-                    continue
-                stmt = stmt.with_bodies(inner)
-            elif not (needed.intersection(stmt.defines()) or stmt.external_writes()):
-                continue
-            kept.append(stmt)
-            needed |= free_names(stmt)
-        # A carried state may be read before its update. Keep its update too, even when the
-        # backward walk discovered that read after it had already visited the update.
-        if needed == before:
-            return Body(tuple(reversed(kept)))
-
-
-def _children(expr) -> tuple:
-    values = (getattr(expr, f.name) for f in fields(expr))
-    return tuple(child for v in values for child in (v if isinstance(v, (tuple, list)) else (v,)) if isinstance(child, Expr))
-
-
-def _coordinate_reads(body: Body, names: tuple[str, ...]) -> dict[str, Expr]:
+def _coordinate_reads(body: Body, names: tuple[str, ...]) -> dict[str, Expression]:
     """For each coordinate the cone reads through ONE expression of that coordinate alone, other
     than the coordinate itself, that expression — the index a rotate-half read computes its column
     by. A coordinate read two ways, or plainly, reads no expression."""
 
     found: dict[str, set] = {name: set() for name in names}
 
-    def visit(expr) -> None:
-        own = expr.free_vars()
+    def visit(expression) -> None:
+        own = expression.free_vars()
         if len(own) == 1 and (name := next(iter(own))) in found:
-            found[name].add(expr)
+            found[name].add(expression)
             return
-        for child in _children(expr):
+        for child in expression.children():
             visit(child)
 
     for stmt in body.iter():
-        for expr in stmt.exprs():
-            visit(expr)
-    return {name: next(iter(exprs)) for name, exprs in found.items() if len(exprs) == 1 and exprs != {Var(name)}}
+        for expression in stmt.expressions():
+            visit(expression)
+    return {name: next(iter(expressions)) for name, expressions in found.items() if len(expressions) == 1 and expressions != {Var(name)}}
 
 
 class _AbstractingSigma(Sigma):
     """Replaces each coordinate's read expression by the bare coordinate — the cone as a function of
     the value its index computes. The mapping names the coordinates so a binder still shadows them."""
 
-    def apply(self, expr):
-        return expr.rebuild(lambda term: next((Var(name) for name, read in self._reads.items() if term == read), term))
+    def after(self, expression):
+        return expression.rebuild(lambda term: next((Var(name) for name, read in self._reads.items() if term == read), term))
 
 
-def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], dict[str, Expr], dict]:
+def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expression], dict[str, Expression], dict]:
     """What each component of a seam's cone computes, spelled so two copies of one value key
     alike: the cone lowered over its captured axes renamed by position, cut to the component,
     under the exact statement identity (SSA names, commutative order and buffer declaration order
@@ -568,7 +534,7 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     statistic read at ``i // 2560`` of a flattened 10240-wide axis and at its own 4-wide stream axis is one value.
     Returned beside the forms and the expressions: the address each strided coordinate's cell is stored at, and the
     stored axes."""
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
+    from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
@@ -578,15 +544,15 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     # norm), and that loop keeps its own variable.
     captured = Sigma({name: Var(spelled) for name, spelled in names.items()})
     cells = _stored_cells(seam.node, stored, strides)
-    body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
+    body = Body(tuple(stmt.rewrite(lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
     reads = _coordinate_reads(body, tuple(names.values()))
     if reads:
         sigma = _AbstractingSigma({name: Var(name) for name in reads})
         object.__setattr__(sigma, "_reads", reads)
-        body = Body(tuple(rewrite_stmt(stmt, lambda name: name, sigma) for stmt in body))
+        body = Body(tuple(stmt.rewrite(lambda name: name, sigma) for stmt in body))
     forms = []
     for exposed in seam.node.exposes:
-        identity = canonicalize_identity(_pruned(body, frozenset((exposed,))))
+        identity = canonicalize_identity(body.pruned((exposed,)))
         forms.append((identity.key, identity.arguments))
     own = {spelled: Var(name) for name, spelled in names.items()}
     at = {axis.name: address for axis, address in zip(stored, index, strict=True) if axis.name in strides and axis.name in names}
@@ -650,12 +616,14 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
     return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
 
 
-def _coarser_quotient(term: Expr, row: Expr) -> int | None:
+def _coarser_quotient(term: Expression, row: Expression) -> int | None:
     """The ``B`` for which ``term`` is ``row / B``, when the row is a coordinate's quotient ``x / d`` and the term the
     same coordinate's coarser one ``x / (B·d)``: floor division composes over the non-negative coordinates a kernel
     indexes. A GQA head reads its key head at ``h / 3`` beside the value head ``h``; flattened, the row ``i / 128`` sits
     beside ``i / 384``."""
-    if not (isinstance(term, BinaryExpr) and isinstance(row, BinaryExpr) and term.op == row.op == "/" and term.left == row.left):
+    if not (
+        isinstance(term, BinaryExpression) and isinstance(row, BinaryExpression) and term.op == row.op == "/" and term.left == row.left
+    ):
         return None
     coarse, fine = term.right, row.right
     if not all(isinstance(lit, Literal) and isinstance(lit.value, int) and lit.value > 0 for lit in (coarse, fine)):
@@ -671,47 +639,45 @@ class _AbstractingRow(Sigma):
     head-major in a wider buffer reads its row ``16·b + l`` inside ``128·h + 16·b + l``, which holds
     no subterm equal to the row."""
 
-    def apply(self, expr):
-        return self._abstract(expr)
+    def after(self, expression):
+        return self._abstract(expression)
 
-    def _abstract(self, term: Expr) -> Expr:
+    def _abstract(self, term: Expression) -> Expression:
         row = self._row
         names = row.free_vars()
         if term == row or not term.free_vars() & names:
             return Var("_row") if term == row else term
         if (coarser := _coarser_quotient(term, row)) is not None:
-            return BinaryExpr("/", Var("_row"), Literal(coarser, "int"))
+            return BinaryExpression("/", Var("_row"), Literal(coarser, "int"))
         own, base = affine_form(term, names), affine_form(row, names)
         if own is not None and base is not None and own[1].keys() == base[1].keys():
             ratios = {coeff // base[1][name] for name, coeff in own[1].items() if coeff % base[1][name] == 0}
             if len(ratios) == 1 and all(coeff % base[1][name] == 0 for name, coeff in own[1].items()):
                 (scale,) = ratios
-                rest = BinaryExpr("-", own[0], BinaryExpr("*", Literal(scale, "int"), base[0]))
-                return _affine_sum(BinaryExpr("+", BinaryExpr("*", Literal(scale, "int"), Var("_row")), rest))
-        changes = {}
-        for field in fields(term):
-            value = getattr(term, field.name)
-            if isinstance(value, Expr):
-                changes[field.name] = self._abstract(value)
-            elif isinstance(value, (tuple, list)) and any(isinstance(child, Expr) for child in value):
-                changes[field.name] = type(value)(self._abstract(child) if isinstance(child, Expr) else child for child in value)
-        return replace(term, **changes) if changes else term
+                rest = BinaryExpression("-", own[0], BinaryExpression("*", Literal(scale, "int"), base[0]))
+                return _affine_sum(BinaryExpression("+", BinaryExpression("*", Literal(scale, "int"), Var("_row")), rest))
+        children = term.children()
+        abstracted = tuple(self._abstract(child) for child in children)
+        return term if abstracted == children else term.with_children(abstracted)
 
 
-def _affine_sum(expr: Expr) -> Expr:
-    """``expr`` spelled as its terms in name order and one constant, so equal values spell alike; an expression
-    that is not affine in its names keeps its simplified spelling."""
-    names = expr.free_vars()
-    form = affine_form(expr, names)
+def _affine_sum(expression: Expression) -> Expression:
+    """``expression`` spelled as its terms in name order and one constant, so equal values spell alike; an expression
+    that is not affine in its names keeps its simplified spelling. The constant keeps its kind: a value's float offset
+    is no integer, and two channels differing only in it are two channels."""
+    names = expression.free_vars()
+    form = affine_form(expression, names)
     if form is None:
-        return expr.simplify(SimplifyCtx.empty())
-    terms = [Var(name) if coeff == 1 else BinaryExpr("*", Literal(coeff, "int"), Var(name)) for name, coeff in sorted(form[1].items())]
-    constant = int(form[0].eval({}))
+        return expression.simplify(SimplifyCtx.empty())
+    terms = [
+        Var(name) if coeff == 1 else BinaryExpression("*", Literal(coeff, "int"), Var(name)) for name, coeff in sorted(form[1].items())
+    ]
+    constant = form[0].eval({})
     if constant or not terms:
-        terms.append(Literal(constant, "int"))
+        terms.append(Literal(constant, "int" if type(constant) is int else "float"))
     total = terms[0]
     for term in terms[1:]:
-        total = BinaryExpr("+", total, term)
+        total = BinaryExpression("+", total, term)
     return total
 
 
@@ -721,36 +687,40 @@ def _read_through(found: tuple, own: dict) -> tuple:
     return channel, tuple((axis, read.substitute(own)) for axis, read in mapping)
 
 
-def _row_form(seam: CutSite, name: str, row: Expr, common: tuple[str, ...], axes: tuple) -> tuple | None:
+def _row_form(seam: CutSite, name: str, row: Expression, common: tuple[str, ...], axes: tuple) -> tuple | None:
     """Exact identity of a contraction channel as a function of one output address."""
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — tile IR import
+    from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415 — tile IR import
 
     node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
     scoped = tuple(axis.name for axis in seam.axes if axis.name in node.free_axes)
     captured = Sigma({axis: Var(f"_s{i}") for i, axis in enumerate(common)})
-    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, captured) for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
+    body = Body(tuple(stmt.rewrite(lambda value: value, captured) for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
     sigma = _AbstractingRow()
     object.__setattr__(sigma, "_row", row)
-    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, sigma) for stmt in body))
-    if any(row.free_vars() & expr.free_vars() for stmt in body.iter() for expr in stmt.exprs()):
+    body = Body(tuple(stmt.rewrite(lambda value: value, sigma) for stmt in body))
+    if any(row.free_vars() & expression.free_vars() for stmt in body.iter() for expression in stmt.expressions()):
         return None
-    identity = canonicalize_identity(_pruned(body, frozenset((name,))))
+    identity = canonicalize_identity(body.pruned((name,)))
     return identity.key, identity.arguments
 
 
-def _row_candidates(seam: CutSite, name: str, axes: tuple) -> tuple[Expr, ...]:
+def _row_candidates(seam: CutSite, name: str, axes: tuple) -> tuple[Expression, ...]:
     """Captured output addresses actually read by a contraction channel."""
     node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
     scoped = frozenset(axis.name for axis in seam.axes if axis.name in node.free_axes)
     body = Body(tuple(node.lower(bound=scoped, axes=axes)))
     return tuple(
         dict.fromkeys(
-            expr for stmt in body.iter() if isinstance(stmt, Load) for expr in stmt.index if expr.free_vars() and expr.free_vars() <= scoped
+            expression
+            for stmt in body.iter()
+            if isinstance(stmt, Load)
+            for expression in stmt.index
+            if expression.free_vars() and expression.free_vars() <= scoped
         )
     )
 
 
-def _row_layout(seam: CutSite, name: str, axes: tuple) -> tuple[tuple[Expr, tuple, int], ...]:
+def _row_layout(seam: CutSite, name: str, axes: tuple) -> tuple[tuple[Expression, tuple, int], ...]:
     """Bijective flat row coordinates offered by a representative's workspace.
 
     A plain axis or a row-major pair covers each row exactly once. A row that
@@ -764,10 +734,10 @@ def _row_layout(seam: CutSite, name: str, axes: tuple) -> tuple[tuple[Expr, tupl
             if match is not None and match.extent.as_static() > 1:
                 found.append((row, (match,), match.extent.as_static()))
             continue
-        if not isinstance(row, BinaryExpr) or row.op != "+":
+        if not isinstance(row, BinaryExpression) or row.op != "+":
             continue
         for high, low in ((row.left, row.right), (row.right, row.left)):
-            if not isinstance(low, Var) or not isinstance(high, BinaryExpr) or high.op != "*":
+            if not isinstance(low, Var) or not isinstance(high, BinaryExpression) or high.op != "*":
                 continue
             for factor, upper in ((high.left, high.right), (high.right, high.left)):
                 if not isinstance(factor, Literal) or factor.dtype != "int" or not isinstance(upper, Var):
@@ -853,8 +823,8 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                                 high, low = row_axes
                                 stride = Literal(low.extent.as_static(), "int")
                                 mapping += (
-                                    (high.name, BinaryExpr("/", row, stride)),
-                                    (low.name, BinaryExpr("%", row, stride)),
+                                    (high.name, BinaryExpression("/", row, stride)),
+                                    (low.name, BinaryExpression("%", row, stride)),
                                 )
                             found = (channel, mapping)
                             break
@@ -887,14 +857,15 @@ _PLACEHOLDER = "_p"
 
 def _signature(stmt) -> tuple:
     """What a statement computes, ignoring the names it reads: a cheap key two definitions of one value share."""
-    return (type(stmt).__name__, getattr(stmt, "op", None), len(getattr(stmt, "args", ())))
+    value = stmt.value if isinstance(stmt, Assign) else None
+    return (type(stmt).__name__, str(value.rename(dict.fromkeys(value.free_vars(), "_"))) if value is not None else None)
 
 
 def _inline_cone(host: Fold, name: str) -> Fold | None:
     """The value ``name`` that ``host``'s lift defines, as a term of its own: the statements it reads through and the
     operand edges they bind. ``None`` when the cone holds anything but loads and straight-line statements."""
     members = tuple(host.lift.body.backward_cone((name,)).members)
-    if any(not isinstance(stmt, (Load, Affine, Assign, Let)) for stmt in members):
+    if any(not isinstance(stmt, (Load, Assign, Let)) for stmt in members):
         return None
     used = Body(members).ssa_uses
     params = host.lift.params[1 if host.base is not None else 0 :]
@@ -952,7 +923,7 @@ def _inline_copies(tile: TileOp, seams: tuple[CutSite, ...], all_sites, outer: t
             continue
         scope = tuple(dict.fromkeys((*outer, *site.scope, *((host.axis,) if host.axis is not None else ()))))
         for stmt in host.lift.body:
-            if not isinstance(stmt, (Assign, Affine)) or _signature(stmt) not in signatures or stmt.name in host.lift.results:
+            if not isinstance(stmt, Assign) or _signature(stmt) not in signatures or stmt.name in host.lift.results:
                 continue
             cone = _inline_cone(host, stmt.name)
             if cone is None or not cone.free_axes <= set(scope):
@@ -1010,14 +981,14 @@ def _abstracted(body: Body, captured: frozenset[str], table: dict, by_name: dict
 
     def visit(stmt, scope, step):
         if isinstance(stmt, Load):
-            return replace(stmt, index=tuple(step(e) if e.free_vars() and e.free_vars() <= scope else e for e in stmt.index))
+            return stmt.replace(index=tuple(step(e) if e.free_vars() and e.free_vars() <= scope else e for e in stmt.index))
         inner = scope - {stmt.axis.name} if isinstance(stmt, Loop) else scope
         nested = stmt.nested()
         return stmt.with_bodies(tuple(Body(tuple(visit(child, inner, step) for child in body)) for body in nested)) if nested else stmt
 
     found = []
     for stmt in body:
-        visit(stmt, captured, lambda expr: found.append(expr) or expr)
+        visit(stmt, captured, lambda expression: found.append(expression) or expression)
     found = list(dict.fromkeys(found))
     # The finest components come first: the given ones, then those reading more coordinates, then the one-to-one
     # addresses, then those holding no other as a subterm. Each later one reads through the earlier ones when it can.
@@ -1031,35 +1002,35 @@ def _abstracted(body: Body, captured: frozenset[str], table: dict, by_name: dict
         ),
     )
     kept: list = []
-    for expr in finest:
+    for expression in finest:
         stand_ins = {other: Var(f"{_PLACEHOLDER}{n}") for n, other in enumerate(kept)}
-        if expr in table or _through(expr, stand_ins, captured, by_name) is None:
-            kept.append(expr)
+        if expression in table or _through(expression, stand_ins, captured, by_name) is None:
+            kept.append(expression)
     derived = set(found) - set(kept)
-    for expr in (e for e in found if e not in derived):
-        table.setdefault(expr, Var(f"{_PLACEHOLDER}{len(table)}"))
+    for expression in (e for e in found if e not in derived):
+        table.setdefault(expression, Var(f"{_PLACEHOLDER}{len(table)}"))
 
-    def step(expr):
-        spelled = _through(expr, table, captured, by_name) if expr in derived else None
+    def step(expression):
+        spelled = _through(expression, table, captured, by_name) if expression in derived else None
         if spelled is not None:
             return spelled
-        return table.setdefault(expr, Var(f"{_PLACEHOLDER}{len(table)}"))
+        return table.setdefault(expression, Var(f"{_PLACEHOLDER}{len(table)}"))
 
     out = Body(tuple(visit(stmt, captured, step) for stmt in body))
     return None if _reads_free(out, captured) else out
 
 
-def _through(expr: Expr, placeholders: dict, captured: frozenset[str], by_name: dict) -> Expr | None:
-    """``expr`` read through ``placeholders`` (component -> placeholder), or ``None`` when it still reads a captured
+def _through(expression: Expression, placeholders: dict, captured: frozenset[str], by_name: dict) -> Expression | None:
+    """``expression`` read through ``placeholders`` (component -> placeholder), or ``None`` when it still reads a captured
     coordinate. A component's quotient (:func:`_quotient`) reads as its placeholder divided: the head ``h`` of a row
     ``128*h + d`` over ``d < 128`` is ``_p / 128``, whichever view of the row reads it. Otherwise each subterm that
     is a component becomes its placeholder, and each coordinate left over becomes its digit of a component's
     placeholder (:func:`_digits`)."""
     for component, placeholder in placeholders.items():
-        if (divisor := _quotient(expr, component, by_name)) is not None:
-            return BinaryExpr("/", placeholder, Literal(divisor, "int"))
-    spelled = expr.rebuild(lambda term: placeholders.get(term, term))
-    digits: dict[str, Expr] = {}
+        if (divisor := _quotient(expression, component, by_name)) is not None:
+            return BinaryExpression("/", placeholder, Literal(divisor, "int"))
+    spelled = expression.rebuild(lambda term: placeholders.get(term, term))
+    digits: dict[str, Expression] = {}
     for component, placeholder in placeholders.items():
         for name, digit in _digits(component, placeholder, by_name).items():
             digits.setdefault(name, digit)
@@ -1067,19 +1038,19 @@ def _through(expr: Expr, placeholders: dict, captured: frozenset[str], by_name: 
     return None if spelled.free_vars() & captured else spelled
 
 
-def _quotient(expr: Expr, component: Expr, by_name: dict) -> int | None:
-    """The ``B`` for which ``expr`` is ``component / B`` at every point of the component's static coordinates, or
+def _quotient(expression: Expression, component: Expression, by_name: dict) -> int | None:
+    """The ``B`` for which ``expression`` is ``component / B`` at every point of the component's static coordinates, or
     ``None``: a block scale read at ``4*h + d / 128 + 2`` beside the weight row ``512*h + d + 256`` (``d < 256``) is
-    that row divided by 128. The candidate ``B`` is the smallest row at which ``expr`` passes its lowest value, over
-    ``expr`` there; it is checked at every point."""
+    that row divided by 128. The candidate ``B`` is the smallest row at which ``expression`` passes its lowest value, over
+    ``expression`` there; it is checked at every point."""
     names = sorted(component.free_vars())
-    if not names or not expr.free_vars() <= set(names) or any(not by_name[name].extent.is_static for name in names):
+    if not names or not expression.free_vars() <= set(names) or any(not by_name[name].extent.is_static for name in names):
         return None
     extents = [by_name[name].extent.as_static() for name in names]
     if prod(extents) > 1 << 20:
         return None
     grid = dict(zip(names, (axis.ravel() for axis in np.indices(extents)), strict=True))
-    fine, coarse = (np.broadcast_to(np.asarray(e.eval(grid), dtype=np.int64), (prod(extents),)) for e in (component, expr))
+    fine, coarse = (np.broadcast_to(np.asarray(e.eval(grid), dtype=np.int64), (prod(extents),)) for e in (component, expression))
     low = int(coarse.min())
     if fine.min() < 0 or low < 0 or not (coarse > low).any():
         return None
@@ -1091,7 +1062,7 @@ def _quotient(expr: Expr, component: Expr, by_name: dict) -> int | None:
 def _reads_free(body: Body, names: frozenset[str]) -> bool:
     """Whether a statement of ``body`` reads one of ``names`` outside every loop of ``body`` that binds it again."""
     for stmt in body:
-        if set().union(*(expr.free_vars() for expr in stmt.exprs())) & names:
+        if set().union(*(expression.free_vars() for expression in stmt.expressions())) & names:
             return True
         inner = names - {stmt.axis.name} if isinstance(stmt, Loop) else names
         if inner and any(_reads_free(nested, inner) for nested in stmt.nested()):
@@ -1099,21 +1070,15 @@ def _reads_free(body: Body, names: frozenset[str]) -> bool:
     return False
 
 
-def _bounds(expr: Expr, ctx: SimplifyCtx) -> Interval | None:
-    """``expr``'s integer range: interval analysis, else the exact range over a small static domain (a guarded or
+def _bounds(expression: Expression, ctx: SimplifyCtx) -> Interval | None:
+    """``expression``'s integer range: interval analysis, else the exact range over a small static domain (a guarded or
     padded coordinate, which interval analysis does not bound)."""
-    bounds = expr.range(ctx)
-    if bounds is not None:
-        return bounds
-    names = sorted(expr.free_vars())
-    if prod(ctx.ranges[name].hi + 1 for name in names) > 1 << 20:
-        return None
-    values = [expr.eval(dict(zip(names, point, strict=True))) for point in product(*(range(ctx.ranges[name].hi + 1) for name in names))]
-    return Interval(int(min(values)), int(max(values)))
+    bounds = expression.range(ctx)
+    return bounds if bounds is not None else expression.exact_range(ctx, 1 << 20)
 
 
 def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
-    """Per exposed component, ``(key, exprs, ranges)``: the contraction with its free operand indices replaced by
+    """Per exposed component, ``(key, expressions, ranges)``: the contraction with its free operand indices replaced by
     placeholders, the expression this channel reads each one at, and that expression's range. ``None`` when the seam is not a
     pure contraction or a channel does not separate into a contraction over placeholders."""
     node = seam.node
@@ -1136,24 +1101,24 @@ def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
     for position, name in enumerate(node.exposes):
         channel = _channels(node, (name,)) if len(node.exposes) > 1 else node
         table: dict = {}
-        body = _abstracted(_pruned(Body(tuple(channel.lower(bound=captured, axes=axes))), frozenset((name,))), captured, table, by_name)
+        body = _abstracted(Body(tuple(channel.lower(bound=captured, axes=axes))).pruned((name,)), captured, table, by_name)
         if body is None:
             return None
-        exprs = tuple(table)
+        expressions = tuple(table)
         ranges = []
-        for expr in exprs:
-            if expr.free_vars() <= set(static):
-                bounds = _bounds(expr, ctx)
+        for expression in expressions:
+            if expression.free_vars() <= set(static):
+                bounds = _bounds(expression, ctx)
                 if bounds is None:
                     return None
                 ranges.append((bounds.lo, bounds.hi - bounds.lo + 1))
-            elif isinstance(expr, Var):
-                ranges.append((0, by_name[expr.name].extent))  # a symbolic coordinate read plainly
+            elif isinstance(expression, Var):
+                ranges.append((0, by_name[expression.name].extent))  # a symbolic coordinate read plainly
             else:
                 return None
-        identity, slots = _canonical_slots(body, len(exprs))
+        identity, slots = _canonical_slots(body, len(expressions))
         symbolic = tuple(extent for _, (_, extent) in sorted(zip(slots, ranges, strict=True)) if not isinstance(extent, int))
-        out[position] = ((identity.key, identity.arguments, symbolic), exprs, tuple(ranges), slots)
+        out[position] = ((identity.key, identity.arguments, symbolic), expressions, tuple(ranges), slots)
     return out
 
 
@@ -1164,7 +1129,7 @@ def _canonical_slots(body: Body, placeholders: int) -> tuple[object, tuple[int, 
     and the same contraction reads its weight first under a block amax and its activation first elsewhere, which
     made the two occurrences two groups, each recomputing the contraction. Past four placeholders the numbering
     stays as found."""
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
+    from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     found = tuple(range(placeholders))
     best = (canonicalize_identity(body), found)
@@ -1195,16 +1160,22 @@ def _group_contractions(seams: list[CutSite], axes: tuple) -> tuple[tuple[CutSit
             forms[index] = found
     groups: dict[tuple, list] = {}
     for index, found in forms.items():
-        for position, (key, exprs, ranges, slots) in found.items():
-            groups.setdefault(key, []).append((index, position, exprs, ranges, slots))
+        for position, (key, expressions, ranges, slots) in found.items():
+            groups.setdefault(key, []).append((index, position, expressions, ranges, slots))
     built = []
     for members in groups.values():
-        # The workspace is laid out in the first member's order; every other member reads it through the slots
-        # its own placeholders share with the first's.
-        first = members[0][4]
+        # The workspace is laid out in the nest order of the first member's loops: its coordinates by the scope position
+        # of the innermost axis each reads, the one the consumer varies fastest last, so that consumer reads the rows
+        # it stores contiguously; two at one depth keep their digest-min slot order. Every other member reads it
+        # through the slots its own placeholders share with the first's. Not the order the lowered body names the
+        # operands in: that is the normal form's statement order, which a spelling change moves.
+        first_index, _, first_expressions, _, first_slots = members[0]
+        scope = {axis.name: position for position, axis in enumerate(seams[first_index].axes)}
+        depth = [max(scope[name] for name in expression.free_vars()) for expression in first_expressions]
+        first = tuple(sorted(first_slots, key=lambda slot: (depth[first_slots.index(slot)], slot)))
         members = [
-            (index, position, tuple(exprs[slots.index(slot)] for slot in first), tuple(ranges[slots.index(slot)] for slot in first))
-            for index, position, exprs, ranges, slots in members
+            (index, position, tuple(expressions[slots.index(slot)] for slot in first), tuple(ranges[slots.index(slot)] for slot in first))
+            for index, position, expressions, ranges, slots in members
         ]
         dtypes = {seams[index].dtypes[position] for index, position, *_ in members}
         space = []
@@ -1217,7 +1188,7 @@ def _group_contractions(seams: list[CutSite], axes: tuple) -> tuple[tuple[CutSit
             hi = max(lo + extent - 1 for lo, extent in spans)
             space.append((lo, hi - lo + 1))
         group = ContractionGroup(
-            members=tuple((seams[index].node, position, exprs, ranges) for index, position, exprs, ranges in members),
+            members=tuple((seams[index].node, position, expressions, ranges) for index, position, expressions, ranges in members),
             space=tuple(space),
             dtype=next(iter(dtypes)) if len(dtypes) == 1 else F32,
         )
@@ -1258,7 +1229,7 @@ def _group_contractions(seams: list[CutSite], axes: tuple) -> tuple[tuple[CutSit
     return tuple(out), rest
 
 
-def _read_at(rn: str, mn: str, rep: tuple, member: tuple) -> Expr | None:
+def _read_at(rn: str, mn: str, rep: tuple, member: tuple) -> Expression | None:
     """The address a clustered copy reads the representative's workspace at along ``rn``, or ``None``;
     ``rep`` and ``member`` are their :func:`_value_forms`.
 
@@ -1288,7 +1259,7 @@ def _read_at(rn: str, mn: str, rep: tuple, member: tuple) -> Expr | None:
     return Var(mn) if rep_at[rn].substitute({rn: Var(mn)}) == cell else None
 
 
-def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str, Expr]]]:
+def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str, Expression]]]:
     """The components of ONE seam that are another component read at other coordinates, as
     ``{position: (position read, {axis: address})}``. Lifting folds every contraction over one input
     into one twin, so RoPE's rotate-half copies of a projection become channels beside the plain one,
@@ -1311,7 +1282,7 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
     reps = {}
     for position, ((form,), _reads, *_) in sorted(enumerate(forms), key=lambda item: len(item[1][1])):
         reps.setdefault(form, position)
-    copies: dict[int, tuple[int, dict[str, Expr]]] = {}
+    copies: dict[int, tuple[int, dict[str, Expression]]] = {}
     for position, ((form,), *_) in enumerate(forms):
         rep = reps[form]
         if rep == position or seam.dtypes[rep] != seam.dtypes[position]:
@@ -1324,9 +1295,7 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
 
 def _channels(node: Fold, names: tuple[str, ...]) -> Fold:
     """``node`` computing only the components ``names``, every operand it no longer reads dropped."""
-    from emmy.compiler.ir.tile.normalize import _prune_unread  # noqa: PLC0415
-
-    return _prune_unread(node.exposing(names), frozenset(names))
+    return node.exposing(names).pruned(names)
 
 
 def _unchanged(pieces: tuple, members) -> bool:
@@ -1360,7 +1329,7 @@ def _read_inline(node: Fold, inline: _InlineReads) -> tuple[Fold, dict[str, str]
     loads = dict(inline.reads)
     body = Body(
         tuple(
-            replace(loads[defined[0]], names=defined) if len(defined := tuple(stmt.defines())) == 1 and defined[0] in loads else stmt
+            loads[defined[0]].replace(names=defined) if len(defined := tuple(stmt.defines())) == 1 and defined[0] in loads else stmt
             for stmt in node.lift.body
         )
     )
@@ -1377,7 +1346,7 @@ def _read_inline(node: Fold, inline: _InlineReads) -> tuple[Fold, dict[str, str]
             operands.append(edge)
             bound.extend(slots)
     lift = Lambda.closing((*node.lift.params[:lead], *bound), Body(members), node.lift.results)
-    return replace(node, operands=tuple(operands), lift=lift), {name: load.name.removeprefix(name) for name, load in loads.items()}
+    return node.replace(operands=tuple(operands), lift=lift), {name: load.name.removeprefix(name) for name, load in loads.items()}
 
 
 def _replace_member(member, targets: dict[int, tuple], renamed: dict[str, str]):
@@ -1405,8 +1374,8 @@ def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str], lift_reads
     :func:`_read_name` tags a workspace read because the value can still be computed in place
     beside it. The same holds one step on: a statement over that read is a different statement from
     the one still computed in place — ``v = in0__ws… + b`` beside ``v = in0 + b`` — and a lowered
-    scope binds a name once, so under one name the pair is the same SSA fault (nvcc: *already
-    declared*). Each such definition takes the tags of the reads it depends on; a statement that
+    scope binds a name once, so under one name the pair is the same SSA fault (a name defined
+    twice). Each such definition takes the tags of the reads it depends on; a statement that
     reads no workspace keeps its name and still shares with its in-place copy. The term's readers
     follow through :attr:`~emmy.compiler.ir.pure.fold.Fold.applied`, which is what walks the rename
     up the tree, one rebuilt term at a time. It stops at a reduce: a carried state keeps its name,
@@ -1421,7 +1390,7 @@ def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str], lift_reads
         tags.update((name, "".join(read)) for name in stmt.defines() if read)
     names = {name: f"{name}{tag}" for name, tag in tags.items() if name not in was}
     renamed.update(names)
-    return replace(after, lift=after.lift.rename(names)) if names else after
+    return after.replace(lift=after.lift.rename(names)) if names else after
 
 
 def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]) -> Fold:
@@ -1455,13 +1424,13 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
     body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets, renamed))
     if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body) and not lift_reads:
         return node
-    lift = replace(node.lift, body=Body(body))
+    lift = node.lift.replace(body=Body(body))
     if not all(bound):
         lead = 1 if node.base is not None else 0
         params = node.lift.params
         head, slots, tail = params[:lead], params[lead : lead + len(bound)], params[lead + len(bound) :]
-        lift = replace(lift, params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
-    return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed, lift_reads)
+        lift = lift.replace(params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
+    return _follow_reads(node, node.replace(operands=operands, lift=lift), renamed, lift_reads)
 
 
 def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
@@ -1476,10 +1445,10 @@ def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
             continue
         (stmt,) = proj.lift.body
         slab = proj.operands[0].as_slab() if isinstance(proj.operands[0], Fold) else None
-        if slab is None or not isinstance(stmt, Assign) or stmt.op != ElementwiseImpl("copy") or stmt.args != proj.lift.params[:1]:
+        if slab is None or not isinstance(stmt, Assign) or not isinstance(stmt.value, Var) or (stmt.value.name,) != proj.lift.params[:1]:
             continue
         if dtypes.get(slab.load.input) == stmt.dtype:
-            targets[id(proj)] = (Fold.slab(replace(slab.load, names=(stmt.name,))),)
+            targets[id(proj)] = (Fold.slab(slab.load.replace(names=(stmt.name,))),)
     return _replace_fold(node, targets, {}) if targets else node
 
 
@@ -1492,7 +1461,7 @@ def _defined_values(root: Fold, skip: int | None = None) -> set[str]:
         if id(node) in seen or id(node) == skip:
             continue
         seen.add(id(node))
-        out |= set(node.exposes) | node.step().ssa_defs
+        out |= set(node.exposes) | node.step().defined
         pending.extend(node.operands)
     return out
 
@@ -1594,8 +1563,8 @@ def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, tuple[int, int]
             plain = plain or term.observe is not None or name in term.lift.results
             for stmt in term.lift.body.iter():
                 plain = plain or (not isinstance(stmt, Load) and name in stmt.deps())
-                for expr in stmt.exprs():
-                    reads.update(_divmod_reads(expr, name))
+                for expression in stmt.expressions():
+                    reads.update(_divmod_reads(expression, name))
         divisors = [value for op, value in reads if op == "/"]
         remainders = {value for op, value in reads if op == "%"}
         if plain or ("", 1) in reads or not divisors or len(remainders) > 1:
@@ -1617,7 +1586,7 @@ def _workspace_layout(produced: Fold, axes: tuple) -> tuple[tuple, dict[str, tup
         if (stride := strides.get(axis.name)) is not None:
             (d, c), i = stride, Var(axis.name)
             stored[position] = replace(axis, extent=axis.extent.ceil_div(d) if c == 1 else Dim(axis.extent.as_static() // d * c))
-            index[position] = i / d if c == 1 else (i / d) * c + BinaryExpr("%", i, Literal(c, "int"))
+            index[position] = i / d if c == 1 else (i / d) * c + BinaryExpression("%", i, Literal(c, "int"))
     return tuple(stored), strides, tuple(index)
 
 
@@ -1629,35 +1598,25 @@ def _stored_cells(produced: Fold, axes: tuple, strides: dict[str, tuple[int, int
             continue
         d, c = stride
         if c == 1:
-            produced = rewrite_stmt(produced, lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
+            produced = produced.rewrite(lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
             continue
-        folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpr("%", Var(axis.name), Literal(c, "int"))})
-        object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
-        produced = rewrite_stmt(produced, lambda name: name, folding)
+        folding = Sigma(
+            {axis.name: (Var(axis.name) / c) * d + BinaryExpression("%", Var(axis.name), Literal(c, "int"))},
+            SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}),
+        )
+        produced = produced.rewrite(lambda name: name, folding)
     return produced
 
 
-def _divisor(expr, name: str) -> int | None:
-    """What ``expr`` divides the bare coordinate ``name`` by through positive integer divisions, or ``None``."""
-    if expr == Var(name):
+def _divisor(expression, name: str) -> int | None:
+    """What ``expression`` divides the bare coordinate ``name`` by through positive integer divisions, or ``None``."""
+    if expression == Var(name):
         return 1
-    if not (isinstance(expr, BinaryExpr) and expr.op in ("/", "//") and isinstance(expr.right, Literal)):
+    if not (isinstance(expression, BinaryExpression) and expression.op in ("/", "//") and isinstance(expression.right, Literal)):
         return None
-    if expr.right.dtype != "int" or expr.right.value <= 0 or (inner := _divisor(expr.left, name)) is None:
+    if expression.right.dtype != "int" or expression.right.value <= 0 or (inner := _divisor(expression.left, name)) is None:
         return None
-    return inner * int(expr.right.value)
-
-
-class _FoldingSigma(Sigma):
-    """A substitution that FOLDS as it lands, under a fixed range context.
-
-    ``Sigma.apply`` substitutes and stops, which is right everywhere else: a σ that rewrote its
-    result would hide what it did. Here the fold is the point — the whole gain is that
-    ``i / c`` and ``i % c`` collapse to the bare split coordinates, and an index left as
-    ``((hi * c) + lo) / c`` reaches the scheduler as an expression of the fused name again."""
-
-    def apply(self, expr):
-        return expr.substitute(self.mapping).simplify(self._ctx)
+    return inner * int(expression.right.value)
 
 
 def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyCtx) -> Fold:
@@ -1668,15 +1627,15 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
     the substituted name leaves the param list and :meth:`Lambda.closing` appends the two the body
     now reads, as TRAILING params, which is where a coordinate already sat and is what keeps the
     operand correspondence in the prefix untouched. A fold over an axis of the same name binds that
-    name for itself and its operands, so it is left whole."""
+    name for itself and its operands, so it is left whole. The fold is the point: the whole gain is that
+    ``i / c`` and ``i % c`` collapse to the bare split coordinates."""
     if produced.axis == name:
         return produced
-    folding = _FoldingSigma(dict(sigma.mapping))
-    object.__setattr__(folding, "_ctx", ctx)
+    folding = Sigma(dict(sigma.mapping), ctx)
     operands = tuple(_substitute_and_fold(edge, name, sigma, ctx) for edge in produced.operands)
-    body = Body(rewrite_stmt(stmt, lambda n: n, folding) for stmt in produced.lift.body)
+    body = Body(stmt.rewrite(lambda n: n, folding) for stmt in produced.lift.body)
     lift = Lambda.closing(tuple(p for p in produced.lift.params if p != name), body, produced.lift.results)
-    return replace(produced, operands=operands, lift=lift)
+    return produced.replace(operands=operands, lift=lift)
 
 
 def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
@@ -1692,30 +1651,30 @@ def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
         term = pending.pop()
         pending.extend(term.operands)
         for stmt in term.lift.body.iter():
-            for expr in stmt.exprs():
-                for op, value in _divmod_reads(expr, name):
+            for expression in stmt.expressions():
+                for op, value in _divmod_reads(expression, name):
                     high = op == "/" and value % factor == 0
                     div = div or high
                     low = low or not high
     return div, low
 
 
-def _divmod_reads(expr, name: str) -> list[tuple[str, int]]:
-    """How ``expr`` reads the coordinate ``name``: ``("/", d)`` per outermost chain of integer
+def _divmod_reads(expression, name: str) -> list[tuple[str, int]]:
+    """How ``expression`` reads the coordinate ``name``: ``("/", d)`` per outermost chain of integer
     divisions (``(i // a) // b`` reads ``i // (a * b)``), ``("%", m)`` per remainder, ``("", 1)``
     per bare use."""
-    parts = tuple(expr.subterms())
+    parts = tuple(expression.subterms())
     chains = {
         id(part): divisor
         for part in parts
-        if isinstance(part, BinaryExpr) and (divisor := _divisor(part, name)) is not None and divisor > 1
+        if isinstance(part, BinaryExpression) and (divisor := _divisor(part, name)) is not None and divisor > 1
     }
     inner = {id(part.left) for part in parts if id(part) in chains}
     reads = [("/", divisor) for key, divisor in chains.items() if key not in inner]
     reads += [
         ("%", int(part.right.value))
         for part in parts
-        if isinstance(part, BinaryExpr)
+        if isinstance(part, BinaryExpression)
         and part.op == "%"
         and part.left == Var(name)
         and isinstance(part.right, Literal)
@@ -1783,8 +1742,8 @@ def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
             if name not in term.free_axes:
                 continue
             for stmt in term.lift.body.iter():
-                for expr in stmt.exprs():
-                    reads.update(_divmod_reads(expr, name))
+                for expression in stmt.expressions():
+                    reads.update(_divmod_reads(expression, name))
         divisors = {value for op, value in reads if op == "/"}
         remainders = {value for op, value in reads if op == "%"}
         # The pair's factor is the finest division; a coarser one that it divides reads the high
@@ -1814,12 +1773,12 @@ def _split_fused_pair(produced: Fold, axes: tuple, index: tuple) -> tuple[Fold, 
     hi, lo = (f"{name}_{suffix}" for suffix in ("hi", "lo"))
     while hi in taken or lo in taken:
         hi, lo = f"{hi}_", f"{lo}_"
-    fused = BinaryExpr("+", BinaryExpr("*", Var(hi), Literal(factor, "int")), Var(lo))
+    fused = BinaryExpression("+", BinaryExpression("*", Var(hi), Literal(factor, "int")), Var(lo))
     ranges = {hi: Interval(0, extent // factor - 1), lo: Interval(0, factor - 1)}
     produced = _substitute_and_fold(produced, name, Sigma({name: fused}), SimplifyCtx(ranges=ranges))
     minted = (Axis(name=hi, extent=Dim(extent // factor)), Axis(name=lo, extent=Dim(factor)))
     grid = tuple(part for a in axes for part in (minted if a.name == name else (a,)))
-    return produced, grid, tuple(expr.substitute({name: fused}) for expr in index), minted
+    return produced, grid, tuple(expression.substitute({name: fused}) for expression in index), minted
 
 
 def _buffer_reads(node: Fold) -> set[str]:
@@ -1881,6 +1840,16 @@ def _region_term(regions: tuple, body, stores: tuple) -> Fold:
     return Fold(operands=regions, lift=Lambda.closing(bound, body, tuple(dict.fromkeys(results))))
 
 
+def _over(regions: tuple, owners: set[int], stores: tuple) -> tuple:
+    """The operand terms a piece writing ``stores`` is built over, in the kernel's operand order: the regions at the
+    positions ``owners``, and each region those stores read only for a coordinate or a guard (a scatter's row), which
+    owns no output and rides with them (:func:`~emmy.compiler.ir.tile.ops.output_regions`)."""
+    reads = {name for store in stores for name in store.reads}
+    return tuple(
+        region for index, (region, _, owned) in enumerate(regions) if index in owners or (not owned and reads & set(region.exposes))
+    )
+
+
 def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, split_consumed: bool, spelling: str, shapes: dict):
     """One output-owning piece: the regions' term, the outputs they produce, and the PARENT's free
     axes. The placement is deliberately the parent's and not the seam's own axes — the piece is a
@@ -1889,9 +1858,6 @@ def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, split_consu
     longer in the intersection."""
     piece = TileOp(
         op=_region_term(regions, tail, stores),
-        # The seam token keeps recursive pieces' kernel names distinct, as it does for a workspace
-        # producer — two same-named pieces from different cut levels would launch one kernel twice.
-        name=f"{tile.name}__place_{seam_token(tile, spelling)}",
         place=Placement(free=tuple(tile.place.free)),
         axes=tile.axes,
         output_specs=stores,
@@ -1910,8 +1876,8 @@ def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
     what one kernel binds. The value a cut materializes can still be computed in place beside the
     read: a structurally equal cone the replacement did not reach (replacement follows object
     sharing), or a second seam exposing that same value. Under one name those are two declarations
-    at two different addresses, which is an SSA fault and which nvcc rejects (*already declared in
-    the current scope*). Reads of ONE workspace at one address keep one name, so the emitted body
+    at two different addresses, which is an SSA fault (a name defined twice in one scope). Reads of ONE
+    workspace at one address keep one name, so the emitted body
     still binds each value once. What a reader derives from the read carries the tag on
     (:func:`_follow_reads`).
     """
@@ -1926,9 +1892,9 @@ def _indexed_read(seam: CutSite, own: str, channel: int, correspondence: tuple, 
     mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
     return Fold.slab(
         Load(
-            name=_read_name(own, token, ordinal),
+            names=(_read_name(own, token, ordinal),),
             input=held[channel],
-            index=tuple(expr.substitute(mapping) for expr in indexes[channel]),
+            index=tuple(expression.substitute(mapping) for expression in indexes[channel]),
         )
     )
 
@@ -1961,18 +1927,21 @@ def _fuse_sibling_producers(fragment: Graph, spelled: dict[str, str], parent: Ti
     producer returns to Tile IR without a schedule, so an output-owning cut can separate it.
     ``spelled`` is each workspace buffer's seam; the fused producer is the piece of the seam set its
     members produced, and carries that set's token.
+
+    A producer nothing reads is dropped first. A chosen seam goes unread when another chosen seam's piece computes it
+    in place (a cone under one occurrence of a contraction whose piece is built from another); fused into a piece
+    something reads, it was a buffer no launch reads, which the backend refuses as dead scratch.
     """
+    fragment.remove_orphans()
     workspace = set(spelled)
     by_dependencies: dict[frozenset[str], set[str]] = {}
     for buffer in spelled:
-        node = fragment.producer(buffer)
-        assert node is not None
+        if (node := fragment.producer(buffer)) is None:
+            continue  # dropped above
         if any(tensor.dtype.logical_elems > 1 for tensor in node.outputs):
             continue  # the Loop splicer cannot remove a packed tensor's storage relation
         by_dependencies.setdefault(frozenset(set(node.inputs) & workspace), set()).add(node.id)
     for members in by_dependencies.values():
-        # A previous splice can prune unused producers from later groups as orphans.
-        members = members & fragment.nodes.keys()
         if len(members) < 2:
             continue
         _splice_pieces(fragment, members, spelled, parent, "+".join(sorted({spelled[nid] for nid in members})))
@@ -1984,7 +1953,7 @@ def _splice_pieces(fragment: Graph, members: set[str], spelled: dict[str, str], 
     loop_graph = fragment.copy()
     for nid in members:
         tile = loop_graph.nodes[nid].op
-        loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body, name=tile.name)
+        loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body)
     live = live_outputs_of(loop_graph, members)
     merged = build_merged_region(loop_graph, members, live)
     if merged is None:
@@ -1994,7 +1963,7 @@ def _splice_pieces(fragment: Graph, members: set[str], spelled: dict[str, str], 
     merged = replace(merged, inputs={name: merged.inputs[name] for name in inputs if name in merged.inputs})
     replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
     merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
-    fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{seam_token(parent, seams)}")
+    fused = lift_kernel(merged_node.op)
     merged_node.op = replace(fused, split_consumed=any(fragment.nodes[nid].op.split_consumed for nid in members))
     fragment.splice(replacement, consumed=members, output=output_map)
 
@@ -2004,9 +1973,16 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
     producer, if the seam's piece joined one) and the output-owning seam's piece."""
     for producer, region in joins:
         workspace = next(buffer for buffer, spelling in spelled.items() if spelling == producer.spelling)
+        if (node := fragment.producer(workspace)) is None:
+            continue  # nothing read the workspace and its piece was dropped: the region's piece stands alone
         _, stores = region.owned
-        members = {fragment.producer(workspace).id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
+        members = {node.id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
         _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
+
+
+#: The node hint a cut leaves on every kernel it mints. A graph fact, like op provenance: each such kernel is a new
+#: kernel, which reads only the pins that name it, and the schedule pass reads it as one piece of a cut kernel set.
+PIECE = "cut.piece"
 
 
 def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
@@ -2027,7 +2003,9 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
 
     Every piece leaves its placement open, so it can expose and decide smaller seams. A placement
     cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
-    sliced-axis split receipt."""
+    sliced-axis split receipt.
+
+    Every kernel the cut leaves is a new kernel and carries the :data:`PIECE` hint."""
     tile: TileOp = root.op
     split_consumed = tile.split_consumed or carries_partition(tile)
     owning = tuple(seam for seam in seams if seam.owned is not None)
@@ -2098,15 +2076,13 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
                 groups.append((names, produced, tuple(seam.dtypes[position] for position in positions), tuple(positions)))
         held: dict[int, str] = {}
         indexes: dict[int, tuple] = {}
-        for number, (names, produced, dtypes, ordinals) in enumerate(groups):
+        for names, produced, dtypes, ordinals in groups:
             axes, strides, index = _workspace_layout(produced, _weight_ordered(_workspace_axes(seam, produced), produced, tile.inputs))
             buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
             for name, buffer in zip(names, buffers, strict=True) if front is None else ():
                 held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})
                 indexes.update({position: index for position, own in enumerate(child.exposes) if own == name})
-            pieces.append(
-                (replace(seam, dtypes=dtypes), produced, axes, strides, token if number == 0 else f"{token}_{number}", names, buffers)
-            )
+            pieces.append((replace(seam, dtypes=dtypes), produced, axes, strides, names, buffers))
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
@@ -2116,9 +2092,9 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         for position, (rep, mapping) in copies.items():
             if rep in held:
                 held[position] = held[rep]
-                indexes[position] = tuple(expr.substitute(mapping) for expr in indexes[rep])
+                indexes[position] = tuple(expression.substitute(mapping) for expression in indexes[rep])
         loads: tuple = tuple(
-            Fold.slab(Load(name=_read_name(name, token), input=held[position], index=indexes[position])) if position in held else None
+            Fold.slab(Load(names=(_read_name(name, token),), input=held[position], index=indexes[position])) if position in held else None
             for position, name in enumerate(child.exposes)
         )
         if front is not None:
@@ -2127,7 +2103,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
             # projection over a slab. The residue is a lambda over that read, so tagging what it
             # EXPOSES renames its defining statements in lockstep and leaves the read's own
             # internal spelling alone.
-            raw = Load(name=names[0], input=buffers[0], index=index, dtype=front.dtype)
+            raw = Load(names=(names[0],), input=buffers[0], index=index, dtype=front.dtype)
             operands = tuple(edge for edge in child.operands if set(edge.exposes) & Body(front.residue).ssa_uses)
             params = tuple(name for edge in operands for name in edge.exposes)
             residue = Lambda.closing(params, Body((raw, *front.residue)), child.applied.results)
@@ -2149,9 +2125,9 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
             replacements[id(sibling)] = tuple(
                 Fold.slab(
                     Load(
-                        name=_read_name(own, token, ordinal),
+                        names=(_read_name(own, token, ordinal),),
                         input=held[channel],
-                        index=tuple(expr.substitute(mapping) for expr in indexes[channel]),
+                        index=tuple(expression.substitute(mapping) for expression in indexes[channel]),
                     )
                 )
                 if channel in held
@@ -2209,7 +2185,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     parent_fold = _without_identity_casts(parent_fold, stored)
     # A store reads a value the replaced root binds or defines. A name the cut re-spelled in one region can still be
     # exposed unchanged by another region that computes the same name in place; a store of that region keeps it.
-    visible = {*parent_fold.lift.params, *parent_fold.applied.params, *parent_fold.exposes, *parent_fold.step().ssa_defs}
+    visible = {*parent_fold.lift.params, *parent_fold.applied.params, *parent_fold.exposes, *parent_fold.step().definitions}
     respelled = {old: new for old, new in read_names.items() if new in visible or old not in visible}
     specs = tuple(
         # The seam renames what a store writes AND what its coordinates and guard name (a scatter's row).
@@ -2221,7 +2197,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         for store in tile.output_specs
     )
     produced_pieces = []
-    for seam, produced, axes, strides, token, names, buffers, replacements in pieces:
+    for seam, produced, axes, strides, names, buffers, replacements in pieces:
         others = {target: loads for target, loads in everything.items() if target not in replacements}
         # A piece that reads another seam's workspace re-spells what it derives from it too, and
         # its own stores name those values.
@@ -2229,7 +2205,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         produced = _without_identity_casts(_replace_fold(produced, others, derived) if others else produced, stored)
         produced = _stored_cells(produced, axes, strides)
         index = tuple(Var(axis.name) for axis in axes)
-        produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
+        produced_pieces.append((seam, produced, axes, index, tuple(derived.get(name, name) for name in names), buffers))
 
     fragment = _input_fragment(match, root)
     spelled = {buffer: seam.spelling for seam, *_, buffers in produced_pieces for buffer in buffers}
@@ -2267,17 +2243,13 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     # containment makes this dependency graph acyclic, including chains whose members have the
     # same number of direct workspace reads.
     entries = []
-    for seam, produced, axes, index, token, names, buffers in _producer_order(produced_pieces):
+    for seam, produced, axes, index, names, buffers in _producer_order(produced_pieces):
         # The workspace keeps the shape the sibling already reads it back at, so the split below
         # moves the GRID and nothing else.
         shape = tuple(axis.extent for axis in axes)
         produced, grid, index, minted = _split_fused_pair(produced, axes, index)
         producer = TileOp(
             op=produced,
-            # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source
-            # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
-            # different cut levels would launch one kernel twice.
-            name=f"{tile.name}__place_{token}",
             # The workspace axes are the store's SWEEP, and the one rank rule
             # (``promoted_sweep``, applied by ``TileOp.__post_init__``) binds the ones binding
             # replicates nothing over. A free axis per workspace dimension instead bound the sweep a
@@ -2289,7 +2261,8 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
                 *minted,
             ),
             output_specs=tuple(
-                OutputSpec(Write(output=buffer, index=index, value=name), sweep=grid) for name, buffer in zip(names, buffers, strict=True)
+                OutputSpec(Write(output=buffer, index=index, values=(name,)), sweep=grid)
+                for name, buffer in zip(names, buffers, strict=True)
             ),
             split_consumed=split_consumed,
         )
@@ -2342,9 +2315,9 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         regions = output_regions(parent_fold, specs)
         order = [store.write.output for store in specs]
         for index, seam in chosen.items():
-            region, tail, stores = regions[index]
+            _, tail, stores = regions[index]
             stores = _in_source_order(stores, order)
-            piece = _region_piece(tile, (region,), tail, stores, split_consumed, seam.spelling, shapes)
+            piece = _region_piece(tile, _over(regions, {index}, stores), tail, stores, split_consumed, seam.spelling, shapes)
             reads = _buffer_reads(piece.op)
             add_output_piece(
                 fragment,
@@ -2353,28 +2326,27 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
                 _piece_inputs(root, piece.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
                 suffix=_PLACED,
             )
-        kept = [regions[index] for index in range(len(regions)) if index not in chosen]
-        consumer_stores = _in_source_order(tuple(store for _, _, stores in kept for store in stores), order)
+        kept = {index for index, (_, _, stores) in enumerate(regions) if index not in chosen and stores}
+        consumer_stores = _in_source_order(tuple(store for index in kept for store in regions[index][2]), order)
         # A composed decision may hand every output away; then there is no sibling piece to emit.
         if not consumer_stores:
             _fuse_sibling_producers(fragment, spelled, tile)
             _join_pieces(fragment, joins, spelled, tile)
-            return fragment
+            return _marked(fragment)
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
-            tuple(region for region, _, _ in kept), Body(tuple(stmt for _, tail, _ in kept for stmt in tail)), consumer_stores
+            _over(regions, kept, consumer_stores),
+            Body(tuple(stmt for index in sorted(kept) for stmt in regions[index][1])),
+            consumer_stores,
         )
 
     consumer = TileOp(
         op=consumer_fold,
-        name=tile.name,
         place=tile.place,
         axes=tile.axes,
         # ``specs`` already reads each stored value under the name the cut left it;
         # ``add_output_piece`` re-spells the BUFFER each write targets.
         output_specs=consumer_stores,
-        placement_consumed=tile.placement_consumed,
-        placement_step=tile.placement_step + 1,
         split_consumed=split_consumed,
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
@@ -2391,6 +2363,14 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     )
     _fuse_sibling_producers(fragment, spelled, tile)
     _join_pieces(fragment, joins, spelled, tile)
+    return _marked(fragment)
+
+
+def _marked(fragment: Graph) -> Graph:
+    """``fragment`` with every kernel it holds marked a piece of a cut (:data:`PIECE`)."""
+    for node in fragment.nodes.values():
+        if isinstance(node.op, TileOp):
+            node.hints.set(PIECE, True)
     return fragment
 
 
@@ -2399,8 +2379,8 @@ def _reindexed(body: Body, mapping: dict) -> Body:
 
     def visit(stmt, scope):
         if isinstance(stmt, Load):
-            return replace(stmt, index=tuple(expr.substitute(scope) for expr in stmt.index))
-        inner = {name: expr for name, expr in scope.items() if name != stmt.axis.name} if isinstance(stmt, Loop) else scope
+            return stmt.replace(index=tuple(expression.substitute(scope) for expression in stmt.index))
+        inner = {name: expression for name, expression in scope.items() if name != stmt.axis.name} if isinstance(stmt, Loop) else scope
         nested = stmt.nested()
         return stmt.with_bodies(tuple(Body(tuple(visit(child, inner) for child in body)) for body in nested)) if nested else stmt
 
@@ -2420,15 +2400,16 @@ def _contraction_reads(tile: TileOp, root: Node, groups, seam_of: dict, taken: d
         token = seam_token(tile, seam_of[id(group)].spelling)
         buffer = f"{root.id}__place_{token}_{number}"
         reads: dict[int, dict[int, Fold]] = {}
-        for ordinal, (member, position, exprs, _) in enumerate(group.members):
+        for ordinal, (member, position, expressions, _) in enumerate(group.members):
             own = member.exposes[position]
             if own not in taken.get(id(member), member.exposes):
                 continue
             index = tuple(
-                expr if lo == 0 else BinaryExpr("+", expr, Literal(-lo, "int")) for expr, (lo, _) in zip(exprs, group.space, strict=True)
+                expression if lo == 0 else BinaryExpression("+", expression, Literal(-lo, "int"))
+                for expression, (lo, _) in zip(expressions, group.space, strict=True)
             )
             name = _read_name(own, token, ordinal)
-            reads.setdefault(id(member), {})[position] = Fold.slab(Load(name=name, input=buffer, index=index))
+            reads.setdefault(id(member), {})[position] = Fold.slab(Load(names=(name,), input=buffer, index=index))
             read_names.setdefault(own, name)
         out.append((group, buffer, reads))
     return out
@@ -2448,19 +2429,18 @@ def _contraction_producer(tile: TileOp, seam: CutSite, batch: list, others: dict
             nest = (Loop(axis=Axis(f"{_PLACEHOLDER}{slot}", space[slot][1]), body=Body(nest)),)
         nests.extend(nest)
     nest = tuple(nests)
-    name = f"{tile.name}__place_{seam_token(tile, seam.spelling)}"
     # The nest is stored as the piece's ``source``, as a re-formed piece's is: it is the body a kernel row stores.
-    return replace(lift_kernel(LoopOp(body=Body(nest)), name=name, shapes=shapes), source=LoopOp(body=Body(nest), name=name))
+    return replace(lift_nest(Body(nest), shapes), source=LoopOp(body=Body(nest)))
 
 
-def _digits(expr: Expr, placeholder: Var, by_name: dict) -> dict[str, Expr]:
-    """Each coordinate of an address ``expr`` read back from the ``placeholder`` that stands for it, or nothing when
+def _digits(expression: Expression, placeholder: Var, by_name: dict) -> dict[str, Expression]:
+    """Each coordinate of an address ``expression`` read back from the ``placeholder`` that stands for it, or nothing when
     the address is not one-to-one. The address is affine with a literal offset, and each coefficient divides the next
     larger one with a quotient no smaller than its coordinate's extent: a mixed radix over the coordinates' extents
     (``var``, ``var + c``, ``4*a + b + 8`` over ``b < 4``), or one with gaps (``512*h + d`` over ``d < 256``, the first
     half of each head). A coordinate is its digit, ``(placeholder - offset) / coefficient``, taken modulo the quotient
     of the next coefficient by its own below the top one."""
-    form = affine_form(expr, frozenset(by_name))
+    form = affine_form(expression, frozenset(by_name))
     if form is None or not form[1] or not isinstance(offset := form[0].simplify(SimplifyCtx.empty()), Literal):
         return {}
     coefficients = form[1]
@@ -2471,27 +2451,27 @@ def _digits(expr: Expr, placeholder: Var, by_name: dict) -> dict[str, Expr]:
         if coefficients[name] <= 0 or rest or not by_name[name].extent.is_static or quotient < by_name[name].extent.as_static():
             return {}
         radix[name] = quotient
-    flat = placeholder if offset.value == 0 else BinaryExpr("+", placeholder, Literal(-offset.value, "int"))
+    flat = placeholder if offset.value == 0 else BinaryExpression("+", placeholder, Literal(-offset.value, "int"))
 
     def digit(name):
-        return flat if coefficients[name] == 1 else BinaryExpr("/", flat, Literal(coefficients[name], "int"))
+        return flat if coefficients[name] == 1 else BinaryExpression("/", flat, Literal(coefficients[name], "int"))
 
-    return {**{name: BinaryExpr("%", digit(name), Literal(radix[name], "int")) for name in lower}, top: digit(top)}
+    return {**{name: BinaryExpression("%", digit(name), Literal(radix[name], "int")) for name in lower}, top: digit(top)}
 
 
-def _preimage(expr: Expr, placeholder: Var, span: tuple, by_name: dict, *, shared: bool = False) -> dict[str, Expr]:
-    """The one coordinate of an address ``expr`` read back from the ``placeholder`` that stands for it as a point
+def _preimage(expression: Expression, placeholder: Var, span: tuple, by_name: dict, *, shared: bool = False) -> dict[str, Expression]:
+    """The one coordinate of an address ``expression`` read back from the ``placeholder`` that stands for it as a point
     that reads each address of ``span``, or nothing: ``x`` for a token read clamped, ``(x < 4) ? x : 0``. The point
     sits at one offset from the address throughout: the first coordinate value that reads it, or with ``shared`` the
     smallest offset at which a coordinate value reads every address, as a clamp reads its first address at several
     points (``(x + 2 < 4) ? 0 : x - 2`` reads 0 at x = 0, 1, 2 and 1 at x = 3: no first point fits, offset 2 does)."""
-    names = tuple(expr.free_vars())
+    names = tuple(expression.free_vars())
     lo, extent = span
     if len(names) != 1 or not isinstance(extent, int) or not by_name[names[0]].extent.is_static:
         return {}
     (name,) = names
     size = by_name[name].extent.as_static()
-    values = np.broadcast_to(np.asarray(expr.eval({name: np.arange(size)}), dtype=np.int64), (size,))
+    values = np.broadcast_to(np.asarray(expression.eval({name: np.arange(size)}), dtype=np.int64), (size,))
     points: dict[int, list[int]] = {}
     for point, value in enumerate(values.tolist()):
         points.setdefault(value, []).append(point)
@@ -2500,7 +2480,7 @@ def _preimage(expr: Expr, placeholder: Var, span: tuple, by_name: dict, *, share
     if not offsets:
         return {}
     offset = min(offsets)
-    return {name: placeholder if offset == 0 else BinaryExpr("+", placeholder, Literal(offset, "int"))}
+    return {name: placeholder if offset == 0 else BinaryExpression("+", placeholder, Literal(offset, "int"))}
 
 
 def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others: dict, shapes: dict) -> tuple[Body, Write]:
@@ -2514,18 +2494,18 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
     body = None
     # A shared preimage offset is tried only once no channel builds from first points, so a space that builds from
     # them keeps the body it has always had.
-    for (member, position, exprs, ranges), shared in ((entry, shared) for shared in (False, True) for entry in candidates):
+    for (member, position, expressions, ranges), shared in ((entry, shared) for shared in (False, True) for entry in candidates):
         name = member.exposes[position]
         channel = _channels(member, (name,)) if len(member.exposes) > 1 else member
         replaced = _replace_fold(channel, others, {}) if others else channel
         captured = frozenset(axis for axis in replaced.free_axes if axis in by_name)
-        table = dict(zip(exprs, (Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(exprs))), strict=True))
+        table = dict(zip(expressions, (Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(expressions))), strict=True))
         inverse = {}
         preimages = {}
-        for (expr, placeholder), span in zip(table.items(), ranges, strict=True):
-            inverse.update(_digits(expr, placeholder, by_name))
-            preimages.update(_preimage(expr, placeholder, span, by_name, shared=shared))
-        lowered = _pruned(Body(tuple(replaced.lower(bound=captured, axes=tile.axes))), frozenset((name,)))
+        for (expression, placeholder), span in zip(table.items(), ranges, strict=True):
+            inverse.update(_digits(expression, placeholder, by_name))
+            preimages.update(_preimage(expression, placeholder, span, by_name, shared=shared))
+        lowered = Body(tuple(replaced.lower(bound=captured, axes=tile.axes))).pruned((name,))
         # A captured unit axis reads at 0 wherever a nested cut left it in an index.
         inverse.update({axis: Literal(0, "int") for axis in captured if axis not in inverse and _unit(by_name[axis])})
         body = None
@@ -2535,8 +2515,10 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
             # A coordinate the channel reads bare beside its addresses (a nested cut's statistic read at the token,
             # where the contraction reads the token clamped) reads at a point that has the placeholders' addresses:
             # the channel depends on its coordinates only through its addresses, so any such point gives its value.
-            extra = {placeholder.name: expr.substitute(preimages) for expr, placeholder in attempt.items() if expr not in table}
-            if found is None or any(expr.free_vars() & captured for expr in extra.values()):
+            extra = {
+                placeholder.name: expression.substitute(preimages) for expression, placeholder in attempt.items() if expression not in table
+            }
+            if found is None or any(expression.free_vars() & captured for expression in extra.values()):
                 continue
             found = _reindexed(found, extra) if extra else found
             # A nested cut's workspace holds only this channel's own addresses: a placeholder that indexes one must
@@ -2545,10 +2527,10 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
                 var
                 for stmt in found.iter()
                 if isinstance(stmt, Load) and stmt.input not in by_input
-                for expr in stmt.index
-                for var in expr.free_vars()
+                for expression in stmt.index
+                for var in expression.free_vars()
             }
-            if any(f"{_PLACEHOLDER}{slot}" in nested and ranges[slot] != group.space[slot] for slot in range(len(exprs))):
+            if any(f"{_PLACEHOLDER}{slot}" in nested and ranges[slot] != group.space[slot] for slot in range(len(expressions))):
                 continue
             body = found
             break
@@ -2558,13 +2540,13 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
     if body is None:
         raise ValueError(f"contraction {group.members[0][0].exposes[group.members[0][1]]}: no channel builds the space {group.space}")
     shift = {
-        f"{_PLACEHOLDER}{slot}": BinaryExpr("+", Var(f"{_PLACEHOLDER}{slot}"), Literal(lo, "int"))
+        f"{_PLACEHOLDER}{slot}": BinaryExpression("+", Var(f"{_PLACEHOLDER}{slot}"), Literal(lo, "int"))
         for slot, (lo, _) in enumerate(group.space)
         if lo
     }
     if shift:
         body = _reindexed(body, shift)
-    return body, Write(output=buffer, index=tuple(Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(exprs))), value=name)
+    return body, Write(output=buffer, index=tuple(Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(expressions))), values=(name,))
 
 
 __all__ = [
@@ -2576,7 +2558,6 @@ __all__ = [
     "joined_halves",
     "joined_spelling",
     "output_map",
-    "place_token",
     "realize",
     "seam_token",
     "storage_frontier",

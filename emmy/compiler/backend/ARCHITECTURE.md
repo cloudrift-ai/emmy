@@ -53,7 +53,7 @@ so `torch.compile` can trace it. A single-output graph returns its tensor direct
 ordered tuple following `graph.outputs`, matching the backend result boundary. Symbolic
 graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the supplied tensors
 (the CUDA launch convention) and bakes the env into the per-node callables — shape-resolving sites (`ReshapeOp` target
-shape, `IndexMapOp` out-shape and coord/select exprs) eval through it, so a dynamic frontend provenance slice
+shape, `IndexMapOp` out-shape and coord/select expressions) eval through it, so a dynamic frontend provenance slice
 gets the same vs-torch comparison as a static one (benched at the `Dim` hint by
 `commands/run.py::bench_lowered_vs_torch`, which sizes its random inputs by hint-resolving symbolic dims). Used to
 benchmark decoded golden programs and in-memory provenance slices against torch.
@@ -125,7 +125,7 @@ generator, not fusion.**
 
 ## CUDA backend (`cuda/`)
 
-See `cuda/ARCHITECTURE.md`. Runs the full lowering chain, compiles every kernel with `nvcc`
+See `cuda/ARCHITECTURE.md`. Runs the full lowering chain, assembles every kernel's PTX with `ptxas`
 into the cubin cache, and executes the program through the Rust runtime.
 The `COLD_CACHE` input regime measures one replay per kernel after same-stream eviction of L2 and the instruction
 caches outside the event window. It reports a sum of per-kernel times, with no whole-program timing; worker requests carry the regime
@@ -146,21 +146,27 @@ dispatcher. `splice` joins one plan into another under a prefix — the paging p
 programs into its step — sharing each buffer the target already holds under its mapped name and merging kernels by name
 (`merge_kernels`: a different source under a taken name takes a suffix from its own).
 
+**Kernels of one identity share one source.** A kernel's name is `k_` and the first 12 hex digits of its exact
+identity (`pipeline/ARCHITECTURE.md`). Lowering gives every buffer of that identity its role slot (`buf0`, `buf1`,
+…) and declares the parameters in role order, inputs before outputs (`canonical_buffers`), so kernels of one identity
+under one schedule compile to one PTX text and share one cubin; `arg_order` maps the slots back to the graph's
+buffers in the same order. A buffer outside the identity (a neighbor's delegated zero-init) keeps its name. The plan
+keeps one source per name. A kernel of a taken name whose code differs — a neighbor's delegated zero-init, another
+schedule pick — launches under its own symbol, `k_<hash>_<8 hex digits of its source>`, the same rule `merge_kernels`
+applies when programs merge. No source is dropped in favor of another.
+
 `plan.py` defines the **execution plan** — the serializable runtime projection of a lowered `Graph[CudaOp]`:
 buffer specs (one `BufferSpec` per BUFFER — a multi-output node mints one per output slot, each with its own
 role via `graph.buffer_role`), scalar/runtime constants, the launch list (`LaunchSpec.writes` names every
 buffer a launch produces; a scratch planner's first-write test reads it, falling back to `node_id` for plans
-stored before the field existed), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
+stored before the field existed; `LaunchSpec.size_range` limits a launch to a range of one symbolic size, as native
+runs each range of windows' attention), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
 cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op vocabulary applied
-with pure numpy). A kernel ref also records `arch_specific` — whether it must compile for the arch-SUFFIXED
-target (`sm_120a`, `sm_90a`). Three unrelated instruction families need that suffix: TMA, which announces itself
-through the launch's descriptors, and the block-scaled fp4 mma and Hopper's `wgmma`, which a plan can only recognize
-by their wrapper names in
-the rendered source. Plans stored under the older `uses_tma` key still read, since the meaning is the same and
-only the name narrowed. A kernel ref also records `dependent_launch`, read the same way off the source: every kernel
-the renderer emits waits on the grid ahead of it (`griddepcontrol.wait`, compiled in on sm_90 and later) before its
-first memory access, and that wait is what lets the runtime launch it as a programmatic dependent launch. A plan
-stored before the renderer emitted the wait carries no flag, and its kernels launch serialized.
+with pure numpy). Whether a kernel needs the arch-SUFFIXED target (`sm_120a`, `sm_90a`) is no field: its PTX names
+its target, and ptxas assembles for it. A kernel ref records `dependent_launch`, which the PTX compiler reports: a
+kernel for sm_90 and later waits on the grid ahead of it (`griddepcontrol.wait`) before its first memory access, and
+that wait is what lets the runtime launch it as a programmatic dependent launch. A plan stored before the wait
+carries no flag, and its kernels launch serialized.
 A deterministic source-free bind record is the third binding kind: `plan_from_graph`
 evaluates it once and its bytes ride the plan (`WeightSpec.generated`), so no checkpoint can supply it and
 `build_from_plan` fills that buffer from the plan itself — a caller-supplied array still wins, but an
@@ -174,7 +180,7 @@ a weight, and on one with no source, instead of leaving its buffer zero.
 nothing reads the graph again — `CompiledProgram.build(graph)` is exactly `build_from_plan(plan_from_graph(g))`,
 so a plan loaded from disk and a freshly compiled one share one launch path. The JSON form (`plan_to_dict` /
 `plan_from_dict`) carries symbolic shapes and ceil-div grid factors through a tiny self-contained expression
-grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the compiler's `Expr` classes — the
+grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the compiler's `Expression` classes — the
 on-disk format survives compiler changes; only runtime-contract changes bump `PLAN_FORMAT_VERSION`.
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
 namespace and its own `build_from_plan` equivalent.

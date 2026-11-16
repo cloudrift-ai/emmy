@@ -1,11 +1,15 @@
 """Generic sync compute-fill lowering invariants."""
 
+import pytest
+
+from emmy.commands.trace import graph_from_code
+from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.kernel.ir import Smem, pack_smem, swizzle_fn, swizzle_xor
+from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.kernel.ir import pack_smem, swizzle_xor
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Assign, Body, Load, parse_body
 from emmy.compiler.ir.tile.ops import cone_stat
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     _SWIZZLE_SLAB_ALIGN,
@@ -16,13 +20,15 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     slab_smem,
     software_swizzle,
 )
+from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import compile_with_kernels, statements
 from tests.compiler.terms import projection, reduction, slab
 
 
 def _sum_fold(axis: str, acc: str, *index: str) -> Fold:
     """``acc = Σ_axis x[index]`` — a plain sum over one slab."""
     value = f"{acc}_value"
-    return reduction(axis, (slab(value, "x", *index),), (Assign(name=f"{acc}__v", op="copy", args=(value,)),), (acc,))
+    return reduction(axis, (slab(value, "x", *index),), parse_body(f"{acc}__v = copy({value})"), (acc,))
 
 
 def test_cone_stat_follows_the_first_top_level_reduce_in_lowering_order() -> None:
@@ -34,15 +40,15 @@ def test_cone_stat_follows_the_first_top_level_reduce_in_lowering_order() -> Non
     recursive tree walk encounters it.
     """
     nested = _sum_fold("nested", "nested_acc", "first", "nested")
-    first = reduction("first", (nested,), (Assign(name="first_acc__v", op="copy", args=("nested_acc",)),), ("first_acc",))
+    first = reduction("first", (nested,), parse_body("first_acc__v = copy(nested_acc)"), ("first_acc",))
     axes = (Axis("first", 4), Axis("nested", 4))
     body_prologue = projection((first,))
-    body_cone = projection((body_prologue,), (Assign(name="cell", op="copy", args=("first_acc",)),))
+    body_cone = projection((body_prologue,), parse_body("cell = copy(first_acc)"))
     assert cone_stat(body_cone, "k", axes) is first
 
     operand_stat = _sum_fold("operand", "operand_acc", "operand")
-    operand_prologue = projection((operand_stat,), (Assign(name="scale", op="copy", args=("operand_acc",)),))
-    operand_cone = projection((operand_prologue,), (Assign(name="cell", op="copy", args=("scale",)),))
+    operand_prologue = projection((operand_stat,), parse_body("scale = copy(operand_acc)"))
+    operand_cone = projection((operand_prologue,), parse_body("cell = copy(scale)"))
     assert cone_stat(operand_cone, "k", (Axis("operand", 4),)) is operand_stat
 
 
@@ -54,11 +60,11 @@ def test_cone_stat_finds_the_statistic_edge_wherever_formation_put_it() -> None:
     7.7 ms to 11.9 ms at 4096 tokens on an RTX 5090, same schedule. An edge that varies with the
     contraction axis is the cell's, never the prologue's, even when it reduces."""
     stat = _sum_fold("r", "acc", "m", "r")
-    prologue = projection((stat,), (Assign(name="scale", op="copy", args=("acc",)),))
+    prologue = projection((stat,), parse_body("scale = copy(acc)"))
     per_cell = _sum_fold("s", "cell_acc", "k", "s")
     cone = projection(
         (slab("x_v", "x", "m", "k"), slab("w_v", "w", "k"), per_cell, prologue),
-        (Assign(name="cell", op="multiply", args=("x_v", "scale")),),
+        parse_body("cell = multiply(x_v, scale)"),
     )
     axes = (Axis("m", 4), Axis("k", 4), Axis("r", 4), Axis("s", 4))
     assert cone_stat(cone, "k", axes) is stat
@@ -68,25 +74,39 @@ def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:
     """Replicated computed operands must rename definitions inside nested statistic folds."""
 
     def value(_k0, _row, col):
-        reduce_axis = Axis("r", 4)
-        loop = Loop(
-            axis=reduce_axis,
-            body=Body(
-                (
-                    Load(name="value", input="x", index=(col, Var(reduce_axis.name))),
-                    Accum(name="acc", value="value", op=ElementwiseImpl("add"), axes=(reduce_axis.name,)),
-                )
-            ),
+        stmts = parse_body(
+            f"""
+            for r in 0..4:
+                value = load x[{col}, r]
+                acc <- add(acc, value) over r
+            out = add(acc, acc)
+            """
         )
-        close = Assign(name="out", op=ElementwiseImpl("add"), args=("acc", "acc"))
-        return [loop, close], "out"
+        return list(stmts), "out"
 
     operand = SyncOperand(tag="b", shape=(1, 8), value=value)
-    transport = SyncTransport(operands=(operand,), slab_dtype="half", cta=CtaTile(Literal(0, "int"), 1), elem_bytes=2)
+    transport = SyncTransport(operands=(operand,), slab_dtype=F16, cta=CtaTile(Literal(0, "int"), 1))
     fill = Body(tuple(transport.fill(k0=Literal(0, "int"), slot=Literal(0, "int"), k0_cur=Literal(0, "int"))))
 
     assert {acc.name for acc in fill.accums} == {f"acc__c{i}" for i in range(8)}
     assert {load.names[0] for load in fill.loads if load.input == "x"} == {f"value__c{i}" for i in range(8)}
+    assert {assign.name for assign in fill.iter_of_type(Assign)} == {f"out__c{i}" for i in range(8)}
+
+
+def test_compute_fill_takes_a_scalar_read_beside_a_vector_run() -> None:
+    """A computed operand can read a 0-d buffer (a calibrated FP8 scale) beside its k-indexed slab read. That read has
+    no last-dim index to advance with the column, so it replicates per cell while the slab read stays one vector run;
+    the plan once indexed its last dim and the fill raised before any kernel was built."""
+
+    def value(_k0, row, col):
+        stmts = parse_body(f"x_v = load x[{row}, {col}]\ns_v = load s[]\nout = multiply(x_v, s_v)\n")
+        return list(stmts), "out"
+
+    operand = SyncOperand(tag="b", shape=(1, 8), value=value)
+    transport = SyncTransport(operands=(operand,), slab_dtype=F16, cta=CtaTile(Literal(0, "int"), 1))
+    fill = Body(tuple(transport.fill(k0=Literal(0, "int"), slot=Literal(0, "int"), k0_cur=Literal(0, "int"))))
+
+    assert {load.input for load in fill.loads} == {"x", "s"}
     assert {assign.name for assign in fill.iter_of_type(Assign)} == {f"out__c{i}" for i in range(8)}
 
 
@@ -100,7 +120,7 @@ def test_software_swizzle_shifts_by_the_slab_row_not_the_atom() -> None:
     positions, and the ``ldmatrix`` drain over 16 rows goes multi-way bank-conflicted (measured
     7.8-way at ``D = 128`` on an A100, none at ``D = 64``). A one-atom row — and a non-power-of-two
     one, where no row bit is extractable — keeps the PLAIN spelling, so every slab that already
-    drained conflict-free renders byte-identically.
+    drained conflict-free keeps its layout.
     """
     assert software_swizzle(64, 2) == "B128"  # one 128 B atom: the default shift already is the row
     assert software_swizzle(32, 2) == "B64"  # one 64 B atom
@@ -112,10 +132,6 @@ def test_software_swizzle_shifts_by_the_slab_row_not_the_atom() -> None:
     assert swizzle_xor("B128") == (6, 0x7)
     assert swizzle_xor("B128@7") == (7, 0x7)  # the override moves the shift, never the row mask
     assert swizzle_xor("NONE") is None
-    # One emitted helper per distinct (mask, shift): the plain mode keeps its name, so an
-    # unchanged slab's kernel source is unchanged.
-    assert swizzle_fn("B128") == "emmy_swizzle_b128"
-    assert swizzle_fn("B128@7") == "emmy_swizzle_b128_s7"
 
 
 def test_a_staged_slab_aligns_to_its_fill_chunk_not_its_element() -> None:
@@ -146,7 +162,31 @@ def test_no_copied_slab_lands_misaligned_behind_an_odd_neighbour() -> None:
     of the next slab's chunk. Placing an f16 operand after such a neighbour is exactly what put a
     16 B ``cp.async`` write on an 8 mod 16 address; :func:`pack_smem` must now round it up.
     """
-    odd = Smem(name="_bs_smem", extents=(3, 4), dtype="half")  # 24 B — leaves the cursor at 8 mod 16
-    copied = slab_smem("_a_smem", 8, 64, "half", align=_fill_align(64, 2, "NONE"))
+    [odd] = parse_body("Smem(name=_bs_smem, extents=(3, 4), dtype=f16)")  # 24 B — leaves the cursor at 8 mod 16
+    copied = slab_smem("_a_smem", 8, 64, F16, align=_fill_align(64, 2, "NONE"))
     offsets, _total = pack_smem([odd, copied])
     assert offsets["_a_smem"] % 16 == 0, f"copied slab at {offsets['_a_smem']}, not 16 B-aligned"
+
+
+@pytest.mark.parametrize("width", [256, 260], ids=["dense-row", "row-off-the-16B-grid"])
+def test_a_computed_operand_merges_its_reads_only_where_each_run_is_aligned(width, monkeypatch) -> None:
+    """GPU-free. ``(x[:, :256] * 2.0) @ w.t()`` computes A in the fill, which merges each run's eight bf16 reads of ``x``
+    into one 16 B load. A run starts on the 16 B grid along K, but its row does too only when the row stride is a
+    multiple of eight elements: a 260-wide row is 520 B, so every odd row starts 8 B off the grid and a 16 B load there
+    is misaligned. That row reads per element, and the 256-wide row keeps the merge. The later vectorizer still joins
+    the 260-wide row's reads where it can prove them (8 B), so the plan is read off the fill itself."""
+    plans: list[list[str]] = []
+    run_plans = SyncTransport._run_plans
+    monkeypatch.setattr(SyncTransport, "_run_plans", lambda self, op, v: plans.append(run_plans(self, op, v)) or plans[-1])
+    code = (
+        f"import torch\nx = torch.randn(64, {width}, dtype=torch.bfloat16)\nw = torch.randn(256, 256, dtype=torch.bfloat16)\n"
+        "(x[:, :256] * 2.0) @ w.t()"
+    )
+    pin = {"TILE": "mma_m16n8k16_bf16_f32/f2x4/k4", "WORK": "w2x2", "STAGE": "d1/smem", "REDUCE": "", "PLACE": "fuse"}
+    with pinned_knobs(pin):
+        _, kernels = compile_with_kernels(graph_from_code(code)[0], ctx=Context.from_target((12, 0)))
+
+    aligned = width % 8 == 0
+    assert plans, "the pin must lower through the compute fill"
+    assert any("vector" in plan for plan in plans) is aligned
+    assert any(load.input == "x" and load.width == 8 for load in statements(kernels, Load)) is aligned, "one 16 B read of eight"

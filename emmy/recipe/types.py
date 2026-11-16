@@ -4,6 +4,11 @@ import re
 from dataclasses import dataclass, field, fields
 from typing import Any
 
+#: The seconds a deployed request has to answer before Relay abandons it: Relay's default wait for the backend's
+#: response headers, kept under the fronting nginx's 300 s. A non-streaming response sends its headers only after the
+#: whole generation, so onboarding lowers a recipe's context length until its full-context request fits.
+MAX_FULL_CONTEXT_LATENCY_S = 290
+
 
 @dataclass(frozen=True, slots=True)
 class LoRAAdapterConfig:
@@ -66,6 +71,12 @@ class LLMConfig:
 
     context_length: int | None = None
     max_concurrent_requests: int | None = None
+    # A measurement, not a setting: the full-context latency of this deployment entry, in whole seconds. The
+    # slowest of three non-streaming completion requests sent one at a time, each filling the context (a prompt
+    # of context_length - 512 tokens, 512 generated tokens, EOS ignored). At most MAX_FULL_CONTEXT_LATENCY_S:
+    # onboarding lowers context_length until the request fits. The catalog exports it per deployment as the
+    # reference for Relay's non-streaming request timeout; unset until an onboarding run measures it.
+    full_context_latency_s: int | None = None
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     data_parallel_size: int = 1
@@ -198,7 +209,11 @@ class BenchmarkConfig:
 
     ``client_image`` names the vLLM image that runs the bench client. Unset, a vLLM recipe's client runs in its
     serving image and any other engine's in the default vLLM image; naming one gives every lane of a cross-engine
-    comparison the same client, and one whose tokenizer the default client cannot load a client that can."""
+    comparison the same client, and one whose tokenizer the default client cannot load a client that can.
+
+    ``session_request_timeout_s`` bounds each request of the session client, in seconds (unset: one hour); a request
+    that runs past it fails the run. The full-context latency lane sets it to the time a deployed request has to
+    answer, so a context too long for the platform fails at the first request instead of running for an hour."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -218,6 +233,7 @@ class BenchmarkConfig:
     session_concurrencies: list[int] = field(default_factory=list)
     session_new_tokens: int = 512
     session_affinity: bool = True
+    session_request_timeout_s: int | None = None
 
 
 @dataclass
@@ -313,6 +329,7 @@ class Recipe:
         llm = LLMConfig(
             context_length=llm_dict.get("context_length"),
             max_concurrent_requests=llm_dict.get("max_concurrent_requests"),
+            full_context_latency_s=llm_dict.get("full_context_latency_s"),
             tensor_parallel_size=llm_dict.get("tensor_parallel_size", 1),
             pipeline_parallel_size=llm_dict.get("pipeline_parallel_size", 1),
             data_parallel_size=llm_dict.get("data_parallel_size", 1),

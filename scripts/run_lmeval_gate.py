@@ -51,6 +51,14 @@ def build_model_args(base_url, model, chat=False, num_concurrent=NUM_CONCURRENT)
     }
 
 
+def build_gen_kwargs(gen_kwargs=None, chat_template_kwargs=None):
+    """The generation arguments lm-eval sends with every request, or None to keep the task's own."""
+    merged = dict(gen_kwargs or {})
+    if chat_template_kwargs:
+        merged["chat_template_kwargs"] = chat_template_kwargs
+    return merged or None
+
+
 def extract_metrics(results, task):
     """The task's metric row from a `simple_evaluate` results dict, minus the presentation-only alias."""
     row = results["results"][task]
@@ -102,6 +110,15 @@ def main():
         "'{\"enable_thinking\": false}' for a model whose template defaults to thinking: the hidden "
         "reasoning otherwise spends the task's generation budget and the content comes back empty",
     )
+    parser.add_argument(
+        "--gen-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object of lm-eval generation arguments that override the task's own, e.g. "
+        "'{\"max_gen_toks\": 1024}' when the task's 256-token budget cuts a worked answer short of its final line, "
+        'or \'{"until": ["<|im_end|>"]}\' with thinking on: the server applies a stop string to the hidden '
+        'reasoning too, and GSM8K\'s "Question:" ends a response there with empty content',
+    )
     args = parser.parse_args()
 
     import lm_eval  # heavy (pulls datasets/evaluate); deferred so the module imports without it
@@ -112,7 +129,7 @@ def main():
         model_args=build_model_args(args.base_url, args.model, args.chat, args.num_concurrent),
         apply_chat_template=args.chat,
         fewshot_as_multiturn=args.chat,
-        gen_kwargs={"chat_template_kwargs": args.chat_template_kwargs} if args.chat_template_kwargs else None,
+        gen_kwargs=build_gen_kwargs(args.gen_kwargs, args.chat_template_kwargs),
         tasks=[args.task],
         num_fewshot=args.num_fewshot,
         limit=args.limit,

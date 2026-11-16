@@ -240,19 +240,15 @@ def register_run_command(subparsers):
             "-vv: also per-rule application snapshots."
         ),
     )
-    from emmy.commands.compile import add_nvcc_args
     from emmy.compiler.target import add_target_arg
 
-    add_nvcc_args(parser)
     add_target_arg(parser, dest="gpu_arch", option="--gpu-arch")
     parser.set_defaults(func=handle_run)
 
 
 def handle_run(args):
-    from emmy.commands.compile import apply_nvcc_flags
     from emmy.compiler.target import CPU_TARGET, apply_target_arg
 
-    apply_nvcc_flags(args, default="")  # run uses nvcc default -O3 (representative codegen)
     cpu = args.gpu_arch == CPU_TARGET
     if not cpu:
         apply_target_arg(args, dest="gpu_arch")
@@ -450,9 +446,7 @@ def _handle_run_cpu(args) -> None:
                 variance=statistics.pvariance(us),
                 n_samples=len(us),
             )
-            persist_kernel_perf(
-                db, program.ctx, tile, stats=stats, status="ok", knobs=decisions[nid], name=tile.name, sizes=program.native.executor.env()
-            )
+            persist_kernel_perf(db, program.ctx, tile, stats=stats, status="ok", knobs=decisions[nid], sizes=program.native.executor.env())
     finally:
         db.close()
 
@@ -994,7 +988,7 @@ def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str,
             dict(pins),
             target,
         )
-        for (target, pins), rows in target_rows.items()
+        for (target, pins, _), rows in target_rows.items()
     ]
     traced = {kernel.ref: kernel.traced for kernel in document.targets()}
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
@@ -1007,12 +1001,20 @@ def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str,
         return fork_less_of[id(graph)]
 
     ordered = []
-    for pin_set in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
-        same_pins = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == pin_set]
+    for pin_set in dict.fromkeys(_regime(pins) for _, pins, _ in targets):
+        same_pins = [(name, pins, target) for name, pins, target in targets if _regime(pins) == pin_set]
         reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
         for index, scope in twins_in_build_order(reached, fork_less):
             ordered += [(name, pins, target, scope) for name, pins, target in same_pins if traced[target] == index]
     return ordered
+
+
+def _regime(pins: dict) -> tuple:
+    """The regime ``pins`` spell, as a comparable key: a row that spells every precision gate and one that spells only
+    the ``FAST_MATH`` umbrella name the same regime, so twins recorded either way are one family."""
+    from emmy.compiler.pipeline.search.space import regime_pins  # noqa: PLC0415
+
+    return tuple(sorted(regime_pins(pins).items()))
 
 
 def _family_layouts(args):
@@ -1037,7 +1039,7 @@ def _family_layouts(args):
         return contextlib.nullcontext()
     path = document.path_to(rows[0].kernel)
     target = path[0].parent if path else rows[0].kernel
-    regime = {key: group for key, group in document.target_rows().items() if dict(key[1]) == rows[0].pins}
+    regime = {key: group for key, group in document.target_rows().items() if _regime(dict(key[1])) == _regime(rows[0].pins)}
     ordered = _targets_in_build_order(document, regime)
     scope = next((scope for _, _, ref, scope in ordered if ref == target), None)
     if scope is None:
@@ -1066,18 +1068,12 @@ def _family_layouts(args):
 
 
 def _records_evidence(args, *, timed: bool = True) -> bool:
-    """Whether this run's bench writes tune-DB evidence: not opted out (``--no-record-evidence``), compiled in the
-    deployable regime, and, for a timing (``timed``), benched at the tune bench standard. A run at another
-    optimization level (the test suite's ``-Xcicc -O1`` compile) measures a kernel no deploy compiles; a run below
-    the standard is a quick look, whose median could displace a recorded row. A ``bench_fail`` row is no timing."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
+    """Whether this run's bench writes tune-DB evidence: not opted out (``--no-record-evidence``) and, for a timing
+    (``timed``), benched at the tune bench standard. A run below the standard is a quick look, whose median could
+    displace a recorded row. A ``bench_fail`` row is no timing."""
     from emmy.compiler.pipeline.search.bench_record import meets_quality_bar  # noqa: PLC0415
 
-    return (
-        not getattr(args, "no_record_evidence", False)
-        and float(Context.probe().features().get("H_opt", 3.0)) == 3.0
-        and (not timed or meets_quality_bar(args.warmup, args.iters))
-    )
+    return not getattr(args, "no_record_evidence", False) and (not timed or meets_quality_bar(args.warmup, args.iters))
 
 
 def _note_below_standard(args) -> None:
@@ -1095,8 +1091,7 @@ def _record_greedy_failure(args, backend, graph, exc) -> None:
     """A greedy pick that failed to bench is evidence too (``--no-record-evidence`` opts out): the
     kernel the watchdog named earns its ``bench_fail`` perf row at the run budget's fail sentinel,
     exactly as the tuner files a hung terminal, so the next ``compile`` / ``run`` / ``serve``
-    disqualifies that arm instead of electing the same route and hanging again. Recorded only in
-    the deployable regime (:func:`_records_evidence`)."""
+    disqualifies that arm instead of electing the same route and hanging again (:func:`_records_evidence`)."""
     if not _records_evidence(args, timed=False):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
@@ -1114,7 +1109,7 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     and the greedy isolated re-bench become per-kernel ``perf`` rows in the tune DB — the measured
     evidence the next compile's greedy pick deploys, which is how a replayed golden or a hand-pinned
     ``--ab`` row becomes what ``compile`` / ``run`` / ``serve`` choose. Records only at tune-standard
-    measurement quality, and only in the deployable regime; ``record_perf`` keeps the best
+    measurement quality; ``record_perf`` keeps the best
     measurement per kernel. A clean row is an ``ok`` row with NO integrity flag — a flagged ok row
     measured something untrue (wrong answer, intensity floor). ``decisions`` are the kernel-set
     decisions the greedy compile took; once the greedy re-bench is recorded they become ``routing``
@@ -1242,7 +1237,7 @@ _TWIN_JIT_S_PER_NODE = 2.0
 
 def _compare_wall_s(graph, backend, *, base_s: float, twin=None) -> float:
     """Workload-scaled SIGKILL cap for a worker comparison job. A fixed cap false-fails
-    legitimate big runs: the child pays a first nvcc compile of EVERY kernel (the in-child
+    legitimate big runs: the child pays a first compile of EVERY kernel (the in-child
     compile budget bounds each) plus the bench itself, on top of ``base_s`` for its own
     setup — a dozen-kernel model layer legitimately needs several hundred seconds where a
     single --code kernel needs a fraction. ``twin`` is the frontend graph the Torch twin is
@@ -1396,7 +1391,7 @@ def _nonfinite_mismatch(actual, expected) -> bool:
 def env_pin_refusal(
     kernel_knobs: list[dict],
     placement_knobs: list[dict] | None = None,
-    kernel_names: list[tuple[str, ...]] | None = None,
+    kernel_names: list[str] | None = None,
     applied_place_pins: dict[str, str] | None = None,
 ) -> str | None:
     """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
@@ -1431,7 +1426,7 @@ def env_pin_refusal(
 
 
 def record_refusal(
-    kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[tuple[str, ...]] | None = None, *, benches=()
+    kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[str] | None = None, *, benches=()
 ) -> str | None:
     """A flagged comparison, rejected answer, or unrealized env pin cannot become recorded evidence."""
     flags = [flag for row in benches if row is not None for flag in row.flags or []]
@@ -1502,11 +1497,21 @@ _FLOAT_MANTISSA_BITS = {"bf16": 7, "f16": 10, "f32": 23, "f64": 52}
 
 
 def _computed_from_formats(frontend) -> dict:
-    """The coarsest IEEE float format each output of ``frontend`` is computed in: the coarsest among the output and
-    every value its producing chain computes. Graph inputs and constants do not count (the FP64 evaluation reads them
-    exactly), nor do quantized values (the math decodes them to a float first). ``None`` for an output with no float
-    value in its chain."""
+    """The coarsest IEEE float format each output of ``frontend`` is computed in: the coarsest format an op of its
+    producing chain rounds into. A layout op (the trace writes a cast as one) moves its first input's values and rounds
+    them only into a coarser format, so a bf16 input sliced and cast to f32 adds no bf16 step; every other op rounds
+    into its own format. Graph inputs and constants do not count (the FP64 evaluation reads them exactly), nor do
+    quantized values (the math decodes them to a float first). ``None`` for an output no op rounds into a float."""
     from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import CatOp, ReshapeOp, SliceOp, TransposeOp, UnsqueezeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import GatherOp, IndexMapOp, ScatterOp  # noqa: PLC0415
+
+    layout = (CatOp, GatherOp, IndexMapOp, ReshapeOp, ScatterOp, SliceOp, TransposeOp, UnsqueezeOp)
+    bits = _FLOAT_MANTISSA_BITS
+
+    def rounds(node, fmt: str) -> bool:
+        source = frontend.buffer(node.inputs[0]).dtype.name if isinstance(node.op, layout) and node.inputs else None
+        return source not in bits or bits[source] > bits[fmt]
 
     def coarsest(output: str) -> str | None:
         found, stack, seen = [], [output], set()
@@ -1516,9 +1521,11 @@ def _computed_from_formats(frontend) -> dict:
             if buf in seen or node is None or isinstance(node.op, (ConstantOp, InputOp)):
                 continue
             seen.add(buf)
-            found.append(frontend.buffer(buf).dtype.name)
+            fmt = frontend.buffer(buf).dtype.name
+            if fmt in bits and rounds(node, fmt):
+                found.append(fmt)
             stack.extend(node.inputs)
-        return min((f for f in found if f in _FLOAT_MANTISSA_BITS), key=_FLOAT_MANTISSA_BITS.get, default=None)
+        return min(found, key=bits.get, default=None)
 
     return {output: coarsest(output) for output in frontend.outputs}
 
@@ -1578,7 +1585,7 @@ def _strict_correctness_proof(
 
     ``formats`` names each output's format (a dtype name, ``_output_formats``): a quantized output's
     storage format; for a float output, the coarser of its storage format and the coarsest float format
-    it is computed in. An f32 output cast from a bf16 value carries bf16 rounding errors, and two summation
+    it is computed in. An f32 output cast from bf16 math carries bf16 rounding errors, and two summation
     orders of that bf16 math land up to a bf16 step apart, thousands of f32 steps. An output without a
     format gets no step, only the largest-error rule, and no one-code pass. A real fault — a wrong element beyond the reference's own
     error and one step, a code two steps off, or a bias across the output — still fails.
@@ -1930,9 +1937,9 @@ def _cuda_knob_dicts(graph) -> list[dict]:
     return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
 
 
-def _cuda_kernel_names(graph) -> list[tuple[str, str]]:
-    """The kernel name and node id of each ``CudaOp`` beside :func:`_cuda_knob_dicts` — what a kernel pin names."""
-    return [(n.op.kernel_name, n.id) for n in _launch_order_cuda_nodes(graph)]
+def _cuda_kernel_names(graph) -> list[str]:
+    """Each launched kernel's name, in launch order beside ``_cuda_knob_dicts``."""
+    return [n.op.kernel_name for n in _launch_order_cuda_nodes(graph)]
 
 
 def _placement_knob_dicts(graph) -> list[dict]:
@@ -2264,7 +2271,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     needs."""
     from emmy.commands.table import Col, knob_columns, render_table  # noqa: PLC0415
     from emmy.compiler.ir.cuda.ir import CudaOp, resolve_dim
-    from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import Var  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
     from emmy.compiler.pipeline.search.dataset import ShapeKey  # noqa: PLC0415
     from emmy.compiler.pipeline.search.features import stamps  # noqa: PLC0415
@@ -2288,8 +2295,8 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         sym_env = {}
         for nid in graph.inputs:
             for dim in graph.buffer(nid).shape:
-                if isinstance(dim.expr, Var) and dim.hint is not None:
-                    sym_env.setdefault(dim.expr.name, dim.hint)
+                if isinstance(dim.expression, Var) and dim.hint is not None:
+                    sym_env.setdefault(dim.expression.name, dim.hint)
 
     def _geom(op, attrs: dict):
         block_dims = [resolve_dim(d, sym_env) for d in op.block]
@@ -2978,16 +2985,16 @@ def _parse_ncu_csv(csv_text: str) -> dict:
 
 def _detect_stage(graph) -> str:
     """Identify the IR stage by scanning op type names. Returns one of
-    ``torch | tensor | loop | tile | kernel | cuda`` — the highest-stage
+    ``torch | tensor | loop | tile | kernel | ptx`` — the highest-stage
     op present in the graph wins, since lowering produces a graph mixed
     only briefly during a pass and stable in the post-pass form."""
     stage_by_op: dict[str, str] = {
-        "CudaOp": "cuda",
+        "CudaOp": "ptx",
         "KernelOp": "kernel",
         "TileOp": "tile",
         "LoopOp": "loop",
     }
-    order = ["torch", "tensor", "loop", "tile", "kernel", "cuda"]
+    order = ["torch", "tensor", "loop", "tile", "kernel", "ptx"]
     best = "torch"
     for node in graph.nodes.values():
         s = stage_by_op.get(type(node.op).__name__)
@@ -3014,7 +3021,7 @@ def _passes_after_stage(stage: str) -> list[str]:
         "loop": LOOP_PASSES,
         "tile": TILE_PASSES,
         "kernel": KERNEL_PASSES,
-        "cuda": CUDA_PASSES,
+        "ptx": CUDA_PASSES,
     }[stage]
     return [p for p in CUDA_PASSES if p not in completed]
 
@@ -3115,6 +3122,16 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
     return rng.standard_normal(shape, dtype=np.float32)
 
 
+def _chunk_position(graph, static) -> int | None:
+    """The ``position`` a bench gives a native step's program, whose rows start there in its cache (``q``, ``keys``):
+    the window's last chunk, the one its attention is priced for. Drawn at random the rows sit at the cache's start,
+    where a causal chunk stops after a few keys, and its time says nothing of the window. ``None`` for any other
+    program; ``static`` gives a shape's sizes at the bench's bindings."""
+    if not {"q", "keys", "position"} <= graph.nodes.keys():
+        return None
+    return static(graph.nodes["keys"].output.shape)[0] - static(graph.nodes["q"].output.shape)[0]
+
+
 async def bench_lowered_vs_torch(
     frontend,
     lowered,
@@ -3178,7 +3195,7 @@ async def bench_lowered_vs_torch(
     # Symbolic reproducers bench at each dim's hint (``DEFAULT_SEQ_HINT`` for a
     # bare seq axis) — the same size the backend resolves a symbolic graph to
     # when no inputs are supplied — so the random inputs built here get concrete
-    # hint-sized shapes. Atomic dims carry their own hint; composite exprs
+    # hint-sized shapes. Atomic dims carry their own hint; composite expressions
     # (e.g. ``S * 2``) eval over the collected env.
     from emmy.compiler.dim import Dim
 
@@ -3187,7 +3204,7 @@ async def bench_lowered_vs_torch(
         sym_env_out.append(dict(sym_env))
 
     def _static(shape):
-        return tuple((d.as_static() if d.is_static else int(d.expr.eval(sym_env))) if isinstance(d, Dim) else int(d) for d in shape)
+        return tuple((d.as_static() if d.is_static else int(d.expression.eval(sym_env))) if isinstance(d, Dim) else int(d) for d in shape)
 
     # One random source array per distinct constant ``source_path`` — shared by
     # emmy (lowered graph) and the torch ref (frontend graph). ``bind_constants``
@@ -3211,9 +3228,12 @@ async def bench_lowered_vs_torch(
 
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
+    position = _chunk_position(lowered, _static)
     for nid, node in lowered.nodes.items():
         if isinstance(node.op, InputOp):
             arr = _random_input_values(rng, _static(node.output.shape), node.output.dtype, name=nid)
+            if nid == "position" and position is not None:
+                arr = np.full(arr.shape, position)
             # Keep the ndarray shape (no flatten) — a symbolic graph's launch
             # reads the runtime seq_len off the input array's shape.
             input_data[nid] = arr
@@ -4083,7 +4103,7 @@ def _hint_sized_inputs(lowered, example_args, example_kwargs):
     for nid, tensor in zip(input_ids, flat, strict=True):
         for axis, d in enumerate(lowered.buffer(nid).shape):
             if isinstance(d, Dim) and not d.is_static:
-                tensor = _tile_to(tensor, axis, int(d.expr.eval(sym_env)))
+                tensor = _tile_to(tensor, axis, int(d.expression.eval(sym_env)))
         resized.append(tensor)
     it = iter(resized)
     args = tuple(_map_tensors(v, lambda _: next(it)) for v in example_args)

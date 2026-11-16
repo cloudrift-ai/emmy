@@ -9,8 +9,7 @@ the tile ops read it without reading each other.
 
 from __future__ import annotations
 
-from emmy.compiler.ir.stmt import Body, Loop, Write
-from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
+from emmy.compiler.ir.stmt import Body, Loop, Write, exposed_defines, free_names
 
 
 def _sweep_start(stmts, axis_name: str) -> int:
@@ -40,7 +39,7 @@ def _swept(out: list, start: int, axis, writes: tuple = (), *, holding: int | No
     held = {id(stmt) for stmt in (*seeds, *Body(tuple(run)).backward_cone(roots).members)}
     inside = [stmt for stmt in run if id(stmt) in held]
     rest = [stmt for stmt in run if id(stmt) not in held]
-    defined = set().union(*(_exposed_defines(stmt) for stmt in inside))
+    defined = set().union(*(exposed_defines(stmt) for stmt in inside))
     if any(free_names(stmt) & defined for stmt in rest):
         inside, rest = run, []
     return [*out[:start], Loop(axis=axis, body=Body((*inside, *writes))), *rest], start
@@ -59,7 +58,7 @@ def _splice_streamed(stmts: list, write: Write) -> bool:
         if _splice_streamed(inner, write):
             stmts[i] = stmt.with_bodies((Body(tuple(inner)),))
             return True
-        if stmt.is_reduce and values <= set().union(*(Body((s,)).ssa_defs for s in inner)):
+        if stmt.is_reduce and values <= set().union(*(exposed_defines(s) for s in inner)):
             stmts[i] = stmt.with_bodies((Body((*inner, write)),))
             return True
     return False

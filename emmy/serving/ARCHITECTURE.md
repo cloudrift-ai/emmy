@@ -149,8 +149,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   boot's `EMMY_GEN_EXPERTS_GPU` and `EMMY_GEN_EMBED_GPU`, which decide whether those programs
   read paged inputs), one per kind, width and shape: `router1-native`, `rope64-native` and the like. Under
   `--speculative-config` they include the verify step's, at its rows, with the checkpoint's multi-token-prediction
-  head drafting (`accept3-native`, `pick3-native`, `attend3-native`). Native's trunk is the plugin's twins at those
-  widths, and so is the drafter's prologue and layer, so they are not among them. Each is reached at its own width in
+  head drafting (`accept3-native`, `pick3-native`, `attend3-native`, `unfold3-native`). Native's trunk is the plugin's
+  twins at those widths, and so is the drafter's prologue and layer, so they are not among them. A config that names
+  a wider chunk for native alone (`SERVE_NATIVE_PREFILL`, native's `--prefill-size`) adds native's programs at it and
+  the trunk's static twins at it, as rows of the server's lane; the plugin's chunk stays a width of both. Each is reached at its own width in
   the one lane the server runs (`SERVE_ENV`'s `EMMY_FAST_MATH`, standard by default), since native preparation
   compiles in one regime, and each has a layout scope of its own, since native preparation compiles every one of its
   own programs alone. Unlike the other twins they read the checkpoint, as native preparation traces the loaded model.
@@ -332,7 +334,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   memory and the uploads between layers self-copy-skip under an outer capture. A post twin's residual input is its
   pre twin's input buffer, which the post does not write, so the residual needs no protective copy; its gate input
   is its pre twin's gate output. The two buffers belong to these programs only: a mixed step's GDN calls must not
-  write into the arena backing the other tiers' pre twins share.
+  write into the arena backing the other tiers' pre twins share. A hyper-connection MoE layer's output is computed in
+  torch (`place_routed_streams`), which writes it into the next layer's decode input, and a hosted Gated DeltaNet
+  layer writes into its post twin's attention input (`decode_input`), so neither upload copies.
   **Post→pre chaining covers the other program families** (M=1, symbolic, prefill-chunk — the vLLM
   integration plan's Milestone A2): each family's post OUTPUT array is rewired at build onto its pre twins'
   shared hidden-INPUT backing, so the between-layer upload self-copy-skips on pointer equality. The skip pays
@@ -365,7 +369,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   the tracer cannot map) runs on `xn`, each HIT expert launches ONE shared expert program (`moe.expert.sym`:
   `expert(x, w_gate_up, w_down[, b_gate_up, b_down])` with the weights — and gpt-oss's per-expert biases — as
   forward args → graph INPUTS, fed per-expert dim-0 slices of the E-stacked tensors, which live on device beside
-  the routers via `_ensure_device` under the per-layer `inputs` map), and the partials weighted-`index_add_` into
+  the routers via `_ensure_device` under the per-layer `inputs` map), and the partials' weighted sum is added to
   `h`. **Under tensor parallelism every rank holds a slice of EVERY expert** (`slice_routed_experts`, the slicing vLLM's
   fused MoE does without expert parallelism): gate and up keep the same 1/world of the intermediate rows, down the
   matching columns, so a rank's expert output is a partial sum the caller's all-reduce completes. The router is
@@ -373,9 +377,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   tier below serves them. This is what makes a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts
   are ~9.4 GB against a 32 GB card that also carries attention, arenas and the KV cache, ~1.2 GB per rank once sliced
   eight ways. The slicing reaches the checkpoint read (`load_quantized_split`'s `expert_slice`), the twin's declared
-  expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. Everything else
-  the layer's programs hold runs whole on every rank, shared experts included (DeepSeek V4's, and Qwen3.8-Flash-Next's
-  gated one inside `post`), so only the routed output is all-reduced. The router the
+  expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. Qwen3.8-Flash-Next's
+  gated shared expert is sliced the same way: its `post` returns the shared expert's output apart, the runner adds it
+  to the routed output, and one all-reduce sums both, as the 1Cat fork does. Everything else the layer's programs hold
+  runs whole on every rank, DeepSeek V4's shared expert included. The router the
   combine calls is the runner's own copy (`serving_router`), cast to the activation dtype except for the
   expert-selection bias (`e_score_correction_bias`),
   which stays float32 as Transformers keeps it: DeepSeek V4's bias reaches ~27, where float16 rounding flipped a top-6
@@ -409,7 +414,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   base residual, fp16 normalized activation, and fp32 shared result separately; the runner adds base + shared + routed
   without a narrowing cast. gpt-oss MXFP4 uses the narrower form of the same residual contract: embedding and the
   inter-layer residual stay fp32, pre/post norms cast their projection and router activations back to fp16, expert
-  partials and their weighted combine stay fp16, and the routed result is added to the fp32 base before the final norm
+  partials and the routed result stay fp16, and the routed result is added to the fp32 base before the final norm
   returns fp16 for the output head. This prevents late-layer residual adds from overflowing on fp16-only GPUs without
   widening attention or expert kernels. Other checkpoints retain their existing hot paths.
   **Expert tiers (decode + prefill perf lanes):** the expert program comes in four tiers mirroring the main ladder —
@@ -428,7 +433,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   width, so a tier without descriptors is lent its block of the gathered rows and of the output and runs in place;
   descriptor-bearing tiers copy the block in and out. The symbolic program's buffers span the whole step, and a launch
   that clears its output clears all of it, so its blocks come last, in the order they run, with that span spare
-  after them. The combine reads each pick's output through the row map the launcher returns.
+  after them. The combine reads each pick's output through the row map the launcher returns and weighs and sums every
+  row's picks in one pass (`embedding_bag`), in ascending expert order, in float32, rounding once to the activation
+  dtype: on Qwen3.8-Flash-Next's V100 slices a 3,920-token step's combine takes about 0.9 ms per layer against 1.9 ms
+  for a gather, a weighting and k adds in fp16.
   **Fixed-slot decode tier (T=1, capture-legal):** ONE batched program per shape group over the E-stacked expert
   tensors (`moe.expert.slots`): `x[1, H]` and the row's `k` picks `sel[k]` in, `partials[k, H]` out. The module is
   the expert twin's `slots` form (`ExpertFFN.slots`, trace ARCHITECTURE): each weight is gathered along its expert
@@ -436,7 +444,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   products over the k picks, so the kernels read the E-tensors directly and the whole expert layer is one fused
   kernel. `_ensure_device` instantiates the group's plan once per layer over that layer's experts, binding the
   shared `[k]` int64 selector the router writes and the shared `[k, H]` partials (one layer runs at a time) and the
-  layer's stacked tensors: resident, aliased as the plan's weight inputs; paged (`EMMY_GEN_EXPERTS_GPU` below the
+  layer's stacked tensors: resident, lent to the instance at build as the plan's weight inputs (an arena backing held
+  a dead copy of one layer's experts); paged (`EMMY_GEN_EXPERTS_GPU` below the
   expert count), the first experts on the device and the rest in pinned host memory, declared to the runtime pager,
   which binds the page tables the kernels read through and the tables the compiler-spliced paging program keeps
   (backend ARCHITECTURE, "Paging"). Bound once, so per-layer cached graphs
@@ -444,10 +453,26 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   selector (one fixed-shape device write — no `unique()`/`.tolist()`/host sync, no per-step weight staging), runs
   the layer's program and combines the partials with one score matmul, so vLLM's whole-step decode graph records it
   (under the outer capture the program issues its raw launch sequence, mirroring `run_device`). On a sliced-expert
-  rank a decode batch up to the bucket width rides the slots too, row by row through the one selector and partials
-  pair: its picks reach nearly as many distinct experts as there are picks, so the routed dispatch would launch
-  about as often and add the per-layer host read. Wider steps, prefill and whole-expert ranks ride the routed
-  dispatch; `combine_routed_experts` stays the parity oracle (`test_gen_runner_gpu` fixed-slot-vs-routed, the
+  rank a decode batch up to the bucket width rides the slots too: its picks reach nearly as many distinct experts as
+  there are picks, so the routed dispatch would launch about as often and add the per-layer host read. There each
+  group's program is also built at every slot width (`slot_widths`: the bucket and its halvings down to two rows;
+  `slot_rows`: `x[B, H]` and every row's picks `sel[B, k]` in, `partials[B, k, H]` out, the twins `expert-slots2`,
+  `-slots4`, `-slots8`), and a step of several rows runs the narrowest that holds it once, through a second shared
+  selector and partials pair, and combines every row with one batched score product. A program reads every slot's
+  expert whatever the step's rows, so the narrower programs are what makes a step's expert work follow its rows. The
+  rows past the step keep an earlier step's picks and inputs, whose partials no row reads. A step of one row keeps
+  the one-row program, and a step no built width holds goes through it one row at a time. Wider steps, prefill and whole-expert
+  ranks ride the routed dispatch. **Grouped prefill tier:** on the same resident sliced experts each group also builds
+  `ExpertFFN.blocks` over the stacked tensors (`x[G, R, H]` and one expert per block `sel[G]` in, `[G, R, H]` out,
+  G = `EXPERT_GROUP`) at two block widths: R = the decode bucket for the experts a step routes that many rows or
+  fewer, R = `EXPERT_PREFILL_M` for the wider ones (the twins `expert-group32x8` and `expert-group32x256`), one
+  instance of each per layer, all sharing one arena. `_launch_experts` lays each program's blocks first in the gathered
+  rows, an expert's rows filling one or more blocks, each program's padded to whole launches of G, and one `run_each`
+  per program lends each launch its blocks of the rows and of the output and its experts' entries of a selector. One
+  launch set over 32 experts in place of a launch set per expert keeps the card's waves full: on Qwen3.8-Flash-Next's
+  V100 slices, 32 experts of 256 rows take about 0.65 ms cold against about 2.7 ms one expert at a time, and 32 of up
+  to 8 rows about 0.19 ms against about 1.1 ms. A width that does not build leaves its experts to the per-expert
+  tiers. `combine_routed_experts` stays the parity oracle (`test_gen_runner_gpu` fixed-slot-vs-routed, grouped-vs-per-expert, the
   slot-program-vs-direct bit-exactness pin and the paged-vs-resident pin, `test_gen_capture_gpu` captured-step
   live-replay).
   **Per-input feed dtypes:** `_compile_split` binds every plan input at its own traced dtype rather than one blanket
@@ -490,7 +515,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   table-resolved inputs and no decoded dense expert weight exists.
   Single-token sparse decode uses the generic fixed-slot tier: the selected experts' E-leading coded tensors are
   gathered by the selector, their factorized contraction runs batched over the picks, and the routed outputs combine
-  in fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
+  in fp32. EXL3 has no format-specific operation, native helper, or hand-written kernel below the birth-time spelling
+  boundary.
   Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
 
   A **hyper-connection** architecture (DeepSeek V4, Qwen3.8-Flash-Next) changes what the seam carries, and the runner
@@ -663,13 +689,20 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   single-TP, and for EXL3 the `mul1` codebook) stays compressed. `CodedHead` (`serving/coded_head.py`) takes the
   `lm_head` slot, so vLLM's MTP proposer, which hands the draft model the target's head, shares it too, and both
   `compute_logits` paths pass its fp32 logits through a `logits_as_input` processor that scales and softcaps them.
-  It compiles one program whose inputs are the step's sampled rows, on the `num_tokens` axis of serving's any-width
-  programs (built for `max_num_seqs` × (1 + draft tokens) rows), and the codes, spelled per format: EXL3's
-  factorized algebra; NVFP4 through the input speller, each value decoded in-graph and rounded once to the model
-  dtype, as the decoded parameter holds it. One launch serves a verify step's rows; whether they share one read of
+  It compiles one program whose input is the step's sampled rows, on the `num_tokens` axis of serving's any-width
+  programs (built for `max_num_seqs` × (1 + draft tokens) rows), over the codes, spelled per format and bound from
+  the checkpoint's stored tensors: EXL3's factorized algebra; NVFP4 as the trunk spells a linear over a checkpoint
+  weight, the constant `lm_head.weight` turned into its codes and scales by the trunk's weight speller, and, where the
+  checkpoint stores `lm_head.input_scale`, the rows coded by its activation speller. That head is W4A4, as stock vLLM
+  runs it: both operands reach the product as packed e2m1 pairs, so at sm_120 the head is offered the block-scaled
+  tensor-core tile, and its logits stay f32. One launch serves a verify step's rows; whether they share one read of
   the codes is the schedule's choice, and a schedule that gives each row its own blocks reads them once per row,
-  which at a few rows can cost more than the dense matmul it replaces. On Qwen3.8-27B-NVFP4 the card holds 0.67 GiB
-  of codes and scales where the decoded BF16 head took 2.37 GiB. The head
+  which at a few rows can cost more than the dense matmul it replaces. The program is compiled and measured at one
+  row: the spellers name the rows' axis afresh in the buffers they add, so the program takes its input's one-row hint
+  again after spelling, and each of its kernels is keyed at one row. On Qwen3.8-27B-NVFP4 the card holds 0.67 GiB
+  of codes and scales where the decoded BF16 head took 2.37 GiB, and on an RTX 5090 the W4A4 head takes the e2m1 tile
+  with its warps across the vocabulary: 0.44 ms at one or three rows, where the weight-only head's schedule read the
+  codes once per row (0.62 ms at one row, 1.86 ms at three). The head
   program is a serving twin (`head-sym`) and a kernel of its own, so like any twin it takes its schedule from a
   measured row in the card's golden, and from the prior where there is none. Any other coded head decodes into
   vLLM's parameter in output-row blocks (`decode_exl3_blocks`, whose whole-tensor fold runs in float64, ~5 GiB for a
@@ -914,13 +947,13 @@ Recorded follow-ups, in impact order:
   **generative** path no longer needs it: `run_device` is capture-aware and `serve --runner generate` defaults to
   whole-step decode graphs (see `gen_runner.py` above). A checkpoint with GDN layers is the exception: it serves
   eager (see `vllm_model_gen.py` above).
-- Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays nvcc). `EMMY_CUBIN_CACHE`
+- Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays ptxas). `EMMY_CUBIN_CACHE`
   persistence across container restarts is what keeps reboots fast. **`EMMY_PACK_DIR`** cuts the rest of the warm
   boot: `EmmyForwardRunner.create` keys an execution-plan pack (`compiler/backend/pack.py`) on model id + config
   hash + serving shape — a hit loads binary-keyed plans (`CompiledProgram.build_from_plan`) and skips trace, pass
   pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
-  a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile; a changed golden
+  a different config, ptxas change, evicted cubin — silently falls back to the full compile; a changed golden
   recompiles only the programs whose rows it changed (next bullet).
   The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
   the warm boot uses the hub id) and excludes only `eos_token_id` from the config digest: EOS is generation policy
@@ -1088,7 +1121,10 @@ inspector and no paging program, and the pager binds a page table that points ev
 the gather is a device-side launch, so whole-step decode capture records it. Host memory does not double: the numpy
 table the oracle and the prefill fallback read is rebound to a view of the pinned home. vLLM's MTP drafter gathers from
 that home too, because its proposer shares the target's `embed_tokens` (`_SharedRawEmbedding`), which reads the runner's
-table; the home holds the table's rows wherever the pager also keeps a copy.
+table; the home holds the table's rows wherever the pager also keeps a copy. The home's device view is on the rank's
+own device: one on device 0 opened a CUDA context on rank 0's card from every other rank of a tensor-parallel group. At
+zero pages on a V100 SXM3 (Qwen3.8-Flash-Next, 248,320 x 2,560 fp16) the gather reads a 4,096-row prefill chunk over the
+link in 7 ms and a decode row in 9 us.
 
 A page is a block of rows, not one, because the paging program ranks every page against every other on each step:
 NVIDIA's Qwen3.8-27B-NVFP4 table (248,320 x 5,120 BF16) is 970 pages of 2.5 MiB, with tables of a few KB.
@@ -1244,9 +1280,10 @@ list does not get the flooring treatment described above, so it can violate the 
   when none applies. Also pins that the coded path does NOT walk vLLM's weight stream, and that a compiled coded
   head receives the stored codes while the dense parameter stays untouched.
 - `tests/serving/generation/test_coded_head.py` — coded output heads: which EXL3 and NVFP4 heads stay coded, the
-  NVFP4 head program's inputs and its logits for several rows against the decoded head on the torch reference (no
-  GPU), and, on CUDA, both compiled heads against their decoded weights at one row, a full group and more rows than
-  a group holds, with their code buffers kept in place.
+  NVFP4 head spelled as the trunk's linears (W4A4 where the checkpoint stores `lm_head.input_scale`, offered the
+  e2m1 tile at sm_120 lowering), its W4A4 logits against an independent coding of the rows (no GPU), and, on CUDA,
+  both compiled heads at one row, a full group and more rows than a group holds, with their code buffers kept in
+  place.
 - `tests/serving/generation/test_gen_runner_gdn_gpu.py` — GDN layers through the runner, needs CUDA: prompt lengths
   on both sides of the static widths against the eager model, prefill followed by single-token steps, a request run
   after another one that must be bit-identical to the same request run alone, a padded step that must corrupt the

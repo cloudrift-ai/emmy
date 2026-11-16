@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim, to_dim
-from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx
+from emmy.compiler.ir.expression import Expression, Interval, Literal, SimplifyCtx
 from emmy.compiler.wire import Wire
 
 # Sentinel upper bound for a symbolic loop axis ``[0, hi]``. Only its ``lo = 0``
@@ -58,8 +58,8 @@ class Window(Wire):
     """
 
     parent: Axis | None = None
-    base: Expr | None = None
-    bound: Expr | None = None
+    base: Expression | None = None
+    bound: Expression | None = None
     partition: bool = False
 
 
@@ -67,7 +67,7 @@ class Window(Wire):
 class Axis(Wire):
     """One named iteration variable.
 
-    Referenced from ``Expr`` subtrees by ``Var(name)``. ``extent`` is a
+    Referenced from ``Expression`` subtrees by ``Var(name)``. ``extent`` is a
     :class:`Dim` — static (``Dim(32)``) in most cases today, symbolic
     (``Dim("seq_len")``) for dynamic dims. Construction coerces a bare
     ``int`` / ``str`` to ``Dim`` for ergonomics, so ``Axis("m", 32)``
@@ -128,10 +128,10 @@ class Axis(Wire):
         w = Window(parent=self.source_axis or self)
         return (Axis(f"{self.name}_o", ext // factor, window=w), Axis(f"{self.name}_i", factor, window=w))
 
-    def extent_expr(self) -> Expr:
-        """This axis's extent as an ``Expr`` — a literal int (static) or the symbolic ``Dim``
-        expr (dynamic ``seq_len``)."""
-        return Literal(self.extent.as_static(), "int") if self.extent.is_static else self.extent.expr
+    def extent_expression(self) -> Expression:
+        """This axis's extent as an ``Expression`` — a literal int (static) or the symbolic ``Dim``
+        expression (dynamic ``seq_len``)."""
+        return Literal(self.extent.as_static(), "int") if self.extent.is_static else self.extent.expression
 
 
 def extend_simplify_ctx(ctx: SimplifyCtx, axis: Axis) -> SimplifyCtx:
@@ -142,7 +142,7 @@ def extend_simplify_ctx(ctx: SimplifyCtx, axis: Axis) -> SimplifyCtx:
     a literal exclusive bound. A **symbolic** extent — previously dropped, which
     left symbolic-seq indices unsimplified — gets ``[0, sentinel]`` (the
     non-negativity the ``(i*c + …)//c → i`` div fold needs) plus its extent
-    ``Expr`` as an exclusive upper bound, so ``i % extent → i`` folds. Together
+    ``Expression`` as an exclusive upper bound, so ``i % extent → i`` folds. Together
     these collapse the delinearized seq coordinate (``(i*stride + feat)/stride %
     seq_len``) back to ``i`` exactly as a static seq does, removing the runtime
     integer div/mod from masked-tile repack kernels."""
@@ -150,7 +150,7 @@ def extend_simplify_ctx(ctx: SimplifyCtx, axis: Axis) -> SimplifyCtx:
     if ext.is_static:
         n = ext.as_static()
         return ctx.extend(axis.name, Interval(0, n - 1), bound=Literal(n, "int"))
-    return ctx.extend(axis.name, Interval(0, _SYMBOLIC_AXIS_HI), bound=ext.expr)
+    return ctx.extend(axis.name, Interval(0, _SYMBOLIC_AXIS_HI), bound=ext.expression)
 
 
 __all__ = ["Axis", "Window", "extend_simplify_ctx"]

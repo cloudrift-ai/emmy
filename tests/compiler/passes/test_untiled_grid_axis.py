@@ -24,7 +24,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt import free_names
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -70,6 +70,6 @@ def test_a_sibling_outputs_grid_axis_stays_bound() -> None:
 
     assert len(kernels) == 1, "the pinned fuse arm must give this shape one kernel for the untiled axis to arise"
     node = kernels[0]
-    bound = {*node.inputs, *node.buffer_names(), *_TOKENS.expr.free_vars()}
+    bound = {*node.inputs, *node.buffer_names(), *_TOKENS.expression.free_vars()}
     free = set().union(*(free_names(stmt) for stmt in node.op.body))
     assert free <= bound, f"kernel body reads names the kernel never binds: {sorted(free - bound)}"

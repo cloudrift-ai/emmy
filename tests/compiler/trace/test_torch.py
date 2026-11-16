@@ -552,7 +552,7 @@ def test_trace_rejects_copy_mutation_through_nonunit_slice():
             base[:, ::2].copy_(source)
             return base
 
-    with pytest.raises(NotImplementedError, match="slice_scatter requires .* step 1"):
+    with pytest.raises(NotImplementedError, match="slice(_scatter)? requires .*step 1"):
         trace_module(StridedCopy(), (torch.randn(1), torch.randn(1, 2, 8)))
 
 
@@ -1174,6 +1174,20 @@ def test_trace_passthrough_ops_no_extra_nodes():
 
     # Should just have input(s) — contiguous is a no-op.
     assert len(g.outputs) >= 1
+
+
+def test_trace_refuses_a_stepped_slice():
+    """A slice's step has no index-map form yet; dropping it would read every row."""
+    import torch
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Stepped(torch.nn.Module):
+        def forward(self, x):
+            return x[:, 1::2] * 2.0
+
+    with pytest.raises(NotImplementedError, match="step 1"):
+        trace_module(Stepped(), (torch.randn(2, 8),))
 
 
 def test_trace_zero_width_pad_is_an_alias():
@@ -1952,7 +1966,7 @@ def test_trace_keeps_a_dynamic_dim_symbolic_at_an_example_of_one():
 
     graph = trace_module(Project(), (torch.randn(1, 16),), dynamic_shapes={"x": {0: torch.export.Dim("rows", min=1, max=64)}})
     rows = [graph.buffer(name).shape[0] for name in graph.inputs]
-    assert any(not dim.is_static and dim.expr.free_vars() == {"rows"} for dim in rows)
+    assert any(not dim.is_static and dim.expression.free_vars() == {"rows"} for dim in rows)
 
 
 def test_trace_cat_on_its_default_axis():

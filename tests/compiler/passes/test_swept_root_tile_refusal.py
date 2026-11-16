@@ -36,7 +36,7 @@ def _lifted():
     """The two contractions' one fused kernel, lifted and not yet scheduled."""
     lowered = Pipeline.build(LOOP_PASSES).run(graph_from_code(CODE)[0], ctx=CTX)
     (loop,) = (node.op for node in lowered.nodes.values() if isinstance(node.op, LoopOp))
-    return replace(lift_loop_op(loop, name=loop.name), knobs=dict(loop.knobs), inputs=dict(loop.inputs), outputs=dict(loop.outputs))
+    return replace(lift_loop_op(loop), knobs=dict(loop.knobs), inputs=dict(loop.inputs), outputs=dict(loop.outputs))
 
 
 def _tiled(knobs) -> bool:
@@ -46,13 +46,13 @@ def _tiled(knobs) -> bool:
 def test_swept_roots_offer_no_tile() -> None:
     tile = _lifted()
     assert all(spec.sweep for spec in tile.output_specs), "each store keeps its own sweep"
-    leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, CTX)))
+    leaves = list(iter_leaves(classic_forks(tile, tile.knobs, CTX)))
     assert leaves
     assert not any(_tiled(leaf.knobs) for leaf in leaves)
 
     clear_pin_refusals()
     with pinned_knobs({"TILE@map.1/inner": "f1x2"}):
-        list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, CTX)))
+        list(iter_leaves(classic_forks(tile, tile.knobs, CTX)))
     assert "stays a serial loop" in (pin_refusal("TILE", "f1x2") or "")
 
 
@@ -62,7 +62,7 @@ def test_binder_declines_a_swept_tiled_root(monkeypatch) -> None:
     tile = _lifted()
     monkeypatch.setattr(classic_sites, "_swept_root_refusal", lambda _tile, _node: None)
     both = lambda knobs: all(value for key, value in knobs.items() if key.partition("@")[0] == "TILE")  # noqa: E731
-    leaf = next(leaf for leaf in iter_leaves(classic_forks(tile, tile.name, tile.knobs, CTX)) if both(leaf.knobs))
+    leaf = next(leaf for leaf in iter_leaves(classic_forks(tile, tile.knobs, CTX)) if both(leaf.knobs))
     (realized,) = leaf.expand()
     with pytest.raises(UnbindableProjection, match="output sweep axis"):
         factorize(realized, root=None)

@@ -24,10 +24,10 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import RegStore, WgmmaMma
-from emmy.compiler.ir.stmt import Body, Stmt
+from emmy.compiler.ir.stmt import Body, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -47,7 +47,7 @@ def rewrite(root: Node) -> KernelOp:
 
 
 def _walk(body: Body) -> tuple[Body, bool]:
-    stmts: list[Stmt] = []
+    stmts: list[Statement] = []
     changed = False
     for s in body:
         if nested := s.nested():
@@ -56,12 +56,12 @@ def _walk(body: Body) -> tuple[Body, bool]:
                 s = s.with_bodies(tuple(b for b, _ in walked))
                 changed = True
         stmts.append(s)
-    out: list[Stmt] = []
+    out: list[Statement] = []
     i = 0
     while i < len(stmts):
         group = stmts[i : i + _RUN]
         if len(group) == _RUN and _widens(group):
-            out.append(replace(group[0], run=tuple(group[1:])))
+            out.append(group[0].replace(run=tuple(group[1:])))
             changed = True
             i += _RUN
         else:
@@ -70,7 +70,7 @@ def _walk(body: Body) -> tuple[Body, bool]:
     return (Body(tuple(out)) if changed else body), changed
 
 
-def _plain(s: Stmt) -> bool:
+def _plain(s: Statement) -> bool:
     return (
         isinstance(s, RegStore)
         and not s.run
@@ -94,7 +94,7 @@ def _delta(a, b) -> int | None:
     fa, fb = affine_form(a, free), affine_form(b, free)
     if fa is None or fb is None or fa[1] != fb[1]:
         return None
-    diff = BinaryExpr("-", fb[0], fa[0]).simplify(SimplifyCtx.empty())
+    diff = BinaryExpression("-", fb[0], fa[0]).simplify(SimplifyCtx.empty())
     return diff.value if isinstance(diff, Literal) and isinstance(diff.value, int) else None
 
 
@@ -107,7 +107,7 @@ def _aligned(col) -> bool:
     return isinstance(anchor, Literal) and anchor.value % _COLS == 0 and all(c % _COLS == 0 for c in coeffs.values())
 
 
-def _widens(group: list[Stmt]) -> bool:
+def _widens(group: list[Statement]) -> bool:
     if not all(_plain(s) for s in group):
         return False
     first = group[0]

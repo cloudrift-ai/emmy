@@ -137,8 +137,8 @@ class Backend(ABC):
     # finishes so the worker raises cleanly and no daemon thread is ever
     # left holding the CUDA context. Autotune cache pins ``bench_fail``
     # latency to (this + ``bench_run_timeout_s``). Default 30 s gives the
-    # whole-graph compile/run commands headroom for a large kernel's nvcc
-    # compile; the ``tune`` sweep overrides it (single kernels) — see ``commands/tune.py``.
+    # whole-graph compile/run commands headroom for a large kernel's ptxas
+    # assembly; the ``tune`` sweep overrides it (single kernels) — see ``commands/tune.py``.
     _bench_compile_timeout_s: float = 30.0
     # Cumulative GPU-time cap on the iter loop. Enforced *after* each
     # iter completes — checked against the running sum of per-launch
@@ -194,11 +194,11 @@ class Backend(ABC):
         # Symbolic dims bind from the supplied input array shapes (mirrors
         # ``CudaBackend.run``): each atomic symbolic input dim records its
         # runtime size; downstream node shapes — possibly composite Dim
-        # exprs — resolve via ``expr.eval(sym_env)``.
+        # expressions — resolve via ``expression.eval(sym_env)``.
         sym_env = compiled.symbolic_env(input_data)
 
         def _shape_of(t) -> tuple[int, ...]:  # noqa: ANN001
-            return tuple(d.as_static() if d.is_static else int(d.expr.eval(sym_env)) for d in t.shape)
+            return tuple(d.as_static() if d.is_static else int(d.expression.eval(sym_env)) for d in t.shape)
 
         t0 = time.perf_counter()
         for nid in compiled.topological_order():
@@ -256,6 +256,12 @@ class Backend(ABC):
             bufs = node.buffer_names()
             if len(results) != len(bufs):
                 raise ValueError(f"node {nid!r}: forward returned {len(results)} values for {len(bufs)} outputs")
+            # An op that names its outputs returns them in its own order, which a body's canonical order may have
+            # moved away from the node's: match them by name.
+            op_outputs = tuple(getattr(node.op, "outputs", ()))
+            if set(op_outputs) == {t.name for t in node.outputs} and len(op_outputs) == len(bufs):
+                by_name = dict(zip(op_outputs, results, strict=True))
+                results = tuple(by_name[t.name] for t in node.outputs)
             for buf, t, r in zip(bufs, node.outputs, results, strict=True):
                 values[buf] = _coerce(r, _shape_of(t), t.dtype, preserve_bits=isinstance(node.op, BitcastOp))
 

@@ -304,7 +304,7 @@ already names, which print bare.
 | `emmy::scalar::from_f8e4m3(x)`, `from_f8e5m2`, `to_f8e4m3`, `to_f8e5m2` | decode or encode a narrow float format |
 | `emmy::scalar::bitcast(x)` | the same reinterpretation as `emmy::bitcast`, reached through that table |
 | `emmy::scalar::gelu_tanh(x)` | gelu's tanh approximation, torch's `approximate="tanh"` |
-| `emmy::scalar::exp_fast(x)` | `exp` with the fast-math CUDA spelling, from a kernel-stage pass |
+| `emmy::scalar::exp_fast(x)`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`, `log_fast`, `sin_fast`, `cos_fast`, `tanh_fast`, `pow_fast`, `sigmoid_fast` | the operation it is named after by its approximate instruction, picked by a kernel-stage pass |
 
 The following section presents `emmy::` helper operations in more detail.
 We do not discuss the PyTorch- and NumPy-based operations in detail, consult those repsective projects for that.

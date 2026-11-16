@@ -4,11 +4,12 @@ A case file is a golden with one traced program and one target kernel; its rows 
 compiler is expected to realize — one per kernel of the set the target compiles to — and its routing rows the
 kernel-set decisions that mint the pieces. ``realized``, ``built`` and ``correct`` ask the whole set of the compile
 the way a deploy would: the case is the compile's only evidence, strict, and no hand pin rides beside it
-(:func:`evidence_scope`). Everything here is GPU-free except :func:`built` and :func:`correct`.
+(:func:`evidence_scope`). Everything here is GPU-free except :func:`correct`; :func:`built` needs ptxas.
 """
 
 from __future__ import annotations
 
+import functools
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -169,12 +170,18 @@ def canonical_knobs(knobs: dict) -> dict:
 
 def regenerate(document: GoldenFile) -> GoldenFile:
     """The case document as the current compiler would derive it: its kernels restamped, its authored rows and note
-    preserved (``golden.restamp``, the same rewrite every repository golden gets)."""
-    fresh, _report = restamp(document)
+    preserved (``golden.restamp``, the same rewrite every repository golden gets). A row that would lose a key — a
+    site the fresh lowering no longer has — is a lowering regression to review, not a case to rewrite: a corpus row
+    has no measurement whose demotion would show it, so the restamp is refused."""
+    fresh, report = restamp(document)
+    if report.dropped_keys:
+        raise CaseError("the restamp drops schedule keys that name no site of the fresh kernel: " + "; ".join(report.dropped_keys))
     return replace(fresh, rows=[replace(row, knobs=canonical_knobs(row.knobs or {})) for row in fresh.rows])
 
 
-def complete(document: GoldenFile, settled: dict[str, dict[str, str]] | None = None) -> GoldenFile:
+def complete(
+    document: GoldenFile, settled: dict[str, dict[str, str]] | None = None, pins: dict[str, dict[str, str]] | None = None
+) -> GoldenFile:
     """The document with a row for every kernel of each target's set and a routing row for every decision that
     mints one.
 
@@ -185,7 +192,8 @@ def complete(document: GoldenFile, settled: dict[str, dict[str, str]] | None = N
     kernel standing in its place gets a fresh row. Strict evidence then has a row at every fork, each kernel's own.
     ``settled`` maps a row name's prefix before the first ``.`` — the captured graph's key (``g000`` …) — to the weight
     layouts that program compiled with in its runner (``settled_layouts``), so the set completed is the set serving
-    runs. Authoring, not derivation."""
+    runs. ``pins`` maps the same prefix to the kernel-set pins that program was captured under, which its compile
+    here takes again, so the decisions recorded are the ones the capture took. Authoring, not derivation."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
@@ -206,17 +214,18 @@ def complete(document: GoldenFile, settled: dict[str, dict[str, str]] | None = N
         taken: list = []
         watcher = KernelInventory(on_routing=lambda parent, arm, pieces, _ids, taken=taken: taken.append((parent, arm, pieces)))
         layouts = (settled or {}).get(seed.name.split(".", 1)[0], {})
-        with evidence_scope([_measured(document)]), pinned_knobs(regime), settled_layouts(layouts):
+        cuts = (pins or {}).get(seed.name.split(".", 1)[0], {})
+        with evidence_scope([_measured(document)]), pinned_knobs({**regime, **cuts}), settled_layouts(layouts):
             graph = Pipeline.build(CUDA_PASSES).with_strategies(watcher).run(target.program({}), ctx=ctx, db=None)
         for parent, arm, pieces in taken:
-            stored = document.add_kernel(definition(parent, parent.name))
-            children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+            stored = document.add_kernel(definition(parent))
+            children = [document.add_kernel(definition(piece)) for piece in pieces]
             arm = {str(k): str(v) for k, v in arm.items()}
             document.add_routing(RoutingRow(stored.ref, arm, tuple(c.ref for c in children)))
         for node in graph.nodes.values():
             if not isinstance(node.op, CudaOp) or (tile := kernel_tile(node.op)) is None:
                 continue
-            stored = document.add_kernel(definition(tile, node.op.kernel_name))
+            stored = document.add_kernel(definition(tile))
             ran.add(stored.ref)
             realized = dict(schedule_row_key(dict(node.op.knobs or {})))
             existing = [index for index, row in enumerate(document.rows) if row.kernel == stored.ref and row.pins == regime]
@@ -225,7 +234,7 @@ def complete(document: GoldenFile, settled: dict[str, dict[str, str]] | None = N
             if existing:
                 document.rows[existing[0]] = replace(document.rows[existing[0]], knobs=realized)
                 continue
-            name = seed.name if seed.kernel == stored.ref else f"{seed.name}.{stored.exact_identity[:12]}"
+            name = seed.name if seed.kernel == stored.ref else f"{seed.name}.{stored.name}"
             document.rows.append(Row(name=name, kernel=stored.ref, bindings=kernel_bindings(tile), pins=dict(regime), knobs=realized))
     document.rows[:] = [row for row in document.rows if row.kernel in ran]
     return document
@@ -322,24 +331,52 @@ def _unstamped_families(knobs: dict, rows: list[dict]) -> set[str]:
     return wanted - stamped
 
 
-def built(case: Case):
-    """Stage 2 — nvcc accepts the kernel the evidence picks. Returns the compiled graph, raising on refusal."""
-    from emmy.compiler.backend.cuda.program import CompiledProgram  # noqa: PLC0415
-    from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
+@functools.cache
+def assembles(compute_cap: tuple[int, int]) -> bool:
+    """Whether the installed ptxas assembles code for a card of ``compute_cap``: the one of CUDA 13 no longer takes
+    ``sm_70``, which an older toolkit's does."""
+    import subprocess  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
 
-    graph, _taken = lowered(case, Context.probe())
-    with gpu_lock():
-        CompiledProgram.build(graph, seeded_inputs(case.program()))
+    from emmy.emmy_ir import compile_ptx, parse_body  # noqa: PLC0415
+
+    from emmy.compiler.backend.cuda import ptxas  # noqa: PLC0415
+    from emmy.compiler.dtype import F32  # noqa: PLC0415
+    from emmy.compiler.ir.kernel.interface import Interface, Param  # noqa: PLC0415
+
+    major, minor = compute_cap
+    body = "Grid(axes=(i in 0..256), decode=(thread_idx.x), block_threads=256):\n    f32 x = load a[i]\n    f32 o[i] = x"
+    interface = Interface((Param("a", "input", F32, "a"), Param("o", "output", F32, "o")), {}, 0)
+    probe, _ = compile_ptx("probe", parse_body(body), interface, sm=major * 10 + minor)
+    with tempfile.TemporaryDirectory() as scratch:
+        text = Path(scratch) / "probe.ptx"
+        text.write_text(probe)
+        command = [ptxas.ptxas_path(), f"-arch=sm_{major}{minor}", "-o", str(Path(scratch) / "probe.cubin"), str(text)]
+        return subprocess.run(command, capture_output=True).returncode == 0
+
+
+def built(case: Case):
+    """Stage 2 — ptxas assembles every kernel the evidence picks, for the case's declared card. GPU-free: the code is
+    the case's at its declared capability, as :func:`realized` lowers it. Returns the lowered graph, raising on a
+    refusal."""
+    from emmy.compiler.backend.cuda import ptxas  # noqa: PLC0415
+    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+
+    graph, _taken = lowered(case, case.context())
+    for node in graph.nodes.values():
+        if isinstance(node.op, CudaOp):
+            ptxas.compile_to_cubin(node.op.kernel_source, node.op.kernel_name)
     return graph
 
 
-def correct(case: Case, compiled) -> None:
-    """Stage 3 — the kernel the evidence picks computes the reference answer: the kernel's traced ops run on the
-    numpy backend (``GoldenFile.reference_program``); a kernel with no exact frontend twin compares against the
-    same-input greedy execution of the same program."""
+def correct(case: Case) -> None:
+    """Stage 3 — the kernel the evidence picks computes the reference answer on the card: the kernel's traced ops run
+    on the numpy backend (``GoldenFile.reference_program``); a kernel with no exact frontend twin compares against
+    the same-input greedy execution of the same program."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.backend.numpy import NumpyBackend  # noqa: PLC0415
 
+    compiled, _taken = lowered(case, Context.probe())
     program = case.program()
     sources = {}
     feed = seeded_inputs(program, sources=sources)
@@ -432,8 +469,7 @@ def _tolerance(narrow: bool, reference: np.ndarray) -> dict[str, float]:
 #
 # The stages above answer "can this schedule be realized and is it correct". This answers "and is it still as fast
 # as it was" — the failure a lockout leaves behind when the compiler quietly stops selecting a schedule and falls
-# back to a slower tier. It cannot ride the correctness walker: `make test` compiles at `-Xcicc -O1`, which is not a
-# measurement lane.
+# back to a slower tier. It cannot ride the correctness walker: `make test` never measures.
 
 #: Where a stored latency stops being a match. MEASURED, not guessed: ten estimates per case over four repeats on an
 #: idle RTX 5090, spanning 1.5 us to 579 us, put the best-of-three estimator's own run-to-run spread at a median of
@@ -478,14 +514,13 @@ def bench_command(case: Case, output: Path) -> list[str]:
 
 def measure(case: Case, *, within: float | None = None) -> tuple[list[float], float]:
     """Best-of-N emmy microseconds for the case's own schedule, and the torch.compile number. Stops early once a
-    sample lands at or below ``within``. Deployable optimization is forced: the correctness lane's `-O1` changes
-    runtime performance."""
+    sample lands at or below ``within``."""
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
 
-    environment = {**os.environ, "EMMY_NVCC_FLAGS": ""}
+    environment = dict(os.environ)
     samples: list[float] = []
     tcompile = 0.0
     with tempfile.TemporaryDirectory(prefix="emmy_corpus_bench_") as directory:
@@ -521,3 +556,37 @@ def describe(case: Case) -> dict[str, str]:
         "dtype": "/".join(sorted(dtypes)),
         "family": case.path.parent.name,
     }
+
+
+def raw_bodies(case: Case) -> list:
+    """The bodies the lowering of ``case`` hands to normalization, each once, in the order they arrive: what a loop
+    op is constructed over, and a tile op's loop body, synthesized from its term, which its identity is taken of.
+    The material the normalization rules are stated over — a stored kernel is what one of these normalizes to."""
+    from functools import cached_property
+
+    import emmy.compiler.ir.stmt as stmt
+    from emmy.compiler.ir.tile.ir import TileOp
+
+    seen: dict[str, object] = {}
+    normalize = stmt.normalize_body
+    synthesized = TileOp.loop_body
+
+    def catching(body):  # noqa: ANN001, ANN202 — the normalization entry's signature
+        seen.setdefault(str(body), body)
+        return normalize(body)
+
+    def catching_loop_body(op):  # noqa: ANN001, ANN202 — the tile op's loop body, before its identity is taken
+        body = synthesized.func(op)
+        if body is not None:
+            seen.setdefault(str(body), body)
+        return body
+
+    stmt.normalize_body = catching
+    TileOp.loop_body = cached_property(catching_loop_body)
+    TileOp.loop_body.__set_name__(TileOp, "loop_body")
+    try:
+        lowered(case, case.context())
+    finally:
+        stmt.normalize_body = normalize
+        TileOp.loop_body = synthesized
+    return list(seen.values())

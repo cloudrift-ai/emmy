@@ -54,8 +54,11 @@ DEFAULT_NEGATIVES = 500
 # Trees for the placement space, whose forks are few (a handful of arms each) and whose rare labels — a split taken
 # under fast math only — need the trees the schedule space's default stops short of. Cross-validated over the
 # repository goldens (2026-10-05, 2414 forks), 500 lifted held-out top-1 on recorded cuts from 87.5% to 89.7% and on
-# recorded splits from 76.0% to 78.7% against 200, with no fork kind lower; 1000 bought nothing more.
-PLACEMENT_ITERATIONS = 500
+# recorded splits from 76.0% to 78.7% against 200, with no fork kind lower. The shipped weights are fit with 3000: the
+# reproduction gate asks the prior to re-decide EVERY recorded fork of the repository goldens, and at 500 trees the
+# 2026-11-09 fit (8133 forks) left 71 training forks ranked second to fourth — split forks of the A100, H100 and V100
+# linear kernels whose 5090 twin records a smaller split — which the gate reports as red hardware-golden slices.
+PLACEMENT_ITERATIONS = 3000
 # Mining rounds. Round 0 is the uniform draw; each further round adds the rows the current model ranks near the
 # golden. ONE by default — mining is implemented and reachable (``--rounds 2``), but it is not on, because the
 # only measurement of it says it hurts: over the 1278-group golden dataset, round 1 moved top-1 from 545 to 517
@@ -86,8 +89,10 @@ class CatBoostTrainer:
 
     feature_names: tuple[str, ...]
     # A cross-validated sweep over the repository goldens (trees 100-400, depth 3-8, rate 0.05-0.5) found held-out
-    # top-1 still rising with size; 200 trees of depth 6 at 0.3 sit within noise of the best at half its file size.
-    iterations: int = 200
+    # top-1 still rising with size; depth 6 at 0.3 sits within noise of the best. 400 trees is what the shipped
+    # schedule weights are fit with (the defaults are the fit the repository ships, so a refit with no flags reproduces
+    # it); 200 halves the file size for a fit that need not pass the reproduction gate.
+    iterations: int = 400
     depth: int = 6
     learning_rate: float = 0.3
     negatives: int = DEFAULT_NEGATIVES

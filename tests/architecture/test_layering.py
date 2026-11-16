@@ -11,6 +11,7 @@ this file rather than scattering one-off greps elsewhere.
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 import re
 
@@ -27,6 +28,17 @@ _POST_DECOMPOSITION_ROOTS = (
     "emmy/compiler/ir/tile",
     "emmy/compiler/pipeline/passes/loop",
     "emmy/compiler/pipeline/passes/lowering",
+)
+
+
+# The two entry points (the normal form, and its optimizing half) and the steps a pass may run on its own.
+_STEPS = (
+    "normalize_body",
+    "optimize_body",
+    "one_operation_per_definition",
+    "normalize_lambda_body",
+    "simplify_body",
+    "prepare_body",
 )
 
 
@@ -57,10 +69,10 @@ def test_lowering_tile_does_not_import_kernel_ir() -> None:
     (``100_materialize_tile``) emits. A Tile pass that imports
     Kernel-IR types is fabricating Kernel stmts inside a Tile body —
     exactly what PR #166 did to ``085_warp_specialize`` and what the
-    WarpSpecialize Stmt refactor undid.
+    WarpSpecialize Statement refactor undid.
 
     If this test fires, either:
-    1. you genuinely need a new Tile-level abstraction (add a Stmt to
+    1. you genuinely need a new Tile-level abstraction (add a Statement to
        ``ir/tile/ir.py``, lower it in ``100_materialize_tile``), or
     2. you're in the wrong directory — Kernel-IR-emitting passes live
        under ``lowering/kernel/``.
@@ -120,29 +132,136 @@ def test_ir_does_not_import_pipeline() -> None:
     assert not offenders, "ir/ must not import the pipeline layer:\n" + "\n".join(offenders)
 
 
-def test_normalization_has_one_entry_point_and_no_orphan_transform() -> None:
-    """Every transform in ``ir/stmt/normalize.py`` runs inside ``normalize_body``.
+def test_normalization_has_one_entry_point() -> None:
+    """Body normalization is the canonical form every Loop IR body and every identity digest takes; it answers to no
+    knob, pin or evidence. It lives in the ``emmy-ir`` crate behind one entry point, ``normalize_body``; the package
+    exports beside it only the steps a pass may run on its own, and holds no transform of its own."""
+    import emmy.compiler.ir.stmt as stmt
 
-    Body normalization is the canonical form every Loop IR body and every identity digest takes;
-    it answers to no knob, pin or evidence. A transform a pass invokes on its own is that pass's
-    code and lives in its pass file. Two signs give one away: it is exported beside
-    ``normalize_body``, or no other function in the module calls it.
+    steps = {name for name in stmt.__all__ if name in _STEPS}
+    assert steps == set(_STEPS)
+    package = _REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt"
+    modules = sorted(path.name for path in package.glob("*.py"))
+    assert modules == ["__init__.py", "glue.py"], "the statement package is its exports and the glue"
+    crate = (_REPO_ROOT / "crates" / "emmy-ir" / "src" / "normalize" / "mod.rs").read_text()
+    assert "pub fn normalize_body(" in crate
+
+
+def test_a_kernel_body_takes_the_optimizing_half_of_the_normal_form() -> None:
+    """A ``KernelOp`` body takes the optimizing steps of the normal form at construction, in the base it shares with
+    ``LoopOp``, and keeps the names and the order its builder wrote: no identity reads a kernel body, so nothing
+    needs them canonical. A ``LoopOp`` takes the whole normal form."""
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import normalize_body, optimize_body, parse_body
+
+    body = parse_body("late = load X[1]\nearly = load X[0]\nb = add(early, late)\nunused = multiply(early, 3)\nY[0] = b")
+    kernel = KernelOp(body=body).body
+    assert kernel == optimize_body(body)
+    assert [str(stmt).split(" = ")[0] for stmt in kernel] == ["late", "early", "b", "Y[0]"]
+    assert LoopOp(body=body).body == normalize_body(body) != kernel
+
+
+_STMT_PACKAGE = "emmy.compiler.ir.stmt"
+
+
+def _imports(path: pathlib.Path):
+    """Every ``(module, names)`` a file imports, function-local imports included."""
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            yield node.module, [alias.name for alias in node.names]
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name, []
+
+
+def test_the_statement_module_is_entered_through_its_package() -> None:
+    """Outside ``ir/stmt``, the compiler and its tests import the statement package's exported names, nothing else.
+
+    A submodule path or a private name is a dependency on how the module is built. The package's export list is the
+    whole interface, so the module can be rearranged, or replaced, behind it. The tests of how it is built are the
+    one exception, and they sit in one directory that leaves with the implementation.
     """
-    module = ast.parse((_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt" / "normalize.py").read_text())
-    exported = next(
-        ast.literal_eval(node.value)
-        for node in module.body
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
+    import emmy.compiler.ir.stmt as stmt
+
+    inside = (_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt", _REPO_ROOT / "tests" / "compiler" / "ir" / "stmt" / "implementation")
+    offenders = []
+    for py in sorted([*(_REPO_ROOT / "emmy").rglob("*.py"), *(_REPO_ROOT / "tests").rglob("*.py")]):
+        if any(root in py.parents for root in inside):
+            continue
+        for module, names in _imports(py):
+            if module.startswith(_STMT_PACKAGE + ".") or (module == _STMT_PACKAGE and not set(names) <= set(stmt.__all__)):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}: from {module} import {', '.join(names)}")
+    assert not offenders, "import these from the statement package's exported names:\n" + "\n".join(offenders)
+
+
+def test_the_statement_module_exports_a_pinned_list() -> None:
+    """The statement module's interface is this list. A name added here is a decision, not a convenience."""
+    import emmy.compiler.ir.stmt as stmt
+
+    statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
+    statement_types += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
+    containers = ["Body", "Identity", "OutputSpec"]
+    functions = ["canonicalize_identity", "free_names", "exposed_defines"]
+    functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
+    # The target's spelling of an index division, which an emitter runs on the body it renders.
+    functions += ["reduce_strength"]
+    # The input check of a code generator: the body says every type and every conversion, and asks for nothing.
+    functions += ["check_types", "check_input"]
+    # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
+    steps = list(_STEPS)
+    assembly = ["Call", "Subroutine"]
+    # The names of a statement type's fields, for the one pass that generalizes whole statements.
+    declaring = ["fields_of"]
+    assert sorted(stmt.__all__) == sorted(statement_types + containers + functions + steps + assembly + declaring)
+
+
+def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
+    """``ir/stmt`` is the vocabulary every IR shares, so it sits below all of them: it imports the extension that
+    implements it, expressions, axes, dtypes and the structural and wire forms. No op, tensor, graph, backend,
+    renderer or pipeline."""
+    allowed = (
+        _STMT_PACKAGE,
+        "emmy.emmy_ir",
+        "emmy.compiler.ir.expression",
+        "emmy.compiler.ir.axis",
+        "emmy.compiler.ir.sigma",
+        "emmy.compiler.ir.elementwise",
+        "emmy.compiler.dtype",
+        "emmy.compiler.dim",
+        "emmy.compiler.structural",
+        "emmy.compiler.wire",
+        "emmy.utils",
     )
-    assert exported == ["normalize_body"], f"normalize.py exports {exported}; normalization has one entry point"
-    functions = [node for node in module.body if isinstance(node, ast.FunctionDef)]
-    drivers = {"normalize_body", "_normalize_body"}
-    orphans = []
-    for function in functions:
-        callers = {name.id for other in module.body if other is not function for name in ast.walk(other) if isinstance(name, ast.Name)}
-        if function.name not in drivers and function.name not in callers:
-            orphans.append(function.name)
-    assert not orphans, "no normalization step calls these; a transform invoked only from outside is a pass:\n" + "\n".join(orphans)
+    offenders = []
+    for py in sorted((_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt").glob("*.py")):
+        for module, _names in _imports(py):
+            if module.startswith("emmy") and not any(module == root or module.startswith(root + ".") for root in allowed):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}: {module}")
+    assert not offenders, "the statement module must not depend on these:\n" + "\n".join(offenders)
+
+
+def test_a_class_is_on_the_wire_by_what_it_registers() -> None:
+    """Nothing under ``emmy/`` asks whether a value inherits ``Wire``, and only the mixin's own defaults read a
+    dataclass field for the wire: a class joins through ``wire.register`` with its tag, its two wire functions and
+    its parts, so one that cannot be a dataclass or inherit a Python base travels like any other."""
+    by_base = re.compile(r"\b(?:isinstance|issubclass)\([^()]*\bWire\b")
+    offenders = [
+        f"{py.relative_to(_REPO_ROOT)}:{number}"
+        for py in sorted((_REPO_ROOT / "emmy").rglob("*.py"))
+        for number, line in enumerate(py.read_text().splitlines(), 1)
+        if by_base.search(line)
+    ]
+    assert not offenders, "ask the wire registry, not the base class:\n" + "\n".join(offenders)
+    wire = ast.parse((_REPO_ROOT / "emmy" / "compiler" / "wire.py").read_text())
+    reflecting = {
+        function.name
+        for function in ast.walk(wire)
+        if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Name) and node.id in ("fields", "is_dataclass")
+    }
+    assert reflecting == {"wire_parts", "_wire_fields"}
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +396,7 @@ _IDENTITY_HOME = "emmy/compiler/ir/base.py"
 #: second spelling.
 _IDENTITY_DEFINERS = {
     "identity_key": {_IDENTITY_HOME, "emmy/compiler/ir/cuda/ir.py"},
-    "body_identity": {_IDENTITY_HOME, "emmy/compiler/ir/stmt/ir.py", "emmy/compiler/ir/tile/ir.py"},
+    "body_identity": {_IDENTITY_HOME, "emmy/compiler/ir/body_op.py", "emmy/compiler/ir/tile/ir.py"},
     "io_fingerprint": {_IDENTITY_HOME},
     "deploy_identity": set(),
     "cache_key": set(),
@@ -321,7 +440,7 @@ def test_kernel_identity_is_not_redefined_outside_its_home() -> None:
 
 def test_a_golden_file_stores_inputs_only() -> None:
     """A golden file and a corpus case hold inputs — the Loop IR, the decisions, the measurements — and nothing
-    computed from them: no kernel identity, no ``S_*`` stamp. A stored copy of a computed value has to be kept in
+    computed from them: no kernel identity, no kernel name, no ``S_*`` stamp. A stored copy of a computed value has to be kept in
     agreement with the computation, and every time the two drifted a row stopped pricing its own fork with nothing
     reporting it. So the field lists are pinned here: a new field is an input, or it does not go in the file.
 
@@ -332,7 +451,7 @@ def test_a_golden_file_stores_inputs_only() -> None:
     from emmy.compiler.pipeline.search.db import RoutingRow
     from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Latency, Measurements, Row
 
-    assert [f.name for f in fields(Kernel)] == ["loop_ir", "name", "formed", "key", "traced", "origins", "bindings"]
+    assert [f.name for f in fields(Kernel) if f.name not in Kernel.wire_skip] == ["loop_ir", "formed", "traced", "origins", "bindings"]
     assert [f.name for f in fields(Row)] == ["name", "kernel", "bindings", "pins", "knobs", "measurements", "latency", "note"]
     assert [f.name for f in fields(RoutingRow)] == ["parent", "arm", "children"]
     assert [f.name for f in fields(Measurements)] == ["emmy_us", "reference_us", "reference_backend", "tried"]
@@ -372,38 +491,35 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
     assert not offenders, "read kernel identity off the Op interface (Op.deploy_identity)\n" + "\n".join(offenders)
 
 
-def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
-    """``Stmt.rename_buffers`` is the setter counterpart of ``external_reads`` /
-    ``external_writes``: a stmt kind that DECLARES external buffers without knowing how to
-    rename them silently breaks every buffer rebind (structural identity, the session kernel
-    cache) the day it first appears inside a body those walk. Wrapper stmts whose
-    declarations aggregate a nested body are exempt — ``Body.rename_buffers`` reaches their
-    leaves through the recursive map."""
-    import importlib
-    import pkgutil
+def _kernel_statement_types() -> list[type]:
+    import emmy.compiler.ir.kernel.ir as kernel_ir
+    from emmy.compiler.ir.stmt import Statement
 
-    import emmy.compiler.ir as ir_pkg
-    from emmy.compiler.ir.stmt.base import Stmt
-
-    for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
-        importlib.import_module(mod.name)
-
-    def subclasses(cls):
-        for sub in cls.__subclasses__():
-            yield sub
-            yield from subclasses(sub)
-
-    offenders = [
-        cls.__name__
-        for cls in subclasses(Stmt)
-        if ("external_reads" in cls.__dict__ or "external_writes" in cls.__dict__)
-        and "rename_buffers" not in cls.__dict__
-        and not cls.__dict__.get("nested", None)  # wrapper aggregators rename through their bodies
+    return [
+        cls
+        for cls in vars(kernel_ir).values()
+        if isinstance(cls, type) and issubclass(cls, Statement) and cls.__module__ == kernel_ir.__name__
     ]
-    assert not offenders, (
-        "these stmt kinds declare external buffers but cannot rename them — add a "
-        "rename_buffers override beside the declaration:\n" + "\n".join(sorted(offenders))
+
+
+def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
+    """A Kernel IR statement type is data: fields with their roles, how it prints, and at most a constructor check,
+    declared in the emmy-ir crate with the shared statement types. The statement protocol follows from the roles; what rendering
+    or a lowering asks of a statement beyond that is a function over it, beside the render functions, never a
+    Python member attached to the class."""
+    import types
+
+    statement_types = _kernel_statement_types()
+    offenders = [
+        f"{cls.__name__}.{name}"
+        for cls in statement_types
+        for name, member in vars(cls).items()
+        if isinstance(member, (types.FunctionType, property, functools.cached_property, staticmethod, classmethod))
+    ]
+    assert len(statement_types) == 32 and all(
+        cls.__module__ == "emmy.compiler.ir.kernel.ir" and "_fields" in vars(cls) for cls in statement_types
     )
+    assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))
 
 
 def test_every_op_is_a_frozen_dataclass() -> None:

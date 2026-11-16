@@ -1,13 +1,12 @@
 """Loop IR — post-fusion kernel representation and validation.
 
-``LoopOp`` normalizes its body before validation. The statement vocabulary, body analysis and
-reconstruction live in ``ir/stmt``; the Loop IR splicer supplies graph regions to that shared engine.
+``LoopOp`` normalizes its body before validation. The statement vocabulary lives in ``ir/stmt``; body analysis
+and the body assembly fusion drives live here, and the splicer supplies graph regions to that engine.
 Common types are re-exported here for Loop IR callers.
 """
 
 from emmy.compiler.ir.loop.ir import (
     Accum,
-    Affine,
     Assign,
     Axis,
     BodyAnalysis,
@@ -18,29 +17,26 @@ from emmy.compiler.ir.loop.ir import (
     Scope,
     Select,
     SelectBranch,
-    Stmt,
+    Statement,
     Write,
 )
 from emmy.compiler.ir.loop.splicer import UnfusableStmt, observes_running_accumulator, splice_graph, splice_loops
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.builder import BodyBuilder
 
 __all__ = [
     "Accum",
-    "Affine",
     "Assign",
     "Axis",
     "Cond",
     "Load",
     "Loop",
-    "BodyBuilder",
     "BodyAnalysis",
     "LoopOp",
     "Scope",
     "Select",
     "SelectBranch",
     "Sigma",
-    "Stmt",
+    "Statement",
     "Write",
     "iter_body",
     "map_body",

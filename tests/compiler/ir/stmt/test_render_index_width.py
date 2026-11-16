@@ -11,8 +11,8 @@ later CUDA test sharing that xdist worker.
 import pytest
 
 from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt.base import RenderCtx, render_index
+from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.loop.render import RenderCtx, render_index
 
 _SMALL = (Dim(4), Dim(512), Dim(1024))  # 2_097_152 elements
 _BIG = (Dim(4), Dim(512), Dim(2048), Dim(1024))  # 2^32 elements — the buffer that faulted

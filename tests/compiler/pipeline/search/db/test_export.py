@@ -34,11 +34,13 @@ _CUT = "fused/linear-add-place-cut-sm70.json"
 @pytest.mark.parametrize("cold", [False, True])
 def test_recorded_pool_candidates_ignore_opposite_ambient_precision_and_cache(reduced_accumulate, cold):
     from emmy.compiler.pipeline.search.dataset import regime_of
+    from emmy.compiler.pipeline.search.space import precision_pins
 
     document = GoldenFile.load(corpus.CASES_DIR / "matmul/f16-mma-f16acc-cp.json")
     regime = regime_of(cold, {"F16_MMA_F32_ACC": reduced_accumulate})
     pool = GoldenPool("NVIDIA A100 40GB", (8, 0), regime, document.kernels[0], {}, ())
-    expected = {"FAST_MATH": False, "FAST_EXP": False, "F16_MMA_F32_ACC": reduced_accumulate, "FP8_MMA": False}
+    expected = precision_pins({"FAST_MATH": False, "F16_MMA_F32_ACC": reduced_accumulate})
+    assert expected["F16_MMA_F32_ACC"] is reduced_accumulate and not expected["FAST_EXP"] and expected["CONTRACT_FMA"]
     assert pool.pins == {**expected, "COLD_CACHE": cold}
     draws = []
     for ambient in (False, True):
@@ -58,15 +60,15 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
     golden file sourced, and the builder's ``kernel`` narrows on the kernel's C name."""
     db = tuned_db(None, (_MATMUL,), source="golden:case")
     [pool], dropped = golden_pools(db)
-    assert pool.kernel.formed and pool.name.startswith("k_matmul_") and (pool.regime, pool.bindings) == ("", {}) and dropped == {}
-    assert build_golden_groups([pool], kernel="k_reduce") == ([], [])
-    groups, skipped = build_golden_groups([pool], kernel="k_matmul")
+    assert pool.kernel.formed and pool.name == pool.kernel.name and (pool.regime, pool.bindings) == ("", {}) and dropped == {}
+    assert build_golden_groups([pool], kernel="k_ffffffffffff") == ([], [])
+    groups, skipped = build_golden_groups([pool], kernel=pool.kernel.name)
     assert skipped == []
     [group] = groups
     assert (group.key, group.name, group.tier, group.gpu) == (f"{GPU_5090}/{pool.name}", pool.name, "warp", GPU_5090)
 
     case = corpus.load_case(corpus.CASES_DIR / _MATMUL)
-    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision={})
     with pinned_knobs(case.row.pins):
         file_side = enumerate_graph(case.program(), ctx)
     db_side = enumerate_pool(pool, pool_context(pool))
@@ -96,8 +98,8 @@ def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_i
     from tests.compiler.passes.test_shared_carry import _graph as carried_state_graph
 
     graph = carried_state_graph()
-    kernel = KernelDef(loop_ir=graph.to_wire(), name="k_step", formed=True)
-    ctx = Context.from_target((7, 0), gpu_name=CARDS[(7, 0)], compile_flags="")
+    kernel = KernelDef(loop_ir=graph.to_wire(), formed=True)
+    ctx = Context.from_target((7, 0), gpu_name=CARDS[(7, 0)], precision={})
     schedule = {k: v for k, v in _PINS.items() if k in ("WORK", "REDUCE")}
     with pinned_knobs({"FAST_MATH": True}):
         file_side = enumerate_graph(graph, ctx, prefer=schedule)
@@ -150,7 +152,7 @@ def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp
 def test_symbolic_placement_fork_exports_in_the_dynamic_tier():
     """A recorded symbolic cut must export with the same regime its arm features carry."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
-    target = "k_linear_matmul_reduce_b61b5c"
+    target = "k_2e9258d74428"  # a symbolic fused linear and matmul reduction, cut by its recorded route
     row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
     db = SearchDB()
     import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
@@ -168,7 +170,7 @@ def test_a_static_piece_under_a_symbolic_root_exports_in_its_own_regime():
     the static head dimension); the fork on that piece is a static-regime group, whatever its root's regime, and the
     group's tier agrees with the rows it packs."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "Qwen3.8-27B-NVFP4-NVIDIA" / "golden" / "rtx5090_sm120.json")
-    target = "k_matmul_softmax_range_reduce_908021"
+    target = "k_22b2aab5f40b"  # a symbolic attention kernel whose recorded cut leaves a static piece
     rows = [row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel))]
     assert rows
     db = SearchDB()
@@ -236,7 +238,7 @@ def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
     import_rows(db, regime_context(document, row.pins), document, [row], source=source)
     assert import_constants(db, document, [row], source=source) > 0
     pools = placement_pools(db, golden_pools(db)[0])
-    [pool] = [pool for pool in pools if pool.kernel.name == "k_linear_0accca"]
+    [pool] = [pool for pool in pools if pool.kernel.name == "k_ea581e1ab999"]  # the 3584-wide linear
     forks, unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
     assert unmatched == []
     [layout] = [fork for fork in forks if fork.tier == "layout"]
@@ -284,7 +286,7 @@ def test_a_placement_label_is_what_the_golden_of_that_card_did():
     db = tuned_db(None, (_CUT,), source="golden:case")
     [parent] = [pool for pool in placement_pools(db, golden_pools(db)[0]) if pool.rows]
     other = "NVIDIA Tesla V100 SXM3 32GB"
-    whole = dict(us=1.0, flags=parent.regime, bindings=parent.bindings, knobs={"WORK": "t1"})
+    whole = dict(us=1.0, bindings=parent.bindings, knobs={"WORK": "t1"})
     db.record_perf_row(perf_row(parent.kernel.exact_identity, gpu=parent.gpu, cc=70, source="golden:case", **whole))
     db.record_perf_row(perf_row(parent.kernel.exact_identity, gpu=other, cc=70, source="golden:other", **whole))
     assert {pool.gpu for pool in golden_pools(db)[0] if pool.kernel == parent.kernel} == {parent.gpu, other}
@@ -296,7 +298,7 @@ def test_a_cut_a_golden_took_is_the_label_with_no_piece_measured():
     """What a golden did is the label, not what it measured: a file whose rows lost their times still says where
     it cut the kernel, and the placement space marks that cut though the DB holds no measurement of any piece."""
     case = corpus.load_case(corpus.CASES_DIR / _CUT)
-    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision={})
     db = SearchDB()
     assert import_rows(db, ctx, case.document, [replace(row, measurements=None) for row in case.rows], source="golden:case") == 0
     pools, _dropped = golden_pools(db)
@@ -308,23 +310,23 @@ def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
     """A piece carved from a twisted tree has no definition the lowering takes back to it; its rows are counted
     out under their kernel's name rather than enumerated through a body that would make another kernel."""
     db = SearchDB()
-    db.record_kernel(kernel_row("twisted", name="k_piece", formed=False))
+    db.record_kernel(kernel_row("twisted", formed=False))
     db.record_perf_row(perf_row("twisted", us=500.0, source="golden:case"))  # plausible: the freeze admits it
     groups, skipped = build_golden_groups(golden_pools(db, lambda row: StubKernel(F16_MATMUL_STAMPS))[0])
-    assert groups == [] and skipped == [(GPU_5090, "k_piece.twisted", "kernel formed from no loop op")]
+    assert groups == [] and skipped == [(GPU_5090, "k_twisted", "kernel formed from no loop op")]
 
 
 def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
     """A golden that cut a kernel at several seams, one of them on a piece of its own, is in the placement space the
     sequence of single cuts a deploy with no recorded route takes: at the kernel's fork the single seams carving a piece of the
-    recorded kernel set are positive, the deepest first; each remainder's fork is the next, with the seams still
-    to cut positive; the last remainder is a piece of the set and stays whole. No arm cuts several seams at once,
+    recorded kernel set are positive, the deepest first; the fork of the piece each cut leaves to cut is the next, with
+    the seams still to cut positive; the last such piece is a piece of the set and stays whole. No arm cuts several seams at once,
     and the reproduction gate grades every fork on the way."""
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
 
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
-    target = "k_linear_matmul_reduce_b61b5c"
+    target = "k_2e9258d74428"  # cut at three seams by its recorded route
     row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
     db = SearchDB()
     import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
@@ -339,8 +341,42 @@ def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
     first, *rest = forks
     assert len(first.positives) == 2 and first.pick == first.positives[0]
     assert first.labels[first.pick].count("/") > first.labels[first.positives[1]].count("/"), "the deepest seam first"
-    assert [len(fork.positives) for fork in rest] == [1, 1, 1] and rest[-1].labels[rest[-1].pick] == "fuse"
+    # The second fork reaches the set either way: each of its two arms carves a recorded kernel and leaves one to cut.
+    assert [len(fork.positives) for fork in rest] == [2, 1, 1] and rest[-1].labels[rest[-1].pick] == "fuse"
     assert reproduction_rate([verdict for verdict in reproduce_placement(pools, None) if verdict.pool is parent]) == 1.0
+
+
+def test_a_piece_reached_through_its_parents_pool_carries_the_next_recorded_cut():
+    """A golden that cut a piece, then cut a piece that cut left, records the second cut on that piece under
+    its identity. Walked as its own pool, that piece's fork is that cut; walked from its parent's pool, the piece
+    is minted inside the piece's program, and its identity must be the one the file records, or the walk keeps it whole
+    and labels the same fork "fuse" — two labels on one feature row, which no prior reproduces both of. That held only
+    while the normal form had one fixed point for the piece's body: with two (the sibling reductions merged in one loop
+    or kept apart by a value between them), the two programs lifted to trees whose seams carved different halves. The
+    RTX 5090 golden's `gdn2rows` linear piece is cut three times this way."""
+    from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate
+    from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
+
+    golden = GoldenFile.load(Path(__file__).parents[5] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
+    # The piece, and the pieces its successive cuts left to cut further, each a kernel of its own name.
+    piece, *deeper_names = ("k_bc9aac9c5ba2", "k_8f724e47ecf1", "k_5cbc5e5dc53e", "k_0b9ebbcae797", "k_a6f722502dca")
+    [ref] = [kernel.ref for kernel in golden.kernels if kernel.name == piece]
+    rows = [row for row in golden.rows if row.kernel in golden.kernel_set(ref)]
+    db = SearchDB()
+    import_rows(db, regime_context(golden, rows[0].pins), golden, rows, source="golden:case")
+    pools = placement_pools(db, golden_pools(db)[0])
+    [first] = [pool for pool in pools if pool.kernel.name == piece]
+    deeper = [pool for pool in pools if pool.kernel.name in deeper_names and pool.rows]
+
+    def walk(pool):
+        return walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
+
+    walked, unmatched = walk(first)
+    assert unmatched == [] and len(walked) == len(deeper) + 2, "the piece's walk takes every recorded cut below it, then stays whole"
+    # The next piece's fork, reached from the piece, carries a cut: the one that piece's own pool records on it.
+    assert [walked[1].labels[i] for i in walked[1].positives] != ["fuse"]
+    assert {walked[1].labels[i] for i in walked[1].positives} & {walk(pool)[0][0].labels[walk(pool)[0][0].pick] for pool in deeper}
+    assert reproduction_rate([verdict for verdict in reproduce_placement(pools, None) if verdict.pool is first]) == 1.0
 
 
 def test_a_composed_route_is_no_arm_of_the_walk():
@@ -371,7 +407,7 @@ def test_constants_follow_the_input_names_of_the_kernel_copy_the_db_keeps(tmp_pa
     document = replace(case.document, gpu_name=CARDS[case.compute_cap], rows=[replace(row, measurements=measured) for row in case.rows])
     [target] = document.targets()
     db = SearchDB()
-    renamed = replace(target, loop_ir=json.loads(json.dumps(target.loop_ir).replace('"linear_wt"', '"other_wt"')))
+    renamed = replace(target, loop_ir=json.loads(json.dumps(target.loop_ir).replace("linear_wt", "other_wt")))
     db.record_kernel(renamed.keyed(target.exact_identity))
     import_file(db, document.dump(tmp_path / "golden.json"), "golden:test")
     [pool] = placement_pools(db, golden_pools(db)[0])

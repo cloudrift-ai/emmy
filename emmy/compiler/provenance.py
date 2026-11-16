@@ -22,13 +22,10 @@ with ``list`` (never ``set``) piece collections so it round-trips through
 
 from __future__ import annotations
 
-import hashlib
-import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph, Node
-    from emmy.compiler.ir.loop import LoopOp
 
 PROV = "prov"
 
@@ -121,84 +118,3 @@ def coverage(node_prov: dict, all_totals: dict[str, set[str]]) -> dict[str, tupl
         total = len(all_totals.get(oid, set(entry["pieces"])))
         out[oid] = (have, total, have >= total)
     return out
-
-
-# Generic glue ops carry no descriptive name — a kernel made only of these
-# falls back to the node-id name. When a meaningful op (rms_norm / linear /
-# sdpa / …) is also present, the glue is dropped from the label.
-_GENERIC_KINDS = frozenset({"ElementwiseOp", "ReduceOp", "ScanOp", "IndexMapOp", "GatherOp", "ScatterOp"})
-
-# Frontend layout/plumbing ops label a kernel only when no strong op is present:
-# an attention kernel that also absorbs RoPE's cat/slice/unsqueeze plumbing
-# stays ``k_sdpa_…``, while a standalone copy kernel (e.g. a cat feeding a graph
-# output) still reads ``k_cat_…`` instead of the node-id fallback.
-_WEAK_KINDS = frozenset({"TransposeOp", "ReshapeOp", "UnsqueezeOp", "CatOp", "SliceOp"})
-
-
-def _humanize_kind(kind: str) -> str:
-    """``RmsNormOp`` → ``rms_norm``, ``SdpaOp`` → ``sdpa`` (CamelCase→snake, drop ``Op``)."""
-    stem = kind[:-2] if kind.endswith("Op") else kind
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", stem).lower()
-
-
-def _dedup_tokens(name: str) -> str:
-    """Drop consecutive duplicate ``_``-separated tokens.
-
-    ``softmax_softmax_max`` → ``softmax_max``; ``rms_rms_norm`` → ``rms_norm``.
-    Preserves order; only collapses adjacent duplicates so structurally
-    distinct repeats (``add_mul_add``) survive.
-    """
-    out: list[str] = []
-    for tok in name.split("_"):
-        if not tok or (out and out[-1] == tok):
-            continue
-        out.append(tok)
-    return "_".join(out) if out else name
-
-
-def name_for(loop: LoopOp, base_name: str, node_prov: dict, all_totals: dict[str, set[str]], dtype_sig: str = "") -> str:
-    """Name the kernel after the original ops it implements (op provenance).
-
-    A kernel that fully realizes exactly one meaningful op gets ``k_<op>_<h>``
-    (e.g. ``k_rms_norm_3f2a1b``); a partial one keeps the ``_<reduce|pointwise>``
-    qualifier so the reduce half is told apart from the pointwise tail. Multiple
-    meaningful ops join dominant-first — sorted by descending piece count (the op
-    the kernel mostly implements leads, e.g. ``k_sdpa_linear_...``), ties broken
-    lexically — so the label is independent of fusion merge order. Layout ops
-    (:data:`_WEAK_KINDS`) label the kernel only when no strong op is present;
-    with no provenance (or only glue ops) it falls back to the node-id name.
-
-    ``<h>`` is a short structural-body hash: prov labels are *not* unique (two
-    rms_norms, or SDPA's two distinct reduce kernels, share a label), but the
-    backend dispatches kernels by name and the launch dict holds one source per
-    name. The hash makes structurally-identical kernels share a name (so they
-    dedup to one compilation) and distinct kernels differ (so a duplicate label
-    never makes one launch reuse another's code). The node-id fallback is
-    already unique, so it needs no hash.
-
-    Local import for the carriers avoids a top-of-module cycle through
-    ``ir.loop`` (which imports ``provenance`` for graph utilities)."""
-    from emmy.compiler.ir.stmt import Accum
-
-    suffix = "reduce" if any(isinstance(s, Accum) for s in loop) else "pointwise"
-    strong = [oid for oid, e in node_prov.items() if e["kind"] not in _GENERIC_KINDS | _WEAK_KINDS]
-    meaningful = strong or [oid for oid, e in node_prov.items() if e["kind"] in _WEAK_KINDS]
-    if not meaningful:
-        return f"k_{_dedup_tokens(base_name)}_{suffix}"
-
-    meaningful.sort(key=lambda oid: (-len(set(node_prov[oid]["pieces"])), _humanize_kind(node_prov[oid]["kind"])))
-    labels: list[str] = []
-    for oid in meaningful:
-        lbl = _humanize_kind(node_prov[oid]["kind"])
-        if lbl not in labels:
-            labels.append(lbl)
-    joined = _dedup_tokens("_".join(labels))
-    # ``structural_key`` is a pretty-printed body string; hash it (with the caller's io
-    # ``dtype_sig`` — buffer decls are outside the body, and two kernels identical except an
-    # operand/output dtype must NOT share a name) to a short alphanumeric token (valid in a C
-    # identifier; identical bodies + dtypes → same token).
-    h = hashlib.sha1((loop.body.structural_key(structural=False) + "|" + dtype_sig).encode()).hexdigest()[:6]
-    cov = coverage(node_prov, all_totals)
-    if len(meaningful) == 1 and cov[meaningful[0]][2]:  # single op, fully covered
-        return f"k_{joined}_{h}"
-    return f"k_{joined}_{suffix}_{h}"

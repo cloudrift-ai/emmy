@@ -1,13 +1,13 @@
 r"""Attention coverage over the canonical Fold tree.
 
 The tests cover scalar SDPA, causal and additive masks, GQA, symbolic sequence lengths, split
-reductions, a hand-written FA-2 reference, and TinyLlama attention integration. No
+reductions and TinyLlama attention integration. No
 attention-specific scheduler or emitter is part of the tested contract.
 
 The tensor-core arm is NOT covered here. A twisted carrier reaches no atom tier: the carrier folds
 one bilinear channel beside states that are no product at all, and both tiers fold the stored
-lift — the base contribution — straight into their accumulator. The hand-written FA-2 kernel below
-stays as the spec that arm has to meet; the realization corpus carries the gap as recorded cases.
+lift — the base contribution — straight into their accumulator. The realization corpus carries the gap as
+recorded cases.
 
 ## Measured evidence
 
@@ -103,8 +103,42 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.kernel.ir import (
+    CpAsyncCopy,
+    FragmentApply,
+    FragmentRepack,
+    FragmentRowReduce,
+    MmaSyncPtx,
+    TmaLoad,
+    TreeHalve,
+    WarpShuffle,
+)
+from emmy.compiler.ir.stmt import Accum, StridedLoop
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import direct_classic_leaf, from_pretrained_or_skip, requires_cuda, requires_sm
+from tests.compiler.helpers import (
+    compile_with_kernels,
+    direct_classic_leaf,
+    from_pretrained_or_skip,
+    requires_cuda,
+    requires_sm,
+    statements,
+)
+
+
+def _operations(kernels) -> set[str]:
+    """The elementwise operations the kernels compute: in a value, as a fold's or a fragment statement's operation,
+    or inside a cross-thread combine."""
+    found: set[str] = set()
+    pending = statements(kernels)
+    while pending:
+        stmt = pending.pop()
+        found |= {node.operation.name for e in stmt.expressions() for node in e.subterms() if node.operation}
+        if isinstance(stmt, (Accum, FragmentApply, FragmentRowReduce)):
+            found.add(stmt.op.name)
+        if isinstance(stmt, (WarpShuffle, TreeHalve)):
+            pending.extend(stmt.combine_states)
+    return found
 
 
 class _Sdpa(torch.nn.Module):
@@ -143,22 +177,14 @@ class _Scaled(torch.nn.Module):
 
 
 def _trace(module, args, dynamic_shapes=None, *, direct: bool = False):
-    """Trace + compile ``module``; return ``(backend, compiled, graph, kernel_node_ids)``."""
+    """Trace + compile ``module``; return ``(backend, compiled, graph, its kernels)``, the kernels as the Kernel IR
+    each one's code was generated from, by node id."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
     graph = trace_module(module.cpu(), args, dynamic_shapes=dynamic_shapes)
-    backend = CudaBackend()
-    if direct:
-        from emmy.compiler.context import Context  # noqa: PLC0415
-        from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-        from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
-
-        compiled, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.probe()).resolve(graph, direct_classic_leaf)
-    else:
-        compiled = backend.compile(graph)
-    kernels = [nid for nid in compiled.nodes if getattr(compiled.nodes[nid].op, "kernel_source", None)]
-    return backend, compiled, graph, kernels
+    compiled, kernels = compile_with_kernels(graph, decide=direct_classic_leaf if direct else None)
+    return CudaBackend(), compiled, graph, kernels
 
 
 def _pin_classic(monkeypatch, pins: dict[str, str]) -> None:
@@ -243,8 +269,8 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
         backend, compiled, _graph, kernels = _trace(module, args, direct=variant == "mask")
         assert kernels, f"{variant}{cfg}: no kernels"
         if variant == "plain" and cfg == _FLASH_VARIANTS["plain"][2][0]:
-            srcs = "\n".join(compiled.nodes[k].op.kernel_source for k in kernels)
-            assert "fmaxf" in srcs and "expf" in srcs, "the kernel set should carry the softmax (max + exp)"
+            ops = _operations(kernels)
+            assert "maximum" in ops and ops & {"exp", "exp_fast"}, "the kernel set should carry the softmax (max + exp)"
         md = _max_diff(backend, compiled, feed, ref)
         assert md < 1e-4, f"{variant}{cfg}: sdpa vs torch max_diff={md:.6e}"
 
@@ -265,8 +291,7 @@ def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
             return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"]).cpu().flatten().float().numpy()
 
     backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
-    src = "".join(compiled.nodes[nid].op.kernel_source for nid in kernels)
-    assert "__partial" in src and src.count("__global__") == 2
+    assert len(kernels) == 2 and any(nid.endswith("__partial") for nid in kernels)
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"split-K fused sdpa vs torch max_diff={md:.6e}"
 
@@ -293,7 +318,7 @@ def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
         seed_args = (torch.randn(1, Hq, 16, D), torch.randn(1, Hkv, 16, D), torch.randn(1, Hkv, 16, D))
     backend, compiled, _graph, kernels = _trace(module_cls(), seed_args, dynamic_shapes=ds)
     assert kernels, f"dynamic {variant}: no kernels"
-    assert any("int seq_len" in compiled.nodes[k].op.kernel_source for k in kernels), "a dynamic kernel must carry the runtime seq_len arg"
+    assert any("seq_len" in compiled.nodes[k].op.runtime_args for k in kernels), "a dynamic kernel must carry the runtime seq_len arg"
 
     for s in (8, 16, 37):
         if variant == "mask":
@@ -365,10 +390,6 @@ def test_flash_transposed_output_matches_torch(monkeypatch):
 # what these cold-compile cases pin.
 
 
-def _compile_tc(q, k, v, module=None):
-    return _trace(module if module is not None else _Sdpa(), (q, k, v))
-
-
 #: One row of the CHUNK tier: the carrier's own mma tile beside the score's, the seam's equation
 #: satisfied (the score's key side IS the carrier's chunk, one warp column wide, same register rows).
 _CHUNK_ROW = {
@@ -390,12 +411,15 @@ def _chunk_kernel(module, args, dynamic_shapes=None, stage: str = ""):
     """Compile ``module`` on the pinned chunk row and assert the shape of what came out."""
     with pinned_knobs({**_CHUNK_ROW, "STAGE@map.1/twist": stage}):
         backend, compiled, _graph, kernels = _trace(module, args, dynamic_shapes=dynamic_shapes)
-    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {kernels}"
-    source = compiled.nodes[kernels[0]].op.kernel_source
-    assert source.count("emmy_mma_m16n8k16") >= 2, "both the score and the expectation reach mma.sync"
-    assert "emmy_c_to_a_f16" in source, "the weight reaches the expectation's A operand as a register repack"
-    assert "__shfl_xor_sync" in source, "the chunk's pivot is a per-row fold over the score's fragments"
-    return backend, compiled
+    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {list(kernels)}"
+    # The expectation's products read the weight repacked into their A operand; the score's read loaded operands.
+    repacked = {repack.frag for repack in statements(kernels, FragmentRepack) if repack.role == "a"}
+    products = [mma for mma in statements(kernels, MmaSyncPtx) if tuple(mma.shape) == (16, 8, 16)]
+    expectation = [mma for mma in products if mma.a_frag in repacked]
+    assert expectation and len(expectation) < len(products), "both the score and the expectation reach mma.sync"
+    assert repacked, "the weight reaches the expectation's A operand as a register repack"
+    assert statements(kernels, FragmentRowReduce), "the chunk's pivot is a per-row fold over the score's fragments"
+    return backend, compiled, kernels
 
 
 def _sdpa_ref(cuda: dict):
@@ -420,7 +444,7 @@ def test_chunk_tier_folds_the_carrier_on_tensor_cores(keys):
     k, v = (torch.randn(1, 2, keys, 64, dtype=torch.float16) for _ in range(2))
     feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
     cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-    backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v))
+    backend, compiled, _ = _chunk_kernel(_Sdpa(), (q, k, v))
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
@@ -443,7 +467,7 @@ def test_chunk_tier_reads_a_query_whose_rows_stride_over_every_head():
     k, v = (torch.randn(1, 2, 128, 64, dtype=torch.float16) for _ in range(2))
     feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
     cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-    backend, compiled = _chunk_kernel(_SeqMajorQuery(), (q, k, v))
+    backend, compiled, _ = _chunk_kernel(_SeqMajorQuery(), (q, k, v))
 
     def ref():
         with torch.no_grad():
@@ -462,7 +486,7 @@ def test_chunk_tier_takes_a_symbolic_key_extent():
     kv = torch.export.Dim("kv", min=64, max=512)
     feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
     cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-    backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes={"q": {}, "k": {2: kv}, "v": {2: kv}})
+    backend, compiled, _ = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes={"q": {}, "k": {2: kv}, "v": {2: kv}})
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
@@ -491,10 +515,10 @@ def test_chunk_tier_stages_a_symbolic_key_extent(transport):
     kv = torch.export.Dim("kv", min=64, max=512)
     feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
     cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-    backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes={"q": {}, "k": {2: kv}, "v": {2: kv}}, stage=f"d1/{transport}")
-    source = next(compiled.nodes[n].op.kernel_source for n in compiled.nodes if getattr(compiled.nodes[n].op, "kernel_source", None))
-    issued = "cp.async.bulk.tensor" if transport == "smem-tma" else "cp.async.ca"
-    assert issued in source, f"the streamed value moves through {transport}"
+    dynamic = {"q": {}, "k": {2: kv}, "v": {2: kv}}
+    backend, compiled, kernels = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes=dynamic, stage=f"d1/{transport}")
+    copies = statements(kernels, TmaLoad if transport == "smem-tma" else CpAsyncCopy)
+    assert copies, f"the streamed value moves through {transport}"
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
@@ -515,10 +539,10 @@ def test_chunk_tier_skips_the_chunks_a_causal_band_masks(stage):
     q, k, v = (torch.randn(1, 2, 256, 64, dtype=torch.float16) for _ in range(3))
     with pinned_knobs({**_CHUNK_ROW, "STAGE@map.1/twist": stage}):
         backend, compiled, graph, kernels = _stamp_window(_Sdpa(), (q, k, v), window=64)
-    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {kernels}"
-    source = compiled.nodes[kernels[0]].op.kernel_source
-    loop = next(line.strip() for line in source.splitlines() if "for (int " in line and "__ck" in line)
-    assert "__ck_end" in loop and "__ck = 0" not in loop, loop
+    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {list(kernels)}"
+    # The chunk loop is bounded at both ends: it starts past zero and stops at a bound of its own.
+    loop = next(loop for loop in statements(kernels, StridedLoop) if "__ck" in loop.axis.name)
+    assert loop.end is not None and loop.start != Literal(0, "int"), loop
     out = _run_flash(backend, compiled, graph, (q, k, v))
     assert np.abs(out.astype(np.float32) - _banded_ref(q, k, v, 64)()).max() < 1e-2
 
@@ -549,10 +573,8 @@ def _stamp_window(module, args, window, dynamic_shapes=None):
     for n in graph.nodes.values():
         if isinstance(n.op, SdpaOp):
             n.op = replace(n.op, sliding_window=window, is_causal=True)
-    backend = CudaBackend()
-    compiled = backend.compile(graph)
-    kernels = [nid for nid in compiled.nodes if getattr(compiled.nodes[nid].op, "kernel_source", None)]
-    return backend, compiled, graph, kernels
+    compiled, kernels = compile_with_kernels(graph)
+    return CudaBackend(), compiled, graph, kernels
 
 
 def _banded_ref(q, k, v, window, extra_bias=None):
@@ -574,142 +596,6 @@ def _banded_ref(q, k, v, window, extra_bias=None):
 # =========================================================================== #
 # Cooperative-KV flash (BR) — the KV axis split across threads, monoid combine.
 # =========================================================================== #
-
-
-# =========================================================================== #
-# Validated FA-2 reference kernel — the executable spec the warp-chain must reproduce.
-# =========================================================================== #
-# A hand-written FA-2 kernel (NOT compiler output) proving the design works end-to-end on real
-# hardware and pinning the lane-layout contracts the warp-chain codegen relies on: the Q ldmatrix.x4
-# A fragment, the transposed-B native K pack, the fragment online-softmax (rowmax/rowsum + the
-# 4-lane butterfly), the C→A smem handoff, the canonical-B V load. One warp / 16 query rows, D=16.
-
-_KERNEL = r"""
-#include <cuda_fp16.h>
-__device__ __forceinline__ void mma_m16n8k16(float* d, const unsigned* a, const unsigned* b, const float* c){
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-    : "=f"(d[0]),"=f"(d[1]),"=f"(d[2]),"=f"(d[3])
-    : "r"(a[0]),"r"(a[1]),"r"(a[2]),"r"(a[3]), "r"(b[0]),"r"(b[1]),
-      "f"(c[0]),"f"(c[1]),"f"(c[2]),"f"(c[3]));
-}
-// A (m16k16): ldmatrix.x4 — row=lane%16, k-block=(lane/16)*8.
-__device__ __forceinline__ void ldm_a(unsigned* r, const __half* sm, int ldm){
-  int lane=threadIdx.x&31; unsigned addr=__cvta_generic_to_shared(sm + (lane%16)*ldm + (lane/16)*8);
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-    :"=r"(r[0]),"=r"(r[1]),"=r"(r[2]),"=r"(r[3]):"r"(addr));
-}
-// canonical B[k,n] k-major: ldmatrix.x2.trans -> col-major; row=lane%16.
-__device__ __forceinline__ void ldm_b_trans(unsigned* r, const __half* sm, int ldm){
-  int lane=threadIdx.x&31; unsigned addr=__cvta_generic_to_shared(sm + (lane%16)*ldm);
-  asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
-    :"=r"(r[0]),"=r"(r[1]):"r"(addr));
-}
-// transposed-B (Q@K^T) native col-major: manual pack. n=lane/4, k=(lane%4)*2{+8}.
-__device__ __forceinline__ void load_b_native(unsigned* r, const __half* sm, int ldm){
-  int lane=threadIdx.x&31; int n=lane/4; int kb=(lane%4)*2;
-  __half2 h0=__halves2half2(sm[n*ldm+kb+0], sm[n*ldm+kb+1]);
-  __half2 h1=__halves2half2(sm[n*ldm+kb+8+0], sm[n*ldm+kb+8+1]);
-  r[0]=*reinterpret_cast<unsigned*>(&h0); r[1]=*reinterpret_cast<unsigned*>(&h1);
-}
-
-extern "C" __global__ void fa2(const __half* Q,const __half* K,const __half* V,float* O,const float* scale_p,int S){
-  float scale = *scale_p;
-  int qb = blockIdx.x; int lane=threadIdx.x&31; const int D=16;
-  __shared__ __half qs[16*16], ks[16*16], vs[16*16], ps[16*16];
-  for(int i=lane;i<16*D;i+=32){ qs[i]=Q[(qb*16)*D + i]; }
-  __syncwarp();
-  unsigned qa[4]; ldm_a(qa, qs, D);                 // Q -> A fragment, once per query tile
-  float m0=-1e30f,m1=-1e30f,l0=0,l1=0;              // online stats, rows g / g+8 per lane
-  float Of[2][4]={{0,0,0,0},{0,0,0,0}};             // O[16,D] accumulator (2 N-tiles of d)
-  int g = lane/4;
-  for(int kv0=0; kv0<S; kv0+=16){                   // KV stream
-    for(int i=lane;i<16*D;i+=32){ ks[i]=K[(kv0)*D+i]; vs[i]=V[(kv0)*D+i]; }
-    __syncwarp();
-    float Sf[2][4];                                 // QK^T mma -> score C-fragments
-    for(int nt=0;nt<2;nt++){
-      unsigned kb[2]; load_b_native(kb, ks + nt*8*D, D);
-      float z[4]={0,0,0,0}; mma_m16n8k16(Sf[nt], qa, kb, z);
-      for(int e=0;e<4;e++) Sf[nt][e]*=scale;
-    }
-    float r0=fmaxf(fmaxf(Sf[0][0],Sf[0][1]),fmaxf(Sf[1][0],Sf[1][1]));   // fragment rowmax
-    float r1=fmaxf(fmaxf(Sf[0][2],Sf[0][3]),fmaxf(Sf[1][2],Sf[1][3]));
-    r0=fmaxf(r0,__shfl_xor_sync(-1,r0,2)); r0=fmaxf(r0,__shfl_xor_sync(-1,r0,1));
-    r1=fmaxf(r1,__shfl_xor_sync(-1,r1,2)); r1=fmaxf(r1,__shfl_xor_sync(-1,r1,1));
-    float mn0=fmaxf(m0,r0), mn1=fmaxf(m1,r1);
-    float a0=__expf(m0-mn0), a1=__expf(m1-mn1);      // α rescale (combine_states)
-    float Pf[2][4]; float s0=0,s1=0;
-    for(int nt=0;nt<2;nt++){
-      Pf[nt][0]=__expf(Sf[nt][0]-mn0); Pf[nt][1]=__expf(Sf[nt][1]-mn0);
-      Pf[nt][2]=__expf(Sf[nt][2]-mn1); Pf[nt][3]=__expf(Sf[nt][3]-mn1);
-      s0+=Pf[nt][0]+Pf[nt][1]; s1+=Pf[nt][2]+Pf[nt][3];
-    }
-    s0+=__shfl_xor_sync(-1,s0,2); s0+=__shfl_xor_sync(-1,s0,1);   // fragment rowsum
-    s1+=__shfl_xor_sync(-1,s1,2); s1+=__shfl_xor_sync(-1,s1,1);
-    l0=l0*a0+s0; l1=l1*a1+s1;
-    for(int nt=0;nt<2;nt++){ Of[nt][0]*=a0;Of[nt][1]*=a0;Of[nt][2]*=a1;Of[nt][3]*=a1; }
-    int c0=(lane%4)*2;                               // C->A handoff: P C-frag -> smem row-major
-    for(int nt=0;nt<2;nt++){
-      ps[g*16 + nt*8 + c0+0]=__float2half(Pf[nt][0]);  ps[g*16 + nt*8 + c0+1]=__float2half(Pf[nt][1]);
-      ps[(g+8)*16 + nt*8 + c0+0]=__float2half(Pf[nt][2]); ps[(g+8)*16 + nt*8 + c0+1]=__float2half(Pf[nt][3]);
-    }
-    __syncwarp();
-    unsigned pa[4]; ldm_a(pa, ps, 16);               // P@V mma: A=P (ldmatrix), B=V canonical
-    for(int nt=0;nt<2;nt++){
-      unsigned vb[2]; ldm_b_trans(vb, vs + nt*8, D);
-      mma_m16n8k16(Of[nt], pa, vb, Of[nt]);
-    }
-    m0=mn0; m1=mn1;
-  }
-  int c0=(lane%4)*2;                                 // epilogue O/l + store (C-frag layout)
-  for(int nt=0;nt<2;nt++){
-    O[((qb*16)+g)*D + nt*8 + c0+0]=Of[nt][0]/l0;   O[((qb*16)+g)*D + nt*8 + c0+1]=Of[nt][1]/l0;
-    O[((qb*16)+g+8)*D + nt*8 + c0+0]=Of[nt][2]/l1; O[((qb*16)+g+8)*D + nt*8 + c0+1]=Of[nt][3]/l1;
-  }
-}
-"""
-
-
-@requires_cuda
-@pytest.mark.parametrize("S", [16, 32, 64, 128])
-@requires_sm(8)
-def test_fused_tensorcore_flash_reference_matches_torch(S):
-    """The hand-written fused tensor-core flash matches torch SDPA across the KV stream (1–8 tiles).
-    The validated spec for the warp-chain codegen — every lane layout (A/B fragments, the
-    C-fragment row reduction, the C→A handoff) is exercised here."""
-    from emmy.compiler.backend.cuda.program import CompiledProgram  # noqa: PLC0415
-    from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
-    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec  # noqa: PLC0415
-    from emmy.compiler.dim import Dim  # noqa: PLC0415
-    from emmy.compiler.dtype import F16, F32  # noqa: PLC0415
-
-    torch.manual_seed(S)
-    D = 16
-    q, k, v = (torch.randn(S, D, dtype=torch.float16) for _ in range(3))
-    # The reference kernel takes its sequence length by value: a runtime argument bound from
-    # the plan's symbol hints.
-    plan = ExecutionPlan(
-        "cuda",
-        ["Q", "K", "V"],
-        ["O"],
-        [
-            *(BufferSpec(name, (Dim(S), Dim(D)), F16, "input") for name in ("Q", "K", "V")),
-            BufferSpec("scale", (Dim(1),), F32, "constant"),
-            BufferSpec("O", (Dim(S), Dim(D)), F32, "output"),
-        ],
-        {"scale": float(1.0 / np.sqrt(D))},
-        {},
-        [LaunchSpec("O", "fa2", ("Q", "K", "V", "O", "scale"), ((S // 16,), (1,), (1,)), ((32,), (1,), (1,)), 0, (), runtime_args=("S",))],
-        {"fa2": KernelSpec(source=_KERNEL)},
-        symbolic_hints={"S": S},
-    )
-    with gpu_lock():
-        prog = CompiledProgram.build_from_plan(plan, {name: t.numpy() for name, t in zip("QKV", (q, k, v), strict=True)})
-        prog.run_once()
-        got = torch.from_numpy(prog.outputs()["O"])
-    ref = torch.nn.functional.scaled_dot_product_attention(q.cuda().float(), k.cuda().float(), v.cuda().float()).cpu()
-    max_diff = float((got - ref).abs().max())
-    assert max_diff < 2e-3, f"fused TC flash S={S} max_diff={max_diff:.2e}"
 
 
 # =========================================================================== #
@@ -840,34 +726,6 @@ def test_two_linears_tinyllama_shape(_chain_tile_pins):
     x = torch.randn(1, 32, 2048)
     dpd, eager = _run_module_with_eager(m, (x,), {"x": x.numpy()})
     _assert_close(dpd, eager)
-
-
-class _QKVAttnNoRope(torch.nn.Module):
-    def __init__(self, hidden: int = 2048, n_heads: int = 32, head_dim: int = 64):
-        super().__init__()
-        self.h, self.d = n_heads, head_dim
-        self.q = torch.nn.Linear(hidden, hidden, bias=False)
-        self.k = torch.nn.Linear(hidden, hidden, bias=False)
-        self.v = torch.nn.Linear(hidden, hidden, bias=False)
-        self.o = torch.nn.Linear(hidden, hidden, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, S, _ = x.shape
-        q = self.q(x).view(B, S, self.h, self.d).transpose(1, 2)
-        k = self.k(x).view(B, S, self.h, self.d).transpose(1, 2)
-        v = self.v(x).view(B, S, self.h, self.d).transpose(1, 2)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        out = out.transpose(1, 2).contiguous().view(B, S, -1)
-        return self.o(out)
-
-
-def _band_mask(seq: int, window: int) -> torch.Tensor:
-    """A sliding-window additive float mask — causal AND within ``window`` keys of the query (the
-    HF gemma sliding-attention band): 0 where ``m - window < kv <= m``, ``-inf`` elsewhere."""
-    kv = torch.arange(seq)[None, :]
-    m = torch.arange(seq)[:, None]
-    keep = (kv <= m) & (kv > m - window)
-    return torch.where(keep, 0.0, float("-inf"))[None, None].half()
 
 
 def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4, *, direct: bool = False) -> None:

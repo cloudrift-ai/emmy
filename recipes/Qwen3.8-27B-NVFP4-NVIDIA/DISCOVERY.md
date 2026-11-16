@@ -1,5 +1,318 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## The FP8 layers as W8A8, measured root by root (2026-11-15)
+
+The checkpoint declares its FP8 leaves' activations static: a modelopt `config_groups` entry with 8-bit float
+weights and inputs that are not dynamic, and an `input_scale` beside each linear. The loader read static FP8 only
+from `quant_method: fp8`, so these linears ran as W8A16. It now reads the group too, and every attention q/k/v/o and
+every Gated DeltaNet in_proj_qkv, in_proj_z and out_proj is a W8A8 product on the e4m3 tensor-core instruction, the
+checkpoint's own arithmetic and stock vLLM's. The MLPs and the head stay NVFP4. Measured on a rented RTX 5090
+(CUDA 13.3, 14 vCPUs), each root recorded under strict evidence, before main's block-scaled FP8 instruction (#1418).
+
+- **The product.** The 256-row in-projection qkv (256 x 5,120 x 10,240) takes 81 us as W8A8 untuned against 175 us
+  as W8A16 (131 tuned); at 512 rows 148.5 against 323.
+- **Attention halves, a layer, warm:** `pre` 41.7 / 75.2 / 162.4 / 252 us at 16 / 64 / 256 / 512 rows (W8A16
+  `pre256` about 255), `post` 26.2 / 40.0 / 72.5 / 117.4.
+- **Gated DeltaNet roots, a layer**, against the cheapest W8A16 route the golden held (warm):
+
+  | root | W8A16 warm | W8A8 warm | W8A8 cold |
+  |---|---|---|---|
+  | 1 row | 82.3 us | 75.1 | 143.3 |
+  | 2 rows, `pre` / `post` | 105.4 / 183.9 | 32.8 / 45.7 | 64.6 / 96.0 |
+  | 3 rows, `pre` / `post` | 49.7 / 119.2 | 28.4 / 53.7 | 62.2 / 97.6 |
+  | 16 rows, `pre` / `post` | 369.0 / 488.4 | 29.3 / 100.2 | 64.3 / 153.1 |
+  | 64 rows, `pre` / `post` | 200.8 / 166.2 | 48.9 / 145.7 | 72.6 / 202.3 |
+  | 256 rows, `pre` / `post` | 219.6 / 296.8 | 108.8 / 234.2 | 131.0 / 289.6 |
+
+  The large drops at 2 to 16 rows are partly schedules the old routes never tried, not only the FP8 operand.
+- **The route that works.** Cut the contraction seams first, so one piece holds every projection, then the FP8
+  seams inside it: one kernel writes the codes, one piece is pure e4m3 products. Cutting the FP8 seams first
+  recomputes the projections (480 us for `pre256` against the W8A16 route's 255). K chunks of 2 win at 256 rows and
+  up (the `pre256` q product 229 -> 111 us; the prior picks 8). The chunk-output contractions want `t16x8` or
+  `t16x16` tiles (3 to 28 us) where the prior picks a cooperative reduce (0.1 to 3.5 ms).
+- **in_proj_z.** It shares in_proj_qkv's calibrated scale. One shared decoded value crossed the recurrence's kernel
+  boundary as a 16-bit buffer, so z ran on the bf16 instruction. Each linear now decodes the shared codes itself:
+  the 256-row z product 102.1 -> 57.3 us cold, the `post` root 290.1 -> 248.6.
+- **The triangular inverse.** At 256 rows it is a 61-step rolled scan that stored every step's 64 x 64 matrices
+  (192 MB a layer) while only the last was read. It now stores the last alone: 129 -> 39 us cold.
+- **Not measured end to end.** The golden here still holds the W8A16 programs. A fresh trace now gives the W8A8 ones,
+  so the next strict export of this recipe needs those roots recorded first. Summed from the rows, a 256-row chunk
+  would drop from 67 ms to about 51 ms, about 1.5 s to the first token at 7,680 tokens (2.0 s measured with
+  W8A16 on this card, the bar 1.51 s); an estimate from isolated rows, not a measurement.
+- **Left open.** One FP8 activation is offered as one seam per reader, and those seams do not group, so the kernel
+  that writes the codes writes two identical copies. Every `post` bench warns that its wrong-answer reference is
+  unusable. A verify step's state copy into the program's output costs about 8 us a layer (0.38 ms a step); removing
+  it re-forms the scan's routes in three goldens and is left for its own change.
+
+## A 256-row prefill chunk, recorded and timed (2026-11-15)
+
+Native generation can run a prompt in 256-row chunks (`--prefill-size 256`, `SERVE_NATIVE_PREFILL=256`), keeping the
+64-row chunk and the decode width for a prompt's tail. This recipe still serves 64-row chunks; the golden now holds
+every program of the wider chunk. Measured on one rented RTX 5090 (48 vCPUs, 108 GiB of RAM, PCIe Gen4 x16, driver
+610.57, CUDA 13.3), one session, both packs exported from this golden alone under strict evidence and served by the
+same build. The client and settings are the 2026-10-25 section's; the prompts are cut again from this tree's Markdown.
+Stock vLLM was not measured in this session, so the bar below is the 2026-11-12 one.
+
+| | 64-row chunks | 256-row chunks | bar |
+|---|---|---|---|
+| first token, 256-token prompt | 0.147 s | 0.068 s | 0.32 s |
+| first token, 7,680-token prompt | 4.46 s | 2.44 s | 1.51 s |
+| first token, 197,632-token prompt | 172 s | 113 s | 136 s |
+| TPOT at 256 / 7,680 / 197,632 | 8.84 / 8.78 / 11.9 ms | 8.60 / 8.67 / 11.5 ms | 9.44 / 9.28 / 14.3 ms |
+| device memory at rest | 28.6 GiB | 28.9 GiB | |
+| GSM8K strict / flexible match | 0.690 / 0.735 | 0.675 / 0.695 | |
+| twins that deploy from the golden alone | 67 of 67 | 80 of 80 | |
+
+- **Width halves the first token and does not reach the 7,680-token bar.** A 256-row chunk takes about 81 ms where
+  four 64-row chunks take about 149 ms. From the golden's rows, the 48 Gated DeltaNet layers are about 51 ms of it
+  (1.06 ms each) and the 64 MLPs about 25 ms; the bar needs about 45 ms a chunk.
+- **The 197,632-token first token is inside the bar.** Long-window attention at 256 rows takes 4.96 ms a layer at
+  131,072 positions, 3.1x the 64-row fold for four times the rows.
+- **GSM8K.** The two packs differ by 0.015 strict and 0.040 flexible, with a standard error of 0.033 on each score:
+  inside one standard error on strict, 1.2 on flexible. The same prompts continue differently after 0 to 110
+  characters on the two packs, and both continuations read well; the kernels differ at every width, so their
+  rounding does.
+- **What was recorded.** The last three 256-row targets: the MLP's gate and up projection kernel (184 us) and the
+  attention fold at both window ranges (207 us at 4,096, a 2-way key split; 4.96 ms at 131,072, a 16-way one). As
+  the priors pick it, that fold takes 3.8 ms and 117 ms. The drafter's two 256-row programs are recorded again with
+  the weight layouts its narrower programs settle (0.36 and 0.97 ms, as before); recorded alone they were kernels an
+  export never builds. The plugin's any-width `pre` program, the one twin the strict audit failed on, is recorded.
+- **No native pack exported on main before this session's fixes.** Token selection carries the picked index, a
+  64-bit integer, through a warp shuffle and through a 32-bit float slab, and the PTX compiler that replaced nvcc had
+  a rule for neither.
+
+## One cache read per verify step, and the golden measured again (2026-11-12)
+
+A verify step's attention now folds its three rows beside the query group, so every row shares one read of the
+key-value cache; before, each row read every slice. Measured on one rented RTX 5090 (CloudRift; 14 vCPUs of a Ryzen 7
+7800X3D, 21.5 GiB of RAM with swap on, PCIe Gen5 x16, driver 580.159, CUDA 13.3), one session, native and stock
+vLLM 0.32.0 both. The client and settings are the 2026-10-25 section's; the prompts are cut again from this tree's
+Markdown, so acceptance differs from the earlier sessions'. The pack exports under strict evidence from the golden
+alone.
+
+**The golden first.** On main the file held 225 measured rows of 415: #1365's normal form re-keyed the rest, and a
+strict export stopped at its first fork. This session measured the demoted schedules again on the card (the file now
+holds 375 measured rows of 412) and recorded the new verify programs. Three things needed more than a re-measure:
+
+- **A split attention's combine kernel is priced at its window.** An export prices each range of windows at its own
+  window, and a record stores the combine kernel's row at the stored program's hint. With that row at another size the
+  split's arm has no price, the unsplit kernel's row wins, and nothing fails: a pack exported that way ran its decode
+  attention unsplit (389 µs a layer against 11) and gave 10.6 ms a token at 256 tokens and 6.1 s to the first token
+  at 7,680. Every attention twin's split is recorded again at its window, and each combine row is stored under the
+  window it was measured at.
+- **One Gated DeltaNet piece of the 64-row program had no row.** The compile's own pick for it takes 336 µs a layer;
+  the schedule its sibling pieces carry takes 7.7 µs and is the row recorded.
+- **Two schedules no longer realize** (a 64-row Gated DeltaNet projection piece and one alternative of the three-row
+  program). The first is recorded at the schedule the compiler realizes in its place, 49.5 µs; the second is left a
+  proposal, beside the plugin's any-width `pre` piece, which native does not run.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 10.7 µs (11.1) | g64k, 183 µs (205) |
+| `attend3` (verify), rows folded | g32k, 12.5 µs (22.5) | g32k, 183 µs (487) |
+| `attend16` | g16k, 39.1 µs (41.7) | g32k, 852 µs (974) |
+| `attend64` (chunk) | g8k, 78.6 µs (73.0) | g32k, 1,601 µs (1,590) |
+
+The 2026-11-07 times, on another card, are in brackets. The verify step's other new programs take 2.3 µs (the rotary
+store, which now hands the query out per key-value head) and 0.7 µs (the unfold that puts the rows back in order).
+
+| | native, this branch | stock vLLM 0.32.0 | native on 2026-11-07, another card |
+|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 9.84 ms / 0.143 s | 7.87 ms / 0.159 s | 8.68 ms / 0.151 s |
+| first token, 257-token prompt | 0.165 s | 0.127 s | 0.172 s |
+| TPOT / TTFT, 7,680-token prompt | 8.72 ms / 4.37 s | 7.73 ms / 0.753 s | 8.55 ms / 4.62 s |
+| TPOT / TTFT, 197,632-token prompt | 11.4 ms / 172 s | 9.54 ms / 67.9 s | 14.7 ms / 188 s |
+| TPOT / TTFT, 261,632-token prompt | 11.4 ms / 251 s | does not fit | 17.7 ms / 277 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 63 / 77 / 68 / 75% | not read: its stream spaces every token | 75 / 79 / 71 / 64% |
+| device memory at rest | 27.9 GiB | 30.4 GiB | 27.9 GiB |
+| GSM8K strict / flexible match | 0.725 / 0.755 | | 0.715 / 0.765 |
+
+- **Against this session's stock column.** TPOT is inside the bar at 7,680 tokens (1.13x stock, the bar 1.2x) and
+  at 197,632 (1.20x, the bar 1.5x) and outside it at 256 (1.25x). The first token is ahead of stock at 256 tokens and
+  behind at 7,680 (5.8x, the bar 2x) and at 197,632 (2.5x). Native holds 2.5 GiB less of the device and serves the
+  whole window, which stock does not fit.
+- **The long-window decode gate, met.** The captured verify step takes 26.4 ms at 197,632 positions (the target's
+  attention 4.5 ms, the drafter's 0.5) against 21.6 ms at a window of up to 8,192 (attention 0.35 ms): +4.8 ms, where
+  the bound is 8 ms and the 2026-11-07 step was +14.4.
+- **The short cells.** The step is 21.6 ms where 2026-11-07 captured 21.1; TPOT at 256 tokens reads higher here
+  because these prompts accept fewer drafts (2.26 tokens a step).
+- **GSM8K holds:** 0.725 strict and 0.755 flexible match on native (standard error 0.032), against 0.715 / 0.765 on
+  2026-11-07. Stock was not scored in this session, and the probe tokens were not compared.
+
+Where the time goes, from `nsys --cuda-graph-trace=node` (one request at 7,680 tokens and one at 197,632), each
+launch priced at its kernel's median:
+
+| launches | 64-row chunk | verify step, up to 8,192 | verify step, 197,632 |
+|---|---|---|---|
+| Gated DeltaNet layers (48) | 27.7 ms | 14.3 ms | 14.4 ms |
+| attention layers: `post` (16) | 3.0 ms | 2.2 ms | 2.3 ms |
+| attention layers: `pre` (16) | 2.8 ms | 1.7 ms | 1.7 ms |
+| attention | 1.2 ms | 0.35 ms | 4.5 ms |
+| output head (one row; a verify step runs it three times) | 0.45 ms | 1.3 ms | 1.3 ms |
+| the drafter's layer and prologue | 0.44 ms | 1.4 ms | 1.9 ms |
+| state carry, rotary store, unfold, the rest | 0.3 ms | 0.3 ms | 0.3 ms |
+| sum | 35.9 ms | 21.6 ms | 26.4 ms |
+
+The 197,632-token first token is 171 s of kernels: 86 s in the Gated DeltaNet layers, 62 s in attention (69.9 s on
+2026-11-07), 18 s in the attention layers' halves. A 64-row chunk's Gated DeltaNet layers take 577 µs each; the largest
+launches are the MLP gate and up (74 µs), the convolution piece (71 µs), `k_slice_unsqueeze_reduce` (59 µs) and the
+MLP down (54 µs).
+
+**A 256-row chunk does not load yet.** Traced at 256 rows the Gated DeltaNet layer has twelve root kernels where the
+64-row one has four: the recurrence across its four 64-token chunks adds eight. No golden row covers them, and the
+compile's own cuts leave four workspaces of `[4, 64, 64, 48, 48, 128]` FP32 a layer, 18 GiB each, so the pack runs out
+of device memory at load. Under the 64-row kernel's recorded route one piece of the 256-row kernel does not finish in
+80 s. A wide chunk therefore needs its own recorded route before it can be timed, and no time for one is in this
+section.
+
+## The FP8 cache staged into shared memory: milestone 5 met, 6 still missed (2026-11-07)
+
+Native attention's FP8 key-value cache now copies into shared memory, 16 bytes per copy, before the tensor-core fold
+reads it; it was read one byte per load, which kept every fold at 255 registers with spills (#1366, on #1352). Recorded
+and gated on the card and host of the section below (vast.ai, x16 RTX 5090, EPYC 9655, a 46-CPU quota, driver
+610.57). Every attention twin was swept over its neighbouring key splits and four tiles with the cache staged, and the
+compile's pick recorded. The client, prompts and settings are the section below's. The pack exports under strict
+evidence, every twin compiles strictly from the golden, and `emmy eval golden --serving-config` deploys every twin from
+the golden rows alone.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 11.1 µs (27.7) | g64k, 205 µs (581) |
+| `attend3` (verify) | g32k, 22.5 µs (54.9) | g64k, 487 µs (1,413) |
+| `attend16` | g16k, 41.7 µs (141) | g32k, 974 µs (6,516) |
+| `attend64` (chunk) | g8k, 73.0 µs (195) | g32k, 1,590 µs (5,126) |
+
+The section below's times are in brackets. The one-row decode's split piece reads its 268 MB cache in 189 µs, about
+1.4 TB/s; at one warp per CTA it took 170 µs staged against 502 µs read directly. g128k, which the compiler does not
+offer, measured 2% faster than g64k at one row and 7% at three.
+
+| | this branch | the section below |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 8.68 ms / 0.151 s | 9.44 ms / 0.154 s |
+| first token, 257-token prompt | 0.172 s | 0.177 s |
+| TPOT / TTFT, 7,680-token prompt | 8.55 ms / 4.62 s | 9.72 ms / 4.88 s |
+| TPOT / TTFT, 197,632-token prompt | 14.7 ms / 188 s | 23.7 ms / 318 s |
+| TPOT / TTFT, 261,632-token prompt | 17.7 ms / 277 s | 32.7 ms / 505 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 75 / 79 / 71 / 64% | 70 / 71 / 79 / 62% |
+| device memory at rest | 27.9 GiB | 27.9 GiB |
+| GSM8K strict / flexible match | 0.715 / 0.765 | |
+
+- **Milestone 5, met.** The attention term of the 197,632-token first token is 69.9 s of GPU time (`nsys
+  --cuda-graph-trace=node`, 3,092 chunks), against at most 117 s (200 s in the section below). The full window's first
+  token is 277 s, against at most 450 s.
+- **Milestone 6, missed.** The captured verify step takes 35.5 ms at 197,632 positions (attention 14.3 ms) against
+  21.1 ms at the 4,096 window (attention 0.41 ms): +14.4 ms, where the bound is about 8 ms (+38.9 in the section
+  below). The three-row verify reads the cache once per row, three reads where one would do: its twin at 131,072 takes
+  487 µs against the one-row decode's 205.
+- **The short cells did not get slower.** The 256- and 7,680-token cells are faster on both TPOT and first token.
+- **GSM8K holds,** inside one standard error (0.032) of main's 0.730 / 0.750 on 2026-11-06; the section below did not
+  run it.
+- Drafts accepted is the share of drafted tokens a step kept, read off the gaps between streamed tokens.
+
+## Attention priced per range of windows: milestones 5 and 6 again (2026-11-07)
+
+Native attention now compiles once per range of windows, priced at 4,096 and at 131,072 cached tokens, and a step runs
+its window's range's program; the long range starts at 16,384 (#1352, stacked on #1329's grouped decode attention).
+Recorded and gated on one rented x16 RTX 5090 (vast.ai; Gen5 x16; a 46-CPU quota on a 96-core EPYC 9655 host, driver
+610.57, CUDA 13.1). The client, prompts and settings are the 2026-11-06 section's, the prompts cut from that section's
+tree. The pack exports under strict evidence.
+
+Every attention twin was swept whole and under key splits g2k to g128k, the FP8 cache unstaged, no TMA, fast math on,
+and the compile's pick recorded. The compiler offers splits up to g64k; g128k measured faster on the decode twins at
+131,072 (one row 475 against 581 µs, three rows 1,296 against 1,413 µs), and no compile can deploy it.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 27.7 µs | g64k, 581 µs |
+| `attend3` (verify) | g16k, 54.9 µs | g64k, 1,413 µs |
+| `attend16` | g8k, 141 µs | g8k, 6,516 µs |
+| `attend64` (chunk) | g16k, 195 µs | g32k, 5,126 µs |
+
+| | this branch | 2026-11-06 (main) |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 9.44 ms / 0.154 s | 8.70 ms / 0.15 s |
+| first token, 257-token prompt | 0.177 s | 0.17 s |
+| TPOT / TTFT, 7,680-token prompt | 9.72 ms / 4.88 s | 9.76 ms / 4.81 s |
+| TPOT / TTFT, 197,632-token prompt | 23.7 ms / 318 s | 42.9 ms / 429 s |
+| TPOT / TTFT, 261,632-token prompt | 32.7 ms / 505 s | 50.6 ms / 687 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 70 / 71 / 79 / 62% | 76 / 75 / 61 / 67% |
+| device memory at rest | 27.9 GiB | 27.9 GiB |
+
+- **Milestone 5, missed.** The attention term of the 197,632-token first token is 200 s of GPU time (`nsys
+  --cuda-graph-trace=node`, 3,088 chunks), against at most 117 s (300 s on 2026-11-06). The full window's first token is
+  505 s, against at most 450 s (687 s).
+- **Milestone 6, missed.** The captured verify step takes 60.7 ms at 197,632 positions (attention 39.6 ms) against
+  21.9 ms at the 4,096 window (attention 1.1 ms): +38.9 ms, where the bound is about 8 ms (+73.7 on 2026-11-06).
+- **The short cells did not move.** The drafted step at 256 tokens takes 21.9 ms on both trees; TPOT reads higher here
+  because fewer drafts were accepted on these prompts, which the attention's changed numerics move.
+- **What is left is the kernels, not the pricing.** Every attention fold here runs at 255 registers with local memory
+  spills and 17% occupancy. The one-row decode at 131,072 reads 268 MB of cache in 581 µs, about 0.46 TB/s; the 64-row
+  chunk takes 5.1 ms there, where reading the cache once per query head at the card's bandwidth takes under 1 ms.
+
+## The gates of milestones 3, 4 and 5 (2026-11-06)
+
+The gates of the parity plan's milestones 3 (the rotary store's grid), 4 (prefill ends at the prompt's last token) and 5
+(the folded prefill attention), native only, on one rented x16 RTX 5090 (vast.ai; Gen5 x16; a container with a 46-CPU
+quota on a 384-CPU EPYC 9B14 host, driver 615.71, CUDA 13.1). Main is at `f33a86522`, after #1324 recorded the rope,
+row-pick, drafter-token and attention twins. The client, prompts and settings are the 2026-11-01 section's. Two
+reference packs ran on the same card, from the tree before 4 (#1311, `504165b13`) and the tree before 5 (#1318,
+`57fabd6e2`); neither is strict, since rows later PRs recorded are missing from their goldens. Main's column is a
+second pass on an idle host. The first pass, while pack exports compiled on the host, gave the same numbers within 4%
+(413 and 684 s at the two long prompts).
+
+On the card, `emmy eval golden --serving-config` deploys all 62 twins from the golden rows alone, the pack exports
+under strict evidence, and `emmy golden check` says current, 517 kernels.
+
+| | #1311 tree | #1318 tree | main | 2026-11-01 |
+|---|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 9.65 ms / 0.70 s | 9.31 ms / 0.17 s | 8.70 ms / 0.15 s | 9.8 ms / 0.71 s |
+| first token, 257-token prompt | 0.24 s | 0.19 s | 0.17 s | 0.24 s |
+| TPOT / TTFT, 7,680-token prompt | | | 9.76 ms / 4.81 s | 10.5 ms / 7.39 s |
+| TPOT / TTFT, 197,632-token prompt | | | 42.9 ms / 429 s | 26.5 ms / 698 s |
+| TPOT / TTFT, 261,632-token prompt | | | 50.6 ms / 687 s | 41.9 ms / 1,154 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 71% at 256 | 73% at 256 | 76 / 75 / 61 / 67% | 70 / 66 / 88 / 57% |
+| device memory at rest | 30.7 GiB | 30.7 GiB | 27.9 GiB | 30.7 GiB |
+| GSM8K strict / flexible match | | | 0.730 / 0.750 | 0.720 / 0.755 |
+
+The gates:
+
+- **Milestone 4, met.** At 256 tokens, four 64-row chunks, the first token comes in 0.15 s against the 257-token
+  control's 0.17 s; the tree before it took 0.70 s, its control 0.24 s. The trees before and after #1313 give the same
+  64 greedy tokens on all four probes (`scripts/validate_serve.py`'s), on both models.
+- **Milestone 3, met.** In the captured step the rotary store takes 0.09 ms of a 64-row chunk, against 11.9 ms on
+  2026-11-01, and the chunk takes 38.6 ms at up to 4,096 positions, against 54.1 ms. The verify step's three-row store
+  takes 0.08 ms of the step, against about 0.6 ms.
+- **Milestone 5, missed.** The attention term of the 197,632-token first token is 300 s of GPU time, against at most
+  117 s (544 s on 2026-11-01), and the full window's first token is 687 s, against at most 450 s. A layer at 65,536
+  positions takes 3.66 ms against 6.7 ms: 1.8x, where the budget needs 4.6x. The cells within 4,096 positions did not
+  get slower. GSM8K holds, inside one standard error of the plugin lane's 0.720 / 0.770 on 2026-11-01.
+
+Where the time goes, from `nsys --cuda-graph-trace=node` on main (7,680 and 197,632 tokens; first token within 7% of
+the unprofiled runs), the median launch in milliseconds:
+
+| | 64-row chunk, up to 4,096 | 64-row chunk, 4,096 to 7,680 | 64-row chunk, all of 197,632 (mean) | verify step, 7,680 | verify step, 197,632 |
+|---|---|---|---|---|---|
+| rotary store | 0.09 | 0.09 | 0.09 | 0.08 | 0.08 |
+| attention | 3.07 | 5.98 | 97.2 | 2.90 | 75.1 |
+| the rest | 35.9 | 35.9 | 36.0 | 20.8 | 20.8 |
+| the launch, start to end | 38.6 | 41.5 | 132.9 | 23.4 | 95.6 |
+
+- **The 64-row fold takes the same split at every window.** Its rows were measured at 512 cached tokens, where the
+  4-way key split wins, so a chunk runs that split in 192 blocks however many positions it holds: 0.37 ms a layer at
+  4,096 positions, 3.66 ms at 65,536 and 12.3 ms at 197,568, where each block streams about 49,000 keys. Whether a
+  wider split wins at long windows was not measured. The fold also frees 2.8 GiB of device memory, the old route's
+  scores and probabilities.
+- **Decode attention got slower at long windows.** The verify step's three-row attention runs as a score cut and a
+  16-way key split of the rest, also picked at 512 cached tokens: 0.17 ms a layer at 7,700 positions and 4.3 ms at
+  197,632, where it is 75 ms of a 95.6 ms step. The drafted step at 197,632 took 73 ms on 2026-11-01, so TPOT there went
+  from 26.5 to 42.9 ms, and at the window's longest prompt from 41.9 to 50.6 ms. Milestone 6 re-spells this program.
+- **The host leaves 2.6 ms between a prompt's chunks** (median, nsys at 7,680 tokens on an idle host), about 8 s over
+  the 3,088 chunks of a 197,632-token prompt, and 3.7 ms while exports compiled on the host. Not investigated.
+- **Probe tokens.** Main and the #1318 tree part at tokens 46, 9, 5 and 4 of the four probes' 64; each pack repeats its
+  own tokens. Between them differ the fold and #1322's W4A4 head, which alone parted one probe at its second token.
+  Where they part, both continuations read well ("a young boy named Tom" against "a young man named Tom"). Native
+  returns no log-probabilities, so the margin at each parting point is not measured.
+
 ## Native, plugin and stock vLLM again, with concurrency and the chunk's kernels (2026-11-01)
 
 The protocol of the 2026-10-25 table below, on main at `ea17c0964`, one session on one rented x16 RTX 5090 (Gen5 x16, 57

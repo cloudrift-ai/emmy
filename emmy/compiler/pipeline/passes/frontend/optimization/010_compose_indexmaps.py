@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX, Expr
+from emmy.compiler.ir.expression import PLACEHOLDER_PREFIX, Expression
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 
@@ -128,7 +128,7 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
 def _compose_coord_map(producer_coord_map: tuple, consumer_coord_map: tuple) -> tuple:
     """Substitute the producer's coord_map through each consumer coord.
 
-    ``consumer_coord_map[k]`` is an ``Expr`` over the consumer's output
+    ``consumer_coord_map[k]`` is an ``Expression`` over the consumer's output
     placeholders. When the consumer reads the producer at index
     ``consumer_coord_map``, the producer remaps that to its own input via
     ``producer_coord_map[i] = f_i(out_coord_0, out_coord_1, ...)`` where
@@ -138,5 +138,5 @@ def _compose_coord_map(producer_coord_map: tuple, consumer_coord_map: tuple) -> 
     So the composed map reads the original input at
     ``producer_coord_map[i]{out_coord_j → consumer_coord_map[j]}``.
     """
-    substitution: dict[str, Expr] = {f"{PLACEHOLDER_PREFIX}{j}": consumer_coord_map[j] for j in range(len(consumer_coord_map))}
+    substitution: dict[str, Expression] = {f"{PLACEHOLDER_PREFIX}{j}": consumer_coord_map[j] for j in range(len(consumer_coord_map))}
     return tuple(e.substitute(substitution) for e in producer_coord_map)

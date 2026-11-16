@@ -72,22 +72,26 @@ def test_gated_residual_split_matches_eager_layer(layer_idx):
     gate, experts = moe_block_parts(block.mlp)
     with torch.no_grad():
         ref, carrier, mixer_out = _mixer_output(torch, model, block, pre, t)
-        mixed, xn, mix = post(mixer_out, carrier)
-        assert mixed.shape == (t, hc * h) and xn.shape == (t, h) and mix.shape == (t, hc)
-        routed = combine_routed_experts(
+        mixed, xn, mix, shared = post(mixer_out, carrier)
+        assert mixed.shape == (t, hc * h) and xn.shape == (t, h) and mix.shape == (t, hc) and shared.shape == (t, h)
+        routed = shared + combine_routed_experts(
             xn,
             gate(xn),
             per_expert(lambda e, rows: expert(rows, experts.gate_up_proj[e], experts.down_proj[e])),
             num_experts=experts.gate_up_proj.shape[0],
         )
         got = place_routed_streams(mixed, routed, mix)
+        into = torch.full_like(mixed, float("nan"))
+        assert place_routed_streams(mixed, routed, mix, out=into) is into
     torch.testing.assert_close(got, ref, atol=1e-5, rtol=1e-5)
+    assert torch.equal(into, got), "a placement into a given buffer is the same sum"
 
 
 def test_tensor_parallel_ranks_sum_to_the_eager_layer():
-    """At tensor parallelism every rank runs ``pre`` and ``post`` whole, the gated shared expert included, and
-    its slice of every routed expert. The all-reduce sums only the routed partials, which are then placed into
-    the streams. Two ranks together must reproduce the eager layer."""
+    """At tensor parallelism every rank runs ``pre`` and ``post`` whole but for the shared expert, and holds its
+    slice of the shared expert and of every routed expert. The all-reduce sums each rank's shared and routed
+    partials at once, and the sum is then placed into the streams. Two ranks together must reproduce the eager
+    layer."""
     import copy
 
     torch = pytest.importorskip("torch")
@@ -108,15 +112,16 @@ def test_tensor_parallel_ranks_sum_to_the_eager_layer():
             _, post, expert = build_moe_split_wrapper(rank_block)
             gate, experts = moe_block_parts(rank_block.mlp)
             assert experts.down_proj.shape[-1] == model.config.moe_intermediate_size // world
-            mixed, xn, mix = post(mixer_out, carrier)
+            assert rank_block.mlp.shared_expert.down_proj.weight.shape[-1] == model.config.shared_expert_intermediate_size // world
+            mixed, xn, mix, shared = post(mixer_out, carrier)
             halves.append((mixed, xn, mix))
-            routed = routed + combine_routed_experts(
+            routed += shared + combine_routed_experts(
                 xn,
                 gate(xn),
                 per_expert(lambda e, rows, experts=experts, expert=expert: expert(rows, experts.gate_up_proj[e], experts.down_proj[e])),
                 num_experts=experts.gate_up_proj.shape[0],
             )
-        for other in halves[1:]:  # post is replicated: every rank computes the same streams and routing input
+        for other in halves[1:]:  # every rank computes the same streams and routing input
             for a, b in zip(halves[0], other, strict=True):
                 assert torch.equal(a, b)
         mixed, _, mix = halves[0]

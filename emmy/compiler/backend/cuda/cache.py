@@ -22,28 +22,85 @@ def cuda_runtime():
 EVICTED_CODE_BYTES = 256 * 1024
 
 
-def straight_line_source(name: str, code_bytes: int, prologue: str = "", epilogue: str = "") -> str:
-    """A CUDA kernel ``name(const float4* scratch, float* sink)`` whose first warp on each of an SM's four schedulers
-    runs about ``code_bytes`` of straight-line integer code, eight independent chains so the run is bound by fetching
-    the code. ``prologue`` and ``epilogue`` are statements every thread runs before and after it."""
-    lines = []
-    for i in range(code_bytes // 48):  # three 16-byte instructions a line
+def straight_line_source(name: str, code_bytes: int, compute_capability: tuple[int, int], vectors: int = 0) -> str:
+    """The PTX of a kernel ``name(const float4* scratch, float* sink)`` whose first warp on each of an SM's four
+    schedulers runs about ``code_bytes`` of straight-line integer code, eight independent chains so the run is bound
+    by fetching the code, for a card of ``compute_capability``. With ``vectors``, every thread first reads its share
+    of the ``vectors`` float4 of the scratch, which leaves L2 holding it. The kernel claims the launch's dynamic
+    shared memory, so a launch that sizes it past half an SM's places one block on each."""
+    major, minor = compute_capability
+    lines = [
+        f".version {'8.7' if major >= 10 else '7.8'}",
+        f".target sm_{major}{minor}",
+        ".address_size 64",
+        ".extern .shared .align 16 .b8 claim[];",
+        f".visible .entry {name}(.param .u64 scratch_param, .param .u64 sink_param)",
+        "{",
+        "\t.reg .pred %p<4>;",
+        "\t.reg .b32 %x<8>, %t, %y, %tx, %block, %i, %stride, %claim;",
+        "\t.reg .f32 %a<4>, %v<4>, %s;",
+        "\t.reg .b64 %scratch, %sink, %at, %off;",
+        "\tld.param.u64 %scratch, [scratch_param];",
+        "\tcvta.to.global.u64 %scratch, %scratch;",
+        "\tld.param.u64 %sink, [sink_param];",
+        "\tcvta.to.global.u64 %sink, %sink;",
+        "\tmov.u32 %tx, %tid.x;",
+        "\tmov.u32 %block, %ctaid.x;",
+        "\tadd.u32 %y, %block, 1;",
+        *(f"\tmov.f32 %a{k}, 0f00000000;" for k in range(4)),
+    ]
+    if vectors:
+        lines += [
+            "\tmov.u32 %stride, %ntid.x;",
+            "\tmad.lo.u32 %i, %block, %stride, %tx;",
+            "\tmov.u32 %t, %nctaid.x;",
+            "\tmul.lo.u32 %stride, %stride, %t;",
+            "READ:",
+            f"\tsetp.ge.u32 %p0, %i, {vectors};",
+            "\t@%p0 bra READ_DONE;",
+            "\tmul.wide.u32 %off, %i, 16;",
+            "\tadd.u64 %at, %scratch, %off;",
+            "\tld.global.v4.f32 {%v0, %v1, %v2, %v3}, [%at];",
+            *(f"\tadd.f32 %a{k}, %a{k}, %v{k};" for k in range(4)),
+            "\tadd.u32 %i, %i, %stride;",
+            "\tbra READ;",
+            "READ_DONE:",
+        ]
+    lines += [f"\tmad.lo.u32 %x{r}, %y, {r}, %tx;" for r in range(8)]
+    lines += ["\tsetp.ge.u32 %p1, %tx, 128;", "\t@%p1 bra CODE_DONE;"]
+    for i in range(code_bytes // 48):  # three 16-byte instructions a step
         r = i % 8
-        lines.append(f"        x{r} = (x{r} ^ (x{r} >> {3 + i * 7 % 27})) * 0x{(0x9E3779B1 * (i + 1)) & 0xFFFFFFFF | 1:08x}u + y;")
-    chains = " ".join(f"unsigned x{r} = threadIdx.x + {r}u * y;" for r in range(8))
-    body = "\n".join(lines)
-    return f"""extern "C" __global__ void {name}(const float4* __restrict__ scratch, float* __restrict__ sink) {{
-    extern __shared__ float claim[];
-{prologue}
-    unsigned y = blockIdx.x + 1u;
-    {chains}
-    if (threadIdx.x < 128) {{
-{body}
-    }}
-{epilogue}
-    if ((x0 ^ x1 ^ x2 ^ x3 ^ x4 ^ x5 ^ x6 ^ x7) == 0x9e3779b9u) {{ claim[0] = 1.0f; sink[blockIdx.x] = claim[threadIdx.x]; }}
-}}
-"""
+        lines += [
+            f"\tshr.u32 %t, %x{r}, {3 + i * 7 % 27};",
+            f"\txor.b32 %t, %x{r}, %t;",
+            f"\tmad.lo.u32 %x{r}, %t, {(0x9E3779B1 * (i + 1)) & 0xFFFFFFFF | 1}, %y;",
+        ]
+    lines += [
+        "CODE_DONE:",
+        # What the read summed is stored where it cannot be predicted, so the read is never dropped.
+        "\tadd.f32 %s, %a0, %a1;",
+        "\tadd.f32 %s, %s, %a2;",
+        "\tadd.f32 %s, %s, %a3;",
+        "\tmul.wide.u32 %off, %block, 4;",
+        "\tadd.u64 %at, %sink, %off;",
+        "\tsetp.neu.f32 %p2, %s, 0f3FC00000;",
+        "\t@%p2 bra KEEP_DONE;",
+        "\tst.global.f32 [%at], %a0;",
+        "KEEP_DONE:",
+        "\txor.b32 %t, %x0, %x1;",
+        *(f"\txor.b32 %t, %t, %x{r};" for r in range(2, 8)),
+        "\tsetp.ne.u32 %p3, %t, 2654435769;",
+        "\t@%p3 bra END;",
+        "\tmov.u32 %claim, claim;",
+        "\tst.shared.f32 [%claim], 0f3F800000;",
+        "\tmad.lo.u32 %claim, %tx, 4, %claim;",
+        "\tld.shared.f32 %s, [%claim];",
+        "\tst.global.f32 [%at], %s;",
+        "END:",
+        "\tret;",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 class CacheEviction:
@@ -71,13 +128,7 @@ class CacheEviction:
             raise RuntimeError("cold-cache benchmarking requires a positive device L2 cache size")
         sms, vectors = props.multi_processor_count, 2 * props.L2_cache_size // 16
         smem = min(props.shared_memory_per_multiprocessor // 2 + 1024, props.shared_memory_per_block_optin)
-        read = f"""    float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
-    for (unsigned i = blockIdx.x * blockDim.x + threadIdx.x; i < {vectors}u; i += gridDim.x * blockDim.x) {{
-        float4 v = scratch[i];
-        acc.x += v.x; acc.y += v.y; acc.z += v.z; acc.w += v.w;
-    }}"""
-        keep = "    if (acc.x + acc.y + acc.z + acc.w == 1.5f) sink[blockIdx.x] = acc.x;"
-        source = straight_line_source("emmy_cache_eviction", EVICTED_CODE_BYTES, read, keep)
+        source = straight_line_source("emmy_cache_eviction", EVICTED_CODE_BYTES, (props.major, props.minor), vectors)
         plan = ExecutionPlan(
             "cuda",
             ["scratch"],

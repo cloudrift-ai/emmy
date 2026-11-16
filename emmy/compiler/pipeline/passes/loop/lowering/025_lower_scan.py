@@ -9,7 +9,7 @@ from __future__ import annotations
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_canon
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import Accum, Axis, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import ScanOp
@@ -46,9 +46,9 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         Loop(
             axis=scan_axis,
             body=(
-                Load(name="in0", input=src_id, index=index),
+                Load(names=("in0",), input=src_id, index=index),
                 Accum(name="acc", value="in0", op=ElementwiseImpl("add"), axes=(scan_axis.name,)),
-                Write(output=f"loop_{root.id}", index=index, value="acc"),
+                Write(output=f"loop_{root.id}", index=index, values=("acc",)),
             ),
         ),
     )

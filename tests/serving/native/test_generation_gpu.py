@@ -13,7 +13,7 @@ from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.native import NativeWorker
 from emmy.serving.native.prepare import export_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving.helpers import qwen3_5_model, qwen3_5_moe_model, qwen3_model
+from tests.serving.helpers import evidence_scope, qwen3_5_model, qwen3_5_moe_model, qwen3_model
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
@@ -100,8 +100,9 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             selected.append(next_token)
                         else:
                             assert result["tokens"] == []
-                    # Chunk dispatch advances only valid prompt rows. Reusing captured graphs
-                    # across different tails must neither expose padding nor retain an old cache.
+                    # Chunk dispatch advances only valid prompt rows, and the chunk that ends at the prompt's last token
+                    # (the six-token prompt's second) generates the first token. Reusing captured graphs across
+                    # different tails must neither expose padding nor retain an old cache.
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
                     position = 0
                     chunked = []
@@ -110,7 +111,8 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             {"op": "generation_step", "prefill": True, "capture": bool(capture), "logits": str(logits_path)},
                             wall_timeout_s=30,
                         )
-                        expected_position = position + (min(3, len(prompt) - position - 1) if position < len(prompt) - 1 else 1)
+                        rows = 3 if position + 3 == len(prompt) else min(3, len(prompt) - position - 1)
+                        expected_position = position + (rows if position < len(prompt) - 1 else 1)
                         assert result["position"] == expected_position
                         position = expected_position
                         if result["tokens"]:
@@ -176,10 +178,10 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
     type: logits match transformers at prompt lengths 1, 16, 17 and 65, a second request after a
     reset equals the first, and capture on and off select the same tokens.
 
-    Sequential prefill only. Without measured evidence the chunk rule's kernels take no cut, and a
-    one-block kernel then recomputes a 64-wide reduction per state cell: 14 s per two-row chunk on
-    the smallest geometry, hours at sixteen rows. Chunked prefill of a Gated DeltaNet layer waits
-    for recorded schedules; the chunk rule for state is a runtime unit test."""
+    Sequential prefill only. The Gated DeltaNet program is the plugin's one-row twin of the lane's
+    hybrid, so it compiles from the lane golden's cuts: without them it is one kernel that runs as
+    one thread block and recomputes the chunk's triangular solve per output element, past the
+    worker's step deadline. The chunk rule for state is a runtime unit test."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
@@ -188,7 +190,8 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
     model = qwen3_5_model(max_position_embeddings=context).half()
     model.config._attn_implementation = "eager"
     with gpu_lock():
-        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=1)
+        with evidence_scope(strict=False):
+            root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=1)
         manifest = json.loads((root / "manifest.json").read_text())
         assert manifest["key"]["generation"]["state"] == ["layer0.state", "layer0.history"]
         monkeypatch.setenv("PATH", "/nonexistent")
@@ -247,7 +250,8 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
     routed experts (two per token) and the gated shared expert: every logit matches transformers'
     and every greedy token is its own, through sequential and chunked prefill, with capture on and
     off; a request after a reset repeats the first. A chunk runs the fixed-slot program once over
-    all its rows. The device holds every expert, or four or one of them per layer: then the pager
+    all its rows, and the four-token prompt's second chunk ends at its last token and generates the
+    first. The device holds every expert, or four or one of them per layer: then the pager
     moves the experts the router picks into the slots, and with one slot the other picks are read
     in place from host memory. The experts are wide, so they dominate the worker's memory, and the
     host holds them once: the heap keeps no copy, and the load's peak never passes through one.
@@ -282,7 +286,7 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
                     status = (line.split(":") for line in (Path("/proc") / str(worker._proc.pid) / "status").read_text().splitlines())
                     memory = {key: int(value.split()[0]) * 1024 for key, value in status if key in ("VmHWM", "VmRSS", "RssAnon")}
                     assert memory["RssAnon"] < experts / 2 and memory["VmHWM"] - memory["VmRSS"] < experts / 2, memory
-                for prompt in ([3], [5, 1, 4, 1, 5, 9, 2]):
+                for prompt in ([3], [5, 1, 4, 1, 5, 9, 2], [3, 1, 4, 1]):
                     np.asarray(prompt, np.int64).tofile(path)
                     runs = []
                     for capture, prefill in ((False, False), (True, False), (False, False), (True, True)):
@@ -308,15 +312,25 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
         asyncio.run(check())
 
 
-def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("layer_types", "dtype", "prefill_size"),
+    [(["full_attention"] * 2, torch.bfloat16, 3), (["linear_attention", "full_attention"], torch.float16, 4)],
+    ids=["attention", "gdn"],
+)
+def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_types, dtype, prefill_size):
     """Speculative decoding's gate on a tiny Qwen3.5 and a one-layer multi-token-prediction head drafting two tokens:
     at temperature zero the verify steps generate transformers' greedy tokens, the same pack's with the drafter left
-    unloaded, captured or not, through chunked prefill, which writes the drafter's cache too. The head drafts the
-    target's own pick again, so once the target repeats one token every draft stands and a step generates three
-    tokens; before, a step takes one draft or none. Each step's logits are its tokens' rows. At positive temperature
-    every step decodes one token. The layers are attention only: without evidence a Gated DeltaNet layer's one-token
-    step runs past a minute (the state test above), so the per-row state carry is checked on the CPU
-    (``test_prepare``) and by the recipes' gates."""
+    unloaded, captured or not, through chunked prefill, which writes the drafter's cache too. The eight-token prompt and
+    the nine-token one, the eight and its first greedy token, cover both ends of a prompt: with attention layers and
+    3-row chunks the nine-token prompt ends at its third chunk, which generates the first token, and the eight-token one
+    leaves its last token to a verify step; with the Gated DeltaNet layer, whose carried state takes a chunk of prompt
+    tokens only, and 4-row chunks the eight-token prompt ends at its second chunk and the nine-token one leaves its last
+    token to a verify step. The head drafts the target's own pick again, so once the target repeats one token every
+    draft stands and a step generates three tokens; before, a step takes one draft or none. Each step's logits are its
+    tokens' rows. At positive temperature every step decodes one token. With a Gated DeltaNet layer, a verify step
+    keeps the state after each of its rows and the next step continues from the one after its last accepted row; its
+    programs (one row, the 4-row chunk, the 3-row verify) are twins of the lane's hybrid, so they compile from the lane
+    golden's cuts."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
@@ -327,19 +341,17 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
     monkeypatch.setenv("EMMY_GEN_M1_TIER", "0")
     monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "4")
     context, new = 48, 24
-    model = qwen3_5_model(max_position_embeddings=context, layer_types=["full_attention"] * 2).to(torch.bfloat16)
+    model = qwen3_5_model(max_position_embeddings=context, layer_types=layer_types).to(dtype)
     model.config._attn_implementation = "eager"
     model.save_pretrained(tmp_path / "checkpoint")
     add_mtp_head(tmp_path / "checkpoint", repeats=True)
     drafter, _ = load_drafter(str(tmp_path / "checkpoint"), None, model, 2)
-    prompt = [5, 6, 7, 5, 6, 7, 5, 6]
-    with torch.no_grad():
-        greedy = model.generate(torch.tensor([prompt]), max_new_tokens=new, do_sample=False)[0, len(prompt) :].tolist()
     with gpu_lock():
-        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=3, drafter=drafter)
+        with evidence_scope(strict=False):
+            root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=prefill_size, drafter=drafter)
         monkeypatch.setenv("PATH", "/nonexistent")
 
-        async def run(draft, capture, temperature=0.0):
+        async def run(prompt, draft, capture, temperature=0.0):
             worker = NativeWorker(executable=executable)
             path, logits = tmp_path / "prompt.bin", tmp_path / "logits.bin"
             np.asarray(prompt, np.int64).tofile(path)
@@ -361,13 +373,94 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
             finally:
                 await worker.aclose()
 
-        plain, steps = asyncio.run(run(False, True))
-        assert plain == greedy and set(steps) == {1}
-        for capture in (True, False):
-            drafted, steps = asyncio.run(run(True, capture))
-            assert drafted == greedy and steps[-1] == 3 and len(steps) < new
-        sampled = [asyncio.run(run(draft, True, temperature=0.8)) for draft in (False, True)]
-        assert sampled[0] == sampled[1] and set(sampled[1][1]) == {1}
+        def continuation(prompt):
+            with torch.no_grad():
+                return model.generate(torch.tensor([prompt]), max_new_tokens=new, do_sample=False)[0, len(prompt) :].tolist()
+
+        eight = [5, 6, 7, 5, 6, 7, 5, 6]
+        for prompt in (eight, [*eight, continuation(eight)[0]]):
+            greedy = continuation(prompt)
+            plain, steps = asyncio.run(run(prompt, False, True))
+            assert plain == greedy and set(steps) == {1}
+            for capture in (True, False):
+                drafted, steps = asyncio.run(run(prompt, True, capture))
+                assert drafted == greedy and steps[-1] == 3 and len(steps) < new
+            sampled = [asyncio.run(run(prompt, draft, True, temperature=0.8)) for draft in (False, True)]
+            assert sampled[0] == sampled[1] and set(sampled[1][1]) == {1}
+
+
+def test_nvfp4_head_checkpoint_exports_its_w4a4_head(tmp_path, monkeypatch):
+    """An NVFP4 output head stored with its activation's calibrated scale, as NVIDIA's Qwen3.8-27B stores it, exports
+    W4A4 into every program that runs it: the one-token step, the prefill chunks and the verify step, at its three rows
+    and at each draft's one. Each binds the head's codes and the stored activation scale, never a decoded head, and
+    drafting keeps the greedy tokens. The logits are checked only for gross errors: at this size a trunk difference
+    of one rounding flips an activation code now and then, which moves a row by up to ~10%, as far as the uncoded
+    head sits; the head's numerics are pinned where both sides code the same rows (``test_coded_head.py``)."""
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build native worker and add it to PATH")
+    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+    from emmy.compiler.backend.plan import plan_from_dict
+    from emmy.serving.native.prepare import load_drafter, load_model
+    from tests.serving.helpers import add_mtp_head, nvfp4_head_checkpoint, static_fp4
+
+    monkeypatch.setenv("EMMY_GEN_M1_TIER", "0")
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "4")
+    context, new, input_scale = 24, 8, 0.002
+    model = qwen3_5_model(max_position_embeddings=context, layer_types=["full_attention"] * 2).to(torch.bfloat16)
+    model.config._attn_implementation = "eager"
+    model.save_pretrained(tmp_path / "ckpt")
+    add_mtp_head(tmp_path / "ckpt", repeats=True)
+    nvfp4_head_checkpoint(model, tmp_path / "ckpt", input_scale=input_scale)
+    twin, ckpt = load_model(str(tmp_path / "ckpt"))
+    drafter, ckpt = load_drafter(str(tmp_path / "ckpt"), None, twin, 2, ckpt)
+    with gpu_lock():
+        with evidence_scope(strict=False):
+            root = export_model(twin, tmp_path / "pack", context_length=context, prefill_size=3, ckpt=ckpt, drafter=drafter)
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert {"decode", "verify"} <= set(manifest["programs"]) and any(name.startswith("prefill") for name in manifest["programs"])
+    vocab, hidden = model.config.vocab_size, model.config.hidden_size
+    for name, path in manifest["programs"].items():
+        plan = plan_from_dict(json.loads((root / path).read_text()))
+        head = {b.name: b for b in plan.buffers if b.role == "constant" and b.name.startswith("head.")}
+        shapes = {(b.dtype.name, tuple(b.resolve_shape({}))) for b in head.values()}
+        assert ("f4e2m1x2", (vocab, hidden // 2)) in shapes, f"{name} runs no coded head"
+        assert not any(dtype in ("bf16", "f32") and shape == (vocab, hidden) for dtype, shape in shapes), f"{name} binds a decoded head"
+        scalars = {
+            float(np.fromfile(root / manifest["bindings"][name][n], np.float32)[0])
+            for n, b in head.items()
+            if b.dtype.name == "f32" and int(np.prod(b.resolve_shape({}))) == 1
+        }
+        assert {np.float32(input_scale), np.float32(1) / np.float32(input_scale)} <= scalars, f"{name} codes no rows"
+    model.cuda()
+    weight = model.lm_head.weight.detach().float().cpu().numpy()
+
+    def reference(prefix):
+        with torch.no_grad(), _reference_precision(True):
+            row = model.model(torch.tensor([prefix], device="cuda")).last_hidden_state[0, -1]
+        return static_fp4(row.float().cpu().numpy(), input_scale) @ weight.T
+
+    async def run(prompt, draft):
+        worker = NativeWorker(executable=executable)
+        path, logits = tmp_path / "prompt.bin", tmp_path / "logits.bin"
+        np.asarray(prompt, np.int64).tofile(path)
+        try:
+            await worker.run_job({"op": "load_generation", "root": str(root), "draft": draft}, wall_timeout_s=60)
+            await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=60)
+            tokens = []
+            while len(tokens) < new:
+                step = {"op": "generation_step", "prefill": True, "capture": False, "logits": str(logits)}
+                result = await worker.run_job(step, wall_timeout_s=60)
+                rows = np.fromfile(logits, np.float32).reshape(len(result["tokens"]), -1) if result["tokens"] else ()
+                for row, token in zip(rows, result["tokens"], strict=True):
+                    assert _logit_errors(row, reference(prompt + tokens))["relative_l2_error"] < 0.25
+                    tokens.append(token)
+            return tokens[:new]
+        finally:
+            await worker.aclose()
+
+    prompt = [5, 6, 7, 5, 6, 7, 5, 6]
+    assert asyncio.run(run(prompt, True)) == asyncio.run(run(prompt, False))
 
 
 # Per-position absolute budgets and per-prompt RMS comparison, fixed before the
@@ -424,13 +517,11 @@ def test_fp8_checkpoint_exports_its_coded_trunk(tmp_path):
         return sum(m.weight.numel() for m in module.modules() if isinstance(m, torch.nn.Linear))
 
     layers = model.model.layers
-    # Every trunk weight a program runs is in the pack as its e4m3 code, so none was bound decoded;
-    # a prefill chunk stops at the last layer's keys and values, so its post half is not there.
-    tail = weights(layers[-1].self_attn.o_proj) + weights(layers[-1].mlp)
-    for name, expected in (("decode", weights(layers)), ("prefill", weights(layers) - tail)):
+    # Every trunk weight a program runs is in the pack as its e4m3 code, so none was bound decoded.
+    for name in ("decode", "prefill3"):
         plan = plan_from_dict(json.loads((root / manifest["programs"][name]).read_text()))
         coded = [b for b in plan.buffers if b.role == "constant" and b.dtype.name == "f8e4m3"]
-        assert sum(int(np.prod(b.resolve_shape({}))) for b in coded) == expected
+        assert sum(int(np.prod(b.resolve_shape({}))) for b in coded) == weights(layers)
     _computes_the_dequantized_model(model, root, executable, tmp_path)
 
 
@@ -656,6 +747,36 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         asyncio.run(check())
 
 
+def test_a_step_attends_through_its_window_ranges_program(tmp_path, monkeypatch):
+    """Each range of windows attends through its own program, priced at its window: the step holds every layer's
+    attention once per range, each launch running only in its range, and a step gives the model's logits at a window
+    of either range. The boundary sits at the second window here, so a short context reaches both."""
+    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+    from emmy.serving.native.prepare import WINDOW
+
+    monkeypatch.setattr("emmy.serving.native.prepare.WINDOW_RANGES", (("", 1, 4096), ("-long", 8192, 131072)))
+    model = qwen3_5_model(max_position_embeddings=8192, layer_types=["full_attention"] * 2).half()
+    model.config._attn_implementation = "eager"
+    with gpu_lock():
+        with evidence_scope(strict=False):
+            root = export_model(model, tmp_path / "pack", context_length=8192, prefill_size=1)
+        program = _python_reference(root)
+        ranges = [launch.size_range for launch in program.plan.launches if launch.size_range]
+        assert sorted(set(ranges)) == [(WINDOW, 1, 8191), (WINDOW, 8192, 8192)] and len(ranges) % 2 == 0
+        prompt = [5, 9, 2, 7, 1, 3]
+        for position, token in enumerate(prompt):
+            program.set_sym_values({WINDOW: 4096})
+            short = _python_step(program, position, token)
+        # The same step again at the long range's window rewrites the same cache row and reads the same positions.
+        program.set_sym_values({WINDOW: 8192})
+        long = _python_step(program, len(prompt) - 1, prompt[-1])
+        model.cuda()
+        with torch.no_grad(), _reference_precision(True):
+            expected = model(torch.tensor([prompt], device="cuda")).logits[0, -1].float().cpu().numpy()
+    np.testing.assert_allclose(short, expected, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(long, expected, rtol=1e-3, atol=1e-3)
+
+
 @pytest.mark.parametrize("cache", ["float16", "float8_e4m3fn", "near_tie"])
 def test_attention_reads_only_the_written_cache_prefix(cache):
     """The compiled attention reads the cache to the window the runtime sets and masks every position past the current
@@ -688,7 +809,7 @@ def test_attention_reads_only_the_written_cache_prefix(cache):
 
     window = torch.export.Dim(WINDOW, min=1, max=context)
     examples = (torch.zeros(1, heads * d, dtype=torch.float16), torch.zeros(512, kv, d, dtype=dtype), torch.zeros(512, kv, d, dtype=dtype))
-    module = attend_module(heads, kv, d, 1)
+    module = attend_module(heads, kv, d, 1, grouped=True)  # the decode step's spelling
     shapes = {n: {0: window} if n in ("keys", "values") else {} for n in inspect.signature(module.forward).parameters}
     compiled = CudaBackend().compile(trace_module(module, (*examples, torch.zeros(1, dtype=torch.int64)), dynamic_shapes=shapes))
     with gpu_lock():

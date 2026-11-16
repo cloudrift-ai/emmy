@@ -84,6 +84,17 @@ def test_one_request_at_a_time():
     assert build_model_args("http://localhost:8000/v1", "m", num_concurrent=1)["num_concurrent"] == 1
 
 
+def test_gen_kwargs_merge_with_chat_template_kwargs():
+    # A longer budget and thinking off go out together; with neither, the task keeps its own arguments.
+    from run_lmeval_gate import build_gen_kwargs
+
+    assert build_gen_kwargs() is None
+    assert build_gen_kwargs({"max_gen_toks": 1024}, {"enable_thinking": False}) == {
+        "max_gen_toks": 1024,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
 # --- extract_metrics ---
 
 

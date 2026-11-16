@@ -151,7 +151,7 @@ def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
                 command,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "EMMY_NVCC_FLAGS": "", "EMMY_DUMP_DIR": tmp},
+                env={**os.environ, "EMMY_DUMP_DIR": tmp},
                 timeout=1800,
             )
             if result.returncode != 0 or not output.exists():

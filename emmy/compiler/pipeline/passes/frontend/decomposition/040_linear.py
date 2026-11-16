@@ -27,7 +27,9 @@ def rewrite(match: Match, inp_x: Node, inp_w: Node, inp_b: Node | None, out: Ten
     )
 
     matmul_name = f"{out.name}_mm" if inp_b else out.name
-    mm = matmul_decompose(frag, inp_x, wt_id, name=matmul_name)
+    # The declared result dtype is the accumulation/output contract, as for a matmul: an output head's logits are
+    # f32 over 16-bit operands.
+    mm = matmul_decompose(frag, inp_x, wt_id, name=matmul_name, dtype=out.dtype.name)
 
     if inp_b:
         bias_bc = broadcast_to(frag, inp_b, out.shape)

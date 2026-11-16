@@ -75,7 +75,9 @@ jobs:
 
   package:
     name: PyPI package dry run
-    runs-on: ubuntu-latest
+    # The wheel's platform tag follows the runner's glibc: auditwheel repairs to the newest manylinux policy it
+    # knows, and ubuntu-latest (26.04) links symbols past it.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

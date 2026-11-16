@@ -11,10 +11,18 @@ Emmy serving the model correctly, step 5 closes the speed gap, and step 6 releas
 Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Each result is written
 under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
 
-**Where it stands (2026-11-01).** Steps 1 to 3 are done, and the nine items of step 4 are done, but step 4's gate has
-not run. Step 5 is under way: at one request Emmy takes 21.3 ms per token against the fork's 13, and 1.82 s to the
-first token at 4K against 0.93 s. Nothing else in the done gate has been measured for Emmy. The next work is listed
-under "Next" in step 5. The minimums in step 2 and Qwen's license are still open with the owner.
+**Where it stands (2026-11-13).** Steps 1 to 4 are done; step 5's done gate is not met. Step 4's gate (2026-11-02):
+two boots give the same text and the accuracy sets pass, but the correctness limits are not met, and the fork does
+not meet them against itself either. Since the done gate's first run (2026-11-03), step 5 brought Emmy under the
+3 GiB per card margin, sliced the shared expert across ranks, split pre8's down rows across blocks, measured where
+the first-token and eight-request gaps sit (2026-11-07), ran the eight requests' routed experts in one launch (15%
+more output), and found the host time of a decode step equal on both sides. On 2026-11-11 the owner turned async
+scheduling on, on both sides, and on 2026-11-12 a prefill step's wider experts began running 32 per launch, the
+rest on 2026-11-14. Against the async fork, Emmy is now 1.7-1.9x slower to the first token at 1K and 4K, 1.74x
+slower per token at one request, and gives 0.68x the fork's output at four requests and 0.73x at eight (2026-11-14).
+Async doubles the first token at the full context on both sides; the owner keeps the 2.5 GiB key/value pool, so that
+is a known limit (step 5). The next round comes from the 2026-11-13 ranking, for the owner to pick. The minimums in
+step 2 and Qwen's license are still open with the owner, who plans as if the license were granted.
 
 ## What we know
 
@@ -241,8 +249,15 @@ and its baseline and profile are in the results.
 **Result, 2026-10-15.** The shape is the RadixArk NVFP4 checkpoint at TP4 with MTP off, four replicas per node, a
 131,072 context, the KV pool pinned at 2.5 GiB per card (194,016 tokens), a 4,096-token prefill step, up to eight
 sequences, prefix caching, the n-gram table in pinned host memory and history on the cards. It meets every proposed
-minimum with all four replicas running and passes the step 1 accuracy sets. The baseline is the experiment
-`experiments/Qwen3.8-Flash-Next/fork_baseline_v100_sxm3`. The minimums still wait for the owner's confirmation.
+minimum with all four replicas running and passes the step 1 accuracy sets. The minimums still wait for the owner's
+confirmation.
+
+**Async scheduling on, 2026-11-11.** The owner turned vLLM's async scheduling on in this shape, on both sides: the
+host prepares the next step while the GPU runs the current one. The shape above ran it off, as the fork's release
+example does; with MTP off it is vLLM's default, so the recipe and the experiments now just drop
+`--no-async-scheduling`. The production baseline is the experiment
+`experiments/Qwen3.8-Flash-Next/fork_baseline_v100_sxm3`, re-run with async on the step 3 image (result below the
+synchronous rows). Its first run, the synchronous numbers below, stays as history.
 
 - **The grid, one boot per cell by hand.** `emmy bench` deploys every row cold, about 9.5 minutes each, so the full
   grid would have cost about 56 boots; the screen took one boot per cell and the experiment records only the chosen
@@ -278,7 +293,7 @@ minimum with all four replicas running and passes the step 1 accuracy sets. The 
 - **Two boots give the same text.** Six greedy prompts came back identical from the four replicas.
 - **Accuracy on this shape.** GSM8K 124 of 128, none at the cap; acceptance cases 27 of 28 in each mode (the known
   arithmetic miss); every long-document code found, 129 of 129 without thinking and 128 of 128 with it.
-- **Baseline, one replica, repeats 2-4 of 4:**
+- **Baseline, one replica, repeats 2-4 of 4, synchronous (the first run, history):**
 
   | Load | First token | Per output token | Total output |
   | --- | ---: | ---: | ---: |
@@ -292,6 +307,24 @@ minimum with all four replicas running and passes the step 1 accuracy sets. The 
   the fused hyper-connection gathers) 2.7 ms, MoE 1.9 ms, hyper-connection local work 0.9 ms, sparse attention
   0.8 ms, Gated DeltaNet 0.5 ms. A 3,920-token prefill chunk takes about 0.6 s, led by dense GEMMs and the NVFP4
   expert GEMMs; prefill exchanges go over the NCCL ring, not the fast path.
+- **Baseline with async scheduling (2026-11-11), the production baseline.** The same experiment and protocol on the
+  step 3 image; repeats 2-4 of 4:
+
+  | Load | First token | Per output token | Total output |
+  | --- | ---: | ---: | ---: |
+  | 1 request, 1K / 8K / 32K / 130K prompt | 0.47-0.52 / 1.59-1.60 / 6.13-6.21 / 46.3-46.6 s | 9.59 / 9.72-9.74 / 10.0 / 10.9 ms | |
+  | 4 requests, 4K / 1K | 2.5 s mean | 17.2-17.3 ms | 203 tok/s |
+  | 8 requests, 4K / 1K | 3.7-3.9 s mean | 21.3-21.6 ms | 318 tok/s |
+  | 4 replicas, 32 requests, 4K / 1K | 7.4-8.8 s mean, 3.3-3.4 s median | 22.1-22.4 ms | 897-1,008 tok/s |
+
+  - Async takes 3.2-3.9 ms from every decode step and gives 14-17% more output at four and eight requests. First
+    tokens up to 32K do not move; at the full context the first token doubles, because the engine preempts the
+    prompt's prefill twice and starts it again (step 5, "Async scheduling on both sides").
+  - The other checks of this step, on boots never profiled: GSM8K 124 of 128, none at the output limit; acceptance
+    cases 27 of 28 in all six runs; long-document lookups 339 of 339 and 336 of 336. The margin test passes, with
+    338-398 MiB spare per card (0.4-0.6 GiB with async off). Two boots agree on 3 of 6 greedy prompts: the fork's
+    warm-up tune picks kernels anew at every boot, and with async the batches differ from run to run; every
+    divergence is a near-tie (step 5).
 
 ### 3. Bring our fork up to date
 
@@ -319,7 +352,9 @@ minimum with all four replicas running and passes the step 1 accuracy sets. The 
   deploy. Not met as written: the boot is online, because `HF_HUB_OFFLINE=1` moves vLLM's compile key to the host's
   model path. Not run: the full-context DeepSeek V4, Laguna FP8 and Poolside checks, which come with moving those
   recipes to this fork. Published 2026-10-16 to the private Docker Hub repository, digest
-  `sha256:bf976828fc00…`, through `emmy publish`.
+  `sha256:bf976828fc00…`, through `emmy publish`. Since async scheduling went on (2026-11-11) the baked caches miss:
+  the flag is part of vLLM's compile key, so the image boots in 421-464 s again and needs a bake in the async shape
+  before a release.
 
 ### 4. Emmy serves the model, correctly
 
@@ -365,9 +400,10 @@ takes more as later rounds need it.
      be enforced at load;
   4. the MoE split for Qwen's shared-expert gate, with every routed expert sliced across tensor-parallel ranks;
      *Done, 2026-10-16:* every rank runs `pre` and `post` whole, the gated shared expert included, as DeepSeek keeps its
-     shared experts, plus its slice of every routed expert; only the routed output is all-reduced. The fork also reads
-     the shared expert whole, as the serving profile of 2026-10-27 showed (this note first said it slices it); what it
-     splits across ranks is the hyper-connection mixers. The router runs as the checkpoint's module does
+     shared experts, plus its slice of every routed expert; only the routed output is all-reduced. The fork slices the
+     shared expert across ranks and reduces its partial output together with the routed experts' (its allocations,
+     step 5's "Next (2026-11-03)"; a reading of the 2026-10-27 profile had said it reads it whole), and it keeps the
+     hyper-connection mixers' weights whole on every rank. The router runs as the checkpoint's module does
      (FP16 logits, FP32 softmax, top-10 renormalized), and the correctness step checks it against the fork. A CPU test
      at two ranks reproduces the eager layer. The split loader no longer renames Qwen's `mlp.shared_expert` to the
      plural Laguna and GLM use, which had left the shared expert unloaded;
@@ -431,8 +467,38 @@ takes more as later rounds need it.
   and the carried Gated DeltaNet state across steps, then run the step 1 accuracy sets. First-token parity alone does
   not qualify this model.
 - Gate: the Emmy image boots strict on the test node, two boots give the same text, and it passes the correctness
-  checks and the accuracy sets within the step 1 tolerances. **Not run yet.** The evidence so far is the eight greedy
-  probe prompts of item 9.
+  checks and the accuracy sets within the step 1 tolerances.
+- **Gate result, 2026-11-02.** Main `c497a0cc7`, strict boots of the recipe golden in step 2's shape, against the step
+  3 fork image in the same shape. Boots, accuracy: pass. Correctness: not met as written, on either side.
+  - Two boots give the same text: 16 of 16 greedy prompts identical, and prefill and decode log-probabilities
+    bit-identical.
+  - Accuracy sets, all within the step 1 tolerances: GSM8K 126 of 128 (reference 125), none at the output limit;
+    acceptance cases 27, 27, 28 without thinking and 27, 27, 26 with it (reference 27, 27, 27 / 26, 27, 27);
+    long-document codes 387 of 387 and 384 of 384 (reference 387 of 387 / 383 of 384).
+  - Correctness, as KL mean / p99 / max and top-1 agreement:
+
+    | Teacher-forced scenario | Emmy against the fork | A second fork boot against the fork |
+    | --- | --- | --- |
+    | Long outputs, 12 prompts of 1,024 tokens | 0.0064 / 0.14 / 1.10, 99.45% | 0.0073 / 0.16 / 3.50, 99.57% |
+    | The same, before the first divergence | 0.00086 / 0.0086 / 0.43, 99.48% | 0.00048 / 0.0026 / 1.11, 99.70% |
+    | Four requests at once | 0.00036 / 0.0051 / 0.024, 99.41% | 0.00030 / 0.0039 / 0.026, 99.61% |
+    | Prefix reuse, six suffixes on a shared 6K document | 0.0019 / 0.026 / 0.14, 99.22% | 0.0016 / 0.022 / 0.060, 98.96% |
+    | Carried state, prompts of 4.5K to 40K tokens | 0.031 / 0.57 / 3.55, 93.55% | 0.028 / 0.50 / 3.64, 94.34% |
+    | Prompt log-probabilities over prompt and output | 0.0093 / 0.085 / 0.45, 95.59% | 0.0074 / 0.069 / 0.38, 95.77% |
+
+  - Method: the engine's log-probabilities through the API, the top 20 per position. Where the two sides first pick
+    different tokens, the run restarts from the prompt plus the reference's tokens so far; "before the first
+    divergence" is the positions before any restart. KL over the shared top 20 plus a rest bucket is a lower bound:
+    on 48 positions read over the whole vocabulary it caught 90% of the exact KL (Emmy: exact mean 0.016, max 0.27).
+    The largest logit error cannot be measured this way, since log-probabilities leave one offset per position
+    unknown; the spread of log-probability differences over shared tokens fails 0.5 on both sides (up to 13 for
+    Emmy, 12 fork against fork).
+  - Reading: the fork does not meet the limits against itself, so in this shape they do not separate a defect from
+    the fork's own variation. Emmy differs from the fork by about what one fork boot differs from another. The fork
+    tunes small-shape kernels at warm-up (`VLLM_SM70_NVFP4_TUNE_SMALL_SHAPES`, as DeepSeek's FP8 tune), so its boots
+    differ; with the tune off, two fork boots are bit-identical in prefill and equal the second boot above. Against
+    that reproducible fork, Emmy's prompt log-probabilities read 0.0087 / 0.079 / 0.46, 95.57%. Whether to relax
+    the limits, or to measure them with logits against a tune-off fork, is the owner's call.
 
 ### 5. Close the gap to the fork
 
@@ -505,8 +571,9 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   a lever. Serving profile of post8 (2026-10-27): 20 kernels, 143 us busy per layer, 6.75 of 18.5 ms GPU busy per step
   (the fork's step is 9.7 ms). The four big matmuls sit about 49 us per layer over their read floor (2.4 ms per step),
   and 13 small pieces take 62 us per layer (3 ms per step), against an empty kernel's 0.9 us under graphs. The fork
-  reads the shared expert whole with cuBLAS gemv at 550-690 GB/s and splits the hyper-connection mixers across ranks
-  with all-gathers. A hand-written 8-row kernel was also about 2x off the read floor, so a new GEMV schedule family is
+  reads its quarter of the shared expert with cuBLAS gemv (this note first said the whole of it, at 550-690 GB/s;
+  for a quarter that is 130-180 GB/s) and splits the hyper-connection mixers' work across ranks with all-gathers. A
+  hand-written 8-row kernel was also about 2x off the read floor, so a new GEMV schedule family is
   not the obvious win. The cold bench ranked post8's matmuls wrongly because a re-run kernel keeps its code in the
   instruction cache, while serving runs about 58 other kernels between; #1299 evicts the code too and the golden was
   re-measured and re-tuned under it: post8 143 -> 117.6 us per layer, GPU busy 19.32 -> 17.78 ms per step, TPOT
@@ -515,14 +582,672 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   compiling the same 80 kernels.
 - **Next (2026-11-01).** Every number so far is one request at a short or 4K prompt, and the rounds' gains have
   shrunk to about 1 ms per token. So measure the whole gap before more tuning:
-  1. Run step 4's gate: the correctness limits, the accuracy sets, two boots giving the same text.
+  1. Run step 4's gate: the correctness limits, the accuracy sets, two boots giving the same text. **Done
+     2026-11-02**, result under step 4.
   2. Run this step's done gate once against the fork: first token at 1K, 8K, 32K and 130K, total output at 4 and 8
      requests, four replicas together, and memory against the 3 GiB per card margin, of which step 2 left the fork
-     about 0.6 GiB to spare.
+     about 0.6 GiB to spare. **Done 2026-11-03**, result below.
   3. Profile current main again, then choose the round. Candidates, largest first, in figures from the 2026-10-27
      profile: fewer kernels for post8's small pieces (about 3 ms per token); splitting the hyper-connection mixers
      across ranks, which adds an exchange, so its gain is unmeasured; the one-token tail of a prefill, eager at 223 ms
-     against the fork's 75, and the ~80-token step's host wait per layer.
+     against the fork's 75, and the ~80-token step's host wait per layer. The done gate adds two facts to the choice:
+     prefill is further off than decode (2.0-2.5x against 1.67x), and memory fails the margin. **Approved by the
+     owner on 2026-11-03 as the memory fix, then one decode round; both done the same day**, results below.
+- **Done gate, first run (2026-11-03).** Main `c497a0cc7`, the step 3 fork image, step 2's production shape on both
+  sides. First tokens by `dbg/ttftr.py` (random token ids; the first of four runs primes), the rest by `vllm bench
+  serve` (random prompts, greedy, `ignore_eos`, no warm-up request; one priming repeat, then three). Rounds in the
+  order fork, Emmy, Emmy, fork; a range is the measured repeats of both rounds of a side. Every point fails:
+
+  | Point | Fork | Emmy | Emmy against the fork |
+  | --- | ---: | ---: | ---: |
+  | First token, 1K | 0.43-0.47 s | 1.11-1.16 s | 2.5x slower |
+  | First token, 8K | 1.38-1.53 s | 3.39-3.42 s | 2.3x slower |
+  | First token, 32K | 5.99-6.08 s | 13.1-13.2 s | 2.2x slower |
+  | First token, 130K | 26.3-26.5 s | 52.2-52.6 s | 2.0x slower |
+  | One request, 1K / 512, per token | 12.6-12.8 ms | 21.1-21.3 ms | 1.67x slower |
+  | 4 requests, 4K / 1K, total output | 174-176 tok/s (20.3-20.5 ms) | 110-113 tok/s (30.3-30.9 ms) | 0.64x |
+  | 8 requests, 4K / 1K, total output | 278-282 tok/s (25.0-25.4 ms) | 162-165 tok/s (42.0-42.5 ms) | 0.58x |
+  | Four replicas, 32 requests through the load balancer | 742-894 tok/s | 459-530 tok/s | 0.68x (medians) |
+  | Step 2's worst-case loads with 3 GiB held per card | serves, 0.4-0.6 GiB spare | out of memory | fails |
+  | Boot | 419-465 s | 2,091-2,173 s | about 5x |
+
+  - The fork's rows reproduce step 2's baseline; its four-replica row is as noisy as there (775-811 and 808-863 tok/s
+    before). Emmy's first-token and bench rounds ran on two boots that agree, so no cubin diff was needed.
+  - Memory: with 3 GiB held per card, Emmy served the full-context prompt and then ran out of memory on the four 32K
+    prompts, on a 218 MiB allocation in the fork's per-layer-embedding short convolution during prefill, with Emmy
+    holding 28.3 GiB per card. With nothing held, Emmy serves every load; three cards peak at 29.6 GiB, and one sits at
+    32.2 GiB (0.5 GiB spare) for the whole run. Why one rank holds 2.6 GiB more is not established.
+  - Boot: about 36 minutes on every boot, cold or warm. Three greedy resolves of 400-530 s each run every time, and
+    the 1.2 MB kernel cache does not shorten them.
+  - Emmy's log reports decode-shaped steps of 10-16 tokens that miss the decode twin (width 8) and fall to the
+    symbolic path, and post8 at 12-13x its roofline floor (0.31-0.36 ms).
+  - For the next run: `vllm bench serve` with `HF_HUB_OFFLINE` needs the tokenizer's snapshot path (the cache has no
+    `main` ref), and a boot's time is best read from the log's timestamps, not from when polling started.
+- **Memory round (2026-11-03), item 3 part 1.** Measured per rank by PyTorch's allocation history with the Python
+  call site of every block, beside each process's device memory, on boots of both sides without the margin running
+  step 2's worst-case loads. At its peak (the four 32K prompts) Emmy held 26.5 GiB live per rank against the fork's
+  25.5 (its peak is the 64K prefill). Memory outside PyTorch is 1.35 GiB on both sides.
+
+  | Per rank, GiB | Fork | Emmy |
+  | --- | ---: | ---: |
+  | Routed experts | 17.64 | 16.13 |
+  | Dense weights: pre and post, routers, hosted attention and Gated DeltaNet | 2.88 | 3.16 |
+  | Token embedding and output head | 0.59 | 1.48 |
+  | Emmy's program buffers | | 1.04 |
+  | Other (rotary cache, small buffers) | 0.19 | 0.19 |
+  | Key/value pool | 2.50 | 2.50 |
+  | Prefill transients at the peak | 1.59 | 1.81 |
+
+  - The fork keeps a quarter of the token-embedding table and of the output head per rank; Emmy held the whole
+    table on every card (1.19 GiB). Of Emmy's buffers, 0.34 GiB was a dead copy of one layer's experts: the
+    fixed-slot programs' arena kept the build-time backing after every layer pointed its program at its own
+    tensors. Emmy's dense weights are 0.28 GiB more because every rank holds the shared expert whole (0.44 GiB),
+    where the fork holds a quarter (0.11 GiB); both hold the mixers whole (this note first named the mixers). The
+    fork's experts are 1.5 GiB more because it keeps packed copies.
+  - The 2.6 GiB extra on one card in the done gate's run is PyTorch's cache of freed blocks, which it gives back
+    under pressure: live memory is the same on all four ranks at every snapshot, and with the margin held all four
+    ranks failed at the same 28.3 GiB.
+  - Fix: the table stays in pinned host memory and every row is read in place over the link (`SERVE_EMBED_GPU=0`;
+    its gather is the golden's `embed-sym` twin, 7.2 us at one row), and each layer's fixed-slot program is built
+    over the layer's own expert tensors. Weights and buffers after load go from 21.99 to 20.51 GiB per rank, the
+    peak from 26.55 to 25.07 GiB, below the fork's 25.47. Reading the table over the link costs 7 ms per 4,096-token
+    prefill chunk (about 0.4% of a prefill) and 9 us per decode step.
+  - Found on the first fixed boot: the table's device view was a tensor on device 0, so ranks 1 to 3 each opened a
+    CUDA context on rank 0's card (0.06-0.3 GiB each). The view now sits on the rank's own device.
+  - Gate: `margin.sh` with 3 GiB held on every card passes all of step 2's worst-case loads, with no out-of-memory
+    and three to nine cache releases per rank. Two boots give the same text, 16 of 16, and the same text as the
+    step 4 gate's boots, so the fix changes no numerics.
+- **Decode round (2026-11-03), item 3 part 2.** Profile of one decode step at one request after part 1, rank 0, GPU
+  time per step by phase in ms (`dbg/phases.py`, kernels sorted by the layer cycle they sit in); the fork's busy time
+  is 10.2 ms, Emmy's 17.6 ms:
+
+  | Phase | Fork | Emmy |
+  | --- | ---: | ---: |
+  | Pre and post: hyper-connection mixing, norms, shared expert | 2.8, of it 1.5 push exchanges | 8.0 (pre8 2.3, post8 5.7) |
+  | Routers and their top-k | 0.9 | 1.0 |
+  | Routed experts | 1.1 | 1.4 (fixed slots) |
+  | Glue between programs: copies, casts, the routed combine and placement | 0.5 | 2.5 |
+  | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 3.4 | 3.5 |
+  | All-reduces of the layer outputs | 0.7 | 0.7 |
+
+  - Per layer Emmy runs 315 us in 48 kernels, the fork 164 us in 25. Post8 is 74 us over the fork's matching work:
+    its four big matmuls are 8-row tiles of 14-18 us each, where the fork reads its quarter of the shared expert
+    with GEMVs in 6-10 us and splits the mixer's work across ranks (6 us for its 80 down rows, a 3-5 us push
+    all-gather, 7 us for its 640 mixed columns with the second gather inside), and its 13 small pieces take 47 us.
+    Pre8 is 29 us over, and its fused mixer costs what post8's cut one does (48 us per site either way). Neither
+    has a lever that fits one round: the matmuls sit at the latency floor their tiles reached in the earlier tunes,
+    and splitting the mixers puts two exchanges inside pre and post, which makes pre two programs and post three
+    and re-records their decode twins.
+  - The round took the glue: a hyper-connection layer's routed placement now writes into the next layer's decode
+    input (also that layer's post residual) and a hosted Gated DeltaNet layer writes into its post twin's input,
+    so 2.7 copies per layer drop out (128 kernels and 0.24 ms of copies per step). Each rank's own GPU work fell
+    by 0.2 ms per step, but the all-reduces now wait about as much longer for the slowest rank. A/B of the two
+    boots in A B B A order: one request 22.14 -> 22.03 ms per token (within noise), eight requests 150.0 -> 152.8
+    tok/s total output (+1.8%, every pair the same way). Same text as before the round, 16 of 16; GSM8K 126 of 128
+    with none at the cap, acceptance cases 27 of 28 in each mode.
+  - What is left, largest first: the bytes pre and post read per rank, since the fork reads a quarter of the shared
+    expert and of each mixer's weights (planned under "Next (2026-11-03)"); fewer post8 kernels, which needs the
+    compiler to fold a split-K finalize into its consumer; and at eight requests the fixed-slot tier runs the
+    experts one row at a time. A 1-row tier, first listed here because the fork's GEMVs seemed to read at about
+    680 GB/s against the 8-row tiles' 380, has no support: that rate assumed the fork reads the whole shared expert,
+    and per byte Emmy's tiles read faster.
+  - Done gate's decode points re-measured after both parts, the final tree against a fresh fork boot, rounds fork,
+    Emmy, Emmy, fork, three repeats each after a priming one. Both still fail:
+
+    | Point | Fork | Emmy, first run | Emmy now |
+    | --- | ---: | ---: | ---: |
+    | One request, 1K / 512, per token | 12.66-12.84 ms | 21.1-21.3 ms | 20.99-21.12 ms (1.65x slower) |
+    | 8 requests, 4K / 1K, total output | 279.8-282.3 tok/s | 162-165 tok/s | 162.8-164.9 tok/s (0.58x) |
+    | Step 2's worst-case loads with 3 GiB held per card | passes | out of memory | passes |
+
+  - For the next run: a server profiled once (`/start_profile`) stays about 5% slower (22.3 against 21.2 ms per
+    token on the same tree, and the fork 14.1 against 12.8), so profile on one boot and measure on another; the
+    round's A/B used two profiled boots, which keeps its comparison fair.
+- **Next (2026-11-03): pre and post across ranks.** Pre and post are the largest decode gap (8.0 against 2.8 ms per
+  step at one request), and the fork's lead there is that each rank reads a quarter of the bytes. Its allocations and
+  source show how: it slices the shared expert four ways, as vLLM's Qwen3-Next block does (1.6 and 0.8 MB per layer
+  per rank, against Emmy's 6.6 and 3.3), and adds that partial output into the routed experts' all-reduce; and it
+  keeps the mixers' weights whole on every rank but splits their decode work: each rank computes 80 of the 320 down
+  rows and 640 of the 2,560 mixed columns, with a push all-gather after each, 18-23 us per site against Emmy's 48.
+  Two parts, each its own pull request, boot and A/B, in this order:
+  1. **Slice the shared expert across ranks**, at every width, the way the routed experts are sliced. `post` returns
+     the shared expert's partial output instead of placing it in the streams; the runner adds it into the routed
+     partial before the all-reduce it already runs, and the placement injects the sum. No new exchange. Expected:
+     about 1 ms per decode step at one and at eight requests (post8's two shared-expert matmuls take about 37 us per
+     layer whole), 0.33 GiB less per rank, and a slightly faster prefill. The post twins are re-recorded at every
+     width; pre is untouched. The sum order changes to the fork's (four partial sums, then the all-reduce), so the
+     text may move at near-ties: two boots must agree, and the agreement with the fork and the accuracy sets are
+     checked as in step 4.
+  2. **Split the mixers' decode work across ranks**, in the decode twins only; prefill keeps the whole weights, as
+     the fork does. Pre becomes two programs (the norm and this rank's 80 down rows; then this rank's 640 columns of
+     the up projection and the mix) and post three (the attention site's injection, then the same two for the MLP
+     site with its injection weights; then part 1's shared expert). Each of the four exchanges per layer is the group
+     all-reduce over a zeroed buffer whose own slice the program writes: exact, as a gather is, and captured as the
+     routed reduce is. The down rows are a view of the whole weight; the up projection's rank slice is a copy
+     (0.15 GiB per rank). Expected: a site from 48 to about 30 us if an exchange costs what Emmy's all-reduces cost
+     now (6-7 us with the wait for the slowest rank), about 1.7 ms per step. **Gate before the loader, runner and
+     golden work:** trace the split decode twins, bench them cold on the card, add the measured exchange cost, and go
+     on only if a site comes out at least 10 us faster (about 1 ms per step); otherwise stop and report.
+  - Both together would take one request from about 21 to about 18.5 ms per token (the fork 12.7) and give about 5%
+    more total output at eight requests. After each part: in-boot or side-by-side A/B on boots never profiled, the
+    margin test, two boots with the same text, GSM8K and the acceptance cases; one profiled boot for the phase table.
+  - Risks: four more barriers per layer, each waiting for the slowest rank (the fork's exchanges take 1.5 ms of its
+    step); moving pre8's and post8's weights to other programs can re-settle the wide twins' layouts, so check the
+    audit's layout lines, re-record the wide twins if they move, and re-measure first tokens then.
+  - What it leaves: post8's 13 small pieces (about 2.3 ms per step), and at eight requests the fixed-slot tier's one
+    row at a time, which no profile at eight requests has measured yet.
+- **Part 1, the shared expert across ranks (2026-11-04).** Qwen4Exp's `post` returns the gated shared expert's output
+  apart, each rank holds a quarter of its intermediate axis (160 of 640), and the runner adds it to the routed partial
+  ahead of the all-reduce it already ran. The three post twins trace a new program, so the golden's post routes were
+  moved onto the new kernels where a piece's content did not change (a one-off migration matching each seam by the
+  piece it cuts off), and the shared expert's new pieces were tuned and recorded cold on the V100 SXM3. The release
+  audit deploys all 13 twins from the golden alone.
+  - Isolated cold totals, old to new: post8 184.3 to 165.9 us, post4096 4,504 to 3,986 us, post-sym at 512 tokens
+    1,369 to 907 us. The wide twins' down projection needed tensor-core rows the tune's prior did not offer (14.1 ms
+    to 125 us at 4096 tokens), named with `--ab` from the card's offered schedules.
+  - A B B A on two boots never profiled, main against the branch: one request 1K / 512, 21.17 to 20.61 ms per token
+    (every pair the same way); eight requests 4K / 1K, 162.2 to 166.8 tok/s total output, 42.6 to 41.3 ms per token;
+    first tokens unchanged. The plan expected about 1 ms per step at one request.
+  - One profiled boot, GPU time per decode step at one request (the 2026-11-03 profile, then this one): busy 17.5 to
+    16.6 ms; post8 5.66 to 4.86 ms; exchanges 0.88 to 0.64 ms; elementwise 2.41 to 2.59 ms. The rise is the shared
+    add ahead of the all-reduce, one launch per layer (0.17 ms); folding it into the routed combine's matmul would
+    take it back, at one more rounding change.
+  - Weights 0.33 GiB less per rank (from the shapes). The margin test passes: with 3 GiB held per card every
+    worst-case load of step 2 completes and the server keeps serving.
+  - The sum order changed as planned: two branch boots give the same 16 of 16 free texts, and the branch keeps 7 of
+    16 of the 2026-11-03 boots; where it differs from main, both had already left the fork at the same token. GSM8K
+    124 of 128 (2 at the output limit; 126 before, the reference 125), acceptance cases 27 to 28 of 28 in each mode,
+    long-document codes 387 of 387 and 383 of 384 (the reference).
+- **Part 2, the mixers' decode work split (2026-11-05): stopped at its gate.** One rank's split pre was traced in the
+  deployed pre8's cuts (the norm statistics, the rank's 80 down rows, its 2,560 up rows, its 640 mixed columns) and
+  benched cold on the V100 SXM3: 39.0 us, plus two exchanges at 6.65 us each (their serving average, the wait for the
+  slowest rank included), 52.3 against pre8's 62.5 us. That is 10.2 us faster cold, at the bar; scaled piece by piece
+  to the serving times of the 2026-11-04 profile (pre8 48.6 us there), about 6.7 us, below it. The loader, runner and
+  golden work did not start. The weak piece was the down rows: 80 rows at about 13.5 us in serving terms against the
+  fork's 6, under schedules that read each weight row once per token.
+- **Pre8's down rows split across blocks (2026-11-05).** Post8's down projection already ran as a cross-CTA split
+  with tensor-core tiles over the eight tokens (17.2 us plus a 2.8 us finalize in that profile), while pre8's split
+  had never been measured and its down rows ran unsplit at 28.9 us. The golden now records the split for pre8: the
+  10,240-long sum in 64 slices, a tensor-core partial per slice (19.5 us cold) and a finalize (8.2 us), against 37.9 us
+  unsplit. Pre8 goes from 68.6 to 56.3 us cold, a strict compile from the golden alone picks it, and the release audit
+  deploys all 13 twins. No compiler change.
+  - A B B A on two boots never profiled, main against the branch: one request 1K / 512, 20.86 to 20.07 ms per token
+    (every pair the same way); eight requests 4K / 1K, 165.6 to 168.6 tok/s total output, 41.7 to 40.9 ms per token;
+    first tokens unchanged.
+  - The sum order changed: 4 of 6 free texts match main, the other two part after about 370 characters. GSM8K 124
+    of 128 (none at the output limit), acceptance cases 27 to 28 of 28 in each mode, long-document codes 387 of 387
+    and 384 of 384.
+  - Not run: the margin test (no weight moved; the split's state buffer is under 1 MB), a second branch boot (the
+    finalize sums the 64 states in a fixed order), a profiled boot.
+- **Measurement round (2026-11-07): first token and eight requests.** Main `cc38c02d2` against the step 3 fork image,
+  step 2's shape on both sides. One profiled boot per side gives the phase splits: rank 0's GPU time per phase, where
+  an all-reduce counts only the fastest rank's kernel per call and the rest of rank 0's time in it is waiting. One
+  boot per side that was never profiled gives the numbers: first token at 4K random token ids 1.84-1.86 s against
+  the fork's 0.85-0.87 s; eight requests of 4K / 1K 166.7-168.4 tok/s against 269.5-278.9 tok/s (median gap between
+  tokens 36.2-36.5 against 23.1-24.0 ms). Emmy matches the #1326 A/B, so main serves as that branch did.
+  - First token at 4K, summed over its three steps (3,920, 175 and 1 tokens), ms:
+
+    | Phase | Fork | Emmy |
+    | --- | ---: | ---: |
+    | Routed experts, with their row gather, weighting and combine | 171 | 831 |
+    | Pre and post: hyper-connection mixers, norms, shared expert | 156 | 297 |
+    | Glue between programs: copies, casts, the routed placement, eager norms | 30 | 147 |
+    | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 207 | 195 |
+    | Router and its top-k | 14 | 15 |
+    | All-reduces | 33 | 34 |
+    | Token embedding and the n-gram embedding | 1 | 12 |
+    | GPU work | 612 | 1,530 |
+    | Host time, idle, and waiting for other ranks | about 245 | about 320 |
+
+  - Per step, from first tokens at 2, 176, 3,921 and 4,096 tokens: the 3,920-token step takes about 1.34 s on Emmy
+    and 0.64 s on the fork, and is GPU work on both. The 175-token step (0.36 against 0.17 s) and the 1-token step
+    (0.12 against 0.03 s) are host time on both: the GPU sits in all-reduces waiting for the slowest rank's host.
+  - In the 3,920-token step Emmy launches about 270 expert programs per layer, about 1,000 kernels, most of them at
+    the 256-row twin (about 206 real rows), each kernel under one full wave of the card. The fork runs three grouped
+    GEMMs and one finalize per layer. Emmy's expert kernels take 549 ms there, and their row gather, weighting and
+    combine another 109 ms, against the fork's 147 ms for all of it. The fork's small steps count their mixer,
+    shared-expert and router GEMMs under the projections (at most about 25 ms).
+  - Eight requests, one decode step, ms:
+
+    | Phase | Fork | Emmy |
+    | --- | ---: | ---: |
+    | Routed experts | 4.37 | 10.37 |
+    | Fixed slots, per row: selector copy, input upload, output copy, combine | in the row above | 5.03 |
+    | Pre and post | 5.76 | 6.99 |
+    | Router and its top-k | 1.17 | 1.21 |
+    | Glue between programs | 1.66 | 2.35 |
+    | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 6.83 | 7.32 |
+    | All-reduces | 0.70 | 0.97 |
+    | Embeddings and sampling | 0.19 | 0.20 |
+    | GPU busy | 20.67 | 34.45 |
+    | Host and idle: the never-profiled median gap minus GPU busy | 2.4-3.3 | 1.8-2.0 |
+
+  - The fixed-slot tier runs the experts one row at a time, as suspected: per layer it repeats the selector copy, the
+    input upload, the program's three kernels and the row's combine eight times, about 40 us per row and 320 us per
+    layer against the fork's 91. Its slot kernels cost 1.30 ms per row and step, against 1.41 ms at one request. At
+    eight requests the fork no longer splits the mixers' work across ranks, so its pre and post grow from 2.8 to
+    5.8 ms, while Emmy's stay at the 8-row twins' cost.
+  - The eight-request run: Emmy's 195 s are about 148 s of decode steps and 47 s of steps that carry a prompt chunk;
+    the fork's 118-122 s are about 95-98 and 23-24 (a gap above twice the median counts as a prompt step). Decode is two
+    thirds of the gap.
+  - The largest lever for eight requests: one launch set of the fixed-slot program over all eight rows' slots (80
+    expert slices) and one combine, in place of eight row passes; a step of one request keeps the 1-row program.
+    Expected 8.5-10 ms per decode step if that launch reads the slices at 400-550 GB/s (the fork reads its about 74
+    distinct experts at about 550; Emmy's row pass reads at about 250): total output from 168 to about 204-212 tok/s
+    (the fork 270-279).
+  - The largest lever for the first token: the prefill experts as one launch per tier over all its experts, with the
+    weighting and the sum in the same pass. Removing the per-kernel cost and the 256-row padding alone is worth about
+    0.2 s per 4,096-token chunk; the fork's rate would give about 0.65 s. First token at 4K from 1.85 s to 1.2-1.65 s,
+    the same per chunk at every length (6-16 s of the 26 s gap at 130K), and 3-9% more total output at eight requests.
+  - Proposed next round: the eight-row fixed slots. Its cost is measured exactly (the runner loops over the rows), it
+    is 11 of the 13.8 ms GPU gap per decode step at eight requests and helps four requests too, and it is a new width
+    of an existing program, not a new kernel shape. Gate it before the runner and golden work, as part 2 did: trace
+    the 8-row program, bench it cold on the card, and go on only if the experts and their dispatch come to 8 ms per
+    step or less (from 15.4). The prefill experts come after it.
+  - Not measured: the rate one launch over 80 slices reaches (the gate measures it); how often eight rows pick the
+    same expert in real routing (about 7% of picks if routing were random); the wait for the slowest rank under the
+    wider program; four requests; the mixed steps at eight requests (estimated from the gaps, not profiled). The
+    fork's 4K first token has three samples: the two runs after the 3,921-token prompts hit the prefix cache.
+  - Boot: Emmy took 23 minutes on this main (1,387-1,417 s), the fork 7.
+- **Eight rows through the fixed slots at once (2026-11-10).** Main `8dfe595a3`. On experts sliced across ranks the
+  runner now also builds the fixed-slot program at the decode bucket's width (the `expert-slots8` twin) and runs a
+  decode step of two to eight rows through it once, with one combine; a step of one row keeps the one-row program.
+  - Main could not boot this model first. #1365's restamp kept the timings of only 63 of the golden's 139 rows, so
+    12 of its 13 programs refused a strict compile, while `emmy golden check` still called the file current. The
+    fixed-slot program also no longer compiled at all: a cut piece placed each expert's global scale load above the
+    loop that loads the expert. #1377 fixes that placement and re-measures the 76 rows cold on the card (median
+    against their old timings 1.00); main with it serves eight requests at 168.1-168.3 tok/s, as on 2026-11-07.
+  - Gate: the eight-row program, cut like the one-row program (the gate/up product, then the activation) under the
+    one-row program's tuned schedules, took 141 us per layer cold, about 7.4 ms per step with one dispatch per layer
+    against the 8 ms bar. Recorded at 89.6 + 8.2 + 45.1 us; a 40-row tune of each matmul piece and a sweep of their
+    neighbours found nothing faster. The pieces read the 80 slices at about 410 GB/s cold.
+  - A B B A on boots never profiled, main against the branch: eight requests 4K / 1K, 168.1 and 168.3 against 192.3
+    and 193.6 tok/s total output (+15%), median gap between tokens 36.2-36.3 against 30.0 ms. One request 1K / 512:
+    the first pair read 20.02-20.12 against 20.23-20.74 ms per token, a second pair on other boots 20.20-20.39
+    against 20.15-20.29; the boots compiled the same kernels but the three new ones, so one request is unchanged.
+    The done bar for this round, 200 tok/s, is not reached.
+  - One profiled boot, rank 0, one decode step at eight requests, against the 2026-11-07 profile: the routed experts
+    5.93 ms (10.37), their dispatch 0.48 ms (5.03), GPU busy 25.5 ms (34.5), 2,961 kernels (5,361). The experts and
+    their dispatch came to 6.4 ms, under the gate's 8. The step lost only 6.2 of the 9 ms because the profiles
+    over-read the saving: the profiled busy time fell 8.95 ms, the GPU time per step measured without the profiler
+    6.8 ms (the host time note below). Profiled step times flatter a step with fewer kernels, so read gains from
+    unprofiled boots.
+  - Correctness: two branch boots give the same text one request at a time, 6 of 6, and the same as main. Six
+    requests at once give the same text on two branch boots for 5 of 6; batching changes the text against the same
+    prompt alone on main too (4 of 6 identical alone and batched, the branch 3 of 6), and whether batched text varies
+    between two main boots is not measured. GSM8K 124 of 128 with none at the output limit, acceptance cases 26 to 28
+    of 28 in each mode, long-document lookups 339 of 339 and 335 of 336. The margin test passes: with 3 GiB held per
+    card every worst-case load of step 2 completes, the busiest card peaking at 32,178 of 32,768 MiB. The release
+    audit deploys all 14 twins from the golden alone.
+  - Not measured: how often eight rows share an expert in real routing (each row reads its own ten slices); the wait
+    for the slowest rank under the wider program (rank 0 waited about 0.2 ms per step in its all-reduces); four
+    requests.
+- **Host time of a decode step (2026-11-11).** #1378's tree, main with #1377 and the step 3 fork image, on boots never
+  profiled. py-spy samples the engine core and all four workers without pausing them; the sampled runs read within
+  1% of unsampled ones. The torch profiler cannot measure this: it slows the host's Python 2-3x and Emmy's CUDA graph
+  launch call 4x. Per decode step, ms, the range over the four ranks:
+
+  | Per decode step, ms | Fork, 8 requests | Emmy main, 8 | Emmy #1378, 8 | Fork, 1 request | Emmy #1378, 1 |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | Step, mean gap between tokens | 24.0 | 36.5 | 29.7 | 12.9 | 20.2 |
+  | GPU time: from the graph launch call to the sampled tokens on the host | 20.2-20.6 | 32.6-33.1 | 26.0-26.3 | 9.8-10.0 | 16.7-17.0 |
+  | of it, the graph launch call itself | 0.03-0.09 | 3.6-3.8 | 1.5-2.0 | 0.01 or less | 1.3-1.9 |
+  | Host time with nothing queued on the GPU | 3.4-3.8 | 3.4-3.9 | 3.4-3.7 | 3.0-3.1 | 3.2-3.5 |
+  | of it, attention metadata (Gated DeltaNet 0.8-1.0) | 1.7-2.0 | 1.7-1.8 | 1.6-1.9 | 1.7-2.0 | 1.7-1.9 |
+  | of it, input preparation with the n-gram context | 0.6-0.8 | 0.6-0.9 | 0.5-0.9 | 0.5-0.6 | 0.7-0.8 |
+  | of it, the engine core's scheduling and the step's messages | 0.5-0.7 | 0.4-0.9 | 0.5-0.9 | 0.1-0.5 | 0.2-0.7 |
+
+  - The host time with nothing queued on the GPU is 3.0-3.9 ms on every server, and it is the same code: the fork's
+    vLLM builds the metadata of the Gated DeltaNet, short-convolution, Mamba and sparse-attention layers, prepares the
+    inputs, and the engine core schedules the next step. Emmy adds nothing there. Its one extra host cost is the
+    graph launch call, and the GPU works during it: inside Emmy's graph the GPU idles under 0.01 ms per step, even in
+    the profiled trace where the call took 8.5 ms. Why Emmy's graph costs about 0.6 us per kernel to launch and the
+    fork's almost nothing is not established.
+  - Main and #1378 spend the same host time, so the eight-row round did not leave the GPU waiting on the host. The
+    unprofiled gap between tokens minus the profiled GPU busy time is not host time: the profiler changes both.
+  - So the gap left is GPU work: 26.0-26.3 against 20.2-20.6 ms per step at eight requests, 16.7-17.0 against
+    9.8-10.0 at one. The profiled split at eight requests, #1378 against the fork: routed experts and their dispatch
+    6.4 against 4.4 ms, pre and post 7.0 against 5.8, glue 2.4 against 1.7, the hosted dense matmuls 4.3 against 3.6.
+  - Async scheduling hides the host time behind the previous step's GPU work. Both sides run with it off, as the fork's
+    release-notes example for this model does; that example serves MTP to one sequence, and with MTP off the fork's vLLM
+    turns it on by default. Measured with it on, boots never profiled; the fork's synchronous rows from the same day,
+    Emmy's from the A/B above:
+
+    | Point | Fork | Fork, async | Emmy #1378 | Emmy #1378, async |
+    | --- | ---: | ---: | ---: | ---: |
+    | One request 1K / 512, per token | 12.8-13.1 ms | 9.61-9.62 ms | 20.3-20.7 ms | 16.68-16.69 ms |
+    | 8 requests 4K / 1K, total output | 275-277 tok/s | 315-317 tok/s | 192-194 tok/s | 212-216 tok/s |
+    | 8 requests, median gap between tokens | 23.6 ms | 19.9 ms | 30.0 ms | 25.9 ms |
+    | 8 requests, mean first token | 3.4-3.5 s | 3.8-4.0 s | 6.7-6.8 s | 7.6-8.1 s |
+
+  - It takes 3.3-4.1 ms from every step on both sides, so it does not close the gap: at eight requests Emmy goes from
+    0.70 to 0.68 of the fork's output, at one request from 1.6x to 1.7x its time per token. The first token at eight
+    requests gets slower on both. Emmy's text does not change with it: one request at a time 6 of 6 against both #1378
+    boots, six at once 4 of 6 (two synchronous boots agree on 5). The fork's does: 4 of 6 one at a time and 3 of 6 six
+    at once, against two synchronous boots that agree 6 of 6.
+  - Proposed next round: async scheduling in step 2's production shape, on both sides. It is one flag, measured above at
+    10-12% more output at eight requests and 18% less time per token at one for Emmy, 14% and 25% for the fork, and it
+    would also speed up an earlier release on the plain fork. It is the owner's call, because it moves the done gate's
+    fork baseline to the faster rows, and it needs step 2's checks on the fork (accuracy sets, four replicas, the margin
+    test, why its text changes) and step 4's on Emmy. The parity rounds do not change: Emmy has no host lever left, and
+    the next one stays the prefill experts, then the routed experts at eight requests (80 slices at about 410 GB/s,
+    against the fork's about 74 experts at about 550).
+  - Not measured: first tokens at 8K, 32K and the full context with async scheduling; four requests.
+- **Async scheduling on both sides (2026-11-11).** The owner took the proposal above. Main `488f9f0da` with
+  `--no-async-scheduling` dropped from the recipe, against the step 3 fork image in the same shape; every number from
+  boots never profiled. On this main every program of the recipe golden compiles strict from the golden alone,
+  GPU-free, with no row missing its timings, and the release audit on the card deploys all 14 twins from it.
+  - Why the fork's text changed: two causes, neither a defect. One at a time, async does not change the fork's
+    numerics: with its warm-up tune off (`VLLM_SM70_NVFP4_TUNE_SMALL_SHAPES=0`) two async boots give the synchronous
+    boots' text on 6 of 6 prompts. With the tune on, as the fork serves, the tune picks small-shape kernels by timing
+    at every boot, so the text varies by boot: two async boots agree on 3 of 6, and one of them gives the synchronous
+    text on all 6. Six requests at once, async lets the steps the requests share vary from run to run, so the batched
+    text varies even between two runs on one tune-off boot (3 of 6). At every divergence, by boot or by batch, the
+    two candidate tokens sit 0.016-0.11 apart in log-probability, near-ties.
+  - Fork checks: GSM8K 124 of 128, none at the output limit; acceptance cases 27 of 28 in all six runs; long-document
+    lookups 339 of 339 without thinking and 336 of 336 with it. The margin test passes: with 3 GiB held per card every
+    worst-case load completes and the server keeps serving, with 338-398 MiB spare per card (0.4-0.6 GiB
+    synchronous). Four replicas: step 2's baseline with async.
+  - Emmy checks: two boots give the same text, 6 of 6 one at a time and 6 of 6 six at once, as the earlier async boot
+    above; GSM8K 125 of 128 (2 at the output limit); acceptance cases 27, 27, 27 without thinking and 28, 27, 27 with
+    it. The margin test passes, 538-540 MiB spare per card. Long-document lookups were not run.
+  - Async doubles the first token at the full context, on both sides. Its prefill is preempted twice and recomputed
+    from the start: the engine's preemption count grows by 2 per 130K prompt on both sides and by none on any other
+    row, and the prefix cache serves none of it again. At 64K and 96K tokens the two modes take the same time (12.4-12.8
+    and 19.2-19.9 s on the fork) with no preemption; at 130K the synchronous fork takes 26.1 s and the async one
+    47.9-51.1 s. With the key/value pool raised from 2.5 to 3 GiB per card (194,016 to 232,523 tokens) the async fork
+    takes 26.1 s with no preemption, so async needs a larger pool than synchronous scheduling for a full-context
+    prompt; why is not established. The larger pool would come out of the 3 GiB margin, where the async fork keeps
+    only 338-398 MiB. **The owner kept the 2.5 GiB pool (2026-11-13), so this is a known limit:** it slows both sides
+    alike, full-context prompts are rare, and Emmy's 83 s first token at 130K is under Relay's 290 s.
+  - The step 3 image's baked caches miss under async: the flag is part of vLLM's compile key, so every fork boot
+    compiles its graphs again, 421-464 s against 303 s. Before a release the image needs a bake in the async shape.
+    Emmy boots in 1,048-1,055 s.
+  - The done gate against the async fork. Fresh boots of both sides, rounds fork, Emmy, Emmy, fork; first tokens on
+    random token ids (the first of four runs primes), the rest by `vllm bench serve` (one priming run, then three); a
+    range is both rounds' repeats. Every point still fails:
+
+    | Point | Fork | Emmy | Emmy against the fork |
+    | --- | ---: | ---: | ---: |
+    | First token, 1K | 0.43-0.44 s | 1.05-1.10 s | 2.5x slower |
+    | First token, 8K | 1.46-1.51 s | 3.28-3.33 s | 2.2x slower |
+    | First token, 32K | 5.94-6.01 s | 12.69-12.87 s | 2.1x slower |
+    | First token, 130K | 50.9-53.0 s | 93.4-96.4 s | 1.8x slower |
+    | One request, 1K / 512, per token | 9.60-9.62 ms | 16.69-16.71 ms | 1.74x slower |
+    | 4 requests, 4K / 1K, total output | 201.6-203.3 tok/s (17.2-17.3 ms) | 129.8-131.3 tok/s (25.3-25.5 ms) | 0.64x |
+    | 8 requests, 4K / 1K, total output | 311.3-317.3 tok/s (21.3-21.7 ms) | 214.6-215.6 tok/s (29.6-29.7 ms) | 0.68x |
+    | Step 2's worst-case loads with 3 GiB held per card | passes | passes | |
+    | Boot | 421-464 s | 1,048-1,055 s | 2.4x |
+
+  - Against the synchronous rows: the fork from 12.7-13.1 to 9.6 ms per token at one request and from 275-282 to
+    311-317 tok/s at eight; Emmy (#1378) from 20.0-20.7 to 16.7 ms and from 192-194 to 215 tok/s. First tokens up
+    to 32K are unchanged on both sides.
+  - Method change: every bench row now has its own seeds, and the first-token prompts differ by length. `vllm bench`'s
+    random prompts are runs of consecutive token ids from a seeded offset, so with one seed for every row the first
+    4K prompts began with the 1K row's tokens and the eight-request row repeated the four-request row's prompts.
+  - Next: the prefill experts in one launch per group, the round proposed on 2026-11-07, then the routed experts at
+    eight requests.
+- **Prefill experts 32 at a time (2026-11-12).** On top of async scheduling. A 3,920-token step ran about 180
+  routed experts per layer, each its own launch set of five kernels well under one wave of the card: 512 ms of the
+  step on rank 0. On experts sliced across ranks the runner now runs every expert routed more rows than the decode
+  bucket through one grouped program, 32 experts per launch, each against blocks of 256 of its rows (the twin
+  `expert-group32x256@nvfp4`); the experts with fewer rows keep their tiers.
+  - The program takes the per-expert route's four cuts: each launch decodes its 32 experts' NVFP4 weights once
+    (78 MB of fp16 per rank, the launch's transient), then runs the gate/up and down products as tensor-core tiles
+    over all 32 experts. Gate: 32 experts of 256 rows took 710 us cold under the prior's schedules, against about
+    2.7 ms one expert at a time; with the two products tuned (40 rows each: gate/up 406 to 252 us, down 222 to
+    210 us) it is 646 us, and that is what the golden records.
+  - A B B A on boots never profiled, #1385 against the branch, rounds' repeats 1-3:
+
+    | Point | #1385 | This round |
+    | --- | ---: | ---: |
+    | First token, 1K | 1.09-1.15 s | 0.91-0.93 s |
+    | First token, 4K | 1.82-1.84 s | 1.59-1.63 s |
+    | First token, 8K | 3.30-3.33 s | 2.78-2.80 s |
+    | First token, 32K | 12.84-12.90 s | 10.58-11.33 s |
+    | First token, 130K | 93.9-96.9 s | 82.0-84.9 s |
+    | One request, 1K / 512, per token | 16.70 ms | 16.70 ms |
+    | 8 requests, 4K / 1K, total output | 214.0, 214.3 tok/s | 225.9, 223.9 tok/s |
+    | 8 requests, mean first token | 7.8 s | 6.4-6.6 s |
+
+  - About 0.25 s less per 4,096-token chunk, as the gate estimated. Against the async fork the first token is now
+    1.6-2.1x slower (2.0-2.5x before) and eight requests give 0.71x its output (0.68x). The branch's second 32K
+    round rose run by run (10.89 to 11.33 s); the cause is not established.
+  - The grouped kernels sum each product in the same order as the per-expert ones: first-token log-probabilities at
+    2K, 4K, 8K and 32K tokens are identical to #1385's, and so is the text, 6 of 6 one at a time and six at once.
+    GSM8K 125 of 128 (2 at the output limit, as #1385), acceptance cases 27, 28, 27 without thinking and 27, 27, 27
+    with it, long-document lookups 339 of 339 without thinking (the run with thinking was stopped: the numerics
+    are #1385's). The margin test passes with 586 MiB spare per card. The release audit deploys all 15 twins from
+    the golden alone. Boot 1,088-1,111 s.
+  - Next: the experts at eight requests (80 slices at about 410 GB/s, against the fork's about 74 experts at about
+    550), and the experts of up to eight rows in a prefill step, which still run one launch set each.
+- **Measurement round (2026-11-13): one, four and eight requests, and a 4K first token, against the async fork.**
+  Main `496b915d5` (#1388 and #1394 in) against the step 3 fork image, both in step 2's shape with async scheduling.
+  Before any boot every program of the recipe golden compiled strict from the golden alone, GPU-free, with no row
+  missing its timings. One boot per side that was never profiled gives the numbers, rounds fork, Emmy, Emmy, fork, a
+  fresh seed per run; one profiled boot per side gives the phase splits: rank 0's GPU time per phase.
+
+  | Point | Fork | Emmy | Emmy against the fork |
+  | --- | ---: | ---: | --- |
+  | First token, 1K | 0.45-0.46 s | 0.96-1.00 s | 2.2x slower |
+  | First token, 4K | 0.85-0.87 s | 1.57-1.62 s | 1.9x slower |
+  | One request, 1K / 512, per token | 9.59-9.60 ms | 16.69 ms | 1.74x slower |
+  | 4 requests, 4K / 1K, total output | 201.7-203.2 tok/s (17.3 ms) | 135.0-136.0 tok/s (25.0-25.2 ms) | 0.67x |
+  | 8 requests, 4K / 1K, total output | 315.6-317.9 tok/s (21.5-21.7 ms) | 227.5-228.7 tok/s (28.7-28.8 ms) | 0.72x |
+
+  - Four requests: 135.0-136.0 tok/s in four runs against 129.8-131.3 in #1385's gate, before the prefill round:
+    +4%, as expected from #1388, which changed only the steps that carry a prompt. The fork reproduces its
+    201.6-203.3.
+  - Both sides are GPU-bound at every decode point (py-spy, nonblocking, 250 Hz): per step a worker does 3.3-4.1 ms
+    of host work on the fork and 5.2-7.0 ms on Emmy (its graph launch call 1.8-2.3 ms of it) and waits the rest, and
+    rank 0's output thread waits on the GPU for 98-99% of the step. So the gap between tokens is GPU time.
+  - Decode steps are three quarters of the four-request run's gap (99 of Emmy's 121 s against 69 of the fork's
+    81 s) and 56% of the eight-request run's (104 of 144 s against 81 of 104 s); the rest is steps that carry a
+    prompt chunk and the wait for first tokens.
+  - Decode, GPU time per step by phase, profiled, rank 0, ms; the step is the median gap between tokens of the
+    never-profiled boots:
+
+    | Per decode step, ms | Fork, 1 | Emmy, 1 | Fork, 4 | Emmy, 4 | Fork, 8 | Emmy, 8 |
+    | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | Pre and post: hyper-connection mixers, norms, shared expert | 3.41 | 7.02 | 5.50 | 7.05 | 5.89 | 7.35 |
+    | Router and its top-k | 0.80 | 0.97 | 1.16 | 1.20 | 1.19 | 1.25 |
+    | Routed experts, with their dispatch | 1.15 | 2.33 | 2.52 | 6.37 | 4.46 | 6.61 |
+    | Glue between programs | 0.62 | 1.81 | 1.59 | 2.28 | 1.69 | 2.56 |
+    | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 3.39 | 3.66 | 5.90 | 6.43 | 6.98 | 7.63 |
+    | All-reduces (of it, the wait at the step's first) | 0.63 (0.12) | 2.11 (1.56) | 1.00 (0.13) | 0.72 (0.06) | 0.69 (0.01) | 0.76 (0.05) |
+    | Embeddings and sampling | 0.04 | 0.04 | 0.15 | 0.16 | 0.19 | 0.22 |
+    | GPU busy | 10.04 | 17.94 | 17.81 | 24.19 | 21.09 | 26.37 |
+    | Kernels | 1,434 | 2,725 | 2,054 | 2,961 | 2,054 | 2,961 |
+    | Step, never profiled | 9.6 | 16.7 | 16.9 | 24.4 | 20.0 | 25.5 |
+
+  - The split adds up. Busy time less the wait at the step's first all-reduce is 16.4, 24.1 and 26.3 ms on Emmy
+    against its unprofiled 16.7, 24.4 and 25.5; the fork's 9.9, 17.7 and 21.1 against 9.6, 16.9 and 20.0 (its two
+    streams overlap, so its summed busy time reads high). The profiled gap per step, 6.5, 6.4 and 5.3 ms, is a little
+    under the unprofiled 7.1, 7.5 and 5.5.
+  - The 1.56 ms wait at one request is the profiler: on Emmy's profiled boot three ranks wait for the fourth at the
+    step's first all-reduce, and the fourth runs every kernel as fast as they do and idles instead. The profiler
+    slows the host 2-3x and Emmy's graph launch call 4x, which brings Emmy's host near its GPU time at one request
+    only; unprofiled, Emmy's host is a third of the step on every rank.
+  - One request, 7.1 ms: pre and post 3.6. Pre8 runs 44 us per layer and post8 102 us in 19 kernels, 13 of them
+    pieces of 2-5 us (42 us per layer, 2.0 ms per step); the fork runs 19 us per mixer site, its work split across
+    ranks, and 25 us of shared expert. Glue 1.2: about 0.75 ms is the sparse-attention layers' query and key norms
+    and rope, about 22 eager kernels per layer (60-100 us) where the fork's compiled code runs three (8-9 us).
+    Experts 1.2: the fixed-slot program is 28 us per layer against the fork's 24, and its dispatch around it
+    (selector copy, row upload, cast, combine, shared add) about 18 us more. Router and hosted sublayers 0.4.
+  - Four requests, 7.5 ms: experts 3.9. The eight-row fixed-slot program costs 115 us per layer for four rows and
+    122 for eight, so a four-row step pays for eight; the fork's experts scale with the rows (53 us at four, 93 at
+    eight). Pre and post 1.6, glue 0.7, hosted sublayers 0.5.
+  - Eight requests, 5.5 ms: experts 2.2 (122 against 93 us per layer), pre and post 1.5, glue 0.9 (the
+    sparse-attention layers' eager norms alone are about 1.1 ms), hosted sublayers 0.65 (the same matmuls 5-10% slower
+    inside Emmy's step).
+  - First token at 4K: prefix caching splits it into steps of 3,920, 175 and 1 tokens on both sides. Step times from
+    the never-profiled first tokens at 2, 3,921 and 4,096 tokens:
+
+    | Step of a 4K first token | Fork | Emmy |
+    | --- | ---: | ---: |
+    | 3,920 tokens (3,921 less 2) | 0.59 s | 0.98 s |
+    | 175 tokens (4,096 less 3,921) | 0.18 s | 0.36 s |
+    | 1 token and the request (2 tokens) | 0.09 s | 0.27 s |
+    | First token at 4K | 0.86 s | 1.60 s |
+
+  - The 3,920-token step, GPU time by phase, profiled, rank 0, ms:
+
+    | Phase | Fork | Emmy |
+    | --- | ---: | ---: |
+    | Routed experts, with their row gather, weighting and sum | 152 | 458 |
+    | of it, experts above eight rows | 130, every expert in three grouped matmuls per layer | 230, nine grouped launches per layer |
+    | of it, experts of up to eight rows | (above) | 84, about 150 launch sets per layer |
+    | of it, the row gather, sort, weighting and sum | 22 | 142 |
+    | Pre and post: hyper-connection mixers, norms, shared expert | 152 | 264 |
+    | Glue between programs | 18 | 101 |
+    | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 155 | 159 |
+    | Router and its top-k | 13 | 13 |
+    | All-reduces (of it, waiting for other ranks) | 31 (1) | 40 (10) |
+    | Token embedding and the n-gram embedding | 1 | 13 |
+    | GPU busy | 521 | 1,049 |
+    | Kernels | 3,087 | 20,710 |
+
+  - The grouped launches carry about 38,300 rows per layer in 288 blocks of 256: about half their width is
+    padding, since an expert's rows fill whole blocks. Narrower blocks do not pay: each block decodes its expert's
+    weights again, and on #1388's gate split (the decode is about 28% of a launch) a 128-row block comes out about
+    even.
+  - The small steps are host time. Emmy's worker spends about 220 ms of host time per 2-token request, the fork's
+    about 2 ms: Emmy's step runs eager, about 120 ms in its pre, post and expert calls (of it 25 ms making buffer
+    views and 19 ms output prefixes) and about 74 ms in the hosted Gated DeltaNet and sparse attention, which the
+    fork replays in graphs. A 176-token request keeps Emmy's worker busy 444 ms against the fork's 232 ms (host work
+    and the waits for the GPU inside the step): 209 ms of it is the 175-token step's routed combine, of which 145 ms
+    launches about 105 expert runs per layer one at a time (86 ms in the runtime's per-expert calls). In the
+    profiled small steps the GPU works 231 against 78 ms (175 tokens) and 16 against 13 ms (1 token); the rest is
+    all-reduces waiting for the slowest rank's host.
+  - So the 0.74 s gap at 4K is the 3,920-token step 0.39 s (GPU: experts 306 of its 528 ms profiled gap, pre and
+    post 113, glue 83, embeddings 12), the 175-token step 0.18 s and the 1-token step 0.18 s. At 1K the gap is
+    0.52 s, the same 0.18 s of it in the 1-token step.
+  - The next rounds, largest expected gain in the done gate first:
+    1. **Prefill experts, second round** (twins and runner tiers, no compiler). Run the experts of up to eight rows
+       in grouped launches like the wider ones (a grouped twin over blocks of eight rows), and the weighting and the
+       sum in one pass over the slot-major outputs (a combine twin, the same sum order). Share: the routed experts are
+       306 of the 3,920-token step's 528 ms profiled gap, of it 84 ms in the small experts' launch sets and 120 ms in
+       the gather, weighting and sum beyond the fork's 22; and the 175-token step's host launches about 105 expert
+       runs per layer. Expected: about 0.1 s less per 4K chunk and about 0.1 s less in the 175-token step, so first
+       token 1K 0.98 to about 0.88 s, 4K 1.60 to about 1.4, 32K 10.9 to about 10.0, 130K 83 to about 75-80 (its
+       prefill runs up to three times under preemption); one request unchanged; four and eight requests 3-5% more
+       output, from the prompt steps. Unmeasured: the grouped small-expert program's time (at the eight-row
+       fixed-slot program's 410 GB/s, about 10 ms per step against 84); the one-pass combine's (its read floor is
+       about 0.25 ms per layer); how many small experts a 1K step has; how much of the host saving the 175-token step
+       keeps, since it also waits per layer for the expert counts.
+    2. **The fixed-slot program at the step's width** (twins and runner). Four- and two-row versions of the
+       eight-row program, picked by the step's rows. Share: 2.9 of the 7.5 ms gap at four requests. Expected: four
+       requests from 24.4 to about 21.8 ms per step, 135 to about 150 tok/s (0.67 to about 0.74x); one and eight
+       requests unchanged, and the steps of two to four rows in real traffic, which pay for eight rows now, gain.
+       Unmeasured: the narrower programs' cold times (expected about half, as the fork's experts scale).
+    3. **The sparse-attention layers' norms and rope fused** (runner). Share: about 0.75 ms of the one-request gap
+       (11%) and about 1.1 ms at eight requests. Expected: 0.7-1.0 ms less per decode step at every concurrency, one
+       request 16.7 to about 16.0 ms, four and eight requests about 4% more output; first tokens about the same.
+       Unmeasured: whether the runner can call the fork's compiled path as it is, and whether its rounding matches
+       (the text checks decide).
+    4. **The small prefill steps on the host** (runner, size not known). Share: 0.36 of the 0.74 s gap at 4K and at
+       least 0.18 of the 0.52 s at 1K. Expected: up to 0.18 s less per first token at every length if the 1-token step
+       replays a graph (1K 2.2x to about 1.8x), more if the 175-token step does too; steps that mix a prompt chunk
+       with decode rows at four and eight requests run eager as well. Caching the runner's buffer views and output
+       prefixes (about 45 ms per request) is the cheap part. Unmeasured: how vLLM can give a step holding a prompt
+       token a graph (it classes such a step as prefill), and the mixed steps' share.
+    5. **Post8's small pieces folded** (compiler: a split-K finalize folded into its consumer). Share: 2.0 ms per
+       step at every concurrency, 28% of the one-request gap. Expected: up to 1.5 ms less per decode step, one request
+       16.7 to about 15.2 ms, four and eight requests about 6% more output. Unmeasured: how much of the 42 us per
+       layer a fold keeps.
+    6. **The one-row expert dispatch** (runner). Share: about 0.85 ms of the one-request gap. Expected: about 0.5 ms
+       less at one request. Unmeasured: which of its five kernels fold into the program.
+  - Not a round: pre8 against the fork's split mixers (1.2 ms at one request) stopped at its gate on 2026-11-05; the
+    hosted sublayers' 0.5-0.65 ms at four and eight requests is the same kernels running slower inside Emmy's step,
+    with no lever measured.
+  - Recommended: round 1. First token is the furthest gate metric (1.6-2.2x), the experts are the largest measured
+    share of its GPU gap and carry the 175-token step's host launches, the round moves every first-token length and
+    the prompt steps at four and eight requests, and it costs what #1388 cost. Gate it the same way: trace both
+    twins, bench them cold on the card, and go on only if the 3,920-token step's expert work falls by at least
+    100 ms. For a decode round instead, 2 is the cheapest measured gain (four requests) and 3 the cheapest one that
+    reaches every concurrency.
+  - Boot: Emmy about 1,085 s, the fork 475 s (its baked caches miss under async, as before).
+- **Prefill experts, second round (2026-11-14).** Round 1 of the 2026-11-13 ranking. The experts a prefill step
+  routes eight rows or fewer now run 32 at a time too, through a second grouped program over blocks of eight rows (the
+  twin `expert-group32x8@nvfp4`), and each row's expert outputs are weighted and summed in one pass in float32
+  (`embedding_bag`), in place of a gather, a weighting and ten adds in fp16. The round proposed a combine twin; torch's
+  fused weighted gather does the same in one call, 0.92 ms per layer at 3,920 tokens against 1.9 (a sparse product
+  took 0.52 ms, but sums in an order cuSPARSE picks).
+  - The twin takes the 8-row expert's two cuts, and both large pieces were tuned cold on the card, 40 rows each, to
+    tensor-core tiles: 191.5 us per launch of 32 experts, about 6 us per expert against about 35 one at a time. A
+    16-way split of the gate/up sum ran slower under the prior's schedules and was not pursued.
+  - The gate, profiled, rank 0, the 3,920-token step, main against the branch on the same base: expert programs 315 to
+    266 ms (the small experts 83 to 33), the row gather, sort, weighting and sum 139 to 90 ms, so the expert work 454
+    to 356 ms: 98 ms, just under the 100 ms bar. The step is 121 ms shorter (1,189 to 1,068 ms) and runs 7,855
+    kernels against 18,912; the 175-token step takes 472 ms against 588 (5,380 kernels against 15,163).
+  - A B B A on boots never profiled, main `0dfcf3e8c` against the branch; a range is both rounds' repeats:
+
+    | Point | Main | This round |
+    | --- | ---: | ---: |
+    | First token, 1K | 0.93 s | 0.84 s |
+    | First token, 4K | 1.59-1.63 s | 1.43-1.45 s |
+    | First token, 8K | 2.80-2.81 s | 2.55 s |
+    | First token, 32K | 10.66-10.70 s | 9.73-10.22 s |
+    | First token, 130K | 78.8-79.0 s | 72.8-80.0 s |
+    | One request, 1K / 512, per token | 16.68 ms | 16.71 ms |
+    | 4 requests, 4K / 1K, total output | 136.1-136.2 tok/s | 137.4-138.4 tok/s |
+    | 8 requests, 4K / 1K, total output | 227.6-227.9 tok/s | 232.9 tok/s |
+
+  - The 4K first token is 0.17 s sooner: its 3,920-token step by 0.09 s, its 175-token step by 0.05 s and its 1-token
+    step by 0.03 s (first tokens at 2, 3,921 and 4,096 tokens). A 176-token prompt from scratch: 0.53 to 0.39 s.
+    Four and eight requests gained 1-2%, under the 3-5% expected.
+  - At 130K the branch's prefill was preempted three times per prompt against main's two (the engine's counter: 18
+    against 12 over six prompts each), which takes back what its faster chunks save. Why the count differs is not
+    established. The branch's second 32K round rose run by run (9.94 to 10.43 s), as #1388's did; four more runs after
+    the 130K rows took 9.69-10.12 s.
+  - Against the async fork (2026-11-13's numbers): first token 1.9x slower at 1K (2.2x before) and 1.7x at 4K (1.9x);
+    four requests 0.68x its output (0.67x), eight 0.73x (0.72x). The 4K gap is now 0.58 s: the 3,920-token step
+    0.29 s, the 1-token step 0.18 s, the 175-token step 0.11 s.
+  - Checks on the branch: GSM8K 124 of 128 (2 at the output limit; 125 before); acceptance cases 28, 28, 27 without
+    thinking and 27, 27, 27 with it; long-document lookups 339 of 339 without thinking (the run with thinking was
+    stopped for time). The margin test passes with 582-584 MiB spare per card, and the release audit deploys all 16
+    twins from the golden alone. The float32 sum rounds differently: the top first token at 2K, 4K, 8K and 32K random
+    tokens is main's and its log-probabilities move by up to 0.3, and 3 of 6 greedy texts are main's, the other three
+    parting after 650-1,460 characters. Boot 1,116 s, as main's 1,117.
+  - Next: from the 2026-11-13 ranking, for the owner to pick. In the 4K first token the 3,920-token step is still the
+    largest part of the gap; its 256-row blocks are about half padding, and gathering the rows into them takes 33 ms.
+- **The fixed-slot program at the step's width (2026-11-14).** Round 2 of the 2026-11-13 ranking, main `7cfbdf9db`.
+  A fixed-slot program reads every slot's expert whatever the step's rows, so a step of two or four rows through the
+  eight-row program paid for eight. The program is now built at every slot width, the decode bucket and its halvings
+  down to two rows (the twins `expert-slots2@nvfp4` and `expert-slots4@nvfp4` beside `expert-slots8`), and a step
+  runs the narrowest that holds it; the widths share the eight-row selector and partials.
+  - Gate: both new programs take the eight-row program's two cuts and its schedules, cold on the card, per layer:
+    four rows 102 us and two rows 59 us, against 176 us for eight in the same run: 0.58x and 0.34x, the "about half"
+    the ranking expected. They were recorded as measured; the eight-row round's tunes found nothing faster for these
+    pieces, so none was run.
+  - A B B A on boots never profiled, main against the branch:
+
+    | Point | Main | This round |
+    | --- | ---: | ---: |
+    | One request, 1K / 512, per token | 17.20 ms | 17.18 ms |
+    | 2 requests, 4K / 1K, total output | 70.7-70.8 tok/s (25.6 ms) | 84.9-85.1 tok/s (20.8 ms) |
+    | 4 requests, 4K / 1K, total output | 128.8-128.9 tok/s (26.3 ms) | 143.4-144.2 tok/s (23.1 ms) |
+    | 8 requests, 4K / 1K, total output | 220.7-221.1 tok/s (27.4 ms) | 219.6 tok/s (27.4 ms) |
+    | First token, 1K | 0.80 s | 0.80 s |
+    | First token, 4K | 1.42 s | 1.42-1.43 s |
+
+  - Two requests gain 20% and four requests 12%, a step 4.8 and 3.2 ms shorter (expected at four: 2.6 ms, 135 to
+    about 150 tok/s). One and eight requests and the first tokens are unchanged, as expected.
+  - Main itself is slower than on 2026-11-14 morning: four requests 128.9 against 137.4-138.4 tok/s, eight 221
+    against 233, one request 17.2 against 16.7 ms. The cause is #1399, the Rust PTX compiler in place of nvcc: the
+    same kernels under the same schedules, cold, before and at that commit: the eight-row slot program 128 to 175 us,
+    the small-expert group program 193 to 225, the wide group program 629 to 677, the one-row expert programs 36-37
+    to 41-42; the other programs within 2%. Not fixed here. The new programs were recorded on the slower code, so
+    they gain with the eight-row one when it is fixed.
+  - Against the async fork (2026-11-13's 201.7-203.2 tok/s): four requests 0.71x its output, from 0.64x on today's
+    main and 0.68x before #1399.
+  - Checks on the branch: all 18 programs compile strict from the golden alone and the release audit deploys all 18
+    twins. GSM8K 124 of 128 with none at the output limit; acceptance cases 28, 27, 27 without thinking and 27, 28, 27
+    with it; long-document lookups 339 of 339 and 336 of 336. The margin test passes with 566-568 MiB spare per card
+    (582-584 before: the two programs' instances per layer). Six greedy texts, one request at a time, are main's, 6
+    of 6. Boot 698 s, main's 689 (1,116 before #1399).
+  - Next: the PTX compiler's slowdown of the gathered expert programs first, since it costs four and eight requests
+    more than this round gained at eight; then the 2026-11-13 ranking, for the owner to pick.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

@@ -1,15 +1,12 @@
-"""Unit tests for ``op_to_expr`` — elementwise op-name → Expr translation."""
+"""Unit tests for ``op_to_expression`` — elementwise op-name → Expression translation."""
 
 import numpy as np
 import pytest
 
-from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, FuncCallExpr, Literal, TernaryExpr, Var
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.base import dtype_promote, op_to_expr
-from emmy.compiler.ir.stmt.normalize import place_values
+from emmy.compiler.ir.expression import BinaryExpression, FunctionCallExpression, Literal, TernaryExpression
+from emmy.compiler.ir.loop.render import op_to_expression
+from emmy.compiler.ir.stmt import dtype_promote
 
 
 def test_square_renders_to_self_multiply():
@@ -19,23 +16,23 @@ def test_square_renders_to_self_multiply():
     renderer previously had no case for it and raised ``NotImplementedError``.
     """
     x = Literal(3.0, "float")
-    e = op_to_expr("square", [x])
-    assert isinstance(e, BinaryExpr)
+    e = op_to_expression("square", [x])
+    assert isinstance(e, BinaryExpression)
     assert e.op == "*"
-    assert e.left is x and e.right is x
+    assert e.left == x and e.right == x
 
 
 def test_copy_is_identity_passthrough():
     """``copy`` returns its input unchanged (dropout lowers through this path)."""
     x = Literal(1.0, "float")
-    assert op_to_expr("copy", [x]) is x
+    assert op_to_expression("copy", [x]) is x
 
 
 @pytest.mark.parametrize("dtype", [np.float16, np.float32])
 def test_zero_width_pad_is_an_exact_typed_identity(dtype):
     """Stored unary ``pad`` nodes represent only the zero-width frontend case."""
     x = Literal(1.0, "float")
-    assert op_to_expr("pad", [x]) is x
+    assert op_to_expression("pad", [x]) is x
 
     values = np.array([-1.5, 0.0, 2.25], dtype=dtype)
     actual = ElementwiseImpl("pad")(values)
@@ -43,45 +40,13 @@ def test_zero_width_pad_is_an_exact_typed_identity(dtype):
     np.testing.assert_array_equal(actual, values)
 
 
-def test_typed_copy_is_a_cast_not_an_alias():
-    cast = Assign(name="wide", op="copy", args=("narrow",), dtype=F32)
-    assert place_values(Body((cast,))) == Body((cast,))
-
-
-def test_copy_aliases_do_not_leak_between_sibling_scopes():
-    body = Body(
-        (
-            Loop(
-                axis=Axis("i", 4),
-                body=(
-                    Load(name="x", input="A", index=(Var("i"),)),
-                    Assign(name="y", op="copy", args=("x",)),
-                    Write(output="OA", index=(Var("i"),), value="y"),
-                ),
-            ),
-            Loop(
-                axis=Axis("i", 4),
-                body=(
-                    Load(name="x", input="B", index=(Var("i"),)),
-                    Assign(name="y", op="exp", args=("x",)),
-                    Write(output="OB", index=(Var("i"),), value="y"),
-                ),
-            ),
-        )
-    )
-
-    out = place_values(body)
-
-    assert out[1].body[1] == Assign(name="y", op="exp", args=("x",))
-
-
 def test_sin_cos_render_as_intrinsics():
     """DiT timestep embedding keeps its runtime trigonometric ops."""
     x = Literal(1.0, "float")
     for name in ("sin", "cos"):
-        expr = op_to_expr(name, [x])
-        assert isinstance(expr, FuncCallExpr)
-        assert expr.name == name
+        expression = op_to_expression(name, [x])
+        assert isinstance(expression, FunctionCallExpression)
+        assert expression.name == name
 
 
 def test_mask_ops_render():
@@ -100,23 +65,23 @@ def test_mask_ops_render():
         ("bitwise_or", "||"),
         ("bitwise_and", "&&"),
     ]:
-        e = op_to_expr(name, [a, b])
-        assert isinstance(e, BinaryExpr) and e.op == c_op
+        e = op_to_expression(name, [a, b])
+        assert isinstance(e, BinaryExpression) and e.op == c_op
 
-    w = op_to_expr("where", [a, b, Literal(3.0, "float")])
-    assert isinstance(w, TernaryExpr) and w.cond is a
+    w = op_to_expression("where", [a, b, Literal(3.0, "float")])
+    assert isinstance(w, TernaryExpression) and w.cond == a
 
 
 def test_boolean_bitwise_not_is_logical_zero_test_and_integer_fails_closed():
     a = Literal(1.0, "float")
     for dtype in (None, "f32", "bool"):
-        expr = op_to_expr("bitwise_not", [a], dtype=dtype)
-        assert isinstance(expr, BinaryExpr) and expr.op == "=="
+        expression = op_to_expression("bitwise_not", [a], dtype=dtype)
+        assert isinstance(expression, BinaryExpression) and expression.op == "=="
 
     import pytest
 
     with pytest.raises(NotImplementedError, match="boolean masks only"):
-        op_to_expr("bitwise_not", [a], dtype="u32")
+        op_to_expression("bitwise_not", [a], dtype="u32")
 
 
 def test_integer_ops_keep_integer_spelling_without_changing_mask_semantics():
@@ -131,11 +96,11 @@ def test_integer_ops_keep_integer_spelling_without_changing_mask_semantics():
         ("bitwise_and", "&"),
         ("bitwise_xor", "^"),
     ]:
-        expr = op_to_expr(name, [a, b], dtype="u32")
-        assert isinstance(expr, BinaryExpr) and expr.op == c_op
+        expression = op_to_expression(name, [a, b], dtype="u32")
+        assert isinstance(expression, BinaryExpression) and expression.op == c_op
 
-    assert op_to_expr("bitwise_and", [a, b]).op == "&&"
-    assert op_to_expr("bitwise_or", [a, b]).op == "||"
+    assert op_to_expression("bitwise_and", [a, b]).op == "&&"
+    assert op_to_expression("bitwise_or", [a, b]).op == "||"
 
 
 def test_integer_elementwise_promotion_is_operation_specific():
@@ -151,5 +116,20 @@ def test_integer_elementwise_promotion_is_operation_specific():
 
 def test_integer_bitwise_count_stays_an_abstract_intrinsic():
     value = Literal(7, "int")
-    expr = op_to_expr("bitwise_count", [value], dtype="u32")
-    assert isinstance(expr, FuncCallExpr) and expr.name == "bitwise_count" and expr.args == (value,)
+    expression = op_to_expression("bitwise_count", [value], dtype="u32")
+    assert isinstance(expression, FunctionCallExpression) and expression.name == "bitwise_count" and expression.args == (value,)
+
+
+def test_a_literal_contributes_no_dtype_to_a_promotion():
+    """``2 * x`` computes at ``x``'s dtype, as ``x + x`` does — the normal form spells them alike — and a value of
+    literals alone is f32, or i32 when every literal is an integer."""
+    from emmy.compiler.ir.expression import parse, promoted_dtype
+
+    f16 = {"x": "f16", "y": "f16"}.get
+    assert promoted_dtype(parse("2 * x"), f16) == "f16"
+    assert promoted_dtype(parse("x + x"), f16) == "f16"
+    assert promoted_dtype(parse("x * y + 0.5"), f16) == "f16"
+    assert promoted_dtype(parse("exp(x) / 3"), f16) == "f16"
+    assert promoted_dtype(parse("2 * 3"), f16) == "i32"
+    assert promoted_dtype(parse("2.5 * 3"), f16) == "f32"
+    assert promoted_dtype(parse("x + z"), f16) == "f32", "a name without a dtype is f32"

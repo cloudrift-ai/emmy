@@ -235,14 +235,16 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   (`tests/serving/test_deepseek_v4_split.py` proves the carve against the eager layer for sliding, HCA and CSA
   layers with both hash and top-k routers).
 
-  A Qwen4Exp block (it carries `attn_hyper_connection` / `mlp_hyper_connection`) takes the same seam with the same
-  signature, built by `_build_gated_residual_split`, because the fork owns its token mixers, Gated DeltaNet and sparse
-  attention. The gated residual keeps `hc_count` streams already flattened: `pre` returns the attention-site mixed
-  input, and `post` recomputes the injection weights from the carrier, injects the mixer output, runs the MLP-site
-  gated residual (its mixed input is `xn`), injects the gated shared expert (`sigmoid(shared_expert_gate(xn)) *
-  shared_expert(xn)`) and returns the MLP-site injection weights as `mix`. The n-gram PLE on layer 2 is added to the
-  carrier ahead of `pre` and belongs to neither half (`tests/serving/test_qwen4_exp_split.py` proves the carve for the
-  Gated DeltaNet, PLE and sparse-attention layers).
+  A Qwen4Exp block (it carries `attn_hyper_connection` / `mlp_hyper_connection`) takes the same seam, built by
+  `_build_gated_residual_split`, because the fork owns its token mixers, Gated DeltaNet and sparse attention. The
+  gated residual keeps `hc_count` streams already flattened: `pre` returns the attention-site mixed input, and `post`
+  recomputes the injection weights from the carrier, injects the mixer output, runs the MLP-site gated residual (its
+  mixed input is `xn`) and returns the MLP-site injection weights as `mix` and, as a fourth output, the gated shared
+  expert (`sigmoid(shared_expert_gate(xn)) * shared_expert(xn)`). The runner adds that to the routed combine before
+  the placement, so under tensor parallelism the shared expert is sliced like a routed one and one all-reduce sums
+  both (`slice_routed_experts`). The n-gram PLE on layer 2 is added to the carrier ahead of `pre` and belongs to
+  neither half (`tests/serving/test_qwen4_exp_split.py` proves the carve for the Gated DeltaNet, PLE and
+  sparse-attention layers).
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the shard-streamed serving load of a
   quantized MoE checkpoint. The twin builds from config on the meta device (weights never read at trace; the

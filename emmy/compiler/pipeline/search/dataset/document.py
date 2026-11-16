@@ -144,7 +144,6 @@ def _write_group(out: Path, group: Group, matrix: str, index: dict[str, int], ke
         wire["golden_ids"] = list(group.golden_ids)
         wire["pools"] = [_pool_wire(pool, index, kernels) for pool in group.pools]
     elif isinstance(group, MeasuredGroup):
-        wire["h_opt"] = group.h_opt
         wire["latency_us"] = group.latency_us.tolist()
     return wire
 
@@ -179,4 +178,4 @@ def _read_group(base: Path, wire: dict, kernels: list[tuple[dict, str]]) -> Grou
             read.kernel.keyed(identity)  # the manifest's own: a reader names the pool without lifting its kernel
             pools.append(read)
         return GoldenGroup(*common, golden_ids=tuple(wire["golden_ids"]), pools=tuple(pools))
-    return MeasuredGroup(*common, latency_us=np.asarray(wire["latency_us"], dtype=float), h_opt=wire["h_opt"])
+    return MeasuredGroup(*common, latency_us=np.asarray(wire["latency_us"], dtype=float))

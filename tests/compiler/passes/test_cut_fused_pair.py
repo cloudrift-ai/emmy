@@ -10,9 +10,8 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Assign
+from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.pipeline.passes.tile._cut import _fused_pair_factor, _split_fused_pair
 from tests.compiler.terms import contraction, projection, slab
 
@@ -65,7 +64,7 @@ def test_a_fold_over_an_axis_of_the_split_name_is_left_whole() -> None:
     rewrites the coordinate around it and leaves it whole. Rewritten, it lost its own axis and the lift could not
     be built (Qwen3.6's GDN pieces, whose binders take canonical names)."""
     own = contraction(Axis("i", 8), slab("w", "W", "m", "i"), (slab("x", "X", "i"), "dot"))
-    term = projection((_pv(Var("i")), own), [Assign(name="out", op=ElementwiseImpl("add"), args=("acc", "dot"))])
+    term = projection((_pv(Var("i")), own), parse_body("out = add(acc, dot)"))
     produced, grid, _, _ = _split_fused_pair(term, _AXES, (Var("m"), Var("i")))
     assert [axis.name for axis in grid][0] == "m" and len(grid) == 3
     assert produced.operands[1] == own

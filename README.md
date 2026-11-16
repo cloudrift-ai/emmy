@@ -36,11 +36,12 @@ emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark against eager PyTorch and torch.compile
 emmy run --bench -c "nn.Softmax(dim=-1)(torch.randn(1,28,2048,2048))"
 
-# Inspect the generated CUDA
-emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda
+# Inspect the generated PTX
+emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir ptx
 ```
 
-Running compiled kernels requires an NVIDIA GPU and the CUDA toolkit (`nvcc`); source builds also need Rust.
+Running compiled kernels requires an NVIDIA GPU and the CUDA toolkit's PTX assembler (`ptxas`); source builds also
+need Rust.
 For GPUs older than Turing, use CUDA 12 and a PyTorch build that supports your GPU. Fast math is enabled by default;
 set `EMMY_FAST_MATH=0` to disable it.
 
@@ -64,7 +65,7 @@ Read the [compiler guide](emmy/compiler/ARCHITECTURE.md) or the
 
 **Readable Schedule**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir tile`
 ```
-kernel k_rms_norm_reduce  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight  outputs: rms_norm
+kernel k_b70c36714207  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight  outputs: rms_norm
     in0 = load rms_norm_mean_count[0]
     in1 = load rms_norm_eps[0]
     Tile(axes=(a0:256=THREAD, a1:32=BLOCK)):
@@ -85,70 +86,35 @@ kernel k_rms_norm_reduce  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight
             rms_norm[0, a1, a3] = v5
 ```
 
-**Optimized CUDA kernel**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda`
+**Optimized kernel, as PTX**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir ptx` (an excerpt;
+each Kernel IR statement stands as a comment above its instructions)
 
-```c
-extern "C" __global__
-__launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_weight, float* rms_norm) {
-    float in0 = 2048.0f;
-    float in1 = 1e-06f;
-    {
-        int a1 = blockIdx.x;
-        int a0 = threadIdx.x;
-        float acc0 = 0.0f;
-        __syncthreads();
-        __shared__ float x_smem[2048];
-        for (int x_smem_flat = a0; x_smem_flat < 2048; x_smem_flat += 256) {
-            {
-                unsigned int _smem_addr = __cvta_generic_to_shared(&x_smem[x_smem_flat]);
-                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                             :: "r"(_smem_addr), "l"(&x[a1 * 2048 + x_smem_flat])
-                             : "memory");
-            }
-        }
-        asm volatile("cp.async.commit_group;\n" ::: "memory");
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        __syncthreads();
-        __shared__ float p_weight_smem[2048];
-        for (int p_weight_smem_flat = a0; p_weight_smem_flat < 2048; p_weight_smem_flat += 256) {
-            {
-                unsigned int _smem_addr = __cvta_generic_to_shared(&p_weight_smem[p_weight_smem_flat]);
-                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                             :: "r"(_smem_addr), "l"(&p_weight[p_weight_smem_flat])
-                             : "memory");
-            }
-        }
-        asm volatile("cp.async.commit_group;\n" ::: "memory");
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        __syncthreads();
-        for (int a2 = a0; a2 < 2048; a2 += 256) {
-            float in2 = x_smem[a2];
-            float v0 = in2 * in2;
-            acc0 += v0;
-        }
-        __shared__ float acc0_smem[256];
-        acc0_smem[a0] = acc0;
-        __syncthreads();
-        for (int s = 128; s > 0; s >>= 1) {
-            if (a0 < s) {
-                acc0_smem[a0] = acc0_smem[a0] + acc0_smem[a0 + s];
-            }
-            __syncthreads();
-        }
-        __syncthreads();
-        float acc0_b = acc0_smem[0];
-        float v1 = acc0_b / in0;
-        float v2 = v1 + in1;
-        float v3 = rsqrtf(v2);
-        for (int a3 = a0; a3 < 2048; a3 += 256) {
-            float in3 = x_smem[a3];
-            float in4 = p_weight_smem[a3];
-            float v4 = in3 * v3;
-            float v5 = v4 * in4;
-            rms_norm[a1 * 2048 + a3] = v5;
-        }
-    }
-}
+```
+.visible .entry k_b70c36714207(
+	.param .u64 .ptr .align 16 k_b70c36714207_param_0,
+	.param .u64 .ptr .align 16 k_b70c36714207_param_1,
+	.param .u64 .ptr .align 16 k_b70c36714207_param_2
+)
+.maxntid 256, 1, 1
+{
+	...
+	// Grid(axes=(a0 in 0..32, a1_co in 0..256), decode=(block_idx.x, thread_idx.x), block_threads=256):
+	mov.u32 %r0, %ctaid.x;
+	mov.u32 %r1, %tid.x;
+	// init f32 acc0 = 0
+	mov.f32 %f0, 0f00000000;
+	// f32 in0__u0 = load buf0[2048 * a0 + a1_co]
+	mul.wide.s32 %rd3, %r0, 8192;
+	add.s64 %rd4, %rd0, %rd3;
+	mul.wide.s32 %rd5, %r1, 4;
+	add.s64 %rd6, %rd4, %rd5;
+	ld.global.nc.f32 %f1, [%rd6];
+	// f32 v0__u0 = in0__u0 * in0__u0
+	// f32 acc0 <- add(acc0, v0__u0) over a1_co
+	fma.rn.ftz.f32 %f0, %f1, %f1, %f0;
+	// f32 in0__u1 = load buf0[2048 * a0 + a1_co + 256]
+	ld.global.nc.f32 %f2, [%rd6+1024];
+	...
 ```
 
 ## Tune
@@ -204,8 +170,9 @@ freezes the same rows into one file beside the card's under `emmy/compiler/pipel
 measurement freeze the repository keeps, one golden file per card in git LFS: `--repository` reads it beside the
 goldens, and the nightly refresh reports the prior's regret over its pools. Commit the tune's file with your change
 (run `git lfs install` once on the machine that commits); the nightly refresh folds the files into each card's file
-on `main`. A tune on a rented card writes the file into the copy there: copy it back next to the card's file, as you
-do the working golden. `EMMY_FREEZE_DIR` names another directory or, set empty, none.
+on `main`, then compiles every row of the freeze under its own schedule and drops the rows the compiler no longer
+realizes (`emmy golden realize --drop`). A tune on a rented card writes the file into the copy there: copy it back
+next to the card's file, as you do the working golden. `EMMY_FREEZE_DIR` names another directory or, set empty, none.
 
 A tune DB from a machine with no checkout is merged by hand (`~/.cache/emmy/autotune.db`, or the file `EMMY_TUNE_DB`
 names, copied over):
@@ -397,7 +364,8 @@ require CloudRift organization access.
     - [ir/](emmy/compiler/ir/) — per-dialect op definitions (torch / tensor / loop / kernel / cuda) (see
       [ARCHITECTURE.md](emmy/compiler/ir/ARCHITECTURE.md))
       - [schedule/](emmy/compiler/ir/schedule/) — schedule interfaces, reusable choices, and classic scheduling (see
-        [ARCHITECTURE.md](emmy/compiler/ir/schedule/ARCHITECTURE.md))
+        [ARCHITECTURE.md](emmy/compiler/ir/schedule/ARCHITECTURE.md); the classic schedule is compared with the best
+        known hand-written kernels in [classic/ARCHITECTURE.md](emmy/compiler/ir/schedule/classic/ARCHITECTURE.md))
     - [trace/](emmy/compiler/trace/) — PyTorch/HuggingFace → Graph IR capture (see
       [ARCHITECTURE.md](emmy/compiler/trace/ARCHITECTURE.md))
     - [pipeline/](emmy/compiler/pipeline/) — rewrite engine + passes + dump hooks (see
@@ -427,6 +395,16 @@ require CloudRift organization access.
   pack loader and cached generation (design, hosts, and qualification in
   [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
   its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
+- [crates/emmy-ir/](crates/emmy-ir/) — The compiler's statement and expression vocabulary in Rust: the statement types,
+  bodies, their text, value numbering and normalization (see [ARCHITECTURE.md](crates/emmy-ir/ARCHITECTURE.md));
+  [crates/emmy-ir-py/](crates/emmy-ir-py/) is the `emmy.emmy_ir` extension the `ir/stmt`, `ir/expression` and
+  `ir/pure` modules export from
+- [crates/emmy-pure/](crates/emmy-pure/) — The pure terms in Rust: the `Lambda` every IR level binds with, the Tile IR
+  `Fold` term and its twist recipe, the tree normalization and the lowering to Loop IR (see
+  [ARCHITECTURE.md](crates/emmy-pure/ARCHITECTURE.md))
+- [crates/emmy-ptx/](crates/emmy-ptx/) — The compiler from Kernel IR to PTX: an instruction list, its builder, printer
+  and verifier, and the rule of each statement type; scalar kernels so far, and no pipeline stage calls it yet (see
+  [ARCHITECTURE.md](crates/emmy-ptx/ARCHITECTURE.md))
 - [crates/emmy-server/](crates/emmy-server/) — Native HTTP adapter: text and image processing
   (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)

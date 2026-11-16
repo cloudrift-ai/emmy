@@ -17,8 +17,6 @@ weights through the smem compute fill.
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
 from emmy.compiler.dim import Dim
@@ -27,13 +25,13 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.kernel.ir import FragmentLoad, MmaSyncPtx
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Assign, Body, Load, parse_body
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.tile._fromloop import _stamp_axes, fold_from_loop
-from tests.compiler.helpers import requires_cuda, requires_sm
+from tests.compiler.helpers import recording_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction, projection
 
 # ===================================================================
@@ -83,29 +81,25 @@ def _statements(term) -> tuple:
     return (*(edge.as_slab().load for edge in term.operands if edge.as_slab() is not None), *term.lift.body)
 
 
-def _dequant_loop(*, scale_index=None, scale_op="multiply", decode="from_f8e4m3", extra_factor=False):
+def _dequant_loop(*, scale_index="0, n", scale_op="multiply", decode="from_f8e4m3", extra_factor=False):
     """The fused dequant matmul loop body the fp8 expansion + loop fusion produce:
     ``acc += x[m,k] * (s[n] (x) from_f8*(w[k,n]))`` with the scale load hoistable (k-invariant)
-    unless ``scale_index`` says otherwise."""
-    k = Axis("k", Dim(64))
-    stmts = [
-        Load(name="s", input="w_scale", index=scale_index or (Literal(0), Var("n"))),
-        Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3),
-        Assign(name="dq", op=decode, args=("wb",)),
-        Assign(name="wsc", op=scale_op, args=("dq", "s") if scale_op == "divide" else ("s", "dq")),
+    unless ``scale_index`` (the scale load's index text) says otherwise."""
+    lines = [
+        f"s = load w_scale[{scale_index}]",
+        "f8e4m3 wb = load w_bits[k, n]",
+        f"dq = {decode}(wb)",
+        f"wsc = {scale_op}({'dq, s' if scale_op == 'divide' else 's, dq'})",
     ]
     if extra_factor:
-        stmts += [
-            Load(name="s2", input="w_scale2", index=(Literal(0), Var("n"))),
-            Assign(name="wsc2", op="multiply", args=("s2", "wsc")),
-        ]
-    lift_b = "wsc2" if extra_factor else "wsc"
-    stmts += [
-        Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F16),
-        Assign(name="v", op="multiply", args=("a", lift_b)),
-        Accum(name="acc", value="v", op=ElementwiseImpl("add")),
+        lines += ["s2 = load w_scale2[0, n]", "wsc2 = multiply(s2, wsc)"]
+    lines += [
+        "f16 a = load x[m, k]",
+        f"v = multiply(a, {'wsc2' if extra_factor else 'wsc'})",
+        "acc <- add(acc, v)",
     ]
-    return Loop(axis=k, body=Body(tuple(stmts)))
+    (loop,) = parse_body("for k in 0..64:\n" + "\n".join(f"    {line}" for line in lines))
+    return loop
 
 
 def test_decode_scale_cone_binds_via_mul_hoist():
@@ -119,7 +113,7 @@ def test_decode_scale_cone_binds_via_mul_hoist():
     scale = [s for s in epi if isinstance(s, Load) and s.input == "w_scale"]
     assert scale, "the k-invariant scale did not hoist to the epilogue"
     tail = [s for s in epi if isinstance(s, Assign)][-1]
-    assert tail.op.name == "multiply" and "s" in tail.args
+    assert tail.value.operation.name == "multiply" and "s" in tail.value.free_vars()
 
 
 def test_inverse_scale_hoists_as_divide():
@@ -129,7 +123,7 @@ def test_inverse_scale_hoists_as_divide():
     con, epi = bound
     assert con.operands[1].as_slab() is not None and con.operands[1].as_slab().load.input == "w_bits"
     tail = [s for s in epi if isinstance(s, Assign)][-1]
-    assert tail.op.name == "divide" and "s" in tail.args
+    assert tail.value.operation.name == "divide" and "s" in tail.value.free_vars()
 
 
 def test_factor_chain_hoists_every_k_invariant_factor():
@@ -139,7 +133,7 @@ def test_factor_chain_hoists_every_k_invariant_factor():
     con, epi = bound
     assert con.operands[1].as_slab() is not None and con.operands[1].as_slab().load.input == "w_bits"
     assigns = [s for s in epi if isinstance(s, Assign)]
-    assert assigns and {s.op.name for s in assigns} == {"multiply"}
+    assert assigns and {node.operation.name for s in assigns for node in s.value.subterms() if node.operation} == {"multiply"}
     assert {s.input for s in epi if isinstance(s, Load)} == {"w_scale", "w_scale2"}
 
 
@@ -151,12 +145,12 @@ def test_original_epilogue_reads_the_scaled_value():
     con, epi = bound
     assigns = [s for s in epi if isinstance(s, Assign)]
     assert assigns, "no epilogue chain — nothing rescales the accumulator"
-    assert con.exposes[0] in assigns[0].args
+    assert con.exposes[0] in assigns[0].value.free_vars()
 
 
 def test_k_varying_scale_binds_as_whole_computed_b_cone():
     """A 2-D scale cannot commute out, so the complete generic map remains the B operand."""
-    bound = _bind(_dequant_loop(scale_index=(Var("k"), Var("n"))))
+    bound = _bind(_dequant_loop(scale_index="k, n"))
     assert bound is not None, "the k-varying dequant demoted to PLANAR"
     con, epi = bound
     assert con.operands[0].as_slab() is not None and con.operands[1].as_slab() is None and con.operands[1].axis is None
@@ -170,12 +164,15 @@ def test_non_decode_computed_b_preserves_cone_instead_of_positional_misbind():
     assert bound is not None, "the non-decode cone demoted to PLANAR"
     con, _epi = bound
     assert con.operands[0].as_slab() is not None and con.operands[1].as_slab() is None
-    assert any(isinstance(s, Assign) and s.op.name == "exp" for s in con.operands[1].lift.body)
+    assert any(
+        isinstance(s, Assign) and any(n.operation and n.operation.name == "exp" for n in s.value.subterms())
+        for s in con.operands[1].lift.body
+    )
 
 
 def test_m_dependent_b_cone_binds_as_a_batched_matvec():
     """A row-varying scale stays in the complete B cone for each independent m batch."""
-    bound = _bind(_dequant_loop(scale_index=(Var("m"), Var("k"))))
+    bound = _bind(_dequant_loop(scale_index="m, k"))
     assert bound is not None
     con, epi = bound
     assert con.as_contraction().shared_axes == {"m"}
@@ -186,17 +183,15 @@ def test_m_dependent_b_cone_binds_as_a_batched_matvec():
 
 def test_bare_decode_binds_raw_load_without_epilogue():
     """No k-invariant factor at all: B still binds as the raw f8 load, nothing hoists."""
-    loop = Loop(
-        axis=Axis("k", Dim(64)),
-        body=Body(
-            (
-                Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3),
-                Assign(name="dq", op="from_f8e4m3", args=("wb",)),
-                Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F16),
-                Assign(name="v", op="multiply", args=("a", "dq")),
-                Accum(name="acc", value="v", op=ElementwiseImpl("add")),
-            )
-        ),
+    (loop,) = parse_body(
+        """
+        for k in 0..64:
+            f8e4m3 wb = load w_bits[k, n]
+            dq = from_f8e4m3(wb)
+            f16 a = load x[m, k]
+            v = multiply(a, dq)
+            acc <- add(acc, v)
+        """
     )
     bound = _bind(loop)
     assert bound is not None, "the bare decode contraction demoted to PLANAR"
@@ -213,8 +208,12 @@ def test_bare_decode_binds_raw_load_without_epilogue():
 def _warp_contraction():
     k = Axis("k", Dim(4096))
     m, n = Axis("m", Dim(512)), Axis("n", Dim(4096))
-    a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F16)
-    b = Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3)
+    a, b = parse_body(
+        """
+        f16 a = load x[m, k]
+        f8e4m3 wb = load w_bits[k, n]
+        """
+    )
     node = contraction(k, a, (b, "acc"))
     tile = Tile.parse("mma_m16n8k16_f16_f32/f4x1/k4", Work.parse("w1x8")).at(m, n)
     return node, tile, k
@@ -317,16 +316,17 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda():
     # STAGE pinned to gmem-direct: this test anchors the gmem-direct fragment-convert spelling
     # (the staged byte-slab forms are ``test_fp8_staged``'s).
     with pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
-        compiled = backend.compile(_fp8_linear_graph(m, n, k))
+        with recording_kernels() as kernels_of:
+            compiled = backend.compile(_fp8_linear_graph(m, n, k))
 
-    sources = [getattr(node.op, "kernel_source", None) for node in compiled.nodes.values()]
-    mma_src = next((s for s in sources if s and "mma.sync" in s), None)
-    assert mma_src is not None, "no mma kernel — the fp8-B contraction did not reach the warp tier"
+    warp = [kernel for kernel in kernels_of(compiled).values() if statements(kernel, MmaSyncPtx)]
+    assert warp, "no mma kernel — the fp8-B contraction did not reach the warp tier"
     # The fragment-boundary decode. Below sm_90 the 050/060 constant folds don't fire, so B
-    # arrives in-graph-transposed and the TRANS fragment helper carries the same per-element
-    # convert — verified numerically on a 4090 (max_rel 2.5e-4); either spelling is the warp
-    # tier with the decode at the fragment load.
-    assert re.search(r"emmy_mma_load_b_gmem(_trans)?<__nv_fp8_e4m3, __half>", mma_src)
+    # arrives in-graph-transposed and the transposed fragment load carries the same per-element
+    # convert — verified numerically on a 4090 (max_rel 2.5e-4); either is the warp tier with the
+    # decode at the fragment load: a gmem-direct B load of e4m3 bytes into an f16 fragment.
+    b_loads = [load for load in statements(warp[0], FragmentLoad) if load.role == "b"]
+    assert b_loads and all(not load.staged and (load.src_dtype, load.dtype) == (F8E4M3, F16) for load in b_loads)
 
     input_data: dict = {"x": x}
     input_data.update(bind_constants(compiled, {"layer.weight": bits, "layer.weight_scale": scale}))
@@ -344,28 +344,26 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda():
 # ===================================================================
 
 
-def _packed_kblock_body(scale_stride=32, scale_k=None):
-    """The NVFP4 speller's cone, hand-built in the lowering's idiom (flat / and % reshape
+def _packed_kblock_body(scale_stride=32, scale_k=None) -> Body:
+    """The NVFP4 speller's cone, spelled in the lowering's idiom (flat / and % reshape
     arithmetic):
     e4m3 block scale (k under /16), fused-scale multiply, packed byte load, index copy,
     pair-table gather, final value x factor multiply. ``scale_k`` overrides the scale
-    Load's k expression for the negative cases."""
-    from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal
-
-    n, k = Var("a1"), Var("a2")
-    flat = BinaryExpr("+", BinaryExpr("*", n, Literal(scale_stride, "int")), k)
-    sblock = scale_k if scale_k is not None else BinaryExpr("%", BinaryExpr("/", flat, Literal(16, "int")), Literal(2, "int"))
-    byte_idx = BinaryExpr("%", BinaryExpr("/", flat, Literal(2, "int")), Literal(16, "int"))
-    return [
-        Load(name="in1", input="w_scale_bits", index=(n, sblock), dtype=None),
-        Assign(name="v0", op="from_f8e4m3", args=("in1",)),
-        Load(name="in2", input="w_bits", index=(n, byte_idx), dtype=None),
-        Assign(name="v1", op="multiply", args=("in0", "v0")),
-        Assign(name="v2", op="copy", args=("in2",)),
-        Assign(name="v3", op="copy", args=("v1",)),
-        Load(name="in3", input="w_f4_pairs", index=(CastExpr(dtype="int", expr=Var("v2")), Literal(0, "int")), dtype=None),
-        Assign(name="v4", op="multiply", args=("in3", "v3")),
-    ]
+    load's k expression (as text) for the negative cases."""
+    flat = f"(a1 * {scale_stride} + a2)"
+    sblock = scale_k if scale_k is not None else f"{flat} / 16 % 2"
+    return parse_body(
+        f"""
+        in1 = load w_scale_bits[a1, {sblock}]
+        v0 = from_f8e4m3(in1)
+        in2 = load w_bits[a1, {flat} / 2 % 16]
+        v1 = multiply(in0, v0)
+        v2 = copy(in2)
+        v3 = copy(v1)
+        in3 = load w_f4_pairs[(int)v2, 0]
+        v4 = multiply(in3, v3)
+        """
+    )
 
 
 def _packed_inputs():
@@ -383,12 +381,11 @@ def _packed_inputs():
 def test_packed_kblock_b_matches_the_spelled_shape():
     from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
-    body = _packed_kblock_body()
-    cone = list(Body(tuple(body)).backward_cone(["v4"]).members)
+    cone = list(_packed_kblock_body().backward_cone(["v4"]).members)
     got = match_packed_kblock_b(cone, "a2", _packed_inputs())
     assert got is not None
     assert got.bits.input == "w_bits" and got.table.input == "w_f4_pairs"
-    assert got.factor == "v3" and got.block == 16
+    assert str(got.factor) == "v3" and got.block == 16
 
 
 def test_packed_kblock_b_declines_misaligned_row_stride():
@@ -397,15 +394,15 @@ def test_packed_kblock_b_declines_misaligned_row_stride():
     from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
     body = _packed_kblock_body(scale_stride=24)
-    got = match_packed_kblock_b(list(Body(tuple(body)).backward_cone(["v4"]).members), "a2", _packed_inputs())
+    got = match_packed_kblock_b(list(body.backward_cone(["v4"]).members), "a2", _packed_inputs())
     assert got is None
 
 
 def test_packed_kblock_b_declines_naked_k_scale():
     from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
-    body = _packed_kblock_body(scale_k=Var("a2"))
-    got = match_packed_kblock_b(list(Body(tuple(body)).backward_cone(["v4"]).members), "a2", _packed_inputs())
+    body = _packed_kblock_body(scale_k="a2")
+    got = match_packed_kblock_b(list(body.backward_cone(["v4"]).members), "a2", _packed_inputs())
     assert got is None
 
 
@@ -414,21 +411,17 @@ def test_packed_kblock_b_declines_without_a_packed_load():
 
     inputs = _packed_inputs()
     inputs["w_bits"] = Tensor("w_bits", (4096, 16), F8E4M3)
-    got = match_packed_kblock_b(list(Body(tuple(_packed_kblock_body())).backward_cone(["v4"]).members), "a2", inputs)
+    got = match_packed_kblock_b(list(_packed_kblock_body().backward_cone(["v4"]).members), "a2", inputs)
     assert got is None
 
 
 def test_packed_kblock_b_declines_mixed_guarded_and_naked_k():
-    # One index expr holds a guarded division AND a bare k: the naked flag alone must
+    # One index expression holds a guarded division AND a bare k: the naked flag alone must
     # decline (the guard set is non-empty, so the single-block check would pass).
-    from emmy.compiler.ir.expr import BinaryExpr, Literal
     from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
-    n, k = Var("a1"), Var("a2")
-    flat = BinaryExpr("+", BinaryExpr("*", n, Literal(32, "int")), k)
-    mixed = BinaryExpr("+", BinaryExpr("/", flat, Literal(16, "int")), k)
-    body = _packed_kblock_body(scale_k=mixed)
-    assert match_packed_kblock_b(list(Body(tuple(body)).backward_cone(["v4"]).members), "a2", _packed_inputs()) is None
+    body = _packed_kblock_body(scale_k="(a1 * 32 + a2) / 16 + a2")
+    assert match_packed_kblock_b(list(body.backward_cone(["v4"]).members), "a2", _packed_inputs()) is None
 
 
 def test_packed_kblock_b_declines_squared_gather():
@@ -436,6 +429,5 @@ def test_packed_kblock_b_declines_squared_gather():
     # an exception.
     from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
-    body = _packed_kblock_body()
-    body[-1] = Assign(name="v4", op="multiply", args=("in3", "in3"))
-    assert match_packed_kblock_b(list(Body(tuple(body)).backward_cone(["v4"]).members), "a2", _packed_inputs()) is None
+    body = Body((*_packed_kblock_body()[:-1], *parse_body("v4 = multiply(in3, in3)")))
+    assert match_packed_kblock_b(list(body.backward_cone(["v4"]).members), "a2", _packed_inputs()) is None

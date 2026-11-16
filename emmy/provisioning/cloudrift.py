@@ -9,7 +9,7 @@ import uuid
 import httpx
 
 from emmy import config
-from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
+from emmy.provisioning.errors import CapacityExhausted, InstanceTypeNotOffered, TerminalProvisionError
 from emmy.provisioning.ssh import wait_for_ssh
 from emmy.provisioning.types import VMConnectionInfo
 
@@ -583,12 +583,15 @@ async def create_instance(
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         body = exc.response.text
+        # A pinned node of another instance type answers 503 like a full one; only the reason tells them apart.
+        if code == 503 and "is not of instance type" in body:
+            raise InstanceTypeNotOffered(f"CloudRift rent returned 503 for {instance_type}: {body}") from exc
         if code in (429, 503):
             raise CapacityExhausted(f"CloudRift rent returned {code} for {instance_type}") from exc
         # 400 "Instance X not found" means this rift-server doesn't carry this instance type
         # (per-datacenter availability). Treat as capacity so the orchestrator advances candidates.
         if code == 400 and "not found" in body.lower():
-            raise CapacityExhausted(f"CloudRift rent returned 400 for {instance_type}: {body}") from exc
+            raise InstanceTypeNotOffered(f"CloudRift rent returned 400 for {instance_type}: {body}") from exc
         if 400 <= code < 500:
             raise TerminalProvisionError(f"CloudRift rent returned {code}: {body}") from exc
         raise

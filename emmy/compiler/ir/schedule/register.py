@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING
 from frozendict import frozendict
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleProblem, ScheduleRefused, Site
 from emmy.compiler.ir.schedule.choices import Tile, Work
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Pre, Select
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -99,7 +99,7 @@ class RegisterProgram:
                     return None
                 if (view.product.name, view.plus.name) != ("multiply", "add"):
                     return None
-            if any(not isinstance(s, (Affine, Assign, Load, Let, Pre, Select)) for s in node.lift.body):
+            if any(not isinstance(s, (Assign, Load, Let, Pre, Select)) for s in node.lift.body):
                 return None
         batch_axes = tuple(tile.axis_of(name) for name in batch_names)
         batch = set(batch_names)
