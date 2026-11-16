@@ -23,13 +23,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from emmy.compiler.pipeline.knob import family_of, is_off_value
+from emmy.compiler.pipeline.knob import family_of, get, is_off_value, values_equal
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool, GoldenRow, regime_of
 from emmy.compiler.pipeline.search.db import knobs_json
 from emmy.compiler.pipeline.search.golden import GoldenFile, Row
-from emmy.compiler.pipeline.search.space import COLD_CACHE
+from emmy.compiler.pipeline.search.space import COLD_CACHE, REGIME_KNOBS
 
 logger = logging.getLogger(__name__)
+
+_REGIME = frozenset(knob.name for knob in REGIME_KNOBS)
 
 #: The candidate files kept with the repository, one per hardware golden. Left out of the wheel: training data.
 RECORDS = Path(__file__).parent / "records"
@@ -111,8 +113,19 @@ def _of_group(groups: dict[tuple, list[Row]], key: tuple) -> list[Row]:
 
 
 def _schedule(row: Row) -> tuple:
-    """A row's schedule as a key: its knobs by value, the ones at their OFF value left out."""
-    return tuple(sorted((key, str(value)) for key, value in (row.knobs or {}).items() if not is_off_value(family_of(key), value)))
+    """A row's schedule as a key: its knobs by value. A knob at its default or OFF value is left out, since a golden
+    row spells only what its record pinned while a tune's row spells every knob the kernel carries; a regime knob is
+    left out too, the regime being the group's."""
+    out = []
+    for key, value in (row.knobs or {}).items():
+        family = family_of(key)
+        knob = get(family)
+        if family in _REGIME or is_off_value(family, value):
+            continue
+        if knob is not None and knob.hints and values_equal(family, knob.hints[0], value):
+            continue
+        out.append((key, str(value).casefold()))
+    return tuple(sorted(out))
 
 
 def _spread(rows: list[Row], count: int) -> list[Row]:
