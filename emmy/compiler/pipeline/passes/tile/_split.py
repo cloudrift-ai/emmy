@@ -42,6 +42,7 @@ from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, apply
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.twist import Twist
@@ -357,6 +358,77 @@ def _carrying_body(body: Body) -> Body | None:
     return body
 
 
+def _step_maps(step: Body, state: str, mixed: int | None, column, stores) -> tuple[Body, Body] | None:
+    """One step's affine map read off the step itself — ``(matrix, offset)`` bodies, the step with its carrier
+    reads resolved and its ``Carry`` handed to ``stores`` — or ``None`` when a read has a shape this does not take.
+
+    The matrix is the step from the identity less the offset, and the offset the step from zero. A contraction
+    over the previous state (a reduction whose axis is the read's mixed coordinate, its term linear in the read)
+    never runs: from the identity only the term at ``column`` is left, so the loop is that one term with the read
+    at one, and from zero it is nothing. Any other read is the identity's own entry, one where its mixed
+    coordinate is ``column``. No walk, and no contraction against a seed."""
+
+    def contracts(loop: Loop) -> bool:
+        reads = [stmt for stmt in loop.body if isinstance(stmt, Pre) and stmt.carrier == state]
+        if not loop.is_reduce or not reads or mixed is None or any(read.index[mixed] != Var(loop.axis.name) for read in reads):
+            return False
+        linear = {read.name for read in reads}
+        for stmt in loop.body:
+            if isinstance(stmt, Assign):
+                kind = _homogeneity(stmt.value, linear)
+                if kind is None:
+                    return False
+                if kind == "linear":
+                    linear.add(stmt.name)
+            elif isinstance(stmt, Accum):
+                if (
+                    stmt.op.name != "add"
+                    or stmt.init != Literal(0.0, "float")
+                    or not isinstance(stmt.value, Var)
+                    or stmt.value.name not in linear
+                ):
+                    return False
+            elif not isinstance(stmt, Load | Let | Pre):
+                return False
+        return True
+
+    def resolved(body, identity: bool) -> tuple | None:
+        out: list = []
+        for stmt in body:
+            if isinstance(stmt, Loop) and contracts(stmt):
+                if not identity:
+                    out += [Let(name=inner.name, value=0.0) for inner in stmt.body if isinstance(inner, Accum)]
+                    continue
+                at = Sigma({stmt.axis.name: column})
+                for inner in stmt.body:
+                    if isinstance(inner, Pre):
+                        out.append(Let(name=inner.name, value=1.0))
+                    elif isinstance(inner, Accum):
+                        out.append(Assign(inner.name, inner.value))
+                    else:
+                        out.append(inner.substitute(at))
+            elif isinstance(stmt, Loop):
+                if (inner := resolved(stmt.body, identity)) is None:
+                    return None
+                out.append(stmt.replace(body=Body(inner)))
+            elif isinstance(stmt, Pre) and stmt.carrier == state:
+                if not identity or mixed is None:
+                    out.append(Let(name=stmt.name, value=1.0 if identity else 0.0))
+                else:
+                    hit = BinaryExpression("==", stmt.index[mixed], column)
+                    out += [Let(name=f"{stmt.name}_one", value=1.0), Let(name=f"{stmt.name}_zero", value=0.0)]
+                    branches = (SelectBranch(f"{stmt.name}_one", hit), SelectBranch(f"{stmt.name}_zero", Literal(True, "bool")))
+                    out.append(Select(name=stmt.name, branches=branches))
+            elif isinstance(stmt, Carry):
+                out += stores(stmt, identity)
+            elif not isinstance(stmt, Write):
+                out.append(stmt)
+        return tuple(out)
+
+    matrix, offset = resolved(step, True), resolved(step, False)
+    return None if matrix is None or offset is None else (Body(matrix).pruned(()), Body(offset).pruned(()))
+
+
 def _carry_stores(loop: Loop) -> str | None:
     """What the parts of a split walk may store: ``"steps"`` when every store is indexed by the step, so each
     part writes cells of its own; ``"last"`` when the one store is the state itself, each step over the last
@@ -405,8 +477,10 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
 
     def arm(cta: int, pairs: int = 0) -> DeferredFork:
         spelling = Reduce.of(cta=cta, pairs=pairs).spell()
-        # Composed to one map, a walk that stores its last state carries nothing: its state port goes with it.
-        ends = stores == "last" and pairs == (cta - 1).bit_length()
+        # The piece that stores the kernel's outputs may carry nothing, and the state port goes with the state: the
+        # one map a last-state walk composes to, applied to the seed; a walk of one step a part, read from its start.
+        whole = time.extent.as_static() == cta
+        ends = pairs == (cta - 1).bit_length() if stores == "last" else whole
         kept = output_root(root, {spec.write.output for spec in tile.output_specs}) if ends else root
         output = redirects(kept) if match is not None else None  # an enumeration-only arm carries none
         return DeferredFork(lambda: realize_carry_split(match, root, cta, pairs), {key: spelling}, structural=True, output=output)
@@ -495,12 +569,12 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
     sigma = Sigma({loop.axis.name: BinaryExpression("+", BinaryExpression("*", here, Literal(steps, "int")), Var(loop.axis.name))})
     step = Body(tuple(stmt.substitute(sigma) for stmt in loop.body))
     probe_seed, probe_states = f"{out.name}__probe_seed", f"{out.name}__probe"
-    # Level 0 holds the parts' maps, in the probe's stores; each level above, half the maps of the one below.
+    # Level 0 holds the parts' maps; each level above, half the maps of the one below.
     counts = [cta]
     for _ in range(pairs):
         counts.append((counts[-1] + 1) // 2)
-    maps = [probe_states, *(f"{out.name}__map{level}" for level in range(1, pairs + 1))]
-    offsets = [probe_states, *(f"{out.name}__offset{level}" for level in range(1, pairs + 1))]
+    maps = [f"{out.name}__map{level}" for level in range(pairs + 1)]
+    offsets = [f"{out.name}__offset{level}" for level in range(pairs + 1)]
     starts = [f"{out.name}__start{level or ''}" for level in range(pairs + 1)]
 
     def indexed(stmts: Body, lead: tuple[Axis, ...], seed: str) -> Body:
@@ -554,8 +628,42 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
     def at(position: int | None, expression) -> tuple:
         return tuple(expression if index == position else coordinate for index, coordinate in enumerate(own))
 
+    # One step a part: the step's own matrix and offset, read off it, in place of the probe.
+    # A step that is zero from zero has no offset at any level: its maps are their matrices.
+    direct, linear = None, False
+    if steps == 1:
+
+        def stored(carry: Carry, identity: bool) -> tuple:
+            if not identity:
+                return (Write(output=offsets[0], index=(here, *own), values=(carry.value,)),)
+            if linear:
+                return (Write(output=maps[0], index=(here, *own), values=(carry.value,)),)
+            return (
+                Load(names=("_b",), input=offsets[0], index=(here, *own)),
+                Assign("_a", apply("subtract", carry.value, "_b")),
+                Write(output=maps[0], index=(here, *own), values=("_a",)),
+            )
+
+        once = Body(tuple(stmt.substitute(Sigma({loop.axis.name: here})) for stmt in loop.body))
+        column = None if view.kept is None else own[view.kept]
+        direct = _step_maps(once, state, view.mixed, column, stored)
+        if direct is not None:
+            # Normalization folds a product with zero, so an offset that is nothing stores a literal zero.
+            formed = tuple(LoopOp(body=Body((*before, *_nest(direct[1], (part,)), *after))).body.iter())
+            zeros = {stmt.name for stmt in formed if isinstance(stmt, Let) and stmt.value == Literal(0.0, "float")}
+            linear = all(stmt.value in zeros for stmt in formed if isinstance(stmt, Write))
+        if linear:
+            direct = _step_maps(once, state, view.mixed, column, stored)
+    if direct is not None and basis is not None:
+        # The matrix has a column per mixed cell: its kept loop runs over those alone.
+        columns = cells[view.kept]
+        narrowed = direct[0].map(
+            lambda stmt: stmt.replace(axis=map_axes[view.kept]) if isinstance(stmt, Loop) and stmt.axis.name == columns else stmt
+        )
+        direct = (narrowed, direct[1])
+
     def matrix(level: int, where, index: tuple, name: str) -> tuple:
-        if level:
+        if level or direct is not None:
             return (Load(names=(name,), input=maps[level], index=(where, *index)),)
         return (
             Load(names=(f"{name}_one",), input=probe_states, index=(Literal(1, "int"), where, last, *index)),
@@ -564,8 +672,11 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
         )
 
     def offset(level: int, where, index: tuple, name: str) -> tuple:
-        lead = (where,) if level else (Literal(0, "int"), where, last)
-        return (Load(names=(name,), input=offsets[level], index=(*lead, *index)),)
+        if linear:
+            return (Let(name=name, value=0.0),)
+        if level or direct is not None:
+            return (Load(names=(name,), input=offsets[level], index=(where, *index)),)
+        return (Load(names=(name,), input=probe_states, index=(Literal(0, "int"), where, last, *index)),)
 
     def applied(level: int, where, operand) -> tuple[tuple, str]:
         # ``A`` of map ``where`` times ``operand``, a value read at the cell whose mixed coordinate is the column.
@@ -584,8 +695,8 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
     shapes = io_shapes(tile) | {
         probe_seed: (Dim(2), Dim(cta), *extents),
         probe_states: (Dim(2), Dim(cta), Dim(steps), *extents),
-        **{maps[level]: (Dim(counts[level]), *(axis.extent for axis in map_axes)) for level in range(1, pairs + 1)},
-        **{offsets[level]: (Dim(counts[level]), *extents) for level in range(1, pairs + 1)},
+        **{maps[level]: (Dim(counts[level]), *(axis.extent for axis in map_axes)) for level in range(pairs + 1)},
+        **{offsets[level]: (Dim(counts[level]), *extents) for level in range(pairs + 1)},
         **{name: (Dim(count), *extents) for name, count in zip(starts, counts, strict=True)},
     }
 
@@ -599,14 +710,20 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
         frag.add_node(op=made, inputs=inputs, outputs=(Tensor(name, shapes[name], F32), *ports), node_id=name)
 
     frag = _frag(match, root)
-    add(probe_seed, seed_kernel, [])
-    probe_tile = piece(probe_body)
-    frag.add_node(
-        op=probe_tile,
-        inputs=_piece_inputs(root, probe_tile, probe_seed),
-        outputs=(Tensor(probe_states, shapes[probe_states], F32), *state_ports(probe_tile, probe_states)),
-        node_id=probe_states,
-    )
+    if direct is not None:
+        for name, body, first in ((offsets[0], direct[1], ()), (maps[0], direct[0], (offsets[0],)))[linear:]:
+            first = () if linear else first
+            whole = Body((*before, *_nest(body, (part,)), *after))
+            add(name, whole, _piece_inputs(root, whole, *first))
+    else:
+        add(probe_seed, seed_kernel, [])
+        probe_tile = piece(probe_body)
+        frag.add_node(
+            op=probe_tile,
+            inputs=_piece_inputs(root, probe_tile, probe_seed),
+            outputs=(Tensor(probe_states, shapes[probe_states], F32), *state_ports(probe_tile, probe_states)),
+            node_id=probe_states,
+        )
 
     # The pairs: level by level, the maps ``2t`` and ``2t + 1`` of the level below composed as one.
     for level in range(1, pairs + 1):
@@ -617,7 +734,7 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
         whole = BinaryExpression("<", high, Literal(counts[below], "int"))
         if odd:
             high = clamp_to(high, Literal(counts[below], "int"))
-        for target, axes, lower in ((maps, map_axes, matrix), (offsets, cell_axes, offset)):
+        for target, axes, lower in ((maps, map_axes, matrix), (offsets, cell_axes, offset))[: 2 - linear]:
             product, value = applied(below, high, lambda index, name, lower=lower, below=below, low=low: lower(below, low, index, name))
             stmts = [*product]
             if target is offsets:
@@ -628,7 +745,8 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
                 stmts += [*lower(below, low, own, "_keep"), keep]
                 value = "_next"
             stmts.append(Write(output=target[level], index=(here, *own), values=(value,)))
-            reads = [probe_states] if below == 0 else [maps[below]] if target is maps else [maps[below], offsets[below]]
+            composed = [maps[below]] if target is maps else [maps[below], offsets[below]]
+            reads = [probe_states] if below == 0 and direct is None else composed
             add(target[level], _nest(Body(tuple(stmts)), (pair, *axes)), reads)
 
     # The prefix: the state carried across the maps of the top level, each one's start the state before it.
@@ -662,7 +780,7 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
         (*(() if single else (Axis(part.name, Dim(counts[pairs])),)), *cell_axes),
     )
     seeded = [seed] if isinstance(seed, str) else []
-    read = [probe_states] if pairs == 0 else [maps[pairs], offsets[pairs]]
+    read = [probe_states] if pairs == 0 and direct is None else [maps[pairs], *offsets[pairs : pairs + 1 - linear]]
     written = output_root(root, {spec.write.output for spec in tile.output_specs})
 
     def owned(made: TileOp) -> tuple:
@@ -705,11 +823,23 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
                 Write(output=starts[below], index=(here, *own), values=("_from",)),
             )
         )
-        reads = [starts[level], probe_states] if below == 0 else [starts[level], maps[below], offsets[below]]
+        composed = [maps[below], *offsets[below : below + 1 - linear]]
+        reads = [starts[level], *([probe_states] if below == 0 and direct is None else composed)]
         add(starts[below], _nest(fill, (Axis(part.name, Dim(counts[below])), *cell_axes)), reads)
 
-    # The walk: the kernel over each part's range, from the state its start holds.
-    walk_tile = piece(Body((*before, *_nest(indexed(step, (part,), starts[0]), (sliced, part)), *after)))
+    # The walk: the kernel over each part's range, from the state its start holds. One step a part carries
+    # nothing: the step reads its start where it read the state, and is a kernel like any other.
+    if steps == 1:
+
+        def started(stmt):
+            if isinstance(stmt, Pre) and stmt.carrier == state:
+                return Load(names=(stmt.name,), input=starts[0], index=(here, *stmt.index))
+            return None if isinstance(stmt, Carry) else stmt
+
+        once = Body(tuple(stmt.substitute(Sigma({loop.axis.name: here})) for stmt in loop.body))
+        walk_tile = piece(Body((*before, *_nest(once.map(started), (part,)), *after)))
+    else:
+        walk_tile = piece(Body((*before, *_nest(indexed(step, (part,), starts[0]), (sliced, part)), *after)))
     ports = owned(walk_tile)
     result = add_output_piece(frag, written, walk_tile, _piece_inputs(root, walk_tile, starts[0]), states=ports)
     result.outputs.extend(port.name for port in ports if port.name.endswith("__split"))

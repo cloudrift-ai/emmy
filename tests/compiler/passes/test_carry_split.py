@@ -152,11 +152,15 @@ def test_the_parts_maps_compose_pairwise_and_match_the_sequential_walk(pin: str)
     parts, pairs = int(pin[1]), int(pin[-1])
     graph = _cut(_graph(steps=STEPS), {SCAN: pin, "REDUCE": ""})  # the products unsplit: the runner takes no atomic store
     tiles = {node.id: node.op for node in graph.nodes.values() if isinstance(node.op, TileOp)}
+    # One step a part reads the step's maps off the step; longer parts walk a probe.
+    read = ["out__map0", "out__offset0"] if parts == STEPS else ["out__probe", "out__probe_seed"]
     composed = [f"out__{kind}{level}" for level in range(1, pairs + 1) for kind in ("map", "offset", "start")]
-    assert sorted(tiles) == sorted(["out", "out__probe", "out__probe_seed", "out__start", *composed])
+    assert sorted(tiles) == sorted(["out", "out__start", *read, *composed])
     carrying = {name for name, tile in tiles.items() if tile.carries}
     left = -(-parts // 2**pairs)
-    assert carrying == {"out", "out__probe", *([f"out__start{pairs}"] if left > 1 else [])}, "one map left applies to the seed"
+    # One step a part carries nothing in the probe's place or the walk's; one map left applies to the seed.
+    walked = {*(["out", "out__probe"] if parts < STEPS else []), *([f"out__start{pairs}"] if left > 1 else [])}
+    assert carrying == walked
     if left > 1:
         assert tiles[f"out__start{pairs}"].axis_of(head(tiles[f"out__start{pairs}"].op).axis).extent.as_static() == left
 
@@ -205,8 +209,9 @@ def test_the_row_substitution_composes_to_its_last_state_and_matches_eager(pin: 
     with pinned_knobs({SCAN: pin} if pin else {}):
         graph = Pipeline.build(["tile/lift", "tile/cut"], select=["lift", "cut"]).run(Pipeline.build(LOOP_PASSES).run(graph))
     carrying = [node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and node.op.carries]
-    assert len(carrying) == (0 if pin == "g6k3" else 2 if pin else 1) + (pin == "g6k3"), "the probe and the prefix, and no walk"
-    assert sum("__map" in node.id for node in graph.nodes.values()) == (int(pin[3:]) if pin[3:] else 0)
+    # Two parts walk a probe and a prefix; six read their maps off the step, and one map left carries nothing.
+    assert len(carrying) == {"": 1, "g2k": 2, "g6k3": 0}.get(pin, 1), "no walk: the prefix stores the last state"
+    assert sum("__map" in node.id for node in graph.nodes.values()) == (int(pin[3:] or 0) + 1 if pin.startswith("g6") else 0)
 
     arrays = run_loops(graph)
     (out,) = graph.outputs
@@ -242,8 +247,9 @@ def test_both_recurrences_of_the_gated_delta_rule_compose_and_match_eager(pin: s
     with pinned_knobs({SCAN: pin, "REDUCE": ""}):
         graph = Pipeline.build(["tile/lift", "tile/cut"], select=["lift", "cut"]).run(Pipeline.build(LOOP_PASSES).run(graph))
     names = [node.id for node in graph.nodes.values() if isinstance(node.op, TileOp)]
-    assert sum(name.endswith("__probe") for name in names) == 2
-    assert sum("__map" in name for name in names) == 2 * int(pin[3:] or 0)
+    # Three parts: two steps each of the substitution's six, probed; one each of the chunk loop's three, read off it.
+    assert sum(name.endswith("__probe") for name in names) == 1
+    assert sum("__map" in name for name in names) == 2 * int(pin[3:] or 0) + 1
 
     arrays = run_loops(graph)
     (out,) = graph.outputs
@@ -341,7 +347,7 @@ def test_the_row_substitution_composes_to_its_last_state_on_the_gpu(pin: str) ->
     graph, _, (module, _, _) = graph_from_code(_INVERSE.format(n=8))
     with pinned_knobs({SCAN: pin}):
         graph = Pipeline.build(CUDA_PASSES).run(graph)
-    assert sum(node.id.endswith("__probe") for node in graph.nodes.values()) == 1
+    assert sum(node.id.endswith("__probe") for node in graph.nodes.values()) == (pin == "g2k")
     a = (np.random.default_rng(0).standard_normal((2, 8, 8)) * 0.1).astype(np.float32)
     result, _ = run_program(graph, {"a": a})
     (out,) = graph.outputs
