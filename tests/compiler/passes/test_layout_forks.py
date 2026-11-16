@@ -196,7 +196,7 @@ def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     graph = Pipeline.build(["tile/lift"]).run(graph, ctx=ctx, db=None)
     target = definition(graph.nodes["y"].op.with_io(graph, graph.nodes["y"]), traced=0, origins=("y",), ref=0)
     taken = []
-    operand_cut = {"PLACE": "cut"}  # the squared operand's cone, the one seam
+    operand_cut = {"PLACE@map.1/inner.3/map": "cut"}  # the squared operand's cone
 
     def decide(point):
         if not taken:

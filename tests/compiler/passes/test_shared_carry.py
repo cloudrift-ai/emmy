@@ -259,7 +259,7 @@ def test_shared_storage_stores_a_scan_s_last_state_once_and_copies_only_the_row_
     (closing,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_last")
     assert [store.output for store in closing.body.iter() if isinstance(store, Write)] == ["out"]
     (copy,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_copy")
-    assert str(copy.end) == "40 * a0 + 1400" and str(copy.start) == "thread_idx.x + 40 * a0 + 1360"
+    assert str(copy.end) == "40 * a0 + 1400" and str(copy.start) == "40 * a0 + thread_idx.x + 1360"
 
 
 @requires_cuda

@@ -227,7 +227,7 @@ mod tests {
     in0 = load S[a0]
     in1 = load X[a0]
     v0 = exp(in1)
-    v1 = 2.0 * in0 - in1 + 2.0 * v0
+    v1 = 2.0 * in0 + 2.0 * v0 - in1
     v2 = rsqrt(v1)
     O[a0] = v2"
         );
@@ -341,7 +341,7 @@ mod tests {
         assert!(
             shared.contains("v0 = in0 + in1\n")
                 && shared.contains("v1 = in2 + v0\n")
-                && shared.contains("v2 = -in3 + v0\n"),
+                && shared.contains("v2 = v0 - in3\n"),
             "{shared}"
         );
         let twice = text(
