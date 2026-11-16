@@ -565,6 +565,15 @@ What the session changes for the milestones:
    With all three the recorded kernels come to about 46 ms. The MLP's two products already run near 500 TFLOP/s
    and have no named lever.
 
+   2026-11-16, second rental (the recipe's DISCOVERY has the table): #1411 made the FP8 projections W8A8 and left
+   this golden without the new programs' rows, so no strict export worked on main and the profile above could not
+   be taken. All 19 roots the fresh trace adds are recorded: a 256-row Gated DeltaNet layer's two new roots take
+   114 and 204 us (216 and 296 as W8A16), attention's `pre` 128 us (290) and its out projection 76 us (108), the
+   verify step's three-row roots 61 and 38 us. Not done: five small recurrence roots that #1411 left as proposals
+   are benched and not recorded (a strict record stops at a piece two routes disagree on), so the export still
+   stops at the 256-row prefill program, and no cell was timed. Next on a card, in this order: record those five
+   with a fresh tune DB, export strictly, time the cells with stock in the same session, then take the profile.
+
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
 

@@ -1,5 +1,43 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## Nineteen W8A8 roots recorded; the strict export is five small roots short (2026-11-16)
+
+The W8A8 programs of the section below had no rows in this golden, so no strict export worked on main. Recorded on
+one rented RTX 5090 (48 vCPUs, CUDA 13.3), main at `0d69a2def`: every root the fresh trace adds, 19 of them, each
+with a cut route, its pieces tuned (`--tune 40`) and the root recorded alone under strict evidence. The golden
+drops the four targets only the replaced W8A16 programs wrote. The rental ended before the export passed: no pack
+was served and no cell was timed in this session.
+
+| a layer's new roots, warm | 1 row | 2 rows | 3 rows | 16 rows | 64 rows | 256 rows |
+|---|---|---|---|---|---|---|
+| Gated DeltaNet, first / second root | 94 us (one root) | 59 / 34 | 61 / 38 | 45 / 100 | 58 / 143 | 114 / 204 |
+| attention `pre` | | | | 35 | 52 | 128 |
+| attention `post` (the out projection's root) | | | | 18 | 31 | 76 |
+
+The any-width `pre` and `post` roots take 233 and 94 us at 512 rows.
+
+- **What is left before a strict export.** Five small recurrence roots that #1411's restamp left as proposals: one
+  of the 16-row program and four of the 256-row one. Routes were benched for all five (37 us; 6, 41, 0.7 and 229 us,
+  the last untuned) and none was recorded: the strict record of each stops in the 16-row program's first root, at a
+  piece (`type_as`, the FP8 codes) that one route cuts and another leaves whole, where the whole piece's measured
+  row is not among the schedules the family compile offers. The export from this golden alone gets through the
+  vision tower, the drafter and the decode and verify programs and stops at the 256-row prefill program's first
+  such root.
+- **What the rows say, with those five missing.** A 256-row Gated DeltaNet layer sums to 0.65 ms without the four
+  unrecorded roots (0.86 ms before, all roots) and an attention layer to 0.69 ms (0.90 ms). A three-row Gated
+  DeltaNet layer of the verify step sums to 0.14 ms. Sums of isolated rows, not a measurement of a chunk or a step.
+- **The routes.** As the priors pick them, all 19 roots run as one kernel on one block and hang. What worked: cut
+  every contraction, every reduction and every whole output, on the root and on each piece; inside a piece that
+  encodes an FP8 activation, cut the activation too, so the products are pure e4m3 products; leave a
+  contraction's other operands inside it. Cutting an operand that gathers the chunk state out of its product
+  writes a 200 MB buffer (the 256-row second root: 2.4 ms against 0.20 ms). Cutting every seam makes copy kernels
+  (the one-row root: 294 us against 94 us). The priors then give a state contraction a cooperative reduce on a
+  grid of up to 393,216 blocks (175 us) where a tuned tile takes 3 us, so every piece over a few microseconds has
+  to be tuned by name.
+- **Two things that cost the session time.** The first 256-row pack was exported without strict evidence to
+  profile it, and never returned its first token: the priors' picks for the unrecorded roots are that slow. And
+  the host stopped the instance once; the tune DB was in memory and its unrecorded rows were lost.
+
 ## The FP8 layers as W8A8, measured root by root (2026-11-15)
 
 The checkpoint declares its FP8 leaves' activations static: a modelopt `config_groups` entry with 8-bit float
