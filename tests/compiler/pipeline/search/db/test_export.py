@@ -152,7 +152,7 @@ def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp
 def test_symbolic_placement_fork_exports_in_the_dynamic_tier():
     """A recorded symbolic cut must export with the same regime its arm features carry."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
-    target = "k_fec6b4e7655b"  # a symbolic fused linear and matmul reduction, cut by its recorded route
+    target = "k_2e9258d74428"  # a symbolic fused linear and matmul reduction, cut by its recorded route
     row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
     db = SearchDB()
     import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
@@ -170,7 +170,7 @@ def test_a_static_piece_under_a_symbolic_root_exports_in_its_own_regime():
     the static head dimension); the fork on that piece is a static-regime group, whatever its root's regime, and the
     group's tier agrees with the rows it packs."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "Qwen3.8-27B-NVFP4-NVIDIA" / "golden" / "rtx5090_sm120.json")
-    target = "k_78cece60d704"  # a symbolic attention kernel whose recorded cut leaves a static piece
+    target = "k_22b2aab5f40b"  # a symbolic attention kernel whose recorded cut leaves a static piece
     rows = [row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel))]
     assert rows
     db = SearchDB()
@@ -238,7 +238,7 @@ def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
     import_rows(db, regime_context(document, row.pins), document, [row], source=source)
     assert import_constants(db, document, [row], source=source) > 0
     pools = placement_pools(db, golden_pools(db)[0])
-    [pool] = [pool for pool in pools if pool.kernel.name == "k_90a94eaf8978"]  # the 3584-wide linear
+    [pool] = [pool for pool in pools if pool.kernel.name == "k_ea581e1ab999"]  # the 3584-wide linear
     forks, unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
     assert unmatched == []
     [layout] = [fork for fork in forks if fork.tier == "layout"]
@@ -326,7 +326,7 @@ def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
 
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
-    target = "k_fec6b4e7655b"  # cut at three seams by its recorded route
+    target = "k_2e9258d74428"  # cut at three seams by its recorded route
     row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
     db = SearchDB()
     import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
@@ -359,7 +359,7 @@ def test_a_piece_reached_through_its_parents_pool_carries_the_next_recorded_cut(
 
     golden = GoldenFile.load(Path(__file__).parents[5] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
     # The piece, and the pieces its successive cuts left to cut further, each a kernel of its own name.
-    piece, *deeper_names = ("k_a2b88a00bf07", "k_7a5a28b812a5", "k_053828ff9e76", "k_422dbda9e34c", "k_a7158f75e968")
+    piece, *deeper_names = ("k_bc9aac9c5ba2", "k_8f724e47ecf1", "k_5cbc5e5dc53e", "k_0b9ebbcae797", "k_a6f722502dca")
     [ref] = [kernel.ref for kernel in golden.kernels if kernel.name == piece]
     rows = [row for row in golden.rows if row.kernel in golden.kernel_set(ref)]
     db = SearchDB()
