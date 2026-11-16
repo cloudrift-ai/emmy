@@ -139,9 +139,10 @@ Dev-box RTX 5090, 48 heads x 128, 256 rows, one session. FlashInfer's whole kern
   for the 3x gate.
 - **The time is in four products around it** (1,388, 605, 142 and 140 µs), each a fused region whose cut is never
   picked. A cut pinned on a slow kernel by its name is correct alone, and its pieces take bf16 tensor-core tiles.
-- **A respelled rule plus five cuts runs 268 µs**, correct against eager. The respelling moves every pointwise scale
-  onto the small 64 x 64 matrices, so q, k and v stay plain bf16 operands; it matches Transformers' rule in PyTorch
-  (state within 9e-8). The substitution is 140 of the 268. Without the inverse the rest is 119.
+- **A respelled rule plus cuts ran 268 µs, and 195 after #1411's scan fix**, correct against eager. The respelling
+  moves every pointwise scale onto the small 64 x 64 matrices, so q, k and v stay plain bf16 operands; it matches
+  Transformers' rule in PyTorch (state within 9e-8). The substitution is 53 of the 195 (`t256`, `coop-t`, shared
+  carry). It is now the traced rule.
 - **Chunk 16 did not pay as traced.** The stacked start states become a 16-way select copy (169 µs), and reading
   the output inside the chunk loop leaves fifteen separate products in one kernel.
 
@@ -153,11 +154,10 @@ Faults found on the way, each a compiler bug to raise:
 
 What follows, in order:
 
-1. Move the respelling into the trace wrapper. It re-keys every Gated DeltaNet program at every width, so it
-   lands with a record run on each card that holds such a golden; the dev box covers the RTX 5090.
-2. Record the cut rows for the 64-, 256- and three-row programs in the recipe golden. This is what turns 2,310 into
-   268 for a compile that pins nothing.
-3. The substitution, 140 µs: a tuned row first (it ran 31 µs in blocks of 16 alone), then R2's blocked inverse.
+1. Done: the respelling is the traced rule. It re-keys every Gated DeltaNet program at every width, so each card
+   that holds such a golden needs its programs traced again and recorded; the RTX 5090 goldens come first.
+2. Record the cut rows on the other cards (RTX 4090, A100, H100, V100) as they are rented.
+3. The substitution, 53 µs: a tuned row first (it ran 31 µs in blocks of 16 alone), then R2's blocked inverse.
 4. R5 only for what is left against 87 µs.
 
 ## Order

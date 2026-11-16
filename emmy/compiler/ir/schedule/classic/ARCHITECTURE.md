@@ -670,10 +670,11 @@ product 1,388, the setup of the triangular system 605, the product of its invers
 substitution 140. Each is a fused region whose cut was never picked. With no evidence in scope the pick keeps a
 product nested inside another product's operand, on a thread tile.
 
-Pinned in one session: the same rule with every pointwise scale moved onto the small 64 x 64 matrices, so the queries,
-keys and values stay plain bf16 operands, five cuts and the shared carry on the substitution run 268, correct against
-eager. The products take `mma_m16n8k16_bf16_f32` tiles and cost 5 to 18 each; the substitution is 140 of the 268.
-Without the inverse the rest runs 119.
+The traced rule now moves every pointwise scale onto the small 64 x 64 matrices, so the queries, keys and values stay
+plain bf16 operands. Pinned in one session, with a cut on each fused product, the shared carry and a `coop-t` reduce on
+the substitution, it runs 195. The products take `mma_m16n8k16_bf16_f32` tiles and cost 5 to 18 each; the substitution,
+which stores only its last state, is 53 of the 195. None of these picks is the prior's own: unpinned, the substitution
+takes a thread tile and runs 919, and one 128-wide reduce takes a CTA per output cell and runs 336.
 
 What is left to match the reference: the solve is a 63-step forward substitution in f32, not a blocked inverse on
 tensor cores, and the reference's one launch per head has no spelling, since warp groups with different roles inside
