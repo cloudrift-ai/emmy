@@ -906,7 +906,9 @@ from that CSE form. Subroutine boundaries never limit fusion.
   Names are then given sequentially, a commutative operation lists its operands by value and then by those names, and
   a final axis unification restores shared reduction dimensions without merging dependent loops. The order is final
   on its own output because nothing it sorts by reads what it decides: a statement's shape and a block's spelled
-  subtree read a sum's coefficients sorted and the block's children already ordered, and no number reads a name.
+  subtree read a sum's coefficients sorted and the block's children already ordered, and no number reads a name or
+the order of a sum's terms. The affine form lists its terms from the largest coefficient to the smallest, and terms of
+one coefficient by the order above.
 
 ### Value numbering — `emmy-ir`'s `numbering/values.rs`
 
@@ -917,7 +919,10 @@ weight read at `(h / 384) * 128 + d` in one nest and at a grid axis in another n
 under two consumers. A reduce binds the parameters that mention its axis, retains their bound index expressions in its
 number, and keeps the free coordinates those parameters read. Offsets and strides still distinguish reduced walks.
 Commutative operands order by number, and operands tied on number by the layout and then the parameter order their
-arrangement gives, so neither the source order nor the spelling reaches a number. A carried state an operation reads
+arrangement gives, so neither the source order nor the spelling reaches a number. A sum is numbered as one node over its
+affine form — its offset, and each term's coefficient beside the term's number, ordered like commutative operands — so
+`a - b` and `-b + a` number alike and the order the normal form gives a sum's terms never reaches a number. A carried
+state an operation reads
 ahead of its update — the previous step's value — is keyed by use, like every other read of a state; only a name free in
 the body is spelled. The same number applied to the same coordinate expressions in one scope is one instance — what
 placement computes once.
