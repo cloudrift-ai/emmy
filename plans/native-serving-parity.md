@@ -574,6 +574,17 @@ What the session changes for the milestones:
    stops at the 256-row prefill program, and no cell was timed. Next on a card, in this order: record those five
    with a fresh tune DB, export strictly, time the cells with stock in the same session, then take the profile.
 
+   2026-11-17, third rental: done, all four. Main's golden already held the 256-row Gated DeltaNet program as
+   #1420 traces it, so four roots were left (three of the 16-row program, one of the 64-row one) and are recorded.
+   The 256-row pack exports strictly from the golden alone and the audit passes (80 of 80). Native against stock
+   vLLM 0.32.0 in one session, first token: 0.054 against 0.160 s at 256 tokens, 1.61 against 0.670 s at 7,680,
+   82.4 against 68.3 s at 197,632; TPOT 7.74 / 8.89 / 10.1 ms against 7.34 / 7.96 / 10.05. Every cell is inside
+   the bar but the 7,680-token first token (2.4x stock, the bar 2x: 1.34 s, about 44 ms a chunk). The profile: a
+   chunk is about 53 ms and all of it is kernel time, 40.8 ms in the Gated DeltaNet layers and 11.1 ms in the
+   attention layers, so the three items above reduce to one, the Gated DeltaNet layer at 256 rows (0.85 ms, needs
+   about 0.66). The same trace says the verify step's largest term is the three-row Gated DeltaNet programs,
+   13.2 ms of kernel time a step. GSM8K was not scored on this pack.
+
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
 

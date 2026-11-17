@@ -1,6 +1,44 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
-## Nineteen W8A8 roots recorded; the strict export is five small roots short (2026-11-16)
+## The 256-row pack on W8A8, against stock in one session (2026-11-17)
+
+One rented RTX 5090 (vast.ai; 46 vCPUs, driver 595.99, CUDA 13.0 toolkit), main at `f1b7171fc`, native and stock
+vLLM 0.32.0 in one session with the settings of the 2026-10-25 section and prompts cut again from this tree. The
+pack is exported with 256-row prefill chunks under strict evidence from this golden alone, and the strict serving
+audit passes with the 256-row chunk (80 of 80 twins).
+
+| | native, 256-row chunks | stock vLLM 0.32.0 | native on 2026-11-15, W8A16 |
+|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 7.74 ms / 0.054 s | 7.34 ms / 0.160 s | 8.6 ms / 0.068 s |
+| TPOT / TTFT, 7,680-token prompt | 8.89 ms / 1.61 s | 7.96 ms / 0.670 s | 8.7 ms / 2.44 s |
+| TPOT / TTFT, 197,632-token prompt | 10.1 ms / 82.4 s | 10.05 ms / 68.3 s | 11.5 ms / 113 s |
+| device memory at rest | 28.6 GiB | 30.6 GiB | 28.9 GiB |
+
+- **Against the bar.** TPOT is inside it in every cell (1.05x, 1.12x and 1.01x stock; the bar 1.2x, 1.2x and 1.5x).
+  The first token is ahead of stock at 256 tokens, inside the bar at 197,632 (1.21x, the bar 2x) and outside it at
+  7,680: 2.4x stock, where 2x is 1.34 s. Every native cell was run twice, on two exports of the pack, and repeats to
+  about 1%. GSM8K was not scored and draft acceptance was not read in this session.
+- **The golden.** Main's file already held the 256-row Gated DeltaNet program as #1420 traces it, fully recorded,
+  so this file is main's plus the records of the section below for the other programs. Four roots were open after
+  that and are recorded here, each with its pieces tuned and the root recorded alone: the 16-row program's first
+  and second root (49 and 93 us) and its small recurrence root (28 us), and the 64-row program's second root
+  (125 us). A record compiles every root of its program, so the three 16-row roots had to be benched before any
+  of them could be recorded. Two roots of an older 16-row program that no fresh trace gives are dropped with the
+  pieces only they reached, and two rows of one alternative piece are proposals again.
+- **Where a 256-row chunk goes.** A 7,680-token prefill is 30 chunks of about 53 ms. From `nsys
+  --cuda-graph-trace=node` over ten 256-token and four 7,680-token requests (130 chunks), kernel time a chunk: the
+  Gated DeltaNet layers 40.8 ms (0.85 ms a layer), the attention layers 11.1 ms (`post` 5.5, the fold 3.4, `pre`
+  2.2), everything else under 1 ms. So the chunk is kernel time now: the 25 ms that no row explained on 2026-11-15
+  is not there on this pack. Inside a Gated DeltaNet layer the two MLP kernels take 161 and 94 us and the largest
+  recurrence and projection pieces 71, 58, 53 and 52 us.
+- **Where a decode step goes.** The same trace holds 1,497 verify steps. The three-row Gated DeltaNet programs take
+  13.2 ms of kernel time a step, more than everything else in the step together: the next are the 16-row `post`
+  and `pre` programs (2.2 and 1.2 ms), the head (1.4 ms) and the drafter (1.2 ms). One three-row kernel alone,
+  71 us a launch, is 3.4 ms a step.
+- **What the 7,680-token cell still needs.** 1.34 s is about 44 ms a chunk, 9 ms less than now. Only the Gated
+  DeltaNet layers hold that much.
+
+## Nineteen W8A8 roots recorded (2026-11-16)
 
 The W8A8 programs of the section below had no rows in this golden, so no strict export worked on main. Recorded on
 one rented RTX 5090 (48 vCPUs, CUDA 13.3), main at `0d69a2def`: every root the fresh trace adds, 19 of them, each
@@ -8,11 +46,9 @@ with a cut route, its pieces tuned (`--tune 40`) and the root recorded alone und
 drops the four targets only the replaced W8A16 programs wrote. The rental ended before the export passed: no pack
 was served and no cell was timed in this session.
 
-Merging main at `f1b7171fc` moved nine of these kernels: #1420 settled a new normal form for a difference of two
-reads, and the Gated DeltaNet first root's pieces at 3, 16, 64 and 256 rows are other kernels under it. The restamp
-kept their schedules as proposals and cleared the time of the first root at 16, 64 and 256 rows and of the second
-root at 16 rows; six measured rows lost their microseconds and one cut decision was dropped. The table below is
-what the card measured before that merge. Those roots need a record run again, beside the five still unrecorded.
+Main then moved under these records: #1420 traces the 256-row Gated DeltaNet program another way and settles a
+new normal form, which re-keys pieces of the first root at 3, 16 and 64 rows. The section above holds what was
+recorded again; the 256-row column below is the program as it was traced before #1420.
 
 | a layer's new roots, warm | 1 row | 2 rows | 3 rows | 16 rows | 64 rows | 256 rows |
 |---|---|---|---|---|---|---|
