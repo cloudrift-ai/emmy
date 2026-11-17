@@ -440,7 +440,12 @@ included, so a cone recomputed per output counts per output where the per-cell `
 flat extent products cannot see the recompute; and the arm's `P_trips_ratio` reads its pieces' work against the
 kernel the fork decides — 1 for the arm that keeps it whole, far below it for a cut that computes a cone once. A
 whole Gated DeltaNet decode kernel recomputes its chunk's solve per output element, and before this column every
-arm but one left that recompute standing and the prior could not tell them apart. A split arm's `REDUCE` width also
+arm but one left that recompute standing and the prior could not tell them apart. Beside it stands
+`S_ext_varying_trips`, the same count with each statement run only as often as its value changes — once per trip of
+the loops its value depends on — and the arm's `P_varying_ratio` over it. A recurrence with a rank-one step and one
+with a dense step have the same loop nest and the same `S_ext_trips`, but the first walks a row of work a step: a
+composition of its steps into dense maps does a matrix product where the walk paid a row, a ratio that grows with the
+state's width, where composing a dense step stays within a few times its walk. A split arm's `REDUCE` width also
 gives it the `D_*` occupancy features — its CTA count, its waves against the card's SM count and how full the last
 wave is — which say what a split buys on a given card where the piece stamps only say how large the pieces are. Its
 dataset is
