@@ -572,7 +572,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `recipes/Qwen3.8-Flash-Next-NVFP4/serving-v100.env` pins the V100 serving shape with these settings. Of the GDN
   refusals below, a hosted layer takes only the fork's own: `mamba_cache_mode` "all". Captured decode steps and prefix
   caching need nothing more: the fork's modules keep their state in vLLM's blocks, which vLLM copies at a cached
-  block's end (`mamba_cache_mode` "align") and a captured step reads at the addresses it recorded. A captured
+  block's end (`mamba_cache_mode` "align") and a captured step reads at the addresses it recorded. Prefix caching
+  ends a prompt on a step of its last token, which Model Runner V2 would run eager because it holds a prompt token;
+  with no speculative decoding a step whose every row is one token replays the decode graph instead
+  (`vllm_patches.one_token_prompt_rows_replay_decode_graphs`), since the hosted Gated DeltaNet already runs such a row
+  as a decode row and the sparse attention has no prefill path of its own. A captured
   single-token step can run the symbolic programs. The static decode tier needs a recorded golden: picked cold, its
   16-token `post` is one fused kernel that recomputes every normalization in its loops, and the boot audit stops it.
 
