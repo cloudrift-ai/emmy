@@ -20,7 +20,7 @@ from sys import float_info
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Loop
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Loop, Pre
 from emmy.compiler.pipeline.knob import _SITE_FAMILIES, KnobType, axis_of, family_of, family_value, get
 from emmy.compiler.wire import kernel_tile
 
@@ -77,7 +77,8 @@ CTX_PREFIX = "H_"
 # value. Earlier datasets and weights must be rebuilt.
 # Version 14 drops ``H_opt``: ptxas assembles every kernel, so there is no compiler opt level to feature. Earlier
 # datasets and weights must be rebuilt.
-FEATURIZER_VERSION = 14
+# Version 15 adds ``S_ext_varying_trips``, a kernel's work with each statement run only as often as its value changes.
+FEATURIZER_VERSION = 15
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
@@ -470,6 +471,9 @@ class Featurizer:
             # The work the candidate's kernels do against the work the kernel it decides does: 1 where the kernel
             # stays whole, below it where a cut computes a cone once that the whole kernel recomputed per output.
             of_pieces["P_trips_ratio"] = of_pieces["P_sum_ext_trips"] / base["S_ext_trips"]
+            # The same against the work that is left once nothing is recomputed (``_varying_trips``): far above 1
+            # where the pieces do work the kernel never did, as dense maps composed for a rank-one step.
+            of_pieces["P_varying_ratio"] = of_pieces["P_sum_ext_varying_trips"] / base["S_ext_varying_trips"]
         return {**knob_features({**base, **knobs}), **of_pieces}
 
     def warp_eligible(self, kernel: Op) -> bool:
@@ -1083,6 +1087,38 @@ def _trips(body: Body) -> float:
     return min(total, float_info.max)
 
 
+def _varying_trips(body: Body) -> float:
+    """The statement executions ``body`` performs where each statement runs only as often as its value changes: a
+    leaf once per trip of the static loops around it whose axis it depends on (``Body.axis_dependencies``; a read of
+    a carried state depends on the loop that carries it). :func:`_trips` charges a statement every loop around it,
+    so a contraction that sits inside an output loop it does not read is a matrix of work per step there and a row
+    here. That is what tells a recurrence whose step is a rank-one update from one whose step is a dense product:
+    their loop nests agree, and composing the first costs a matrix product where its walk paid a row. Symbolic
+    extents and strided loops count as in :func:`_trips`."""
+    depends = body.axis_dependencies
+
+    def walk(stmts: Body, around: tuple[tuple[str, float, bool], ...]) -> float:
+        total = 0.0
+        for s in stmts:
+            if isinstance(s, Loop):
+                ext = s.axis.extent
+                total += walk(s.body, (*around, (s.axis.name, float(ext.as_static()) if ext.is_static else 1.0, bool(s.carries))))
+            elif nested := s.nested():
+                total += sum(walk(inner, around) for inner in nested)
+            else:
+                before = isinstance(s, Pre)  # reads the cells its index names, at each step of the carrying loop
+                reads = set(s.deps()).union(*(e.free_vars() for e in s.expressions())) - ({s.carrier} if before else set())
+                axes = reads.union(*(depends.get(name, ()) for name in reads))
+                runs = 1.0
+                for name, extent, carries in around:
+                    if name in axes or (carries and before):
+                        runs = _bounded_mul(runs, extent)
+                total += runs
+        return min(total, float_info.max)
+
+    return walk(body, ())
+
+
 def _extents(body: Body) -> dict[str, float]:
     """Continuous ``S_ext_*`` loop extents, split by free vs reduce axis
     (``Loop.is_reduce``). Symbolic axes (non-static extent) are excluded from
@@ -1114,4 +1150,5 @@ def _extents(body: Body) -> dict[str, float]:
         "S_ext_n_symbolic_axis": float(n_symbolic),
         "S_ext_serial_cell_work": _serial_cell_work(body),
         "S_ext_trips": _trips(body),
+        "S_ext_varying_trips": _varying_trips(body),
     }

@@ -1,5 +1,6 @@
 """Focused tests for program-backed golden enumeration."""
 
+import textwrap
 from collections import Counter
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -10,11 +11,12 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.schedule import Placement
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.pipeline import ForkPoint
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.features import Featurizer
+from emmy.compiler.pipeline.search.features import Featurizer, structure_features
 from emmy.compiler.pipeline.search.ranking import _place_ballot, enumerate_graph
 from tests.compiler.terms import contraction, projection, slab
 
@@ -113,6 +115,31 @@ def test_a_cut_arm_is_featurized_by_its_work_against_the_whole_kernels() -> None
     assert 0 < row["P_trips_ratio"] < 1 and row["P_sum_ext_trips"] == row["P_max_ext_trips"] > 0
 
 
+def test_work_counts_a_statement_only_as_often_as_its_value_changes() -> None:
+    """``S_ext_varying_trips`` charges a statement the loops it depends on: a contraction inside an output loop it
+    does not read is a row of work there and a matrix under ``S_ext_trips``, which is what tells a rank-one step
+    from a dense one, whose contraction reads both output axes."""
+    step = """
+        for t in 0..4:
+          for i in 0..8:
+            for j in 0..8:
+              for k in 0..8:
+                a = load w[{index}]
+                p = pre s[k, j]
+                x = a * p
+                acc <- add(acc, x) over k
+              s[i, j] <- acc seed s0
+        """
+    rank_one = structure_features(parse_body(textwrap.dedent(step.format(index="t, k"))))
+    dense = structure_features(parse_body(textwrap.dedent(step.format(index="t, i, k"))))
+
+    assert rank_one["S_ext_trips"] == dense["S_ext_trips"] == 4 * 8 * 8 * (4 * 8 + 1)
+    # Rank-one: the load runs per (t, k), the product per (t, j, k), the state's write per (t, i, j).
+    assert rank_one["S_ext_varying_trips"] == 4 * 8 + 3 * 4 * 8 * 8 + 4 * 8 * 8
+    # Dense: the product and its sum run per (t, i, j, k).
+    assert dense["S_ext_varying_trips"] == 3 * 4 * 8 * 8 + 2 * 4 * 8 * 8 * 8
+
+
 def test_placement_separates_contraction_roots_from_equal_loop_histograms() -> None:
     m, n, k = Axis("m", 4), Axis("n", 8), Axis("k", 16)
     b = slab("b", "w", "k", "n")
@@ -128,7 +155,7 @@ def test_placement_separates_contraction_roots_from_equal_loop_histograms() -> N
 
     assert [row["P_n_whole_contraction_roots"] for row in rows] == [1.0, 0.0]
     # The projection's statements add work; every stamp but the work and the root count agrees.
-    varies = ("P_n_whole_contraction_roots", "S_ext_trips", "P_sum_ext_trips", "P_max_ext_trips", "P_trips_ratio")
-    assert {key: value for key, value in rows[0].items() if key not in varies} == {
-        key: value for key, value in rows[1].items() if key not in varies
+    varies = ("P_n_whole_contraction_roots", "trips")
+    assert {key: value for key, value in rows[0].items() if not any(part in key for part in varies)} == {
+        key: value for key, value in rows[1].items() if not any(part in key for part in varies)
     }

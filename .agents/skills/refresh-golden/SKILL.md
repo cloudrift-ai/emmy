@@ -185,6 +185,11 @@ dropped on purpose. For a serving golden the release gate is the strict audit on
 `make test`'s check does not replace it: that check has passed while a serving golden's twins refused strict
 evidence at a cut fork (DeepSeek V4, after #981 and again after #1003). It proves the file is the fresh lowering,
 not that every fork a deploy meets has a measured arm.
+
+A hardware golden has a candidate file beside it (`emmy/compiler/pipeline/search/candidates/records/<same name>`,
+GLOSSARY "Candidate file"), which carries the golden's programs, kernels and decisions. After the golden changes, run
+`emmy candidates restamp` and then `emmy candidates build`, which copies the golden's tables again and keeps the
+candidate rows whose group the golden still holds.
 Keep the prior reproduction gate green (AGENTS.md finalization step 22): a refreshed hardware golden refits both priors
 in the same PR; a refreshed recipe golden the shipped priors do not reproduce is refit for or tagged `prior-pending`.
 

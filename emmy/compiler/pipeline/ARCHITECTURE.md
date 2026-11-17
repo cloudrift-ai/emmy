@@ -440,7 +440,12 @@ included, so a cone recomputed per output counts per output where the per-cell `
 flat extent products cannot see the recompute; and the arm's `P_trips_ratio` reads its pieces' work against the
 kernel the fork decides — 1 for the arm that keeps it whole, far below it for a cut that computes a cone once. A
 whole Gated DeltaNet decode kernel recomputes its chunk's solve per output element, and before this column every
-arm but one left that recompute standing and the prior could not tell them apart. A split arm's `REDUCE` width also
+arm but one left that recompute standing and the prior could not tell them apart. Beside it stands
+`S_ext_varying_trips`, the same count with each statement run only as often as its value changes — once per trip of
+the loops its value depends on — and the arm's `P_varying_ratio` over it. A recurrence with a rank-one step and one
+with a dense step have the same loop nest and the same `S_ext_trips`, but the first walks a row of work a step: a
+composition of its steps into dense maps does a matrix product where the walk paid a row, a ratio that grows with the
+state's width, where composing a dense step stays within a few times its walk. A split arm's `REDUCE` width also
 gives it the `D_*` occupancy features — its CTA count, its waves against the card's SM count and how full the last
 wave is — which say what a split buys on a given card where the piece stamps only say how large the pieces are. Its
 dataset is
@@ -466,7 +471,9 @@ fork is a training pool rather than an extrapolation, and the export opens no go
 The card's `H_*` features (capability, SM count, memory, fast math, …) are constant inside a fork, but a tree
 can combine them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM,
 and per precision regime: a golden can split a kernel under fast math and keep it whole in the precise regime.
-The export prices nothing: the label is what the golden did. The import marks every decision on the way down to a
+The export prices nothing: the label is what the golden did. A golden therefore records on a kernel only the
+decision that won there: an arm that was measured and lost keeps its pieces' measured rows and no
+routing row, which the fit would read as the kernel's label. The import marks every decision on the way down to a
 golden row as taken under that row's card, precision regime and sizes (the `taken` table), whether or not the row
 holds a time, so a golden that cut a kernel marks the cut and one that kept it whole marks keep-fused. A routing row
 names no card, so it cannot mark a cut on a card whose golden did not take it. Shared cut parents receive one pool
@@ -1002,6 +1009,18 @@ data but nothing a restamp can lower again; a compiler change that re-keys a ker
   body no longer lowers is skipped with a warning, with its rows; a stale file is a restamp, not an import option. A
   golden file's rows become, through `emmy db export`, the golden pools `emmy fit` and `eval prior` read (Part 8); a
   compile never reads this instance, and the tune DB imports the goldens on its own.
+- **The candidate files** (`search/candidates`, one file per hardware golden under its `records/`) hold measured
+  schedules that are not the best known one, for the groups the hardware golden holds: a group is filled to a count
+  set by the size of its kernel's schedule space (`candidates.target`: 3 at ten schedules or fewer, 10 at a million or
+  more, by the logarithm between; the size is the bound the schedule fork declares, `Fork.pool_bound`, and only a
+  space of at most 64 schedules is walked, to ask its group for no more than it holds). A file is in the golden file
+  format and copies its golden's programs, kernels and decisions; its rows are the candidates alone, and join the
+  golden's rows on the kernel's exact identity, the sizes and the regime. A candidate is never a schedule its golden
+  holds: two rows are one schedule when they agree on every knob that is not at its default or OFF value and is no
+  regime knob, since a tune's row spells every knob its kernel carries and a golden row only what its record pinned.
+  `candidates.build` fills a file from the freeze of the same card and keeps the rows it already holds. It is not a
+  repository golden: no compile, import, export, fit or gate reads it. It restamps as its golden does, and a change
+  to a hardware golden is followed by a build, which copies the golden's tables again.
 - **The freeze kept with the repository** is the directory `search/freezes/` (`freeze.REPOSITORY_FREEZE`): one
   file per card, exactly what `emmy db freeze` writes, payload in git LFS and left out of the wheel. `emmy db import
   --repository` reads it beside the repository goldens, and nothing else does — not a compile, not the reproduction
@@ -1504,9 +1523,10 @@ reading. There is no alias vocabulary: old `a:scalar` / `a:none` scalar tags, al
 tokens, leading-zero widths, and surrounding whitespace all raise rather than naming the same schedule twice.
 
 **`REDUCE`** (STR codec, the tile schedule) — the reduce-axis partition codec, site-local since step 7:
-`[g<n>[a|k]][/coop[-t]][/v<n>][/r<n>]` — `g` cross-CTA split-K (+ finalize letter), `coop` the cooperative-thread
-fold (its WIDTH lives in `WORK`; `-t` the transposed lane map), `v` the lane's contiguous run (adjacent reduce
-elements under `coop`, which one vector load reads; adjacent output columns under `coop-t`), `r` ILP register fold.
+`[g<n>[a|k[<p>]]][/coop[-t]][/v<n>][/r<n>]` — `g` cross-CTA split-K (+ finalize letter, and under `k` the pairwise
+compositions of a carried state's part maps), `coop` the cooperative-thread fold (its WIDTH lives in `WORK`; `-t`
+the transposed lane map), `v` the lane's contiguous run (adjacent reduce elements under `coop`, which one vector
+load reads; adjacent output columns under `coop-t`), `r` ILP register fold.
 Empty = serial (the per-thread remainder is derived, never spelled); the retired `b<n>` coop-width spelling raises.
 The cross-CTA split is the `g<n>` field (GRID stage), and the
 **finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive single-fold
