@@ -1,10 +1,9 @@
 """Autotuning one kernel: which complete schedule rows to measure next, given the ones already measured.
 
 ``emmy run --tune N`` drives it: the program's one scheduled kernel is enumerated under the greedy kernel set
-(:func:`schedule_space`) — every schedule row crossed with the knobs the kernel lowering decides afterwards, the
-carried-state storage among them — the prior's ten best rows are measured first, then each batch is the rows with
-the highest expected improvement under a Gaussian process fit to the log latencies measured so far (Bayesian
-optimization). The caller measures — this module never touches the GPU.
+(:func:`schedule_space`) — every complete schedule row, a carried state's storage among its sites — the prior's
+ten best rows are measured first, then each batch is the rows with the highest expected improvement under a
+Gaussian process fit to the log latencies measured so far (Bayesian optimization). The caller measures — this module never touches the GPU.
 
 A knob value is split into its parts before the process sees it (``TILE`` ``mma_m16n8k16_f16_f32/f2x4/k2`` → the
 atom, a ``2×4`` fragment count and a ``k2`` step), so two rows that differ in one tile dimension are near each other.
@@ -30,14 +29,12 @@ _PART = re.compile(r"^([a-z_]*?)(\d+)(?:x(\d+))?$")
 
 def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
     """The one scheduled kernel of ``graph`` and every complete row its forks offer, under the kernel set the greedy
-    compile takes: each schedule row crossed with every combination of the knobs the kernel lowering decides afterwards
-    (``SHARED_CARRY``; :func:`~.ranking.later_arms`, the crossing the dataset's pools take too). A program with
+    compile takes. A program with
     several scheduled kernels is refused: a bare pin reaches them all."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.greedy import _schedule_fork, greedy_decide  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.ranking import later_arms  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
 
     greedy = greedy_decide(db=db)
@@ -52,7 +49,7 @@ def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
     if len(pools) != 1:
         raise ValueError(f"--tune tunes a program with one scheduled kernel; this one has {len(pools)}")
     ((op, rows),) = pools.values()
-    return op, [{**row, **arm} for row in rows for arm in later_arms()]
+    return op, rows
 
 
 def _parts(row: dict) -> dict:

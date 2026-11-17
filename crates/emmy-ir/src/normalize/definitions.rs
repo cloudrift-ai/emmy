@@ -203,33 +203,33 @@ mod tests {
     fn a_tree_and_its_chain_spelling_are_one_body() {
         let chain = body(
             "for i in 0..8:
-    x = load X[i]
-    s = load S[i]
-    e = exp(x)
-    t = add(e, s)
-    u = multiply(t, 2.0)
-    v = subtract(u, x)
-    w = rsqrt(v)
-    O[i] = w",
+  x = load X[i]
+  s = load S[i]
+  e = exp(x)
+  t = add(e, s)
+  u = multiply(t, 2.0)
+  v = subtract(u, x)
+  w = rsqrt(v)
+  O[i] = w",
         );
         let tree = body(
             "for i in 0..8:
-    x = load X[i]
-    s = load S[i]
-    w = rsqrt(2.0 * (exp(x) + s) - x)
-    O[i] = w",
+  x = load X[i]
+  s = load S[i]
+  w = rsqrt(2.0 * (exp(x) + s) - x)
+  O[i] = w",
         );
         let normal = text(&normalize_body(&tree).unwrap());
         assert_eq!(normal, text(&normalize_body(&chain).unwrap()));
         assert_eq!(
             normal,
             "for a0 in 0..8:
-    in0 = load S[a0]
-    in1 = load X[a0]
-    v0 = exp(in1)
-    v1 = 2.0 * in0 - in1 + 2.0 * v0
-    v2 = rsqrt(v1)
-    O[a0] = v2"
+  in0 = load S[a0]
+  in1 = load X[a0]
+  v0 = exp(in1)
+  v1 = 2.0 * in0 + 2.0 * v0 - in1
+  v2 = rsqrt(v1)
+  O[a0] = v2"
         );
     }
 
@@ -239,11 +239,11 @@ mod tests {
         let normal = text(
             &normalize_body(&body(
                 "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        s = load S[k]
-        acc <- add(acc, exp(x) * s) over k
-    O[i] = acc",
+  for k in 0..4:
+    x = load X[i, k]
+    s = load S[k]
+    acc <- add(acc, exp(x) * s) over k
+  O[i] = acc",
             ))
             .unwrap(),
         );
@@ -261,16 +261,16 @@ mod tests {
     /// so is the comparison a select reads.
     #[test]
     fn a_nested_select_or_cast_is_a_definition_of_its_own() {
-        let loads = "for i in 0..8:\n    x = load X[i]\n    s = load S[i]\n";
+        let loads = "for i in 0..8:\n  x = load X[i]\n  s = load S[i]\n";
         let selected = text(
             &normalize_body(&body(&format!(
-                "{loads}    y = exp(x < s ? x * s : s)\n    O[i] = y"
+                "{loads}  y = exp(x < s ? x * s : s)\n  O[i] = y"
             )))
             .unwrap(),
         );
         let chain = text(
             &normalize_body(&body(&format!(
-                "{loads}    p = x * s\n    t = x < s ? p : s\n    y = exp(t)\n    O[i] = y"
+                "{loads}  p = x * s\n  t = x < s ? p : s\n  y = exp(t)\n  O[i] = y"
             )))
             .unwrap(),
         );
@@ -284,7 +284,7 @@ mod tests {
         );
         let cast = text(
             &normalize_body(&body(&format!(
-                "{loads}    y = exp((f16)(x * s))\n    O[i] = y"
+                "{loads}  y = exp((f16)(x * s))\n  O[i] = y"
             )))
             .unwrap(),
         );
@@ -292,7 +292,7 @@ mod tests {
             cast,
             text(
                 &normalize_body(&body(&format!(
-                    "{loads}    p = x * s\n    c = (f16)(p)\n    y = exp(c)\n    O[i] = y"
+                    "{loads}  p = x * s\n  c = (f16)(p)\n  y = exp(c)\n  O[i] = y"
                 )))
                 .unwrap()
             )
@@ -306,16 +306,16 @@ mod tests {
     /// An accumulation sums a name: a select it summed is a definition ahead of it.
     #[test]
     fn an_accumulation_sums_a_select_by_name() {
-        let loads = "for i in 0..8:\n    for k in 0..4:\n        x = load X[i, k]\n";
+        let loads = "for i in 0..8:\n  for k in 0..4:\n    x = load X[i, k]\n";
         let selected = text(
             &normalize_body(&body(&format!(
-                "{loads}        acc <- add(acc, k < i ? x : 0.0) over k\n    O[i] = acc"
+                "{loads}    acc <- add(acc, k < i ? x : 0.0) over k\n  O[i] = acc"
             )))
             .unwrap(),
         );
         let chain = text(
             &normalize_body(&body(&format!(
-                "{loads}        m = k < i ? x : 0.0\n        acc <- add(acc, m) over k\n    O[i] = acc"
+                "{loads}    m = k < i ? x : 0.0\n    acc <- add(acc, m) over k\n  O[i] = acc"
             )))
             .unwrap(),
         );
@@ -331,38 +331,39 @@ mod tests {
     /// non-affine node reads, however its reader spells the same sum again.
     #[test]
     fn a_shared_affine_value_stays_a_definition() {
-        let loads = "for i in 0..8:\n    x = load X[i]\n    s = load S[i]\n    y = load Y[i]\n    z = load Z[i]\n";
+        let loads =
+            "for i in 0..8:\n  x = load X[i]\n  s = load S[i]\n  y = load Y[i]\n  z = load Z[i]\n";
         let shared = text(
             &normalize_body(&body(&format!(
-                "{loads}    t = add(x, s)\n    u = add(t, y)\n    v = subtract(t, z)\n    O[i] = u\n    P[i] = v"
+                "{loads}  t = add(x, s)\n  u = add(t, y)\n  v = subtract(t, z)\n  O[i] = u\n  P[i] = v"
             )))
             .unwrap(),
         );
         assert!(
             shared.contains("v0 = in0 + in1\n")
                 && shared.contains("v1 = in2 + v0\n")
-                && shared.contains("v2 = -in3 + v0\n"),
+                && shared.contains("v2 = v0 - in3\n"),
             "{shared}"
         );
         let twice = text(
             &normalize_body(&body(
                 "for i in 0..8:
-    x = load X[i]
-    s = load S[i]
-    w = (x + s) + exp(x + s)
-    O[i] = w",
+  x = load X[i]
+  s = load S[i]
+  w = (x + s) + exp(x + s)
+  O[i] = w",
             ))
             .unwrap(),
         );
         assert_eq!(
             twice,
             "for a0 in 0..8:
-    in0 = load S[a0]
-    in1 = load X[a0]
-    v0 = in0 + in1
-    v1 = exp(v0)
-    v2 = in0 + in1 + v1
-    O[a0] = v2"
+  in0 = load S[a0]
+  in1 = load X[a0]
+  v0 = in0 + in1
+  v1 = exp(v0)
+  v2 = in0 + in1 + v1
+  O[a0] = v2"
         );
     }
 
@@ -373,18 +374,18 @@ mod tests {
         let normal = text(
             &normalize_body(&body(
                 "for i in 0..8:
-    x = load X[i]
-    y = copy(x)
-    c = 2.0
-    z = multiply(y, c)
-    O[i] = z
-    P[i] = c",
+  x = load X[i]
+  y = copy(x)
+  c = 2.0
+  z = multiply(y, c)
+  O[i] = z
+  P[i] = c",
             ))
             .unwrap(),
         );
         assert_eq!(
             normal,
-            "let f32 v0 = 2.0\nfor a0 in 0..8:\n    in0 = load X[a0]\n    v1 = 2.0 * in0\n    O[a0] = v1\n    P[a0] = v0"
+            "let f32 v0 = 2.0\nfor a0 in 0..8:\n  in0 = load X[a0]\n  v1 = 2.0 * in0\n  O[a0] = v1\n  P[a0] = v0"
         );
     }
 
@@ -392,11 +393,11 @@ mod tests {
     #[test]
     fn like_terms_sum_and_cancel() {
         let affine = |lines: &[&str]| {
-            let mut given = String::from("for i in 0..8:\n    x = load X[i]\n");
+            let mut given = String::from("for i in 0..8:\n  x = load X[i]\n");
             for line in lines {
-                given.push_str(&format!("    {line}\n"));
+                given.push_str(&format!("  {line}\n"));
             }
-            given.push_str("    O[i] = o");
+            given.push_str("  O[i] = o");
             text(&normalize_body(&body(&given)).unwrap())
         };
         assert_eq!(
@@ -406,13 +407,13 @@ mod tests {
                 "s = add(t, x)",
                 "o = subtract(s, x)"
             ]),
-            "for a0 in 0..8:\n    in0 = load X[a0]\n    v0 = 3.0 * in0\n    O[a0] = v0"
+            "for a0 in 0..8:\n  in0 = load X[a0]\n  v0 = 3.0 * in0\n  O[a0] = v0"
         );
         // Every term cancels: the value is the integer zero (no literal fed it, and `x` is untyped), which the store
         // reads, and nothing loads `X`.
         assert_eq!(
             affine(&["o = subtract(x, x)"]),
-            "let v0 = 0\nfor a0 in 0..8:\n    O[a0] = v0"
+            "let v0 = 0\nfor a0 in 0..8:\n  O[a0] = v0"
         );
     }
 }

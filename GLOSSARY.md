@@ -50,17 +50,17 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Compiler** — A program that translates code from one form into another. Emmy translates PyTorch model operations
   into CUDA code.
 - **Operation (op)** — One unit of computation, such as add, matrix multiplication, softmax, or RMSNorm.
-- **Affine form** — The canonical spelling of a sum: like terms merged, zero terms dropped, the terms ordered, a
-  whole-number coefficient or offset spelled as the integer when no float literal fed the sum (`x + x` is `2 * x`;
-  once a float literal fed it, every literal the sum spells is a float: `2.0 * x`, `x - 8.0`, `2.0 * x + 2.0 * y` for
-  `x + x + 2.0 * y`, and a sum that would spell none keeps `1.0 * x`, since the literal is what makes an operation over
-  integer operands a float one), the offset last (`2 * x - y + 0.5`). Its coefficient domain is the expression class
-  of the field: an `Index` folds integer literals alone and keeps every quotient a term, since integer division
-  floors; a `Value` folds any literal and a quotient by a float literal into its
-  reciprocal scale. Normalization spells every sum, difference, negation and literal scale this way, so two spellings
-  of the same sum are one kernel. An **affine region** is the part of an expression the form covers: the sum with its
-  differences, negations and literal scales, down to the names, literals and other operations it reads, which the
-  normal form spells as one node of a definition.
+- **Affine form** — The canonical spelling of a sum: like terms merged, zero terms dropped, the terms ordered from the
+  largest coefficient to the smallest (`a - b`, never `-b + a`), a whole-number coefficient or offset spelled as the
+  integer when no float literal fed the sum (`x + x` is `2 * x`; once a float literal fed it, every literal the sum
+  spells is a float: `2.0 * x`, `x - 8.0`, `2.0 * x + 2.0 * y` for `x + x + 2.0 * y`, and a sum that would spell none
+  keeps `1.0 * x`, since the literal is what makes an operation over integer operands a float one), the offset last
+  (`2 * x - y + 0.5`). Its coefficient domain is the expression class of the field: an `Index` folds integer literals
+  alone and keeps every quotient a term, since integer division floors; a `Value` folds any literal and a quotient by
+  a float literal into its reciprocal scale. Normalization spells every sum, difference, negation and literal scale
+  this way, so two spellings of the same sum are one kernel. An **affine region** is the part of an expression the
+  form covers: the sum with its differences, negations and literal scales, down to the names, literals and other
+  operations it reads, which the normal form spells as one node of a definition.
 - **Graph** — A representation of a program as nodes connected by data-flow edges. A node usually represents an
   operation; an edge means that one operation uses a value produced by another.
 - **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually
@@ -193,7 +193,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Route** — The spelling a structural knob key addresses a node of the fold tree by: from the root, each departure
   names the node stood on and the 1-based stored operand taken (`map.1`), and the last segment names the kind of the
   node arrived at — `PLACE@map.1/twist.1/inner.2/map`, `TILE@map.1/twist.1/inner`. Kinds are the term's derived
-  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site.
+  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site. A carrying
+  fold reads as `scan`, and its route is where a row spells the storage of the carried state (`STAGE@…/scan`).
 - **Twist recipe** — A twisted monoid stated as data (`ir/pure/twist.py`): a componentwise base monoid with its
   per-element lift, conjugated by a bijection ψ (transport of structure — associativity is inherited), beside which
   the recipe stores what conjugation does not give stably: one pattern per channel (the per-element map a dependent

@@ -88,11 +88,10 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
     assert dataset.provenance["sources"] == {"golden:case": 1} and back.provenance == dataset.provenance
 
 
-def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_its_own():
-    """A kernel whose carried state fits shared memory opens the ``SHARED_CARRY`` fork after its schedule. The pool
-    offers every schedule row in both storages, so the fit can learn the one the greedy's tie-break skips, and a
-    golden row recorded in shared storage lands on that arm, not on the first row of its schedule; one recorded
-    before the knob existed was measured in global storage and lands there."""
+def test_a_carried_kernels_pool_offers_both_storages_and_a_golden_lands_on_its_own():
+    """A kernel whose carried state fits shared memory offers its schedule rows in both storages, so the fit can
+    learn either, and a golden row recorded in shared storage lands on that row, not on the global one of its
+    schedule; one that spells no storage was measured in global storage and lands there."""
     from emmy.compiler.pipeline.search.dataset import GoldenRow, KernelDef, regime_of
     from tests.compiler.passes.test_shared_carry import _PINS
     from tests.compiler.passes.test_shared_carry import _graph as carried_state_graph
@@ -103,24 +102,25 @@ def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_i
     schedule = {k: v for k, v in _PINS.items() if k in ("WORK", "REDUCE")}
     with pinned_knobs({"FAST_MATH": True}):
         file_side = enumerate_graph(graph, ctx, prefer=schedule)
-    arms = {str(row["SHARED_CARRY"]) for row in file_side.rows if all(str(row.get(k)) == v for k, v in schedule.items())}
-    assert arms == {"0", "1"}
-    shared, legacy = GoldenRow({**schedule, "SHARED_CARRY": "1"}, 1.0, "golden:a"), GoldenRow(dict(schedule), 1.05, "golden:b")
+    arms = {str(row["STAGE"]) for row in file_side.rows if all(str(row.get(k)) == v for k, v in schedule.items())}
+    assert arms == {"", "d1/smem"}
+    shared, legacy = GoldenRow({**schedule, "STAGE": "d1/smem"}, 1.0, "golden:a"), GoldenRow(dict(schedule), 1.05, "golden:b")
     pool = GoldenPool(CARDS[(7, 0)], (7, 0), regime_of(False, {"FAST_MATH": True}), kernel, {}, (shared, legacy))
     db_side = enumerate_pool(pool, pool_context(pool))
     assert [tile_signature(r) for r in db_side.rows] == [tile_signature(r) for r in file_side.rows]
     assert db_side.total == len(db_side.rows) == len(file_side.rows)
     [group], skipped = build_golden_groups([pool])
-    column = group.feat_names.index("SHARED_CARRY")
+    column = group.feat_names.index("D_state_shared")
     assert skipped == [] and len(set(group.golden_ids)) == 2
     assert sorted(group.feats[i, column] for i in group.golden_ids) == [0.0, 1.0]
     assert {str(db_side.rows[i]["WORK"]) for i in group.golden_ids} == {schedule["WORK"]}
     [sampled], skipped = build_golden_groups([pool], sample=4, seed=0)
-    column = sampled.feat_names.index("SHARED_CARRY")
+    column = sampled.feat_names.index("D_state_shared")
     assert skipped == [] and sorted(sampled.feats[i, column] for i in sampled.golden_ids) == [0.0, 1.0]
     # A verified row the pool's fastest beats by more than measurement noise is no positive: it measured slower.
     slow = GoldenPool(CARDS[(7, 0)], (7, 0), regime_of(False, {"FAST_MATH": True}), kernel, {}, (shared, replace(legacy, us=2.0)))
     [group], skipped = build_golden_groups([slow])
+    column = group.feat_names.index("D_state_shared")
     assert skipped == [] and [group.feats[i, column] for i in group.golden_ids] == [1.0]
 
 
@@ -152,7 +152,7 @@ def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp
 def test_symbolic_placement_fork_exports_in_the_dynamic_tier():
     """A recorded symbolic cut must export with the same regime its arm features carry."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
-    target = "k_fec6b4e7655b"  # a symbolic fused linear and matmul reduction, cut by its recorded route
+    target = "k_2e9258d74428"  # a symbolic fused linear and matmul reduction, cut by its recorded route
     row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
     db = SearchDB()
     import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
@@ -170,7 +170,7 @@ def test_a_static_piece_under_a_symbolic_root_exports_in_its_own_regime():
     the static head dimension); the fork on that piece is a static-regime group, whatever its root's regime, and the
     group's tier agrees with the rows it packs."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "Qwen3.8-27B-NVFP4-NVIDIA" / "golden" / "rtx5090_sm120.json")
-    target = "k_78cece60d704"  # a symbolic attention kernel whose recorded cut leaves a static piece
+    target = "k_22b2aab5f40b"  # a symbolic attention kernel whose recorded cut leaves a static piece
     rows = [row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel))]
     assert rows
     db = SearchDB()
@@ -238,7 +238,7 @@ def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
     import_rows(db, regime_context(document, row.pins), document, [row], source=source)
     assert import_constants(db, document, [row], source=source) > 0
     pools = placement_pools(db, golden_pools(db)[0])
-    [pool] = [pool for pool in pools if pool.kernel.name == "k_90a94eaf8978"]  # the 3584-wide linear
+    [pool] = [pool for pool in pools if pool.kernel.name == "k_ea581e1ab999"]  # the 3584-wide linear
     forks, unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
     assert unmatched == []
     [layout] = [fork for fork in forks if fork.tier == "layout"]
@@ -326,7 +326,7 @@ def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
 
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
-    target = "k_fec6b4e7655b"  # cut at three seams by its recorded route
+    target = "k_2e9258d74428"  # cut at three seams by its recorded route
     row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
     db = SearchDB()
     import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
@@ -359,7 +359,7 @@ def test_a_piece_reached_through_its_parents_pool_carries_the_next_recorded_cut(
 
     golden = GoldenFile.load(Path(__file__).parents[5] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
     # The piece, and the pieces its successive cuts left to cut further, each a kernel of its own name.
-    piece, *deeper_names = ("k_a2b88a00bf07", "k_7a5a28b812a5", "k_053828ff9e76", "k_422dbda9e34c", "k_a7158f75e968")
+    piece, *deeper_names = ("k_bc9aac9c5ba2", "k_8f724e47ecf1", "k_5cbc5e5dc53e", "k_0b9ebbcae797", "k_a6f722502dca")
     [ref] = [kernel.ref for kernel in golden.kernels if kernel.name == piece]
     rows = [row for row in golden.rows if row.kernel in golden.kernel_set(ref)]
     db = SearchDB()

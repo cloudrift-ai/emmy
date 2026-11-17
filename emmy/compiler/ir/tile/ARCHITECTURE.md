@@ -73,8 +73,8 @@ lifts the kernel's Loop IR again with the state as a buffer the node owns and th
 axis** (`Placement.serial`, `lift_serial`), each launch reading the previous launch's stores one step back. That
 form is a realization of the kernel, not another kernel: the kernel keeps the lifted tile's identity, the one its
 fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
-no cell; a seed tensor keeps that dim, and both schedules read it with `0` there (`seed_index`). The
-register schedule reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
+no cell; a seed tensor keeps that dim, and every storage reads it with `0` there (`seed_index`). Register
+storage reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
 independent. An unmapped classic fallback takes the same serial form during materialization. Re-lifting a stored
 kernel reuses the state ports it already owns. The state's port, added at the lift for the classic realization,
 disappears during materialization,
@@ -468,8 +468,9 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
   row the binder would refuse is never enumerated.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
   when it has one applicable site and carries the site's route (`TILE@map.1/twist.1/inner`, the same grammar as
-  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node and
-  follows the same rule. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
+  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node, and one more at the carrying fold's route for
+  the storage of a carried state, and follows the same rule; register storage spells its geometry as the `TILE` of
+  that route. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
   and semantically refused schedules.
 
 Structural choices are deliberately outside this algebra. A cut or split changes the kernel set first; every fresh

@@ -23,7 +23,7 @@ Every context prefix and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non
 containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `random_step(rng)` is
 the third operation, one option `extensions` would yield, already composed, or `None`: the step of a random descent.
 It costs what it touches: the default materializes the frontier and extends one pick, which is right only where the
-frontier is small by construction (the cut pass's structural choices, the register tier's one kernel choice), and a
+frontier is small by construction (the cut pass's structural choices), and a
 family whose frontier is a product of factors draws factor by factor, deriving only what the draw reaches and never a
 site's product.
 `extend` is also the validation boundary for a complete classic schedule supplied directly by a pinned golden, even
@@ -345,21 +345,31 @@ ordered domains: stored-Fold-edge placement first, then cross-CTA reduction spli
 fresh piece re-enters the same rule. `030_cut` presents its restricted structural frontier through a schedule context;
 `040_schedule` supplies a `ClassicScheduleContext`. Both passes use the same generic `schedule` traversal.
 
-## Register storage across ordered steps
+## Storage of a carried state
+
+`STAGE` names where a site keeps a value it reads more than once: an operand reused along an axis, or the state a
+kernel carries across the steps of a loop. A carrying kernel therefore has one more `STAGE` site, the kernel site's
+own, keyed at the route of the carrying fold (`classic_state_keys`; bare when the row has no other `STAGE` site). It
+takes three values. Empty keeps the state in a global buffer, one launch per step. `d1/smem` keeps it in shared
+memory and runs the steps inside one launch; the schedule offers it where the state reads prove CTA ownership, both
+buffers fit the card's shared memory, and the row runs a one-dimensional cooperative thread tile (`holds_state`).
+`d1/reg` keeps it in registers, one slot without prefetch.
 
 The `reg` transport names stored register intermediates. Reuse can span consumers or loop iterations; recurrence
-is not part of the transport's meaning. `d1/reg` provides one slot without prefetch. The current implementation
-supports this transport through the ordered matrix-loop schedule below; other schedules do not yet offer it.
+is not part of the transport's meaning. The current implementation supports this transport through the ordered
+matrix-loop schedule below; other schedules do not yet offer it.
 
-`RegisterContext` uses the same problem, site, codec, and lazy enumeration interfaces as the classic schedule.
-It offers one kernel choice for a static ordered loop with one matrix state, pointwise operations, and additive
+Register storage is a choice of the classic kernel site, not a schedule model of its own. It is offered for a static
+ordered loop with one matrix state, pointwise operations, and additive
 matrix contractions, read off the fold that carries the state (`Fold.carries`, its `cells` ending in the column
-and the warp-owned row). The structural reading proves that each warp's rows are independent through every
+and the warp-owned row). The row spells the register geometry as the `TILE` of the carrying fold's route
+(`classic_state_tile_keys`) and leaves every site of the step off, since the loop runs inside the CTA and the step
+is not scheduled apart. The structural reading proves that each warp's rows are independent through every
 contraction, that every carrier read takes the previous step at the warp's own rows, and that output matrices
 share the same batch coordinates. Other recurrences retain the classic schedule, which realizes the carrying loop
 as one launch per step over a state buffer. A zero-axis root derived from a step keeps the time coordinate as a
 trailing lambda parameter whenever its body still reads it. Unit batch coordinates are omitted only from ownership
-matching, after checking their external extents; the stored output indices remain unchanged. Both schedule families
+matching, after checking their external extents; the stored output indices remain unchanged. Both storages
 restore omitted unit coordinates against the seed tensor's bound shape before computing its address.
 
 `WORK=w<M>x1` assigns independent groups of sixteen value rows to warps. `TILE` names an FP16 atom with both

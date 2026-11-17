@@ -124,9 +124,9 @@ mod tests {
 
     #[test]
     fn a_loop_that_asks_for_unrolling_is_refused() {
-        check("for k in 0..4:\n    f32 x = load A[k]\n    f32 O[k] = x").unwrap();
+        check("for k in 0..4:\n  f32 x = load A[k]\n  f32 O[k] = x").unwrap();
         let flagged = check(
-            "if k < 2:\n    for k in 0..4 unroll=true:\n        f32 x = load A[k]\n        f32 O[k] = x",
+            "if k < 2:\n  for k in 0..4 unroll=true:\n    f32 x = load A[k]\n    f32 O[k] = x",
         )
         .unwrap_err()
         .to_string();

@@ -29,6 +29,64 @@ hardware golden's programs used below:
 | `attention.hd128.fused` | f16, 1 x 8 heads x 512 x 128, queries = keys |
 | `attention.hd256.causal.fused` | f16, 1 x 16 heads x 512 x 256, causal |
 
+## Reference kernels, measured
+
+The golden format stores eager PyTorch and `torch.compile` beside a program, and no other baseline. The reference
+kernels the sections below name were therefore timed by hand, once, on an RTX 5090 (CUDA 13.0, PyTorch 2.13,
+FlashInfer 0.6.18, Quack 0.6.4, vLLM 0.29, November 2026). Each time is the median over 500 calls of the GPU time
+between two CUDA events around the library call, after 200 warm-up calls, so it holds the library's own launch
+overhead. It is a reference to aim at, not evidence: measure again before building on one.
+
+| Kernel | Shape | Reference | Time |
+| --- | --- | --- | --- |
+| Softmax | f32, 512 x 8192 | Quack | 9.0 |
+| | | FlashInfer | 13.5 |
+| | | PyTorch | 14.0 |
+| RMSNorm | f32, 512 x 8192 | FlashInfer | 11.0 |
+| | | Quack | 11.3 |
+| | | PyTorch | 11.0 |
+| Cumulative sum | f32, 512 x 8192 | PyTorch | 54.5 |
+| | | CuPy | 89.4 |
+| Top-k, k = 50 | f32, 8 x 151,936 | FlashInfer | 23.2 |
+| | | PyTorch | 81.3 |
+| Sort | f32, 8 x 151,936 | PyTorch | 134 |
+| Softmax over the vocabulary | f32, 8 x 151,936 | FlashInfer | 21.9 |
+| | | PyTorch | 34.1 |
+| Sampling from probabilities | f32, 8 x 151,936 | FlashInfer | 29.9 |
+| | | PyTorch `multinomial` | 45.7 |
+| Top-p sampling, p = 0.9 | f32, 8 x 151,936 | FlashInfer | 38.7 |
+| Top-k then top-p sampling | f32, 8 x 151,936 | FlashInfer, from logits | 47.2 |
+| Page append | f16, 64 tokens x 8 heads x 128 | FlashInfer | 9.5 |
+| | | PyTorch, two slice copies | 12.2 |
+| Product, 1 row | f16, 4096 to 8192 | vLLM skinny kernel | 13.1 |
+| | | cuBLAS | 17.9 |
+| Product, 8 rows | f16, 4096 to 8192 | vLLM skinny kernel | 23.6 |
+| | | cuBLAS | 19.5 |
+| Product, 16 rows | f16, 4096 to 8192 | vLLM skinny kernel | 48.2 |
+| | | cuBLAS | 19.5 |
+| Product, 32 and 64 rows | f16, 4096 to 8192 | cuBLAS | 31.6, 32.2 |
+| Product, f16 | 512 x 4096 times 4096 x 4096 | cuBLAS | 95.4 |
+| Product, NVFP4 codes | 512 x 4096 times 4096 x 4096 | B12x through FlashInfer | 51.5 |
+| Product, MXFP8 codes | 512 x 4096 times 4096 x 4096 | B12x through FlashInfer | 45.3 |
+| Convolution 3 x 3 | f16, batch 8, 64 to 64 channels, 56 x 56 | cuDNN, channels last | 19.6 |
+| Convolution 1-D, width 3 | f16, 512 to 512 channels, length 1500 | cuDNN, channels last | 25.7 |
+| Attention, prefill | f16, 8 heads x 512 x 128 | FlashInfer | 19.9 |
+| | | PyTorch | 18.9 |
+| Attention, prefill, causal | f16, 8 heads x 512 x 128 | FlashInfer | 21.1 |
+| Attention, prefill, causal | f16, 16 heads x 512 x 256 | FlashInfer | 36.1 |
+| | | PyTorch | 32.2 |
+| Attention, prefill, paged, causal | f16, 8 heads x 512 x 128, pages of 16 | FlashInfer | 19.5 |
+| Attention, decode | f16, 64 query heads over 8, 2048 keys | FlashInfer, no tensor cores | 13.8 |
+| | | FlashInfer, tensor cores | 16.3 |
+| | | FlashInfer, paged | 13.6 |
+| | | PyTorch, query heads as rows | 15.5 |
+| Gated DeltaNet, prefill | 48 heads x 128, 64 / 256 / 512 / 1,024 rows | FlashInfer | 63 / 87 / 145 / 157 |
+| Gated DeltaNet, decode | 48 heads x 128, 1 row | FlashInfer | 13.1 |
+| Gated DeltaNet, decode | 48 heads x 128, 3 rows | FlashInfer | 20.2 |
+
+What could not be timed alone: vLLM's FP8 product (its entry point refused the call outside the server), a
+mixture-of-experts kernel, and the triangular inverse, which FlashInfer does not expose.
+
 ## The knobs, in the terms of a hand-written kernel
 
 | Hand-written kernel says | Row spells |
@@ -79,7 +137,7 @@ warp holds 4 x 8 instructions of 16 x 8, and the K step is two atoms of 16.
 | Attention, `tcgen05` | FlashAttention-4 | Gap |
 | Attention, decode | Flash-Decoding, FlashInfer | Better than FlashAttention-2 |
 | Attention over a paged cache | FlashInfer | Gap: async copies of a paged operand |
-| Recurrence with a matrix state | FlashInfer Gated DeltaNet | Gap |
+| Recurrence with a matrix state | FlashInfer Gated DeltaNet | Gap: blocked inverse, one launch; the rest is evidence |
 | Recurrence, one channel per thread | Mamba, RWKV | Reproduces RWKV; no evidence for Mamba |
 | Small triangular inverse | FlashInfer `CollectiveInverse` | Gap |
 
@@ -167,11 +225,12 @@ thread t: store_vector(out + t*V, exp(row_smem[t*V ..] - m) / d)
 **Row.** The statistics are reduce sites and the map is fused, so the row is the row reduction's:
 `WORK=t512 REDUCE=coop`.
 
-**Verdict: reproduces, within 1.1 times the reference.** RTX 5090: `softmax.k8192` is recorded at 8.1
-(`WORK=t512 REDUCE=coop`) against `torch.compile` 7.3, and `rms_norm.k8192` at 8.5 (`WORK=t512 REDUCE=coop/r4`)
-against 7.6. No faster row was found. In one run on the softmax, a vector run per lane was slower (`coop/v4` 10.1,
-`coop/v8` 9.3, against 8.2 for the recorded row), and so were 256 threads (11.2) and one warp per row (`WORK=t32x4`,
-10.8), which belongs to narrow rows.
+**Verdict: reproduces, within 1.1 times the reference.** RTX 5090: `softmax.k8192` is recorded at 8.1 (`WORK=t512
+REDUCE=coop`) against `torch.compile` 7.3, and `rms_norm.k8192` at 8.5 (`WORK=t512 REDUCE=coop/r4`) against 7.6.
+Quack's softmax ran 9.0 and FlashInfer's RMSNorm 11.0 on the same shape, so the compiled reference is the one to beat
+here. No faster row was found. In one run on the softmax, a vector run per lane was slower (`coop/v4` 10.1, `coop/v8`
+9.3, against 8.2 for the recorded row), and so were 256 threads (11.2) and one warp per row (`WORK=t32x4`, 10.8),
+which belongs to narrow rows.
 
 **Gap: the row in shared memory.** A `STAGE` pin on a cooperative reduce does not realize, so every statistic and the
 final map read the row from global memory again. This is the likely remainder on both programs. A reduction across a
@@ -220,9 +279,10 @@ for digit from most significant:                # one launch; passes separated b
 
 **Row.** None. The index of a maximum compiles as two maximum reductions in one kernel, which covers greedy decoding.
 
-**Verdict: gap.** Selection needs a histogram (a scatter-add, which has no lowering), a loop whose trip count depends
-on the data, and a barrier across CTAs inside one launch. None is a schedule choice; the first is tracer and lowering
-work, the other two would be new kernel forms.
+**Verdict: gap.** The times to reach are in the table of reference kernels: 23 for the top 50 of 8 rows of 151,936, 39
+for a top-p sample. Selection needs a histogram (a scatter-add, which has no lowering), a loop whose trip count
+depends on the data, and a barrier across CTAs inside one launch. None is a schedule choice; the first is tracer and
+lowering work, the other two would be new kernel forms.
 
 ## Gather, scatter, cache append
 
@@ -367,8 +427,8 @@ instead, which keeps the loads contiguous when the weight is stored K-major. Mor
 
 **Verdict: better than cuBLAS.** One row through a 2048-wide expert projection, RTX 5090, recorded
 `WORK=t64 REDUCE=coop`: 3.2 against cuBLAS 8.2. Linear layers at 32 rows are recorded at 0.2 to 0.9 of
-`torch.compile`'s time (`linear.sq.k3840.m32`: 20.0 against 68.3). None of this was measured against vLLM's own
-kernels, and the cluster reduction has no spelling.
+`torch.compile`'s time (`linear.sq.k3840.m32`: 20.0 against 68.3). vLLM's skinny kernel beats cuBLAS at one row
+only (13.1 against 17.9 on a 4096 to 8192 product) and loses from 8 rows up. The cluster reduction has no spelling.
 
 **Gap: warps that share one K range.** A hand-written kernel for 8 to 64 rows gives each warp of a CTA a slice of K
 and adds the warps' accumulators at the end. `REDUCE=coop` asks for a thread inventory, so a warp tile cannot
@@ -398,10 +458,10 @@ therefore writes the FP8 product through the block-scaled form with a scale of o
 it. The sum is the same bit for bit, and it is no row's choice. Two FP8 programs of the hardware golden, old build
 against new in one session: the tiles bound by the instruction went 448 to 304, 414 to 302 and 240 to 196.
 
-**Verdict: reproduces the atom and the transport; not compared.** Recorded rows exist on the RTX 5090 (for example
-`WORK=w2x2 TILE=mma_m16n8k64_e2m1_f32/f1x1/k8 STAGE=d4/smem-tma`). The reference kernels live on the serving path, so
-no kernel-level comparison against B12x exists. Whether the load warp composes with the block-scaled stage was not
-checked.
+**Verdict: reproduces the atom and the transport; not compared on one shape.** Recorded rows exist on the RTX 5090
+(for example `WORK=w2x2 TILE=mma_m16n8k64_e2m1_f32/f1x1/k8 STAGE=d4/smem-tma`). B12x alone runs a 512 x 4096 by
+4096 x 4096 product in 51.5 with NVFP4 codes and 45.3 with MXFP8 codes, half of cuBLAS's 95.4 in f16; no Emmy row was
+measured on that shape. Whether the load warp composes with the block-scaled stage was not checked.
 
 ## 4-bit integer weights
 
@@ -455,7 +515,7 @@ implicit product:  A[m, k] = input[n, c, y*stride + r, x*stride + s]   with m = 
 read through an index map, so the dense product's rows apply.
 
 **Verdict: reproduces the implicit product. Gap: Winograd and FFT**, which are other algorithms and not schedules.
-No row was compared with cuDNN.
+No row was compared with cuDNN on one shape; its times on two common shapes are in the table of reference kernels.
 
 ## Attention, prefill
 
@@ -566,8 +626,9 @@ kernel 2: m = max_s m_s;  l = sum_s l_s * exp(m_s - m);  out = sum_s O_s * exp(m
 `WORK=w4x1` gives pieces of about 256 keys and a combine kernel. The form without tensor cores is
 `WORK=t8x16 REDUCE=coop/v16`.
 
-**Verdict: better than FlashAttention-2.** 64 query heads over 8 key/value heads, 2048 keys, measured in September
-2026: RTX 5090 12.3 against FlashAttention-2 15.3; A100 17.9 against Inductor 42. Two limits: the split count is
+**Verdict: better than FlashAttention-2, level with FlashInfer.** 64 query heads over 8 key/value heads, 2048
+keys, measured in September 2026: RTX 5090 12.3 against FlashAttention-2 15.3; A100 17.9 against Inductor 42.
+FlashInfer's decode kernel on that shape ran 13.8 in November. Two limits: the split count is
 fixed when the program is compiled, from evidence, and unpinned it stops at 32 pieces.
 
 ## Attention over a paged cache
@@ -595,17 +656,37 @@ for each chunk of 64 rows:
 store(out, S)
 ```
 
-**Row.** A static loop over one matrix state, with maps and additive products, takes the register schedule:
-`WORK=w<M>x1`, an f16 atom with `f1x<N>` covering the state's columns, and `STAGE=d1/reg`, which keeps the state in
-registers across all steps of one launch. Any other recurrence is one launch per step over a state buffer.
+**Row.** A static loop over one matrix state, with maps and additive products, takes register storage:
+`WORK=w<M>x1`, `STAGE=d1/reg` at the carrying fold, which keeps the state in registers across all steps of one
+launch, and at the same route a `TILE` of an f16 atom with `f1x<N>` covering the state's columns. Any other
+recurrence is one launch per step over a state buffer, or `STAGE=d1/smem` where one CTA owns the whole state.
 
-**Verdict: gap.** The recurrence of a 27B-class layer (48 heads, head size 128), RTX 5090, 256 rows: FlashInfer 38
-(80 the way vLLM calls it); Emmy partly tuned 2,338; eager PyTorch 309; `torch.compile` 216. Three parts are missing.
-The reference alone, one sequence, by CUDA events: 63 at 64 rows, 87 at 256, 145 at 512, 157 at 1,024.
-The chunk's work is nine kernels where the reference fuses one launch per head. The solve is traced as a 63-step
-forward substitution in f32, not a blocked inverse on tensor cores. And warp groups with different roles inside one
-CTA have no spelling beyond the load warp. At 64 rows the program does not compile: the cut pass fails on one body
-whose normal form does not settle, a compiler bug.
+**Verdict: gap, and most of it is evidence.** The recurrence of a 27B-class layer (48 heads, head size 128), RTX 5090,
+256 rows: FlashInfer 38 to 87 depending on how the call is timed (80 the way vLLM calls it); Emmy partly tuned 2,310;
+eager PyTorch 309; `torch.compile` 216.
+
+The state update is not the gap. The chunk loop is one serial launch that takes the register row above, and it
+runs 25 for four chunks of 64 and 35 for sixteen chunks of 16. The time is in the kernels around it: the output
+product 1,388, the setup of the triangular system 605, the product of its inverse with the values 142, and the
+substitution 140. Each is a fused region whose cut was never picked. With no evidence in scope the pick keeps a
+product nested inside another product's operand, on a thread tile.
+
+The traced rule now moves every pointwise scale onto the small 64 x 64 matrices, so the queries, keys and values stay
+plain bf16 operands. Pinned in one session, with a cut on each fused product, the shared carry and a `coop-t` reduce on
+the substitution, it runs 195. The products take `mma_m16n8k16_bf16_f32` tiles and cost 5 to 18 each; the substitution,
+which stores only its last state, is 53 of the 195. None of these picks is the prior's own: unpinned, the substitution
+takes a thread tile and runs 919, and one 128-wide reduce takes a CTA per output cell and runs 336.
+
+Inside a whole layer the gain is smaller. Recorded on the RTX 5090 for the 256-row layer of the 27B NVFP4 checkpoint,
+the six roots the rule reaches sum to 474 against 524 for the rule as Transformers writes it. The root that forms the
+system and its inverse went from 192 to 94; the root that applies the inverse to the values and keys went from 279 to
+313, because its scaled products cut into pointwise kernels and scalar products that take no tensor-core tile.
+
+What is left to match the reference: the solve is a 63-step forward substitution in f32, not a blocked inverse on
+tensor cores, and the reference's one launch per head has no spelling, since warp groups with different roles inside
+one CTA do not exist beyond the load warp. Two faults block the shorter routes. An inverse written as repeated
+squaring is rolled into a serial kernel whose compile takes 25 GB at a chunk of 64. And a bare `PLACE=cut` on this
+program gives wrong results, where each cut pinned alone is correct.
 
 ## Recurrence, one channel per thread
 

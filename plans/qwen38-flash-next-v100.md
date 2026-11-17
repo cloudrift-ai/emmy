@@ -1248,6 +1248,27 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     of 6. Boot 698 s, main's 689 (1,116 before #1399).
   - Next: the PTX compiler's slowdown of the gathered expert programs first, since it costs four and eight requests
     more than this round gained at eight; then the 2026-11-13 ranking, for the owner to pick.
+- **The slot programs re-measured on the fixed PTX compiler (2026-11-16).** Main `8f544ccf7`, with #1419. The two-,
+  four- and eight-row slot programs' rows recorded again cold, same route and schedules, no tune. Per layer, whole
+  program cold: two rows 59 to 51 us, four rows 102 to 78, eight rows 176 to 130-131 (128 before #1399).
+  - Two boots of main with these rows, A B B A, against 2026-11-14's main and #1417's branch:
+
+    | Point | Main 2026-11-14 | #1417 branch | Now |
+    | --- | ---: | ---: | ---: |
+    | One request, 1K / 512, per token | 17.20 ms | 17.18 ms | 16.90 ms |
+    | 2 requests, 4K / 1K, total output | 70.7 tok/s | 85.0 tok/s | 86.9-87.2 tok/s |
+    | 4 requests, 4K / 1K, total output | 128.9 tok/s | 143.8 tok/s | 147.9-149.3 tok/s |
+    | 8 requests, 4K / 1K, total output | 221 tok/s | 219.6 tok/s | 231.1-233.5 tok/s |
+    | First token, 1K | 0.80 s | 0.80 s | 0.78-0.82 s |
+    | First token, 4K | 1.42 s | 1.42-1.43 s | 1.38-1.43 s |
+
+  - Eight requests are back at the 233 tok/s of before #1399. Against the async fork (201.7-203.2 tok/s at four):
+    four requests 0.73x its output.
+  - Every program cold against the tree before #1399, in one run: all within 2% except program 9 (1,899.5 to 1,955.8
+    us, 3.0%) and the 32-expert group program 15 (190.5 to 197.6 us, 3.7%); the eight-row slot program 13 is 1.6%
+    above (128.0 to 130.0). Programs 2, 10 and 11 read 5-13% above in a run of 13 at once and equal in the repeat.
+  - Checks: all 18 programs compile strict from the golden alone, and the release audit deploys all 18 twins. Boot
+    698 and 738 s.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

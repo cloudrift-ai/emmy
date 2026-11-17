@@ -134,7 +134,7 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db() -> None:
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.knob import schedule_row_key
+    from emmy.compiler.pipeline.knob import schedule_match_key
     from emmy.compiler.pipeline.search.golden import GoldenFile
     from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
     from emmy.compiler.wire import kernel_tile
@@ -149,14 +149,14 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db() -> None:
         assert not any(db.drift().values())
         measured: dict[str, list[dict]] = {}
         for row in db.iter_perf(ctx):
-            measured.setdefault(row.kernel, []).append({k: str(v) for k, v in dict(schedule_row_key(dict(row.knobs))).items()})
+            measured.setdefault(row.kernel, []).append({k: str(v) for k, v in dict(schedule_match_key(dict(row.knobs))).items()})
         with evidence_scope([]):
             for target in document.targets():
                 if target.exact_identity not in measured:
                     continue
                 graph = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=ctx, db=db)
                 [op] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
-                picked = {k: str(v) for k, v in dict(schedule_row_key(dict(op.knobs or {}))).items()}
+                picked = {k: str(v) for k, v in dict(schedule_match_key(dict(op.knobs or {}))).items()}
                 assert picked in measured[kernel_tile(op).identity_key(structural=False, with_io=True)], target.name
 
 

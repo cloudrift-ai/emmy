@@ -7,8 +7,9 @@ use super::{Key, Number, Param, Tag, expression_key, hash_parts, params_key};
 use crate::Name;
 use crate::body::{Body, StmtRef};
 use crate::elementwise::Operation;
-use crate::expr::{Expr, ExprType, Expression};
+use crate::expr::{Expr, ExprClass, ExprType, Expression};
 use crate::field::NumOr;
+use crate::normalize::{affine_node, affine_terms};
 use crate::statement::Statement;
 use crate::text::structural_text;
 
@@ -208,27 +209,60 @@ impl Context<'_> {
         ops: &mut Vec<Value>,
         touched: &mut Vec<Name>,
     ) -> Key {
-        if let Some((op, args)) = e.operation()
-            && op.info().commutative
-            && args.len() == 2
-        {
-            let mut terms: Vec<Expression> = Vec::new();
-            if op.info().associative && self.chains == Chains::Flat {
-                associative_terms(e, op, &mut terms);
-            } else {
-                terms = args.to_vec();
+        // A sum is one node over its affine form: every term with its coefficient, and the offset. The normal form
+        // writes a sum's terms by sign and by ranks the numbering gives, so a number that read the order of the
+        // terms, or which of them carries the negation, would move with the order it decides.
+        let affine = match e.operation() {
+            Some((op, args))
+                if self.chains == Chains::Flat
+                    && affine_node(op, args, ExprClass::Value)
+                    && !(self.reads_axis(e) && self.coordinate_only(e)) =>
+            {
+                // A node the form does not take apart is its own single term, and is keyed as the operation it is.
+                Some(affine_terms(e, ExprClass::Value))
+                    .filter(|form| !form.terms.iter().any(|(_, term)| term == e))
             }
+            _ => None,
+        };
+        let node = match (affine, e.operation()) {
+            (Some(form), _) => Some((
+                Key::tuple([
+                    Key::str("Affine"),
+                    Key::float(form.offset),
+                    Key::Int(i64::from(form.float)),
+                ]),
+                form.terms
+                    .into_iter()
+                    .map(|(coefficient, term)| (Key::float(coefficient), term))
+                    .collect::<Vec<_>>(),
+            )),
+            (None, Some((op, args))) if op.info().commutative && args.len() == 2 => {
+                let mut terms: Vec<Expression> = Vec::new();
+                if op.info().associative && self.chains == Chains::Flat {
+                    associative_terms(e, op, &mut terms);
+                } else {
+                    terms = args.to_vec();
+                }
+                Some((
+                    Key::str(op.text()),
+                    terms.into_iter().map(|term| (Key::None, term)).collect(),
+                ))
+            }
+            _ => None,
+        };
+        if let Some((head, terms)) = node {
             // Each side is keyed once, into parameter, operand and resource lists of its own, and the sides are
             // laid into this node's lists in the order of what they compute: a parameter or resource first met
             // inside the node takes the index the content order gives it, not the one the spelling would.
             let mut sides: Vec<Side> = terms
                 .iter()
-                .map(|side| {
+                .map(|(weight, side)| {
                     let marks = (self.out.buffers.len(), self.out.states.len());
                     let (mut params, mut ops, mut touched) = (Vec::new(), Vec::new(), Vec::new());
                     let key = self.value_key(side, &mut params, &mut ops, &mut touched);
                     Side {
-                        order: by_content(&key, &ops, &params),
+                        order: Key::tuple([by_content(&key, &ops, &params), weight.clone()]),
+                        weight: weight.clone(),
                         key,
                         ops,
                         params,
@@ -252,7 +286,10 @@ impl Context<'_> {
                         }
                     })
                     .collect();
-                keys.push(relabeled(&side.key, ops.len() as i64, &placed));
+                keys.push(Key::tuple([
+                    side.weight,
+                    relabeled(&side.key, ops.len() as i64, &placed),
+                ]));
                 ops.extend(side.ops);
                 touched.extend(side.touched);
                 for (held, met) in [
@@ -266,11 +303,7 @@ impl Context<'_> {
                     }
                 }
             }
-            return Key::tuple([
-                Key::str(ExprType::Apply.text()),
-                Key::str(op.text()),
-                Key::Tuple(keys),
-            ]);
+            return Key::tuple([Key::str(ExprType::Apply.text()), head, Key::Tuple(keys)]);
         }
         match &**e {
             Expr::Apply(..) | Expr::Ternary(..) | Expr::Cast(..) | Expr::FlatIndex(..)
@@ -1083,6 +1116,8 @@ fn by_content(key: &Key, ops: &[Value], params: &[Param]) -> Key {
 /// One side of a commutative node, keyed on lists of its own before the sides are laid in content order.
 struct Side {
     order: Key,
+    /// The term's coefficient in an affine form; nothing for an operand of any other node.
+    weight: Key,
     key: Key,
     ops: Vec<Value>,
     params: Vec<Param>,
@@ -1191,7 +1226,7 @@ mod tests {
         assert_ne!(numbering.numbers[6], numbering.numbers[7]);
         let looped = |seed: &str| {
             let body = crate::text::parse_body(&format!(
-                "{seed}for k in 0..4:\n    f32 x = load A[k]\n    f32 s <- add(s, x)\nf32 O[0] = s"
+                "{seed}for k in 0..4:\n  f32 x = load A[k]\n  f32 s <- add(s, x)\nf32 O[0] = s"
             ))
             .unwrap();
             let numbering = value_numbers(&body, &|name| Key::Str(*name), Chains::Flat);

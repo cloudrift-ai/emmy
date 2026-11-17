@@ -800,7 +800,7 @@ def test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel():
     result, kernels = compile_with_kernels(_make_shared_const_broadcast())
     (kernel,) = [node for node in result.nodes.values() if isinstance(node.op, CudaOp)]
     assert kernel.buffer_names() == ("c1", "c2")
-    assert kernel.op.arg_order[-2:] == ("c1", "c2")
+    assert sorted(kernel.op.arg_order[-2:]) == ["c1", "c2"]  # the launcher binds by name
     assert {name: tensor.dtype.name for name, tensor in kernels[kernel.id].outputs.items()} == {"c1": "f32", "c2": "f32"}
 
 

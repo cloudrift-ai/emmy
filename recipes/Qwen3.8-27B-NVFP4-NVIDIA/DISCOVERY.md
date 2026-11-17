@@ -8,6 +8,12 @@ with a cut route, its pieces tuned (`--tune 40`) and the root recorded alone und
 drops the four targets only the replaced W8A16 programs wrote. The rental ended before the export passed: no pack
 was served and no cell was timed in this session.
 
+Merging main at `f1b7171fc` moved nine of these kernels: #1420 settled a new normal form for a difference of two
+reads, and the Gated DeltaNet first root's pieces at 3, 16, 64 and 256 rows are other kernels under it. The restamp
+kept their schedules as proposals and cleared the time of the first root at 16, 64 and 256 rows and of the second
+root at 16 rows; six measured rows lost their microseconds and one cut decision was dropped. The table below is
+what the card measured before that merge. Those roots need a record run again, beside the five still unrecorded.
+
 | a layer's new roots, warm | 1 row | 2 rows | 3 rows | 16 rows | 64 rows | 256 rows |
 |---|---|---|---|---|---|---|
 | Gated DeltaNet, first / second root | 94 us (one root) | 59 / 34 | 61 / 38 | 45 / 100 | 58 / 143 | 114 / 204 |

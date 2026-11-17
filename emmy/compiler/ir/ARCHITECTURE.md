@@ -325,17 +325,17 @@ bodies' kept answers, so asking costs the statement's own fields, not a walk of 
 **A body has one text**, which is also its wire form. `str(body)` is it and `parse_body` reads it back to an equal
 body, so the text says
 everything a statement holds and nothing derived from it: a field at its default is left out, an axis carries its
-window and a symbolic extent its hint. One statement is one line, a block's statements sit indented under its
-header, and expressions are in their own text:
+window and a symbolic extent its hint. One statement is one line, a block's statements sit indented two spaces under
+its header, and expressions are in their own text:
 
 ```
 let f32 v0 = 0.125
 for a0 in 0..4:
-    for a1 in 0..seq~128:
-        in0 = load x[a0, a1]
-        v1 = 2*in0 - v0 + 1
-        acc0 <- add(acc0, v1) over a1
-    y[a0] = acc0
+  for a1 in 0..seq~128:
+    in0 = load x[a0, a1]
+    v1 = 2*in0 - v0 + 1
+    acc0 <- add(acc0, v1) over a1
+  y[a0] = acc0
 ```
 
 A subroutine a call names is defined once, ahead of the statements, and the call spells the buffers it binds. Since
@@ -474,8 +474,8 @@ the free-axis order never sorts under the cells, and its shape is the loops over
 keeps two slots of the cell shape and commits the second after each step; how many slots survive and where they are
 stored is a schedule's question, not the statement's. The Tile lift keeps the state in the term: a `Fold` whose ⊕ is
 the action `next`, with the `Carry` index as its `cells` and a `Pre` as a carrier-read slab (`ir/tile/ARCHITECTURE.md`).
-The classic schedule realizes the loop as a serial launch axis over a state buffer; the register schedule retains the
-state inside a CTA and realizes the same axis as a loop.
+The classic schedule realizes the loop as a serial launch axis over a state buffer, or, where the row's `STAGE` keeps
+the state in shared memory or registers, inside a CTA as a loop.
 
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
@@ -906,7 +906,9 @@ from that CSE form. Subroutine boundaries never limit fusion.
   Names are then given sequentially, a commutative operation lists its operands by value and then by those names, and
   a final axis unification restores shared reduction dimensions without merging dependent loops. The order is final
   on its own output because nothing it sorts by reads what it decides: a statement's shape and a block's spelled
-  subtree read a sum's coefficients sorted and the block's children already ordered, and no number reads a name.
+  subtree read a sum's coefficients sorted and the block's children already ordered, and no number reads a name or
+the order of a sum's terms. The affine form lists its terms from the largest coefficient to the smallest, and terms of
+one coefficient by the order above.
 
 ### Value numbering — `emmy-ir`'s `numbering/values.rs`
 
@@ -917,7 +919,10 @@ weight read at `(h / 384) * 128 + d` in one nest and at a grid axis in another n
 under two consumers. A reduce binds the parameters that mention its axis, retains their bound index expressions in its
 number, and keeps the free coordinates those parameters read. Offsets and strides still distinguish reduced walks.
 Commutative operands order by number, and operands tied on number by the layout and then the parameter order their
-arrangement gives, so neither the source order nor the spelling reaches a number. A carried state an operation reads
+arrangement gives, so neither the source order nor the spelling reaches a number. A sum is numbered as one node over its
+affine form — its offset, and each term's coefficient beside the term's number, ordered like commutative operands — so
+`a - b` and `-b + a` number alike and the order the normal form gives a sum's terms never reaches a number. A carried
+state an operation reads
 ahead of its update — the previous step's value — is keyed by use, like every other read of a state; only a name free in
 the body is spelled. The same number applied to the same coordinate expressions in one scope is one instance — what
 placement computes once.

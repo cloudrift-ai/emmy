@@ -56,7 +56,7 @@ def test_a_cut_piece_is_the_kernel_its_stored_definition_lifts_to() -> None:
 
     document = GoldenFile.load(Path(__file__).resolve().parents[4] / "recipes/Qwen3.6-35B-A3B-FP8/golden/rtx5090_sm120.json")
     root = document.kernels[7]  # the gdn2rows twin's linear norm reduction
-    assert root.name == "k_06660b0d3e7b"
+    assert root.name == "k_ae929c4f42fd"
     route = next(route for route in document.routing if route.parent == root.ref)
     [(_, _, pieces)] = mint(root, [route], Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name))
     assert len(pieces) == len(route.children)
@@ -110,7 +110,7 @@ def test_restamp_keys_a_carried_kernels_rows_against_its_serial_form() -> None:
 
     document = GoldenFile.load(Path(__file__).resolve().parents[4] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
     kernel = document.kernels[643]  # a kernel that carries a state
-    assert kernel.name == "k_92b3b90d7d5e"
+    assert kernel.name == "k_077e426585c1"
     rows = [row for row in document.rows if row.kernel == kernel.ref and any("@" in key for key in row.knobs)]
     assert rows and all(any(key.startswith("REDUCE@") for key in row.knobs) for row in rows)
     fresh, report = restamp(replace(document, kernels=[kernel], routing=[], rows=rows))

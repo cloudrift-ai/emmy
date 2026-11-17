@@ -1052,11 +1052,11 @@ mod tests {
     fn cell() -> Body {
         body(
             "
-            a0 = load x[m, k]
-            a1 = negative(a0)
-            b = load w[k, n]
-            p = multiply(a1, b)
-            acc <- add(acc, p)
+      a0 = load x[m, k]
+      a1 = negative(a0)
+      b = load w[k, n]
+      p = multiply(a1, b)
+      acc <- add(acc, p)
             ",
         )
     }
@@ -1065,8 +1065,8 @@ mod tests {
     fn a_topological_order_keeps_an_order_the_constraints_allow() {
         let given = body(
             "
-            right = exp(x)
-            left = abs(x)
+      right = exp(x)
+      left = abs(x)
             ",
         );
         assert_eq!(
@@ -1081,9 +1081,9 @@ mod tests {
     fn a_scope_keeps_the_reads_above_a_name_it_shadows() {
         let given = body(
             "
-            use = abs(outer)
-            for i in 0..4:
-                outer = exp(source)
+      use = abs(outer)
+      for i in 0..4:
+        outer = exp(source)
             ",
         );
         assert_eq!(*inner(&given.stmts()[1]).free_ssa(), names(&["source"]));
@@ -1094,10 +1094,10 @@ mod tests {
     fn statement_type_queries_share_children_and_keep_a_mixed_order() {
         let given = body(
             "
-            for i in 0..4:
-                state[] <- value seed 0
-                sum <- add(sum, value)
-            state[] <- value seed 0
+      for i in 0..4:
+        state[] <- value seed 0
+        sum <- add(sum, value)
+      state[] <- value seed 0
             ",
         );
         let child = inner(&given.stmts()[0]);
@@ -1126,7 +1126,7 @@ mod tests {
                     if dependent { "shifted" } else { "v" }
                 ));
                 let coalesced = body(&format!(
-                    "{header}\n    v = load x[k]\n    maximum <- maximum(maximum, v)\n{header}\n{}",
+                    "{header}\n  v = load x[k]\n  maximum <- maximum(maximum, v)\n{header}\n{}",
                     indented(&second.join("\n"))
                 ))
                 .coalesce();
@@ -1155,10 +1155,10 @@ mod tests {
                     "for k in 0..8:"
                 };
                 let alone = format!(
-                    "{head}\n    x = load xs[k]\n    wa = load was[k]\n    pa = multiply(x, wa)\n    a <- add(a, pa)"
+                    "{head}\n  x = load xs[k]\n  wa = load was[k]\n  pa = multiply(x, wa)\n  a <- add(a, pa)"
                 );
                 let fused = format!(
-                    "{alone}\n    wb = load wbs[k]\n    pb = multiply(x, wb)\n    b <- add(b, pb)"
+                    "{alone}\n  wb = load wbs[k]\n  pb = multiply(x, wb)\n  b <- add(b, pb)"
                 );
                 let (first, second) = if fused_first {
                     (&fused, &alone)
@@ -1201,11 +1201,8 @@ mod tests {
     fn axis_dependencies_stay_compact_through_a_long_ssa_chain() {
         // Axis dependence grows with definitions times axes, not transitive SSA edges.
         let chain_length = 4096;
-        let mut lines = vec![
-            "for a in 0..4:".to_string(),
-            "    v0 = load x[a]".to_string(),
-        ];
-        lines.extend((1..=chain_length).map(|i| format!("    v{i} = negative(v{})", i - 1)));
+        let mut lines = vec!["for a in 0..4:".to_string(), "  v0 = load x[a]".to_string()];
+        lines.extend((1..=chain_length).map(|i| format!("  v{i} = negative(v{})", i - 1)));
         let dependencies = body(&lines.join("\n")).axis_dependencies();
         assert_eq!(dependencies.len(), chain_length + 1);
         assert_eq!(
@@ -1219,10 +1216,10 @@ mod tests {
     fn axis_dependencies_remove_only_the_closed_reduce_axis() {
         let dependencies = body(
             "
-            for a in 0..8:
-                for k in 0..32:
-                    value = load x[a, k]
-                    acc <- add(acc, value)
+      for a in 0..8:
+        for k in 0..32:
+          value = load x[a, k]
+          acc <- add(acc, value)
             ",
         )
         .axis_dependencies();
@@ -1236,19 +1233,19 @@ mod tests {
     fn a_combined_state_depends_on_what_its_own_merge_reads() {
         let dependencies = body(
             "
-            Tile(axes=(m in 0..4, n in 0..8, _lane in 0..32)):
-                for k in 0..32:
-                    p = load P[m, k]
-                    v = load V[k, n]
-                    pv = multiply(p, v)
-                    den <- add(den, p) over k
-                    num <- add(num, pv) over k
-                WarpShuffle(state=(den, num), state_b=(den__o, num__o), length=32):
-                    combine_states:
-                        den = den + den__o
-                        num = num + num__o
-                out = divide(num, den)
-                O[m, n] = out
+      Tile(axes=(m in 0..4, n in 0..8, _lane in 0..32)):
+        for k in 0..32:
+          p = load P[m, k]
+          v = load V[k, n]
+          pv = multiply(p, v)
+          den <- add(den, p) over k
+          num <- add(num, pv) over k
+        WarpShuffle(state=(den, num), state_b=(den__o, num__o), length=32):
+          combine_states:
+            den = den + den__o
+            num = num + num__o
+        out = divide(num, den)
+        O[m, n] = out
             ",
         )
         .axis_dependencies();
@@ -1260,9 +1257,9 @@ mod tests {
     fn axis_dependencies_keep_a_strided_partial_axis() {
         let dependencies = body(
             "
-            for k in start..32 step step:
-                value = load x[k]
-                partial <- add(partial, value)
+      for k in start..32 step step:
+        value = load x[k]
+        partial <- add(partial, value)
             ",
         )
         .axis_dependencies();
@@ -1299,10 +1296,10 @@ mod tests {
         // internal, the row axis it reads is not.
         let given = body(
             "
-            for r in 0..32:
-                s0 = load x[m, r]
-                stat <- maximum(stat, s0)
-            e = exp(stat)
+      for r in 0..32:
+        s0 = load x[m, r]
+        stat <- maximum(stat, s0)
+      e = exp(stat)
             ",
         );
         let (members, external) = given.backward_cone(&roots(&["e"]));
@@ -1317,11 +1314,11 @@ mod tests {
         // drop a real dependence (the rotate-half rotary shape).
         let given = body(
             "
-            a0 = load x[k]
-            a1 = load x[m]
-            v = select:
-                a0 when n < m
-                a1 when m
+      a0 = load x[k]
+      a1 = load x[m]
+      v = select:
+        a0 when n < m
+        a1 when m
             ",
         );
         let (_, external) = given.backward_cone(&roots(&["v"]));
@@ -1330,12 +1327,12 @@ mod tests {
 
     #[test]
     fn the_exact_key_tells_apart_what_body_equality_does_not() {
-        let plain = parse_body("for i in 0..n:\n    x = load X[i]\n    O[i] = x").unwrap();
-        let hinted = parse_body("for i in 0..n~128:\n    x = load X[i]\n    O[i] = x").unwrap();
+        let plain = parse_body("for i in 0..n:\n  x = load X[i]\n  O[i] = x").unwrap();
+        let hinted = parse_body("for i in 0..n~128:\n  x = load X[i]\n  O[i] = x").unwrap();
         let windowed =
-            parse_body("for i in 0..n window(parent=j in 0..m):\n    x = load X[i]\n    O[i] = x")
+            parse_body("for i in 0..n window(parent=j in 0..m):\n  x = load X[i]\n  O[i] = x")
                 .unwrap();
-        let again = parse_body("for i in 0..n:\n    x = load X[i]\n    O[i] = x").unwrap();
+        let again = parse_body("for i in 0..n:\n  x = load X[i]\n  O[i] = x").unwrap();
         assert_eq!(plain, hinted, "a hint is no part of body equality");
         assert_eq!(plain, windowed, "a window is no part of body equality");
         assert_eq!(MemoKey(plain.clone()), MemoKey(again.clone()));
@@ -1395,7 +1392,7 @@ mod tests {
     #[test]
     fn a_failing_walk_returns_its_error_and_builds_nothing() {
         let body =
-            parse_body("x = load X[i]\nfor k in 0..4:\n    y = load Y[k]\n    O[k] = y").unwrap();
+            parse_body("x = load X[i]\nfor k in 0..4:\n  y = load Y[k]\n  O[k] = y").unwrap();
         let mut visited = 0;
         let failed = body.try_map_stmts(&mut |stmt| {
             visited += 1;

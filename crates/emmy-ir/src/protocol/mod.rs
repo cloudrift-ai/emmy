@@ -956,16 +956,16 @@ mod tests {
         "init f32 s = 0",
         "let n = i + 1",
         "out[i] = x",
-        "m = select:\n    x when i < 2\n    y when 1",
+        "m = select:\n  x when i < 2\n  y when 1",
         "zero out words=16",
-        "for k in 0..8:\n    x = load a[k]\n    s <- add(s, x)",
-        "for k in 0..8 step 2 until n:\n    x = load a[k]",
-        "if i < 2:\n    out[] = x\nelse:\n    out[] = y",
-        "sub row_sum(row in 0..4) -> s:\n    for k in 0..8:\n        x = load a[row, k]\n        s <- add(s, x)\nr = call row_sum[a](i)",
+        "for k in 0..8:\n  x = load a[k]\n  s <- add(s, x)",
+        "for k in 0..8 step 2 until n:\n  x = load a[k]",
+        "if i < 2:\n  out[] = x\nelse:\n  out[] = y",
+        "sub row_sum(row in 0..4) -> s:\n  for k in 0..8:\n    x = load a[row, k]\n    s <- add(s, x)\nr = call row_sum[a](i)",
         "Smem(name=s, extents=(16, 16))",
         "Sync",
-        "Tile(axes=(m in 0..4, n in 0..8), raster_axes=(m, n), raster_group=2):\n    x = load a[m, n]",
-        "Grid(axes=(a in 0..3, b in 0..64), decode=(block_idx.x / 2, thread_idx.x), block_threads=64, aux_threads=32):\n    if block_idx.x * 64 + thread_idx.x < 192:\n        y[a, b] = a",
+        "Tile(axes=(m in 0..4, n in 0..8), raster_axes=(m, n), raster_group=2):\n  x = load a[m, n]",
+        "Grid(axes=(a in 0..3, b in 0..64), decode=(block_idx.x / 2, thread_idx.x), block_threads=64, aux_threads=32):\n  if block_idx.x * 64 + thread_idx.x < 192:\n    y[a, b] = a",
         "CpAsyncCopy(smem=s, smem_index=(i, j), src=a, src_index=(i, j), lane_index=(i, j), valid=i < 2)",
         "CpAsyncCommit",
         "CpAsyncWait(group=1)",
@@ -976,8 +976,8 @@ mod tests {
         "MbarrierArrive(mbar=mb, slot=p)",
         "SetMaxNReg(count=64, direction=dec)",
         "MbarrierWait(mbar=mb, phase=ph, slot=p)",
-        "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=8, tid_var=t):\n    combine_states:\n        t = acc * acc__o\n        acc = add(acc, t)",
-        "WarpShuffle(state=(acc), state_b=(acc__o), length=8):\n    combine_states:\n        t = acc * acc__o\n        acc = add(acc, t)",
+        "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=8, tid_var=t):\n  combine_states:\n    t = acc * acc__o\n    acc = add(acc, t)",
+        "WarpShuffle(state=(acc), state_b=(acc__o), length=8):\n  combine_states:\n    t = acc * acc__o\n    acc = add(acc, t)",
         "WarpBroadcast(state=(acc), length=8)",
         "FragmentApply(out=o, op=where, args=(FragmentArg(kind=coord, expressions=(__fcol > __frow)), FragmentArg(kind=uniform, names=(u)), FragmentArg(kind=row, names=(r0, r1)), FragmentArg(kind=frag, names=(f)), FragmentArg(kind=gmem, expressions=(i, j), buffer=mask)), row_base=q, col_base=kv)",
         "FragmentRowReduce(top=t0, bot=b0, frags=(f0, f1), op=maximum)",
@@ -993,7 +993,7 @@ mod tests {
         "WgmmaFence",
         "WgmmaCommit",
         "WgmmaWait",
-        "RegStore(dst_buffer=out, dst_index=(i, j), frag=c, shape=(16, 8, 16), epilogue_params=(acc), epilogue_result=y, extra_frags=(c2), m_guard=(i, j), n_guard=(i, j)):\n    epilogue:\n        r = load res[i, j]\n        y = add(acc, r)\n    run:\n        RegStore(dst_buffer=out, dst_index=(i, j), frag=d, shape=(16, 8, 16))",
+        "RegStore(dst_buffer=out, dst_index=(i, j), frag=c, shape=(16, 8, 16), epilogue_params=(acc), epilogue_result=y, extra_frags=(c2), m_guard=(i, j), n_guard=(i, j)):\n  epilogue:\n    r = load res[i, j]\n    y = add(acc, r)\n  run:\n    RegStore(dst_buffer=out, dst_index=(i, j), frag=d, shape=(16, 8, 16))",
     ];
 
     /// A wgmma cell over eight C fragments, its A operand a shared-memory descriptor.
@@ -1131,7 +1131,7 @@ mod tests {
         // The names an index or a predicate mentions are reads, listed in field order beside the names a field holds.
         let write = statement("out[i, i + gather] = value");
         assert_eq!(strs(&write.deps()), ["i", "gather", "value"]);
-        let select = statement("picked = select:\n    x when i < 2\n    y when i >= 2");
+        let select = statement("picked = select:\n  x when i < 2\n  y when i >= 2");
         assert_eq!(strs(&select.deps()), ["x", "i", "y"]);
         let carry = statement("state[i] <- value seed 0");
         assert_eq!(strs(&carry.deps()), ["value"]);
@@ -1255,7 +1255,7 @@ mod tests {
     #[test]
     fn a_bound_axis_name_follows_its_axis() {
         let tile = statement(
-            "Tile(axes=(m in 0..4, n in 0..8), raster_axes=(m, n), raster_group=2, spread=true):\n    x = load a[m, n]",
+            "Tile(axes=(m in 0..4, n in 0..8), raster_axes=(m, n), raster_group=2, spread=true):\n  x = load a[m, n]",
         );
         let renamed = Statement::rename(&tile, &mapping(&[("m", "m2"), ("x", "x2")]));
         let Statement::Tile(fields) = &*renamed else {
@@ -1381,7 +1381,7 @@ mod tests {
     /// An accumulator buffer zeroed ahead of a reduction over `x`, the sum stored to `out`.
     fn zeroed_sum(x: &str, out: &str, zero: &str) -> Body {
         body(&format!(
-            "zero {zero} words=16\nfor k in 0..8:\n    v = load {x}[k]\n    w = relu(v)\n    acc <- add(acc, w) over k\n{out}[] = acc"
+            "zero {zero} words=16\nfor k in 0..8:\n  v = load {x}[k]\n  w = relu(v)\n  acc <- add(acc, w) over k\n{out}[] = acc"
         ))
     }
 
@@ -1505,7 +1505,7 @@ mod tests {
     fn a_rewrite_keeps_the_segment_layout() {
         // The transposed combine halves segment by segment; losing `inner` in a rewrite folds across outputs.
         let halve = statement(
-            "TreeHalve(bufs=(b), state=(acc0), state_b=(acc0__o), length=4, tid_var=k_co, inner=(n_ln, 32)):\n    combine_states:\n        acc0 = add(acc0, acc0__o)",
+            "TreeHalve(bufs=(b), state=(acc0), state_b=(acc0__o), length=4, tid_var=k_co, inner=(n_ln, 32)):\n  combine_states:\n    acc0 = add(acc0, acc0__o)",
         );
         let names = names_by(&halve, str::to_string);
         let same_axis = |axis: &AxisRef| axis.clone();
