@@ -717,6 +717,8 @@ serial walk beside the full composition. A program is named by its state's width
 | `recurrence.delta.d128.t16` | 20 / 7,406 | 50 / 9,174 | 725 / 11,034 | 1,467 / 18,534 | 415 / 21,996 |
 | `recurrence.delta.d256.t2` | 12 / 11,250 | 41 / 11,572 | 14 / 8,406 | 86 / 14,761 | 2,067 / 21,031 |
 
+Each card's golden records as the program's decision the faster of the two there, and keeps the other's measured rows.
+
 The maps are dense and f32, so a composition is a full matrix product whatever the step was. A step that is a dense
 product composes into the same products the walk runs one after another. A step that is a rank-one update is the
 identity plus a thin term, which the dense map does not keep: its walk costs a row of work a step, and composing
