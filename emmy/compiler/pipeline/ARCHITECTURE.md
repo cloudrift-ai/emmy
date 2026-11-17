@@ -471,7 +471,9 @@ fork is a training pool rather than an extrapolation, and the export opens no go
 The card's `H_*` features (capability, SM count, memory, fast math, …) are constant inside a fork, but a tree
 can combine them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM,
 and per precision regime: a golden can split a kernel under fast math and keep it whole in the precise regime.
-The export prices nothing: the label is what the golden did. The import marks every decision on the way down to a
+The export prices nothing: the label is what the golden did. A golden therefore records on a kernel only the
+decision that won there: an arm that was measured and lost keeps its pieces' measured rows and no
+routing row, which the fit would read as the kernel's label. The import marks every decision on the way down to a
 golden row as taken under that row's card, precision regime and sizes (the `taken` table), whether or not the row
 holds a time, so a golden that cut a kernel marks the cut and one that kept it whole marks keep-fused. A routing row
 names no card, so it cannot mark a cut on a card whose golden did not take it. Shared cut parents receive one pool
