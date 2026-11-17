@@ -418,7 +418,8 @@ require CloudRift organization access.
 
 ## Contributing
 
-Source setup requires Python 3.12+ and a Rust toolchain:
+Source setup requires Python 3.12+, a Rust toolchain and `git-lfs`. `make setup` builds the Rust extensions into the
+package and runs again on its own after a Rust or `pyproject.toml` change:
 
 ```bash
 git clone https://github.com/cloudrift-ai/emmy.git
