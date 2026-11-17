@@ -108,6 +108,13 @@ def test_reduce_site_value_sheds_the_coop_width_and_keeps_the_finalize_letter() 
     assert Reduce.parse("g4a", None).spell() == "g4a"
     assert Reduce.parse("g2k", None).spell() == "g2k"
     assert Reduce.parse("g4a", None).finalize == "atomic"
+    # The digits after the kernel letter: pairwise compositions of a carried state's part maps.
+    composed = Reduce.parse("g8k2", None)
+    assert (composed.cta, composed.finalize, composed.pairs, composed.spell()) == (8, "kernel", 2, "g8k2")
+    assert Reduce.parse("g8k", None).pairs == 0
+    for refused in ("g8k0", "g8a2"):
+        with pytest.raises(ValueError):
+            Reduce.parse(refused, None)
     with pytest.raises(ValueError, match="thread WORK inventory"):
         Reduce.parse("coop", Work.parse("w4x1"))
 

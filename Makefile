@@ -5,7 +5,7 @@ help:
 	@echo "Server Benchmark Makefile"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  setup          - Install system dependencies, create venv, and install Python packages"
+	@echo "  setup          - Create venv, install Python packages, build the Rust extensions, fetch the LFS freeze"
 	@echo "  setup-agent    - Create venv and install API-agent workflow dependencies"
 	@echo "  lint           - Run linter and format checks"
 	@echo "  format         - Auto-format code and fix lint violations"
@@ -45,14 +45,25 @@ venv/.setup-agent-complete: $(AGENT_SOURCE)/pyproject.toml
 
 # Keep the completion marker inside the venv so an interrupted dependency install
 # cannot leave `make setup` permanently succeeding with an unusable environment.
-# pyproject.toml is a prerequisite so dependency edits also refresh the venv.
-venv/.setup-complete: pyproject.toml
+# The prerequisites are every input of the install: the package metadata and the Rust
+# sources pip builds into the package, so a dependency or Rust edit refreshes the venv.
+# A git checkout also fetches the one LFS file set the suite reads, the measurement
+# freeze; every other LFS object stays a pointer (tests.yml says why).
+RUST_SOURCES := Cargo.toml Cargo.lock $(shell find crates -name '*.rs' -o -name Cargo.toml)
+venv/.setup-complete: pyproject.toml $(RUST_SOURCES)
+	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+		git lfs version >/dev/null 2>&1 || { echo "❌ git-lfs is required: sudo apt-get install git-lfs"; exit 1; }; \
+		git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"; \
+	fi
 	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
 	fi
-	@echo "Installing Python dependencies (builds the runtime extension with cargo)..."
-	./venv/bin/pip install -e ".[dev]"
+	@echo "Installing Python dependencies and building the Rust extensions with cargo..."
+	@./venv/bin/pip install -e ".[dev]" || { \
+		stray=$$(find . \( -path ./venv -o -path ./.git \) -prune -o ! -user "$$(id -u)" -print -quit); \
+		[ -z "$$stray" ] || echo "❌ $$stray belongs to another user (a build ran as root?): sudo chown -R $$(id -un): ."; \
+		exit 1; }
 	@touch $@
 
 setup-ci:
