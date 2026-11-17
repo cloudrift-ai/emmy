@@ -124,3 +124,19 @@ def test_a_candidate_file_is_the_fresh_lowering(path: Path, traced: int) -> None
     document = document_of(path)
     fresh, report = restamp(document, traced=traced)
     assert fresh == document and not report.changed, "\n".join(report.lines())
+
+
+def test_a_group_is_asked_for_no_more_candidates_than_its_schedule_space_holds(monkeypatch) -> None:
+    """A space small enough to walk caps its group's target at the schedules it holds besides the golden's, and a
+    kernel with no schedule fork and no measured row is no group."""
+    golden = GoldenFile.load(_RECORDS_DIR / "rtx4080_sm89.json")
+    head = next(row for row in golden.rows if row.measured and row.knobs)
+    monkeypatch.setattr(candidates, "space_size", lambda pool: 4)
+    monkeypatch.setattr(candidates, "_others", lambda pool, taken: 1)
+    document, report = build(golden, [_measured(golden, head, [20.0, 30.0, 40.0])])
+    assert [row.measurements.emmy_us for row in document.rows] == [20.0]
+    assert head.name not in [name for name, _held, _wanted in report.short]
+
+    monkeypatch.setattr(candidates, "space_size", lambda pool: 0)
+    document, report = build(golden, [_measured(golden, head, [20.0])])
+    assert report.groups == 1 and report.rows == 1 and not report.short

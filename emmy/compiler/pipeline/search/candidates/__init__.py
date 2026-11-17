@@ -40,6 +40,8 @@ RECORDS = Path(__file__).parent / "records"
 #: ``MOST`` where it holds ``LARGE`` or more, by the logarithm of the size between.
 FEWEST, MOST = 3, 10
 SMALL, LARGE = 10, 1_000_000
+#: A schedule space of at most this many schedules is walked, so its group is asked for no more candidates than exist.
+WALKED = 64
 
 
 def candidate_paths() -> list[Path]:
@@ -56,7 +58,8 @@ def target(size: int) -> int:
 def space_size(pool: GoldenPool) -> int:
     """An upper bound on the schedules ``pool``'s kernel can run with: the bound its schedule fork declares
     (``Fork.pool_bound``), read off the lowering of the kernel's definition without walking the space. ``0`` for a
-    kernel whose definition does not lower on its own, or that opens no schedule fork."""
+    kernel whose definition does not lower on its own, or that opens no schedule fork: its group is asked for
+    nothing, and is no group of the file while it holds no candidate."""
     from emmy.compiler.pipeline import LOWERING_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION, Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
@@ -113,11 +116,16 @@ def _of_group(groups: dict[tuple, list[Row]], key: tuple) -> list[Row]:
 
 
 def _schedule(row: Row) -> tuple:
-    """A row's schedule as a key: its knobs by value. A knob at its default or OFF value is left out, since a golden
+    """A row's schedule as a key (:func:`_key` of its knobs)."""
+    return _key(row.knobs or {})
+
+
+def _key(knobs: dict) -> tuple:
+    """A schedule row as a key: its knobs by value. A knob at its default or OFF value is left out, since a golden
     row spells only what its record pinned while a tune's row spells every knob the kernel carries; a regime knob is
     left out too, the regime being the group's."""
     out = []
-    for key, value in (row.knobs or {}).items():
+    for key, value in knobs.items():
         family = family_of(key)
         knob = get(family)
         if family in _REGIME or is_off_value(family, value):
@@ -126,6 +134,14 @@ def _schedule(row: Row) -> tuple:
             continue
         out.append((key, str(value).casefold()))
     return tuple(sorted(out))
+
+
+def _others(pool: GoldenPool, taken: set[tuple]) -> int:
+    """The schedules ``pool``'s kernel can run with besides ``taken``, counted by walking its schedule space — for a
+    space small enough to walk (:data:`WALKED`)."""
+    from emmy.compiler.pipeline.search.ranking import enumerate_pool, pool_context  # noqa: PLC0415
+
+    return len({_key(row) for row in enumerate_pool(pool, pool_context(pool)).rows} - taken)
 
 
 def _spread(rows: list[Row], count: int) -> list[Row]:
@@ -175,8 +191,11 @@ def build(golden: GoldenFile, freezes: Sequence[GoldenFile] = (), existing: Gold
         head = min(best, key=lambda row: row.measurements.emmy_us)
         timed = tuple(GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.measurements.emmy_us, "") for row in best)
         pool = GoldenPool(golden.gpu_name or "", tuple(golden.compute_cap), regime, golden.kernel(head.kernel), dict(head.bindings), timed)
-        wanted = target(space_size(pool))
+        size = space_size(pool)
         taken = {_schedule(row) for row in rows}
+        wanted = target(size)
+        if 0 < size <= WALKED:
+            wanted = min(wanted, _others(pool, taken))
         kept = [row for row in _of_group(held, key) if _schedule(row) not in taken]
         taken.update(_schedule(row) for row in kept)
         fresh = {}  # one row per schedule the group does not hold yet
@@ -199,9 +218,11 @@ def build(golden: GoldenFile, freezes: Sequence[GoldenFile] = (), existing: Gold
         # A restamp of the golden can re-key a kernel; a kept row names it as the golden's file does now.
         group = [replace(row, kernel=head.kernel) for row in kept] + added
         document.rows.extend(group)
+        if not size and not group:
+            continue  # no schedule fork of its own and nothing measured: no candidate can exist
         report.groups += 1
         report.rows += len(group)
-        if len(group) < wanted:
+        if size and len(group) < wanted:
             report.short.append((head.name, len(group), wanted))
         report.faster.extend(
             (row.name, row.measurements.emmy_us, head.measurements.emmy_us)
