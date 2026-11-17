@@ -570,8 +570,9 @@ pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
     out
 }
 
-/// The sum an affine form spells, its terms ordered by `rank`: the one spelling of a sum in the normal form, and the
-/// one every reader that takes a sum apart and puts it back uses.
+/// The sum an affine form spells, its terms from the largest coefficient to the smallest and by `rank` among equal
+/// ones: the one spelling of a sum in the normal form, and the one every reader that takes a sum apart and puts it
+/// back uses.
 pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression {
     let AffineTerms {
         terms,
@@ -600,7 +601,16 @@ pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression 
         }
     }
     merged.retain(|(c, _)| *c != 0.0);
-    merged.sort_by_cached_key(|(c, term)| (ranked(term, rank), Key::float(*c)));
+    // From the largest coefficient to the smallest, so a sum opens with a negation only when it adds nothing; terms
+    // of one coefficient by rank.
+    let mut ordered: Vec<(Key, (f64, Expression))> = merged
+        .into_iter()
+        .map(|(c, term)| (ranked(&term, rank), (c, term)))
+        .collect();
+    ordered.sort_by(|(a_rank, (a, _)), (b_rank, (b, _))| {
+        b.total_cmp(a).then_with(|| a_rank.cmp(b_rank))
+    });
+    let merged: Vec<(f64, Expression)> = ordered.into_iter().map(|(_, term)| term).collect();
     let spells_none = offset == 0.0 && merged.iter().all(|(c, _)| c.abs() == 1.0);
     let mut out: Option<Expression> = None;
     for (index, (coefficient, term)) in merged.into_iter().enumerate() {
@@ -720,28 +730,28 @@ mod tests {
         let normal = text(
             &normalize_body(&body(
                 "for i in 0..4:
-    x = load X[i]
-    y = exp(x)
-    y = negative(y)
-    for j in 0..8:
-        y = load Z[i, j]
-        w = sqrt(y)
-        O[i, j] = w
-    P[i] = y",
+  x = load X[i]
+  y = exp(x)
+  y = negative(y)
+  for j in 0..8:
+    y = load Z[i, j]
+    w = sqrt(y)
+    O[i, j] = w
+  P[i] = y",
             ))
             .unwrap(),
         );
         assert_eq!(
             normal,
             "for a0 in 0..4:
-    in0 = load X[a0]
-    v0 = exp(in0)
-    v1 = -v0
-    P[a0] = v1
-    for a1 in 0..8:
-        in1 = load Z[a0, a1]
-        v2 = sqrt(in1)
-        O[a0, a1] = v2"
+  in0 = load X[a0]
+  v0 = exp(in0)
+  v1 = -v0
+  P[a0] = v1
+  for a1 in 0..8:
+    in1 = load Z[a0, a1]
+    v2 = sqrt(in1)
+    O[a0, a1] = v2"
         );
     }
 
@@ -787,13 +797,13 @@ Q[] = y",
     fn a_first_binding_reading_an_outer_name_of_its_spelling_reads_the_outer_value() {
         let normal = text(
             &normalize_body(&body(
-                "y = load A[]\nfor i in 0..4:\n    y = negative(y)\n    O[i] = y",
+                "y = load A[]\nfor i in 0..4:\n  y = negative(y)\n  O[i] = y",
             ))
             .unwrap(),
         );
         assert_eq!(
             normal,
-            "in0 = load A[]\nv0 = -in0\nfor a0 in 0..4:\n    O[a0] = v0"
+            "in0 = load A[]\nv0 = -in0\nfor a0 in 0..4:\n  O[a0] = v0"
         );
     }
 
@@ -820,15 +830,15 @@ Q[] = y",
         let step = |lines: &str| {
             text(
                 &normalize_body(&body(&format!(
-                    "for c in 0..3:\n    for i in 0..4:\n        u = load U[c, i]\n{lines}\nfor r in 0..4:\n    last = pre S[r]\n    out[r] = last"
+                    "for c in 0..3:\n  for i in 0..4:\n    u = load U[c, i]\n{lines}\nfor r in 0..4:\n  last = pre S[r]\n  out[r] = last"
                 )))
                 .unwrap(),
             )
         };
         let read_first =
-            step("        own = pre S[i]\n        next = add(own, u)\n        S[i] <- next seed 0");
+            step("    own = pre S[i]\n    next = add(own, u)\n    S[i] <- next seed 0");
         let update_first =
-            step("        S[i] <- next seed 0\n        own = pre S[i]\n        next = add(own, u)");
+            step("    S[i] <- next seed 0\n    own = pre S[i]\n    next = add(own, u)");
         assert_eq!(read_first, update_first);
         assert!(read_first.contains("v0 = pre acc0[a1]\n"), "{read_first}");
     }
@@ -841,15 +851,15 @@ Q[] = y",
         let normal = text(
             &normalize_body(&body(
                 "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        m_new = maximum(m, x)
-        scale = exp(m - m_new)
-        p = exp(x - m_new)
-        m <- maximum(m, x) over k
-        s_old = s * scale
-        s <- add(s_old, p) over k
-    O[i] = s",
+  for k in 0..4:
+    x = load X[i, k]
+    m_new = maximum(m, x)
+    scale = exp(m - m_new)
+    p = exp(x - m_new)
+    m <- maximum(m, x) over k
+    s_old = s * scale
+    s <- add(s_old, p) over k
+  O[i] = s",
             ))
             .unwrap(),
         );
@@ -877,15 +887,15 @@ Q[] = y",
     fn a_one_step_reduction_reads_its_seed_ahead_of_its_update() {
         let normal = normalize_body(&body(
             "for i in 0..8:
-    for k in 0..1:
-        x = load X[i, k]
-        m_new = maximum(m, x)
-        scale = exp(m - m_new)
-        p = exp(x - m_new)
-        m <- maximum(m, x) over k
-        s_old = s * scale
-        s <- add(s_old, p) over k
-    O[i] = s",
+  for k in 0..1:
+    x = load X[i, k]
+    m_new = maximum(m, x)
+    scale = exp(m - m_new)
+    p = exp(x - m_new)
+    m <- maximum(m, x) over k
+    s_old = s * scale
+    s <- add(s_old, p) over k
+  O[i] = s",
         ))
         .unwrap();
         let normal = text(&normal);
@@ -902,15 +912,15 @@ Q[] = y",
         let normal = text(
             &normalize_body(&body(
                 "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        m_new = maximum(m, x)
-        scale = exp(m - m_new)
-        if k < 3:
-            m <- maximum(m, x) over k
-        s_old = s * scale
-        s <- add(s_old, m_new) over k
-    O[i] = s",
+  for k in 0..4:
+    x = load X[i, k]
+    m_new = maximum(m, x)
+    scale = exp(m - m_new)
+    if k < 3:
+      m <- maximum(m, x) over k
+    s_old = s * scale
+    s <- add(s_old, m_new) over k
+  O[i] = s",
             ))
             .unwrap(),
         );
@@ -930,15 +940,15 @@ Q[] = y",
     fn a_carried_states_cell_loop_under_a_condition_orders_nothing_within_its_step() {
         let normal = normalize_body(&body(
             "for c in 0..3:
-    if c < 2:
-        for i in 0..4:
-            u = load U[c, i]
-            own = pre S[i]
-            next = add(own, u)
-            S[i] <- next seed 0
+  if c < 2:
+    for i in 0..4:
+      u = load U[c, i]
+      own = pre S[i]
+      next = add(own, u)
+      S[i] <- next seed 0
 for r in 0..4:
-    last = pre S[r]
-    out[r] = last",
+  last = pre S[r]
+  out[r] = last",
         ));
         assert!(normal.is_ok(), "{normal:?}");
     }
@@ -966,17 +976,17 @@ for r in 0..4:
         let normal = text(
             &normalize_body(&body(
                 "for i in 0..8:
-    for k in 0..1:
-        x = load X[i, k]
-        m_new = maximum(m, x)
-        scale = exp(m - m_new)
-        y = select:
-            m when i < 4
-            x when true
-        m <- maximum(m, x) over k
-        s_old = s * scale
-        s <- add(s_old, y) over k
-    O[i] = s",
+  for k in 0..1:
+    x = load X[i, k]
+    m_new = maximum(m, x)
+    scale = exp(m - m_new)
+    y = select:
+      m when i < 4
+      x when true
+    m <- maximum(m, x) over k
+    s_old = s * scale
+    s <- add(s_old, y) over k
+  O[i] = s",
             ))
             .unwrap(),
         );
@@ -997,15 +1007,15 @@ for r in 0..4:
         let normal = text(
             &normalize_body(&body(
                 "for i in 0..8:
-    for k in 0..1:
-        x = load X[i, k]
-        a = m * 2
-        m <- maximum(m, x) over k
-        b = m * 3
-        t = a + b
-        s <- add(s, t) over k
-    M[i] = m
-    S[i] = s",
+  for k in 0..1:
+    x = load X[i, k]
+    a = m * 2
+    m <- maximum(m, x) over k
+    b = m * 3
+    t = a + b
+    s <- add(s, t) over k
+  M[i] = m
+  S[i] = s",
             ))
             .unwrap(),
         );
@@ -1026,13 +1036,13 @@ for r in 0..4:
         let normal = text(
             &normalize_body(&body(
                 "for i in 0..8:
-    for k in 0..1:
-        x = load X[i, k]
-        y = load Y[i, k]
-        s <- multiply(t, x) over k
-        t <- add(t, y) over k
-    S[i] = s
-    T[i] = t",
+  for k in 0..1:
+    x = load X[i, k]
+    y = load Y[i, k]
+    s <- multiply(t, x) over k
+    t <- add(t, y) over k
+  S[i] = s
+  T[i] = t",
             ))
             .unwrap(),
         );
@@ -1048,15 +1058,15 @@ for r in 0..4:
         let normal = text(
             &normalize_body(&body(
                 "for i in 0..8:
-    for k in 0..1:
-        x = load X[i, k]
-        s <- add(s, x) over k
-    S[i] = s",
+  for k in 0..1:
+    x = load X[i, k]
+    s <- add(s, x) over k
+  S[i] = s",
             ))
             .unwrap(),
         );
         assert_eq!(
-            normal, "for a0 in 0..8:\n    in0 = load X[a0, 0]\n    S[a0] = in0",
+            normal, "for a0 in 0..8:\n  in0 = load X[a0, 0]\n  S[a0] = in0",
             "{normal}"
         );
     }
@@ -1068,23 +1078,23 @@ for r in 0..4:
     fn a_reader_ahead_of_the_block_holding_the_folding_loop_follows_it() {
         for src in [
             "for i in 0..8:
-    O[i] = m
-    if i < 4:
-        for k in 0..4 seed=false:
-            x = load X[i, k]
-            m <- maximum(m, x) over k",
+  O[i] = m
+  if i < 4:
+    for k in 0..4 seed=false:
+      x = load X[i, k]
+      m <- maximum(m, x) over k",
             "for i in 0..8:
-    O[i] = m
-    for k in 0..4:
-        x = load X[i, k]
-        m <- maximum(m, x)",
+  O[i] = m
+  for k in 0..4:
+    x = load X[i, k]
+    m <- maximum(m, x)",
             "for i in 0..8:
-    O[i] = m
-    if i < 4:
-        for k in 0..4 seed=false:
-            for j in 0..2 seed=false:
-                x = load X[i, k, j]
-                m <- maximum(m, x) over k, j",
+  O[i] = m
+  if i < 4:
+    for k in 0..4 seed=false:
+      for j in 0..2 seed=false:
+        x = load X[i, k, j]
+        m <- maximum(m, x) over k, j",
         ] {
             let normal = text(&normalize_body(&body(src)).unwrap());
             let update = normal.find("<-").expect(&normal);
@@ -1112,28 +1122,28 @@ for r in 0..4:
         for (src, read) in [
             (
                 "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        r = acc * x
-        R[i, k] = r
-        for d in 0..2 seed=false:
-            v = load V[k, d]
-            w = v * x
-            acc <- add(acc, w) over k
-    O[i] = acc",
+  for k in 0..4:
+    x = load X[i, k]
+    r = acc * x
+    R[i, k] = r
+    for d in 0..2 seed=false:
+      v = load V[k, d]
+      w = v * x
+      acc <- add(acc, w) over k
+  O[i] = acc",
                 "acc0 * in0",
             ),
             (
                 "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        r = acc * 2
-        R[i, k] = r
-        for d in 0..2 seed=false:
-            v = load V[k, d]
-            w = v * x
-            acc <- add(acc, w) over k
-    O[i] = acc",
+  for k in 0..4:
+    x = load X[i, k]
+    r = acc * 2
+    R[i, k] = r
+    for d in 0..2 seed=false:
+      v = load V[k, d]
+      w = v * x
+      acc <- add(acc, w) over k
+  O[i] = acc",
                 "2 * acc0",
             ),
         ] {
@@ -1147,28 +1157,28 @@ for r in 0..4:
     fn a_fold_whose_outer_axis_is_the_steps_is_an_update_of_the_step() {
         read_stays_ahead(
             "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        r = acc * x
-        R[i, k] = r
-        for j in 0..2 seed=false:
-            v = load V[i, k, j]
-            acc <- add(acc, v) over k, j
-    O[i] = acc",
+  for k in 0..4:
+    x = load X[i, k]
+    r = acc * x
+    R[i, k] = r
+    for j in 0..2 seed=false:
+      v = load V[i, k, j]
+      acc <- add(acc, v) over k, j
+  O[i] = acc",
             "acc0 * in0",
             "<- add",
         );
         read_stays_ahead(
             "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        r = m * 2
-        R[i, k] = r
-        if k < 2:
-            for j in 0..2 seed=false:
-                y = load Y[i, k, j]
-                m <- maximum(m, y) over k, j
-    O[i] = m",
+  for k in 0..4:
+    x = load X[i, k]
+    r = m * 2
+    R[i, k] = r
+    if k < 2:
+      for j in 0..2 seed=false:
+        y = load Y[i, k, j]
+        m <- maximum(m, y) over k, j
+  O[i] = m",
             "2 * acc0",
             "<- maximum",
         );
@@ -1180,27 +1190,27 @@ for r in 0..4:
     fn an_update_under_a_condition_keeps_a_read_of_the_accumulator_alone_in_the_step() {
         read_stays_ahead(
             "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        r = m * 2
-        R[i, k] = r
-        if k < 2:
-            m <- maximum(m, x) over k
-    O[i] = m",
+  for k in 0..4:
+    x = load X[i, k]
+    r = m * 2
+    R[i, k] = r
+    if k < 2:
+      m <- maximum(m, x) over k
+  O[i] = m",
             "2 * acc0",
             "<- maximum",
         );
         read_stays_ahead(
             "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        y = load Y[i, k]
-        r = m * 2
-        R[i, k] = r
-        if k < 2:
-            m <- maximum(m, x) over k
-            m <- maximum(m, y) over k
-    O[i] = m",
+  for k in 0..4:
+    x = load X[i, k]
+    y = load Y[i, k]
+    r = m * 2
+    R[i, k] = r
+    if k < 2:
+      m <- maximum(m, x) over k
+      m <- maximum(m, y) over k
+  O[i] = m",
             "2 * acc0",
             "<- maximum",
         );
@@ -1212,31 +1222,31 @@ for r in 0..4:
     fn a_blocks_site_kind_does_not_depend_on_the_order_inside_it() {
         read_stays_ahead(
             "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        r = m * 2
-        R[i, k] = r
-        if k < 2:
-            m <- maximum(m, x) over k
-            for j in 0..2 seed=false:
-                y = load Y[i, k, j]
-                m <- maximum(m, y) over k, j
-    O[i] = m",
+  for k in 0..4:
+    x = load X[i, k]
+    r = m * 2
+    R[i, k] = r
+    if k < 2:
+      m <- maximum(m, x) over k
+      for j in 0..2 seed=false:
+        y = load Y[i, k, j]
+        m <- maximum(m, y) over k, j
+  O[i] = m",
             "2 * acc0",
             "<- maximum",
         );
         read_stays_ahead(
             "for i in 0..8:
-    for k in 0..4:
-        x = load X[i, k]
-        r = m * 2
-        R[i, k] = r
-        if k < 2:
-            for j in 0..2 seed=false:
-                y = load Y[i, k, j]
-                m <- maximum(m, y) over k, j
-            m <- maximum(m, x) over k
-    O[i] = m",
+  for k in 0..4:
+    x = load X[i, k]
+    r = m * 2
+    R[i, k] = r
+    if k < 2:
+      for j in 0..2 seed=false:
+        y = load Y[i, k, j]
+        m <- maximum(m, y) over k, j
+      m <- maximum(m, x) over k
+  O[i] = m",
             "2 * acc0",
             "<- maximum",
         );
@@ -1249,9 +1259,9 @@ for r in 0..4:
     fn the_affine_form_takes_its_coefficient_domain_from_the_class() {
         let normal = normalize_uncached(&body(
             "for a0 in 0..8:
-    in0 = load x[a0 + a0 * 2 - 1, a0 / 2 + 1]
-    v = in0 / 2.0 + in0 + 0.5 * in0
-    out[a0] = v",
+  in0 = load x[a0 + a0 * 2 - 1, a0 / 2 + 1]
+  v = in0 / 2.0 + in0 + 0.5 * in0
+  out[a0] = v",
         ))
         .unwrap();
         let listing = text(&normal);
@@ -1279,19 +1289,19 @@ for r in 0..4:
                 "let f32 v0 = -0.5\n",
             ),
             (
-                "for a0 in 0..8:\n    x = load X[(a0 - a0 + 3) / 2]\n    O[a0] = x",
+                "for a0 in 0..8:\n  x = load X[(a0 - a0 + 3) / 2]\n  O[a0] = x",
                 "load X[1]",
             ),
             (
-                "for a0 in 0..8:\n    x = load X[(a0 - a0 - 7) / 2]\n    O[a0] = x",
+                "for a0 in 0..8:\n  x = load X[(a0 - a0 - 7) / 2]\n  O[a0] = x",
                 "load X[-4]",
             ),
             (
-                "for a0 in 0..8:\n    x = load X[maximum(1, 2) * a0]\n    O[a0] = x",
+                "for a0 in 0..8:\n  x = load X[maximum(1, 2) * a0]\n  O[a0] = x",
                 "load X[2 * a0]",
             ),
             (
-                "for a0 in 0..8:\n    x = load X[a0 + minimum(3, 1)]\n    O[a0] = x",
+                "for a0 in 0..8:\n  x = load X[a0 + minimum(3, 1)]\n  O[a0] = x",
                 "load X[a0 + 1]",
             ),
             (
@@ -1303,11 +1313,11 @@ for r in 0..4:
                 "v0 = in0 // 1\n",
             ),
             (
-                "for h in 0..8:\n    for j in 0..1:\n        x = load X[(h + j) % 1, h // 1]\n        O[h, j] = x",
+                "for h in 0..8:\n  for j in 0..1:\n    x = load X[(h + j) % 1, h // 1]\n    O[h, j] = x",
                 "load X[0, a0]",
             ),
             (
-                "for a0 in 0..8:\n    i = load I[a0]\n    x = load X[i % 1, i // 1]\n    O[a0] = x",
+                "for a0 in 0..8:\n  i = load I[a0]\n  x = load X[i % 1, i // 1]\n  O[a0] = x",
                 "load X[0, in0]",
             ),
         ];
@@ -1325,32 +1335,32 @@ for r in 0..4:
         let listing = |program: &str| text(&normalize_uncached(&body(program)).unwrap());
         let doubled = listing(
             "for a0 in 0..8:
-    u8 code = load x[a0]
-    v = code + code
-    out[a0] = v",
+  u8 code = load x[a0]
+  v = code + code
+  out[a0] = v",
         );
         assert!(doubled.contains("= 2 * in0"), "{doubled}");
         let scaled = listing(
             "for a0 in 0..8:
-    u8 code = load x[a0]
-    v = multiply(2.0, code)
-    out[a0] = v",
+  u8 code = load x[a0]
+  v = multiply(2.0, code)
+  out[a0] = v",
         );
         assert!(scaled.contains("= 2.0 * in0"), "{scaled}");
         let shifted = listing(
             "for a0 in 0..8:
-    u8 code = load x[a0]
-    f32 eight = 8.0
-    v = subtract(code, eight)
-    out[a0] = v",
+  u8 code = load x[a0]
+  f32 eight = 8.0
+  v = subtract(code, eight)
+  out[a0] = v",
         );
         assert!(shifted.contains("= in0 - 8.0"), "{shifted}");
         let collapsed = listing(
             "for a0 in 0..8:
-    u8 code = load x[a0]
-    v = multiply(code, 1.0)
-    w = multiply(v, v)
-    out[a0] = w",
+  u8 code = load x[a0]
+  v = multiply(code, 1.0)
+  w = multiply(v, v)
+  out[a0] = w",
         );
         assert!(
             collapsed.contains("v0 = 1.0 * in0\n") && collapsed.contains("v1 = v0 * v0"),
@@ -1358,20 +1368,20 @@ for r in 0..4:
         );
         let cancelled = listing(
             "for a0 in 0..8:
-    u8 code = load x[a0]
-    v = subtract(code, 8.0)
-    w = add(v, 8.0)
-    out[a0] = w",
+  u8 code = load x[a0]
+  v = subtract(code, 8.0)
+  w = add(v, 8.0)
+  out[a0] = w",
         );
         assert!(cancelled.contains("= 1.0 * in0"), "{cancelled}");
         let mixed = listing(
             "for a0 in 0..8:
-    u8 code = load x[a0]
-    u8 other = load y[a0]
-    v = add(code, code)
-    w = multiply(2.0, other)
-    o = add(v, w)
-    out[a0] = o",
+  u8 code = load x[a0]
+  u8 other = load y[a0]
+  v = add(code, code)
+  w = multiply(2.0, other)
+  o = add(v, w)
+  out[a0] = o",
         );
         assert!(
             mixed.contains("2.0 * in0") && mixed.contains("2.0 * in1"),
@@ -1397,10 +1407,10 @@ for r in 0..4:
         // whose gather a rename published into both the name and the axis channel once wired to the wrong row.
         let out = rename_ssa_sequential(&body(
             "
-            idx0 = load ids[a0]
-            idx1 = load ids[a0]
-            gather = load w[idx1, a0]
-            in1 = load weight[a0]
+      idx0 = load ids[a0]
+      idx1 = load ids[a0]
+      gather = load w[idx1, a0]
+      in1 = load weight[a0]
             ",
         ));
         assert_eq!(strs(&find_load(&out, "ids").names), ["in0"]);
@@ -1412,9 +1422,9 @@ for r in 0..4:
     fn canonical_names_do_not_capture_free_arguments() {
         let renamed = rename_ssa_sequential(&body(
             "
-            for k in 0..4:
-                value = load x[a0, k, in0]
-                total <- add(total, value)
+      for k in 0..4:
+        value = load x[a0, k, in0]
+        total <- add(total, value)
             ",
         ));
         let bound = axis(&renamed.stmts()[0]).to_string();
@@ -1443,12 +1453,12 @@ for r in 0..4:
                     };
                     let renamed = rename_ssa_sequential(&body(&format!(
                         "
-                        init f32 total = 0
-                        {wrapper}
-                            {inner_loop}
-                                value = load x[k]
-                                total <- add(total, value) over k
-                        out[] = total
+            init f32 total = 0
+            {wrapper}
+              {inner_loop}
+                value = load x[k]
+                total <- add(total, value) over k
+            out[] = total
                         "
                     )));
                     let [ref initial] = renamed.of_types(&[StatementType::Init])[..] else {
@@ -1488,11 +1498,11 @@ for r in 0..4:
             let out = canonicalize_expressions(
                 &body(&format!(
                     "
-                    for {outer} in 0..4:
-                        for {inner_axis} in 0..4:
-                            x = load X[{outer}, {inner_axis}]
-                            if {inner_axis} == {outer}:
-                                O[{outer}, {inner_axis}] = x
+          for {outer} in 0..4:
+            for {inner_axis} in 0..4:
+              x = load X[{outer}, {inner_axis}]
+              if {inner_axis} == {outer}:
+                O[{outer}, {inner_axis}] = x
                     "
                 )),
                 &[],
@@ -1514,7 +1524,7 @@ for r in 0..4:
         // the normal form of the normal form is itself whatever order the loads came in.
         for spelling in ["in0 * in1", "in1 * in0"] {
             let given = body(&format!(
-                "for a0 in 0..2:\n    for a2 in 0..4:\n        in0 = load A[a2]\n        in1 = load B[a2, a0]\n        f32 v0 = {spelling}\n        acc0 <- add(acc0, v0) over a2\n    O[a0] = acc0"
+                "for a0 in 0..2:\n  for a2 in 0..4:\n    in0 = load A[a2]\n    in1 = load B[a2, a0]\n    f32 v0 = {spelling}\n    acc0 <- add(acc0, v0) over a2\n  O[a0] = acc0"
             ));
             let once = normalize_uncached(&given).unwrap();
             assert_eq!(normalize_uncached(&once).unwrap(), once, "{}", text(&once));
@@ -1528,24 +1538,24 @@ for r in 0..4:
         let normal = text(
             &normalize_uncached(&body(
                 "
-                Tile(axes=(m in 0..8, c in 0..128), block_threads=128):
-                    init f32 s = 0
-                    f32 x = load X[m, c]
-                    f32 q = multiply(x, x)
-                    f32 s <- add(s, q) over c
-                    WarpShuffle(state=(s), state_b=(s__o), length=32):
-                        combine_states:
-                            s = s + s__o
-                    Smem(name=s_smem, extents=(4))
-                    if lane == 0:
-                        f32 s_smem[warp] = s
-                    Sync
-                    TreeHalve(bufs=(s_smem), state=(s), state_b=(s__o), length=4, tid_var=warp):
-                        combine_states:
-                            s = s + s__o
-                    f32 r = rsqrt(s)
-                    f32 y = multiply(r, x)
-                    f32 O[m, c] = y
+        Tile(axes=(m in 0..8, c in 0..128), block_threads=128):
+          init f32 s = 0
+          f32 x = load X[m, c]
+          f32 q = multiply(x, x)
+          f32 s <- add(s, q) over c
+          WarpShuffle(state=(s), state_b=(s__o), length=32):
+            combine_states:
+              s = s + s__o
+          Smem(name=s_smem, extents=(4))
+          if lane == 0:
+            f32 s_smem[warp] = s
+          Sync
+          TreeHalve(bufs=(s_smem), state=(s), state_b=(s__o), length=4, tid_var=warp):
+            combine_states:
+              s = s + s__o
+          f32 r = rsqrt(s)
+          f32 y = multiply(r, x)
+          f32 O[m, c] = y
                 ",
             ))
             .unwrap(),
@@ -1566,15 +1576,15 @@ for r in 0..4:
         let normal = text(
             &optimize_uncached(&body(
                 "
-                Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
-                    RegFragment(name=_a0, role=a, dtype=f16)
-                    RegFragment(name=_b0, role=b, dtype=f16)
-                    RegFragment(name=_c0, role=c, dtype=f32)
-                    for k in 0..128 step 16:
-                        LdmatrixLoad(frag=_a0, src_buffer=A, src_index=(16 * m, k), role=a, ldm=128)
-                        LdmatrixLoad(frag=_b0, src_buffer=B, src_index=(k, 8 * n), role=b, ldm=8)
-                        MmaSyncPtx(c_frag=_c0, a_frag=_a0, b_frag=_b0, shape=(16, 8, 16))
-                    RegStore(dst_buffer=O, dst_index=(16 * m, 8 * n), frag=_c0, shape=(16, 8, 16), ldm=128, ldn=1, row_dim=0, col_dim=1)
+        Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
+          RegFragment(name=_a0, role=a, dtype=f16)
+          RegFragment(name=_b0, role=b, dtype=f16)
+          RegFragment(name=_c0, role=c, dtype=f32)
+          for k in 0..128 step 16:
+            LdmatrixLoad(frag=_a0, src_buffer=A, src_index=(16 * m, k), role=a, ldm=128)
+            LdmatrixLoad(frag=_b0, src_buffer=B, src_index=(k, 8 * n), role=b, ldm=8)
+            MmaSyncPtx(c_frag=_c0, a_frag=_a0, b_frag=_b0, shape=(16, 8, 16))
+          RegStore(dst_buffer=O, dst_index=(16 * m, 8 * n), frag=_c0, shape=(16, 8, 16), ldm=128, ldn=1, row_dim=0, col_dim=1)
                 ",
             ))
             .unwrap(),
@@ -1622,14 +1632,14 @@ for r in 0..4:
     fn an_optimized_body_keeps_its_names_and_its_order() {
         let out = kernel_normal(
             "
-            Tile(axes=(m in 0..4, _lane in 0..32)):
-                for k in 0..16:
-                    _scale = load S[m]
-                    zeta = load T[m, k]
-                    alpha = load U[m, k]
-                    prod = multiply(zeta, alpha)
-                    out = multiply(prod, _scale)
-                    O[m, k] = out
+      Tile(axes=(m in 0..4, _lane in 0..32)):
+        for k in 0..16:
+          _scale = load S[m]
+          zeta = load T[m, k]
+          alpha = load U[m, k]
+          prod = multiply(zeta, alpha)
+          out = multiply(prod, _scale)
+          O[m, k] = out
             ",
         );
         let at = |needle: &str| {
@@ -1647,17 +1657,17 @@ for r in 0..4:
     fn a_later_binder_of_a_spelling_takes_a_number() {
         let given = body(
             "
-            Tile(axes=(m in 0..4)):
-                for k in 0..16:
-                    x = load X[m]
-                    t = load T[m, k]
-                    u = multiply(x, t)
-                    O[m, k] = u
-                for k in 0..16:
-                    x = load Y[m]
-                    t = load T[m, k]
-                    u = add(x, t)
-                    P[m, k] = u
+      Tile(axes=(m in 0..4)):
+        for k in 0..16:
+          x = load X[m]
+          t = load T[m, k]
+          u = multiply(x, t)
+          O[m, k] = u
+        for k in 0..16:
+          x = load Y[m]
+          t = load T[m, k]
+          u = add(x, t)
+          P[m, k] = u
             ",
         );
         let distinct = distinct_names(&given);
@@ -1693,13 +1703,13 @@ for r in 0..4:
     fn a_value_two_cells_of_a_tile_compute_is_computed_once() {
         let out = kernel_normal(
             "
-            Tile(axes=(m in 0..4, n in 0..8)):
-                x0 = load X[m]
-                y0 = multiply(x0, 2.0)
-                x1 = load X[m]
-                y1 = multiply(x1, 2.0)
-                O[m, 2 * n] = y0
-                O[m, 2 * n + 1] = y1
+      Tile(axes=(m in 0..4, n in 0..8)):
+        x0 = load X[m]
+        y0 = multiply(x0, 2.0)
+        x1 = load X[m]
+        y1 = multiply(x1, 2.0)
+        O[m, 2 * n] = y0
+        O[m, 2 * n + 1] = y1
             ",
         );
         assert_eq!(out.matches("load X").count(), 1, "{out}");
@@ -1710,9 +1720,9 @@ for r in 0..4:
     fn an_index_simplifies_under_the_tile_axes() {
         let out = kernel_normal(
             "
-            Tile(axes=(m in 0..4, _lane in 0..32)):
-                x = load X[(32 * m + _lane) / 32, (32 * m + _lane) % 32]
-                O[m, _lane] = x
+      Tile(axes=(m in 0..4, _lane in 0..32)):
+        x = load X[(32 * m + _lane) / 32, (32 * m + _lane) % 32]
+        O[m, _lane] = x
             ",
         );
         assert!(out.contains("load X[m, _lane]"), "{out}");
@@ -1722,12 +1732,12 @@ for r in 0..4:
     fn a_barrier_stays_where_it_is() {
         let out = kernel_normal(
             "
-            Tile(axes=(m in 0..4)):
-                x = load X[m]
-                Sync
-                y = load X[m]
-                O[m] = y
-                P[m] = x
+      Tile(axes=(m in 0..4)):
+        x = load X[m]
+        Sync
+        y = load X[m]
+        O[m] = y
+        P[m] = x
             ",
         );
         assert_eq!(out.matches("Sync").count(), 1, "{out}");
@@ -1739,18 +1749,18 @@ for r in 0..4:
     fn a_state_a_combine_updates_in_place_stays() {
         let out = kernel_normal(
             "
-            Tile(axes=(m in 0..4, _lane in 0..32)):
-                for k in 0..16:
-                    x = load X[m, k]
-                    a <- add(a, x) over k
-                    y = load X[m, k]
-                    b <- add(b, y) over k
-                WarpShuffle(state=(a, b), state_b=(a__o, b__o), length=32):
-                    combine_states:
-                        a = a + a__o
-                        b = b + b__o
-                O[m, 0] = a
-                O[m, 1] = b
+      Tile(axes=(m in 0..4, _lane in 0..32)):
+        for k in 0..16:
+          x = load X[m, k]
+          a <- add(a, x) over k
+          y = load X[m, k]
+          b <- add(b, y) over k
+        WarpShuffle(state=(a, b), state_b=(a__o, b__o), length=32):
+          combine_states:
+            a = a + a__o
+            b = b + b__o
+        O[m, 0] = a
+        O[m, 1] = b
             ",
         );
         assert_eq!(out.matches(" <- ").count(), 2, "{out}");
@@ -1762,18 +1772,18 @@ for r in 0..4:
         let normal = text(
             &normalize_uncached(&body(
                 "
-                Tile(axes=(b in 0..2, k_co in 0..4, n_ln in 0..32), block_threads=128):
-                    for k in k_co..256 step 4:
-                        f32 x = load X[32 * b + n_ln, k]
-                        f32 s <- add(s, x) over k
-                    Smem(name=s_smem, extents=(128))
-                    f32 s_smem[k_co * 32 + n_ln] = s
-                    Sync
-                    TreeHalve(bufs=(s_smem), state=(s), state_b=(s__o), length=4, tid_var=k_co, inner=(n_ln, 32)):
-                        combine_states:
-                            s = s + s__o
-                    if k_co == 0:
-                        f32 O[32 * b + n_ln] = s
+        Tile(axes=(b in 0..2, k_co in 0..4, n_ln in 0..32), block_threads=128):
+          for k in k_co..256 step 4:
+            f32 x = load X[32 * b + n_ln, k]
+            f32 s <- add(s, x) over k
+          Smem(name=s_smem, extents=(128))
+          f32 s_smem[k_co * 32 + n_ln] = s
+          Sync
+          TreeHalve(bufs=(s_smem), state=(s), state_b=(s__o), length=4, tid_var=k_co, inner=(n_ln, 32)):
+            combine_states:
+              s = s + s__o
+          if k_co == 0:
+            f32 O[32 * b + n_ln] = s
                 ",
             ))
             .unwrap(),
@@ -1788,14 +1798,14 @@ for r in 0..4:
         let normal = text(
             &normalize_uncached(&body(
                 "
-                Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
-                    RegFragment(name=_sf, role=sfa, dtype=f4e2m1x2)
-                    RegFragment(name=_c, role=c, dtype=f32)
-                    f32 w = load W[m]
-                    for k in 0..128 step 64:
-                        BlockScaleLoad(frag=_sf, src_buffer=S, src_index=(16 * m, k / 16), role=a, ldm=16)
-                        FragmentApply(out=_c, op=multiply, args=(FragmentArg(kind=frag, names=(_c)), FragmentArg(kind=uniform, names=(w))), in_place=true)
-                    RegStore(dst_buffer=O, dst_index=(16 * m, 8 * n), frag=_c, shape=(16, 8, 16), ldm=128, ldn=1, row_dim=0, col_dim=1)
+        Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
+          RegFragment(name=_sf, role=sfa, dtype=f4e2m1x2)
+          RegFragment(name=_c, role=c, dtype=f32)
+          f32 w = load W[m]
+          for k in 0..128 step 64:
+            BlockScaleLoad(frag=_sf, src_buffer=S, src_index=(16 * m, k / 16), role=a, ldm=16)
+            FragmentApply(out=_c, op=multiply, args=(FragmentArg(kind=frag, names=(_c)), FragmentArg(kind=uniform, names=(w))), in_place=true)
+          RegStore(dst_buffer=O, dst_index=(16 * m, 8 * n), frag=_c, shape=(16, 8, 16), ldm=128, ldn=1, row_dim=0, col_dim=1)
                 ",
             ))
             .unwrap(),
@@ -1832,14 +1842,14 @@ for r in 0..4:
         let normal = text(
             &normalize_uncached(&body(
                 "
-                Tile(axes=(m in 0..4), block_threads=32):
-                    Smem(name=_s, extents=(2, 2))
-                    f32 p, q = load X[m, 0]
-                    for k in 0..8 step 2:
-                        f32 p, q = load X[0] carried=unpack
-                        f32 _s[k / 2 % 2, 0] = (p, q)
-                        Sync
-                        f32 p, q = load X[m, k + 2 < 8 ? k + 2 : 0] carried=load
+        Tile(axes=(m in 0..4), block_threads=32):
+          Smem(name=_s, extents=(2, 2))
+          f32 p, q = load X[m, 0]
+          for k in 0..8 step 2:
+            f32 p, q = load X[0] carried=unpack
+            f32 _s[k / 2 % 2, 0] = (p, q)
+            Sync
+            f32 p, q = load X[m, k + 2 < 8 ? k + 2 : 0] carried=load
                 ",
             ))
             .unwrap(),
@@ -1860,19 +1870,19 @@ for r in 0..4:
         let normal = text(
             &normalize_uncached(&body(
                 "
-                Tile(axes=(m in 0..9, c in 0..32), block_threads=128):
-                    init f32 s = 0
-                    for chunk in 0..64 step 32 unroll=true seed=false:
-                        f32 previous = s
-                        f32 x = load X[m, chunk + c]
-                        init f32 zero = 0
-                        f32 s <- add(zero, x) over chunk
-                        WarpShuffle(state=(s), state_b=(s__o), length=32, prefix=true):
-                            combine_states:
-                                s = s + s__o
-                        f32 s <- add(s, previous)
-                        f32 O[m, chunk + c] = s
-                        WarpBroadcast(state=(s), length=32)
+        Tile(axes=(m in 0..9, c in 0..32), block_threads=128):
+          init f32 s = 0
+          for chunk in 0..64 step 32 unroll=true seed=false:
+            f32 previous = s
+            f32 x = load X[m, chunk + c]
+            init f32 zero = 0
+            f32 s <- add(zero, x) over chunk
+            WarpShuffle(state=(s), state_b=(s__o), length=32, prefix=true):
+              combine_states:
+                s = s + s__o
+            f32 s <- add(s, previous)
+            f32 O[m, chunk + c] = s
+            WarpBroadcast(state=(s), length=32)
                 ",
             ))
             .unwrap(),

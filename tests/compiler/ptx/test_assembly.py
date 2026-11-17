@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from emmy.emmy_ir import compile_ptx, parse_body
 
@@ -41,3 +43,14 @@ def test_no_ptxas_is_an_error_that_says_what_to_install(monkeypatch, tmp_path):
     monkeypatch.setattr(ptxas, "version", lambda: "absent")
     with pytest.raises(RuntimeError, match="ptxas not found.*install"):
         ptxas.compile_to_cubin(".version 8.7", "k", arch="sm_120")
+
+
+def test_a_refused_text_raises_with_ptxas_own_message(monkeypatch, tmp_path):
+    if ptxas.ptxas_path() is None:
+        pytest.skip("ptxas is not installed")
+    monkeypatch.setenv("EMMY_CUBIN_CACHE", str(tmp_path))
+    interface = Interface((Param("a", "input", F32, "a"), Param("o", "output", F32, "o")), {}, 0)
+    ptx, _ = compile_ptx("k", parse_body(BODY), interface, sm=120)
+    with pytest.raises(subprocess.CalledProcessError) as refused:
+        ptxas.compile_to_cubin(ptx.replace("ld.global", "ld.nowhere", 1), "k", arch="sm_120")
+    assert any("ptxas" in note and "error" in note for note in refused.value.__notes__)

@@ -99,12 +99,12 @@ schedule's fork realizes that fold as a serial kernel (`states_as_buffers`): the
 seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is untouched, so a
 contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
 kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
-to completion before the next kernel's first, so pieces could not interleave step by step. The register schedule
-can realize that same ordered axis inside a CTA when every state read stays within its warp's rows. Its schedule
-choice goes through the same lazy fork adapter; the ordinary Fold tree and precision gates remain shared.
-Kernel lowering also offers shared storage when the complete state belongs to one CTA per independent batch and
-fits the card's shared-memory limit. It keeps the scheduled reduction order and requested snapshots while moving the
-ordered axis into the CTA. Global storage remains an offered sibling.
+to completion before the next kernel's first, so pieces could not interleave step by step. Where the state lives
+is the row's `STAGE` at the carrying fold, a site of the same schedule. Register storage realizes the ordered axis
+inside a CTA when every state read stays within its warp's rows. Shared storage does when the complete state
+belongs to one CTA per independent batch and fits the card's shared-memory limit; kernel lowering realizes it,
+keeping the scheduled reduction order and requested snapshots while moving the ordered axis into the CTA. Global
+storage, one launch per step, is the third value.
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over three ordered domains. It first offers the maximal fused tree beside every semantically
@@ -815,9 +815,11 @@ straight-line code that fusion inlines once, and rolling it would only store eve
 distinction, not a size or speed threshold. A reduction whose extent grows with the step runs at its
 widest in the rolled body and folds its identity past the step's own bound — the mask the tracer itself spells a
 partial reduction with. Only then does one kernel replace the chain. It carries the state (`Carry`,
-`ir/ARCHITECTURE.md`) and stores what each step kept —
-the state and any other buffer read outside that step — with the step as its leading axis. Ordinary fusion then
-inlines one slice of those stores per replaced buffer into its reader. A chain whose states alternate two
+`ir/ARCHITECTURE.md`) and stores what each step kept — the state and any other buffer read outside that step — with
+the step as its leading axis. A state nothing reads but the next step (a triangular inverse's row substitutions, a
+Sinkhorn iteration) is stored for no one until the last: its store has the state's shape and no step axis, each step
+stores over the last one's, and the one reader reads the whole of it. Ordinary fusion then inlines one slice of those
+stores per replaced buffer into its reader. A chain whose states alternate two
 bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
 alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion
 splices whole, up to the splicer's construction bound. A kernel that carries a state is a fusion region of its own

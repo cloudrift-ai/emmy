@@ -111,14 +111,14 @@ mod tests {
     fn branches(predicate: &str) -> Vec<String> {
         let simplified = simplify_body(&body(&format!(
             "
-            for a in 0..4:
-                near = load scattered[a]
-                far = load base[a]
-                cone = multiply(near, near)
-                v = select:
-                    cone when {predicate}
-                    far when true
-                out[a] = v
+      for a in 0..4:
+        near = load scattered[a]
+        far = load base[a]
+        cone = multiply(near, near)
+        v = select:
+          cone when {predicate}
+          far when true
+        out[a] = v
             "
         )))
         .unwrap();
@@ -168,11 +168,11 @@ mod tests {
     #[test]
     fn integer_math_over_coordinates_simplifies_in_a_value_too() {
         let body = "
-            for a in 0..4:
-                for b in 0..8:
-                    x = load X[(8 * a + b) / 8]
-                    c = (8 * a + b) / 8
-                    O[a, b] = c
+      for a in 0..4:
+        for b in 0..8:
+          x = load X[(8 * a + b) / 8]
+          c = (8 * a + b) / 8
+          O[a, b] = c
             ";
         assert_eq!(line(body, "load X"), "x = load X[a]");
         assert_eq!(line(body, "c ="), "c = a");
@@ -181,11 +181,11 @@ mod tests {
     #[test]
     fn a_value_quotient_keeps_its_common_factor() {
         let body = "
-            for i in 0..8:
-                x = load X[i]
-                y = load Y[i]
-                c = divide(3 * x, 3 * y)
-                O[i] = c
+      for i in 0..8:
+        x = load X[i]
+        y = load Y[i]
+        c = divide(3 * x, 3 * y)
+        O[i] = c
             ";
         assert_eq!(line(body, "c ="), "c = 3 * x / (3 * y)");
     }
@@ -193,9 +193,9 @@ mod tests {
     #[test]
     fn a_tile_binds_its_axes_for_its_body() {
         let body = "
-            Tile(axes=(m in 0..4, n in 0..8)):
-                x = load X[(8 * m + n) / 8]
-                O[m, n] = x
+      Tile(axes=(m in 0..4, n in 0..8)):
+        x = load X[(8 * m + n) / 8]
+        O[m, n] = x
             ";
         assert_eq!(line(body, "load X"), "x = load X[m]");
     }

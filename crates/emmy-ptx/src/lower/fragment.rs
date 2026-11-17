@@ -244,12 +244,12 @@ impl Lowerer {
     }
 
     /// The low 16 bits of a 32-bit register.
-    fn low_half(&mut self, word: Reg) -> Reg {
+    pub(super) fn low_half(&mut self, word: Reg) -> Reg {
         let narrow = Inst::new(Opcode::Cvt(Ty::U32), Ty::U16, Vec::new(), vec![word.into()]);
         self.b.value(narrow, Bank::B16)
     }
 
-    fn word_of(&mut self, opcode: Opcode, ty: Ty, left: Reg, right: i64) -> Reg {
+    pub(super) fn word_of(&mut self, opcode: Opcode, ty: Ty, left: Reg, right: i64) -> Reg {
         let operands = vec![left.into(), Operand::Int(right)];
         self.b
             .value(Inst::new(opcode, ty, Vec::new(), operands), Bank::B32)
@@ -360,6 +360,25 @@ impl Lowerer {
         let operands = vec![small.into(), Operand::f32(2f32.powi(126))];
         let value = Inst::new(Opcode::Mul, Ty::F32, Vec::new(), operands);
         self.b.value(value.rounded(Round::Rn), Bank::F32)
+    }
+
+    /// The value of a 4-bit e2m1 code, the low four bits of `code`, as a half: the same bits under a half's two
+    /// low exponent bits and its top mantissa bit are the value times 2^-14, and one exact half multiply gives it
+    /// back. Two of them side by side are one instruction of the card.
+    pub(super) fn e2m1_half(&mut self, code: Reg) -> Reg {
+        let sign = self.word_of(Opcode::And, Ty::B32, code, 8);
+        let sign = self.word_of(Opcode::Shl, Ty::B32, sign, 12);
+        let magnitude = self.word_of(Opcode::And, Ty::B32, code, 7);
+        let magnitude = self.word_of(Opcode::Shl, Ty::B32, magnitude, 9);
+        let operands = vec![sign.into(), magnitude.into()];
+        let bits = Inst::new(Opcode::Or, Ty::B32, Vec::new(), operands);
+        let bits = self.b.value(bits, Bank::B32);
+        let small = self.low_half(bits);
+        let scale = Inst::new(Opcode::Mov, Ty::B16, Vec::new(), vec![Operand::Int(0x7400)]);
+        let scale = self.b.value(scale, Bank::B16);
+        let operands = vec![small.into(), scale.into()];
+        let value = Inst::new(Opcode::Mul, Ty::F16, Vec::new(), operands);
+        self.b.value(value.rounded(Round::Rn), Bank::B16)
     }
 
     // --- the gather --------------------------------------------------------------------------------------

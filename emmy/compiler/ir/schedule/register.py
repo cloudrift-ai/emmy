@@ -7,17 +7,14 @@ The term remains the ordinary Fold tree, its state a carried one whose reads are
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from functools import cached_property
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
-
-from frozendict import frozendict
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleProblem, ScheduleRefused, Site
-from emmy.compiler.ir.schedule.choices import Tile, Work
+from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.choices import Raster, Stage, Tile, Work
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select
 
 if TYPE_CHECKING:
@@ -140,146 +137,46 @@ class RegisterProgram:
         return cls(time, state, carrying.init[0], outputs, roots, batch_axes, rows, columns)
 
 
-@dataclass(frozen=True, slots=True)
-class RegisterSchedule:
-    """A warp inventory and matrix fragment geometry for register storage."""
-
-    work: Work
-    tile: Tile
+#: The warp inventories a register schedule's catalog offers.
+REGISTER_WORKS = tuple(Work(kind="warp", units=(warps, 1)) for warps in (1, 2, 4))
 
 
-@dataclass(frozen=True)
-class _RegisterSite(Site):
-    problem: RegisterProblem
-    keys = ("WORK", "TILE", "STAGE")
-
-    @cached_property
-    def options(self):
-        p = self.problem
-        program = p.tile.register_program
-        if program is None or set(p.row) - set(self.keys) or p.row.get("STAGE", "d1/reg") != "d1/reg":
-            return ()
-        if not p.allow_f16 and "TILE" not in p.row:
-            return ()
-        candidates = []
-        works = (Work.parse(p.row["WORK"]),) if "WORK" in p.row else tuple(Work(kind="warp", units=(w, 1)) for w in (1, 2, 4))
-        for work in works:
-            if work.kind != "warp":
-                continue
-            plans = (
-                (Tile.parse(p.row["TILE"], work),)
-                if "TILE" in p.row
-                else tuple(
-                    Tile(atom=atom, units=work.units, regs=(1, (program.columns + atom.atom_n - 1) // atom.atom_n), bk=4) for atom in _ATOMS
-                )
-            )
-            for plan in plans:
-                choice = RegisterSchedule(work, plan)
-                if p.accepts(choice):
-                    candidates.append(Schedule(choice, {}, {}))
-        return tuple(candidates)
+def register_tiles(program: RegisterProgram, work: Work) -> tuple[Tile, ...]:
+    """The fragment geometries the catalog offers ``program``'s stored values under ``work``: one per atom."""
+    return tuple(Tile(atom=atom, units=work.units, regs=(1, (program.columns + atom.atom_n - 1) // atom.atom_n), bk=4) for atom in _ATOMS)
 
 
-@dataclass(frozen=True)
-class RegisterProblem(ScheduleProblem):
-    tile: TileOp
-    target: Context | None
-    row: frozendict[str, str] = field(default_factory=frozendict)
-    allow_f16: bool = False
-
-    def __post_init__(self):
-        object.__setattr__(self, "row", frozendict(self.row))
-
-    @cached_property
-    def sites(self):
-        return (_RegisterSite(self),)
-
-    @property
-    def bound(self):
-        return len(self.sites[0].options)
-
-    def accepts(self, choice: RegisterSchedule) -> bool:
-        program = self.tile.register_program
-        if program is None or not isinstance(choice, RegisterSchedule):
-            return False
-        work, plan = choice.work, choice.tile
-        return (
-            work.kind == "warp"
-            and work.units[1] == 1
-            and work.count <= 32
-            and not work.producer
-            and plan.atom in _ATOMS
-            and plan.units == work.units
-            and plan.regs == (1, (program.columns + plan.atom.atom_n - 1) // plan.atom.atom_n)
-            and (self.target is None or plan.atom.available_on(self.target))
-        )
-
-    def with_row(self, row, *, strict=False):
-        # A descent narrows every offered tier with the kernel's whole row. A row naming a family
-        # this tier does not own (a classic row's REDUCE, its site-scoped keys) describes another
-        # tier, so this one offers no leaf for it; only a strict row must be this tier's own.
-        if strict and set(row) - set(_RegisterSite.keys):
-            raise ValueError("register schedule accepts only WORK, TILE and STAGE")
-        return replace(self, row=frozendict(row))
+def register_accepts(program: RegisterProgram | None, work: Work, plan: Tile, target: Context | None) -> bool:
+    """Whether registers can hold ``program``'s state under this warp inventory and fragment geometry."""
+    return (
+        program is not None
+        and work.kind == "warp"
+        and work.units[1] == 1
+        and work.count <= 32
+        and not work.producer
+        and plan.atom in _ATOMS
+        and plan.units == work.units
+        and plan.regs == (1, (program.columns + plan.atom.atom_n - 1) // plan.atom.atom_n)
+        and (target is None or plan.atom.available_on(target))
+    )
 
 
-@dataclass(frozen=True, slots=True)
-class RegisterContext(ScheduleContext):
-    _problem: RegisterProblem
-    _schedule: Schedule = field(default_factory=lambda: Schedule(None, {}, {}))
-
-    @property
-    def problem(self):
-        return self._problem
-
-    @property
-    def schedule(self):
-        return self._schedule
-
-    def _with_problem(self, problem):
-        return RegisterContext(problem)
-
-    def extensions(self):
-        if self.schedule.kernel is None:
-            yield from self.problem.sites[0].options
-
-    def extend(self, pick):
-        if (
-            self.schedule.kernel is not None
-            or pick.nodes
-            or pick.edges
-            or not self.problem.accepts(pick.kernel)
-            or any(RegisterCodec(self)._encode(pick).get(k) != v for k, v in self.problem.row.items())
-        ):
-            raise ScheduleRefused("register schedule is outside this loop's domain")
-        return replace(self, _schedule=pick)
+def register_row(schedule: Schedule) -> dict[str, str]:
+    """A register schedule as the three values that decide it — the wire form of a scheduled kernel."""
+    return {"WORK": schedule.kernel.work.spell(), "TILE": schedule.kernel.state_tile.spell(), "STAGE": "d1/reg"}
 
 
-class RegisterCodec:
-    def __init__(self, context):
-        self.context = context
+def register_schedule(tile: TileOp, row) -> Schedule:
+    """The register schedule ``row`` spells on ``tile`` (inverse of :func:`register_row`)."""
+    if set(row) != {"WORK", "TILE", "STAGE"} or row["STAGE"] != "d1/reg":
+        raise ValueError("a register schedule is exactly WORK, TILE and STAGE=d1/reg")
+    from emmy.compiler.ir.schedule.classic.schedule import KernelSchedule  # noqa: PLC0415 — the package reads this module
 
-    def keys(self):
-        return _RegisterSite.keys
-
-    def _encode(self, schedule):
-        choice = schedule.kernel
-        return {"WORK": choice.work.spell(), "TILE": choice.tile.spell(), "STAGE": "d1/reg"}
-
-    def encode(self, schedule):
-        return self._encode(self.context.extend(schedule).schedule)
-
-    def decode(self, row):
-        if set(row) != set(self.keys()):
-            raise ValueError("a register schedule needs exactly WORK, TILE and STAGE")
-        context = self.context.narrowed(row, strict=True)
-        choices = tuple(context.extensions())
-        if len(choices) != 1:
-            raise ValueError("row does not select one register schedule")
-        return context.extend(choices[0]).schedule
-
-    def delta(self, before, after):
-        return self._encode(after.schedule)
+    work = Work.parse(row["WORK"])
+    choice = KernelSchedule(work, Raster.parse(""), Stage(transport="reg"), Tile.parse(row["TILE"], work))
+    if not register_accepts(tile.register_program, choice.work, choice.state_tile, None):
+        raise ValueError("row does not select one register schedule")
+    return Schedule(choice, {}, {})
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,8 +186,11 @@ class RegisterMaterialization:
     def validate(self, schedule, source, *, place, workers):
         if workers is not None or not place.is_mapped:
             raise ValueError("register storage needs a mapped, uniform warp inventory")
-        problem = RegisterProblem(source, None, allow_f16=True)
-        RegisterContext(problem).extend(schedule)
+        kernel = schedule.kernel
+        if kernel.state.transport != "reg" or schedule.nodes or schedule.edges:
+            raise ValueError("register storage takes one kernel choice and no site choice")
+        if not register_accepts(source.register_program, kernel.work, kernel.state_tile, None):
+            raise ValueError("register schedule is outside this loop's domain")
 
 
 def materialize_register(tile: TileOp, schedule: Schedule, knobs: dict) -> TileOp:

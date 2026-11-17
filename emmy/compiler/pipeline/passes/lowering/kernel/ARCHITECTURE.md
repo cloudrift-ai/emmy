@@ -726,9 +726,10 @@ expression over its partition coordinate, uniform per CTA like the batch axes an
 (`cell_uniform`), so its mask lands the same way with the partition in the predicate. The same `Select`s are also read
 ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`); on a split piece the bound carries
 the partition, so each slice stops at the block end plus the position minus its own base. Expression normalization
-may reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. A mask
-that scales the key against the row (native's decode and verify steps, whose rows fold a group of query heads) bounds
-no stream: it is masked per element alone. A mask whose
+may reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. It also
+orders a sum's terms by coefficient, which can put two masks ahead of a scaled score; the tier adds the masks last,
+each to the value it masks. A mask that scales the key against the row (native's decode and verify steps, whose rows
+fold a group of query heads) bounds no stream: it is masked per element alone. A mask whose
 masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every
 row the CTA holds, so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every
 key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
@@ -785,9 +786,10 @@ the two apply paths stay distinct on a coop-K contraction.
 
 ## Shared carried state
 
-`035_shared_carry` offers a late storage choice for an ordered kernel whose state reads stay within independent
-leading batch coordinates. It proves ownership from each read's consuming predicates, including discarded clamped
-branches. One CTA owns each batch's complete state; the ordered axis and remaining grid axes become device loops.
+`035_shared_carry` realizes the shared storage a row's `STAGE=d1/smem` asks for, on an ordered kernel whose state
+reads stay within independent leading batch coordinates. The schedule offers the value only where ownership is
+proved from each read's consuming predicates, including discarded clamped branches, so the pass decides nothing; it
+rejects the row where the lowered kernel cannot hold the layout. One CTA owns each batch's complete state; the ordered axis and remaining grid axes become device loops.
 The scheduled reduction and its combine order remain unchanged. This changes kernel lowering, not Loop or Tile
 canonicalization, so the kernel keeps its identity.
 
@@ -804,6 +806,15 @@ that selects its update and drops the branch that would only copy the cell. Inte
 per-cell path. Each shared row is padded by one column, so column-strided reads of the state do not share a bank.
 The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks between
 shared and global storage; ownership, supported geometry and the card's shared-memory limit decide only legality.
+
+A store that does not read the step is the state a rolled scan ends with (`loop/fusion/005_roll_recurrence`): every
+step would write the same cells, and only the last step's are read. Both storages write it once. The ordered launches
+store it behind the last launch (`036_keep_last_store`). The shared layout stores it from its buffer after the loop
+over the steps, and declines a store that is not the state itself at the state's data type. With no snapshot left to
+store each step, the whole-CTA copy has only the two buffers to keep in agreement, and the buffer a step writes
+differs from the state it reads only in the cells the step before changed. So the seed fills both buffers, and where
+the update's predicate bounds the state's leading cell coordinate (one row of a triangular inverse), the copy covers
+that range at the step before instead of the whole state.
 
 ## Kernel-IR peepholes
 

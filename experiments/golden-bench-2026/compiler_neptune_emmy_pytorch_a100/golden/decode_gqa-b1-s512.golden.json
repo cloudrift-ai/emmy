@@ -13,6 +13,6 @@
  ],
  "rows": [
   {"name":"k_sdpa_0bed64","kernel":0,"pins":{"FAST_MATH":false},"knobs":{},"latency":{"NVIDIA A100 40GB":{"emmy_us":12.172619812190533,"tcompile_us":15.645257064274379,"eager_us":121.78286143711635,"kernels":[]}}},
-  {"name":"k_sdpa_0bed64.ca4edcbaaeeb","kernel":1,"pins":{"FAST_MATH":false},"knobs":{"TILE@twist":"mma_m16n8k16_f16_f32/f1x16/k4","TILE@twist.1/inner":"mma_m16n8k16_f16_f32/f1x8/k4","REDUCE@twist":"","REDUCE@twist.1/inner":"","STAGE@twist":"d2/smem-async","STAGE@twist.1/inner":"d2/smem-async","WORK":"w4x1","LOOPIFY":"0","RASTER":"gm8","SHARED_CARRY":"0"},"measurements":{"emmy_us":9.303771890699863,"reference_us":9.336470626294613,"reference_backend":"same-input-greedy","tried":1}},
-  {"name":"k_sdpa_0bed64.5ad6beaa849a","kernel":2,"pins":{"FAST_MATH":false},"knobs":{"WORK":"","REDUCE":"","LOOPIFY":"0","RASTER":"","SHARED_CARRY":"0"},"measurements":{"emmy_us":1.5956810675561428,"reference_us":1.6969143180176616,"reference_backend":"same-input-greedy","tried":1}}
+  {"name":"k_sdpa_0bed64.ca4edcbaaeeb","kernel":1,"pins":{"FAST_MATH":false},"knobs":{"TILE@twist":"mma_m16n8k16_f16_f32/f1x16/k4","TILE@twist.1/inner":"mma_m16n8k16_f16_f32/f1x8/k4","REDUCE@twist":"","REDUCE@twist.1/inner":"","STAGE@twist":"d2/smem-async","STAGE@twist.1/inner":"d2/smem-async","WORK":"w4x1","LOOPIFY":"0","RASTER":"gm8"},"measurements":{"emmy_us":9.303771890699863,"reference_us":9.336470626294613,"reference_backend":"same-input-greedy","tried":1}},
+  {"name":"k_sdpa_0bed64.5ad6beaa849a","kernel":2,"pins":{"FAST_MATH":false},"knobs":{"WORK":"","REDUCE":"","LOOPIFY":"0","RASTER":""},"measurements":{"emmy_us":1.5956810675561428,"reference_us":1.6969143180176616,"reference_backend":"same-input-greedy","tried":1}}
  ]}

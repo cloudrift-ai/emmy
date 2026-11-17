@@ -338,6 +338,13 @@ impl Lowerer {
                 self.cast(inner, to, ctx)
             }
             Expr::Ternary(cond, if_true, if_false) => {
+                // An index wrapped from below zero whose value is never below zero is that value.
+                if let Some((Operation::Less, [value, zero])) = cond.operation()
+                    && zero.int_literal() == Some(0)
+                    && self.non_negative(value, ctx)
+                {
+                    return self.int(if_false, ctx);
+                }
                 let pred = self.pred(cond, ctx)?;
                 let (a, b) = (self.int(if_true, ctx)?, self.int(if_false, ctx)?);
                 let ty = self.common(&a, if_true.range(ctx), &b, if_false.range(ctx));

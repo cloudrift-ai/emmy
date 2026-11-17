@@ -13,7 +13,6 @@ tags:
   - maintained
   - lifecycle-locked
   - compiler-qualified
-  - prior-pending
 
 model:
   huggingface: Inferact/Qwen3.8-27B-NVFP4

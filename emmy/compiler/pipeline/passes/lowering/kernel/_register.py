@@ -35,8 +35,8 @@ class _Fragments:
     def __init__(self, tile):
         self.tile = tile
         self.program = tile.register_program
-        self.atom = tile.schedule.kernel.tile.atom
-        self.period = tile.schedule.kernel.tile.bk
+        self.atom = tile.schedule.kernel.state_tile.atom
+        self.period = tile.schedule.kernel.state_tile.bk
         self.width = self.atom.atom_n
         self.layout = self.atom.fragment_layout
         self.extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
@@ -255,7 +255,7 @@ def factorize_register(tile):
     program = tile.register_program
     choice = tile.schedule.kernel
     warps = choice.work.units[0]
-    height = choice.tile.atom.atom_m
+    height = choice.state_tile.atom.atom_m
     row_base = Literal(height, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
     emit = _Fragments(tile)
     (carrying,) = (site.node for site in tile.sites if site.node.carries)

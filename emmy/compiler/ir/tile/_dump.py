@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
-from emmy.compiler.ir.schedule.register import RegisterSchedule
 from emmy.compiler.ir.stmt import Body, Statement, pretty_body
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
 
@@ -276,8 +275,8 @@ def _pretty_place(tile) -> list[str]:
         out.append(f"place  free=({axes(tile.place.free)})  {grid}")
     if tile.schedule is not None and tile.schedule.kernel.work.spell():
         out.append(f"work   {tile.schedule.kernel.work.spell()}")
-    if tile.schedule is not None and isinstance(tile.schedule.kernel, RegisterSchedule):
-        out.append(f"register  TILE={tile.schedule.kernel.tile.spell()} STAGE=d1/reg")
+    if tile.schedule is not None and tile.schedule.kernel.state.transport == "reg":
+        out.append(f"register  TILE={tile.schedule.kernel.state_tile.spell()} STAGE=d1/reg")
     if tile.workers is not None:
         out.append(f"band   {tile.workers.spell()}")
     return out

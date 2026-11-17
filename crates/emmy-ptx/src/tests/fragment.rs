@@ -420,6 +420,31 @@ fn a_paired_read_in_a_loop_moves_its_address_by_a_sum() {
     );
 }
 
+/// A store in a loop that fills the slab's halves in turn moves its address by one sum a trip as well: the layout
+/// is of the row without the half, ahead of the loop.
+#[test]
+fn a_paired_store_in_a_loop_moves_its_address_by_a_sum() {
+    let module = kernel(
+        "
+        Smem(name=sa, extents=(64, 32), dtype=f16, align=16)
+        for s in 0..4:
+            f16 x0, x1, x2, x3, x4, x5, x6, x7 = load a[r * 256 + t * 8]
+            f16 sa[t / 4 + 32 * (s % 2) + 8, 8 * (t % 4)] = (x0, x1, x2, x3, x4, x5, x6, x7) swizzle=V70A
+        ",
+        HALVES,
+        80,
+    )
+    .unwrap();
+    let lines = listing(&module);
+    let head = lines.iter().rposition(|line| line.ends_with(':')).unwrap();
+    let body = &lines[head..];
+    assert_eq!(count(&module, "st.shared.v4.b16"), 2, "{lines:#?}");
+    assert!(
+        body.iter().all(|line| !line.starts_with("xor")),
+        "{body:#?}"
+    );
+}
+
 /// A swizzled destination of an async copy or a store takes the exchange of 16-byte chunks over its flat index.
 #[test]
 fn a_swizzled_slab_exchanges_its_chunks() {
@@ -484,4 +509,34 @@ fn byte_floats_convert_store_and_decode() {
     let older = lowered_in(&body, &interface, Target { sm: 80 }, EXACT).unwrap();
     assert_eq!(count(&older, "cvt.rn.satfinite.e4m3x2.f32"), 0);
     assert_eq!(count(&older, "st.global.u8"), 2);
+}
+
+/// A pair of codes read from a weight indexes the pair table by its byte, which is never below zero: the wrap of
+/// the index is gone, the high code is one constant shift, and each half is one exact half multiply with no f32.
+#[test]
+fn a_pair_of_codes_decodes_to_halves_by_its_byte() {
+    let statements = "
+        f4e2m1x2 pair = load w[t]
+        i32 c = (i32)pair
+        f16 low, high = load table[2 * ((int)c < 0 ? (int)c + 256 : (int)c)]
+        f16 both = low * high
+        f16 o[t] = both
+    ";
+    let params: Params = &[
+        ("w", ParamKind::Input, Some(DType::F4E2M1x2)),
+        ("table", ParamKind::Input, Some(F16)),
+        ("o", ParamKind::Output, Some(F16)),
+    ];
+    let mut interface = super::common::interface(params);
+    interface.params[1].pair_table = true;
+    let body = format!("{GRID}\n{}", super::common::indented(statements));
+    let module = lowered_in(&body, &interface, Target { sm: 70 }, EXACT).unwrap();
+    let lines = listing(&module);
+    assert_eq!(count(&module, "ld.global"), 1, "{lines:#?}");
+    assert_eq!(count(&module, "setp"), 0, "{lines:#?}");
+    assert_eq!(count(&module, "selp"), 0, "{lines:#?}");
+    assert_eq!(count(&module, "shr"), 1, "{lines:#?}");
+    assert_eq!(count(&module, "mul.rn.f16"), 3, "{lines:#?}");
+    assert_eq!(count(&module, "cvt.rn.f16.f32"), 0, "{lines:#?}");
+    super::common::assemble(&crate::print::print(&module), "sm_70");
 }

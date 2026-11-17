@@ -1552,8 +1552,27 @@ def _negated(node: Expression) -> Expression | None:
 
 def _one_operation(stmts) -> list[Statement]:
     """``stmts`` with every ``Assign`` and ``Accum`` value one operation over names and literals: a nested operation
-    node becomes a temp of its own, declared ahead, since a fragment program evaluates one operation at a time."""
+    node becomes a temp of its own, declared ahead, since a fragment program evaluates one operation at a time. A sum
+    adds its coordinate masks last, each to the value it masks, wherever the normal form's term order put them."""
     out: list[Statement] = []
+    masks = {stmt.name for stmt in stmts if isinstance(stmt, Select)}
+
+    def terms(node: Expression) -> list[Expression]:
+        if node.operation is None or node.operation.name != "add":
+            return [node]
+        return [term for operand in node.operands for term in terms(operand)]
+
+    def masks_last(node: Expression) -> Expression:
+        if node.operation is None or node.operation.name != "add":
+            return node
+        mask = [isinstance(term, Var) and term.name in masks for term in terms(node)]
+        if len(mask) < 3 or not any(mask) or all(mask):
+            return node
+        total, *rest = (term for _, term in sorted(zip(mask, terms(node), strict=True), key=lambda pair: pair[0]))
+        for term in rest:
+            total = apply("add", total, term)
+        return total
+
     for stmt in stmts:
         if not isinstance(stmt, (Assign, Accum)):
             out.append(stmt)
@@ -1563,6 +1582,7 @@ def _one_operation(stmts) -> list[Statement]:
         def leaf(node: Expression, stmt=stmt, temps=temps) -> Expression:
             if node.operation is None:
                 return node
+            node = masks_last(node)
             operation, children = node.operation.name, list(node.operands)
             # A sum with a negated term is the subtraction of that term's positive form: ``a + (-b)`` is ``a - b`` to
             # the bit, as is ``a + (-c) * b`` to ``a - c * b``, and one operation where the negation would be a
@@ -1583,7 +1603,8 @@ def _one_operation(stmts) -> list[Statement]:
         elif stmt.value.operation is None:
             out.append(stmt)
         else:
-            out.append(stmt.replace(value=apply(stmt.value.operation.name, *(leaf(child) for child in stmt.value.operands))))
+            value = masks_last(stmt.value)
+            out.append(stmt.replace(value=apply(value.operation.name, *(leaf(child) for child in value.operands))))
     return out
 
 

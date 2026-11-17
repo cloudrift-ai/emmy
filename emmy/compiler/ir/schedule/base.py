@@ -148,7 +148,7 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
         """One of the next site's options that compose with this prefix, already composed, or ``None`` when none
         does — the step of a random descent through the enumeration. The default materializes the frontier and
         extends one pick of it, which is right only where the frontier is small by construction (the cut pass's
-        structural choices, the register tier's one kernel choice). A family whose frontier is a product of
+        structural choices). A family whose frontier is a product of
         factors overrides it to draw factor by factor, deriving only what the draw touches, so a descent costs the
         picks it tries and never a site."""
         options = list(self.extensions())
