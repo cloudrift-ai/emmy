@@ -159,8 +159,14 @@ What follows, in order:
 2. Done: the 256-row roots are recorded on the RTX 5090. Six roots sum to 474 µs against 524 before. The root
    that applies the inverse got slower (279 to 313): its scaled products cut into pointwise kernels and scalar
    products that refuse a tensor-core tile. That root is the next thing to fix.
-3. The substitution, 53 µs: a tuned row first (it ran 31 µs in blocks of 16 alone), then R2's blocked inverse.
-4. R5 only for what is left against 87 µs.
+3. Done (2026-11-17): the root that applies the inverse computed both readout products and the stack of the chunk
+   start states twice, once under the head norm's statistic and once at the output. The cut pass now takes them for
+   one value: 315 to 226 µs recorded. The six roots also hold three FP8 projections (155 µs), the convolution and the
+   norms, so the recurrence alone is about 170 of the 388, against 87 for the reference.
+4. The readout's three f32 products run on scalar code (60 µs) and a copy stacks the chunk start states (33 µs).
+   A tensor-core tile over f32 operands, and a product that reads the start states where the scan stored them.
+5. The solve is about 40 µs in the traced rule. R2's blocked inverse after 4.
+6. R5 only for what is left against 87 µs.
 
 ## Order
 

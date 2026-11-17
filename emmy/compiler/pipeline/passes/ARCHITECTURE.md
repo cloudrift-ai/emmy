@@ -159,7 +159,11 @@ inside a reduce and the residual add at the kernel's free axis). A cone that rea
 `x / (B·d)` beside a row `x / d` reads the value through `_row / B` (floor division composes over the non-negative
 coordinates a kernel indexes), so a statistic evaluated under a flattened `(h, j)` axis reads the compact `u[h, j]`
 rather than storing a second component broadcast over the part of the axis it does not read — the broadcast copy
-made a GDN readout's 128-long sum run once per broadcast cell. Per-component pruning closes dependencies to a
+made a GDN readout's 128-long sum run once per broadcast cell. A copy that reads a coordinate's remainder `x % c`
+beside its quotient joins the seam that reads that remainder as a coordinate of its own, and reads its workspace at
+the remainder: a norm over each head of a flat (head, head-dim) width reads its operand at `(i / c, j)` under the
+statistic's reduce and at `(i / c, i % c)` at the free axis, and as two seams both products of a GDN readout and
+the stack of its chunk start states ran twice. Per-component pruning closes dependencies to a
 fixpoint: reading a carried state's previous value also keeps its later update, so a coupled carrier never leaves
 an unresolved state name in the comparison. The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
