@@ -147,8 +147,9 @@ worker lifetimes are recorded with three repeats. See the backend and native run
 static subset and timing boundaries. It cannot be combined with model/IR inputs or compilation benchmark modes.
 
 The compiler commands (`trace`, `compile`, and `run`) share the same input loader and model-adapter selector.
-They accept a Hugging Face model, debug Graph IR, or inline `--code`; `causal-lm` is the default and
-keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
+They accept a Hugging Face model, debug Graph IR, a golden's stored program (what `compile --golden PATH --program N
+--ir torch -o FILE.json` writes, so `trace FILE.json -o GOLDEN --append` on another card adds it to that card's golden),
+or inline `--code`; `causal-lm` is the default and keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench`
 includes the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
 and Emmy always rebuild the same module and example inputs. Reference-free runs also honor `--warmup` and `--iters`.
