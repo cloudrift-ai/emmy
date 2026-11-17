@@ -38,7 +38,9 @@ relevant `ARCHITECTURE.md` before answering.
   generator. Use the README architecture index for their design.
 - The CUDA toolkit's `ptxas` (on `PATH` or under `CUDA_HOME`), which assembles each kernel's PTX; NVIDIA ships it in
   the `cuda-nvcc` package. nvcc itself is not used.
-- `make setup` to create the virtual environment and install dependencies
+- `git-lfs`: the test suite reads the measurement freeze, which git LFS stores
+- `make setup` to create the virtual environment, install dependencies, build both Rust extensions and fetch the
+  freeze; it runs again on its own after a change to `pyproject.toml` or to any Rust source
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, compiler stages dump intermediate debug artifacts
@@ -262,7 +264,7 @@ Quick test models / scripts (for local iteration):
 
 ## Key Make Targets
 
-- `make setup` — create venv and install dependencies (includes ruff)
+- `make setup` — create venv, install dependencies (includes ruff), build the Rust extensions, fetch the LFS freeze
 - `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests, which
   `make bench-kernels` and the golden workflows run)
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a lowering or schedule-codec
