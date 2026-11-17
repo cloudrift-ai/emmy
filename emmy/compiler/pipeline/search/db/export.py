@@ -12,7 +12,9 @@ import logging
 import math
 from collections import defaultdict
 from collections.abc import Callable, Mapping
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
+from multiprocessing import get_context
 
 from emmy.compiler.pipeline.search.dataset import (
     REGIME_PINS,
@@ -98,10 +100,21 @@ def kernel_sig(feats: Mapping) -> str:
     return digest(*sorted((k, float(v)) for k, v in feats.items() if k.startswith(STRUCT_PREFIX)))
 
 
-def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dict[str, int]]:
+def _group_features(task: tuple) -> list[dict]:
+    """One measured group's feature rows — the work one worker process does for :func:`measured_groups`. ``task``
+    is the group's regime and its rows, each beside its kernel's op."""
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    regime, rows = task
+    with pinned_knobs(REGIME_PINS[regime]):  # a row's features are read in the regime it was measured under
+        return [measured_features(row, kernel) for row, kernel in rows]
+
+
+def measured_groups(rows, kernel_op: Callable, *, jobs: int = 1) -> tuple[list[MeasuredGroup], dict[str, int]]:
     """Measured ``perf`` rows (:class:`~..db.PerfRow`) as groups labelled with measured µs, keyed
     ``(gpu, kernel_sig, regime)`` — one group per set of configs that genuinely competed, plus a count
-    of what was dropped and why. ``kernel_op`` gives a row its kernel's op, which the featurizer reads.
+    of what was dropped and why. ``kernel_op`` gives a row its kernel's op, which the featurizer reads. ``jobs``
+    featurizes that many groups side by side, one group per spawned worker process, in the groups' order.
 
     Each part of the key is load-bearing, and each has a plausible wrong answer:
 
@@ -124,8 +137,6 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
     the two publish one vocabulary."""
     dropped: dict[str, int] = defaultdict(int)
     buckets: dict[tuple, list] = defaultdict(list)
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
-
     for r in rows:
         reason = freeze_reason(r, shape_of(kernel_op(r)))
         if reason is not None:
@@ -133,13 +144,19 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
         else:
             buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), regime_of(r.cold_cache, r.precision))].append(r)
 
-    groups = []
-    for (gpu, sig, regime), grp in sorted(buckets.items()):
+    keys = sorted(buckets)
+    for grp in buckets.values():
         grp.sort(key=lambda r: (r.kernel, knobs_json(r.knobs)))  # a pool's row order is its own, not the DB's
-        with pinned_knobs(REGIME_PINS[regime]):  # a row's features are read in the regime it was measured under
-            feats = [measured_features(r, kernel_op(r)) for r in grp]
+    tasks = [(regime, [(r, kernel_op(r)) for r in buckets[gpu, sig, regime]]) for gpu, sig, regime in keys]
+    if jobs == 1:
+        feats = map(_group_features, tasks)
+    else:
+        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
+            feats = list(workers.map(_group_features, tasks, chunksize=1))
+    groups = []
+    for (gpu, sig, regime), group_feats in zip(keys, feats, strict=True):
         key = f"{gpu}/{sig}" + (f" {regime}" if regime else "")
-        groups.append(MeasuredGroup.from_measured(key, gpu, sig, [r.stats.median for r in grp], feats))
+        groups.append(MeasuredGroup.from_measured(key, gpu, sig, [r.stats.median for r in buckets[gpu, sig, regime]], group_feats))
     return groups, dict(dropped)
 
 
@@ -157,7 +174,8 @@ def export_dataset(
     row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
     the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
     names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
-    schedule space's pools side by side — the export's whole cost — ``EMMY_WORKERS`` by default."""
+    golden pools, walk the placement pools and featurize the measured pools side by side — the export's whole cost
+    — ``EMMY_WORKERS`` by default."""
     from emmy import config  # noqa: PLC0415
 
     jobs = config.workers() if jobs is None else jobs
@@ -173,7 +191,7 @@ def export_dataset(
     else:
         logger.info("Building %d golden pools (each under its own card's context, %d at a time) ...", len(pools), jobs)
         golden, skipped = build_golden_groups(pools, sample=pool_sample, seed=seed, jobs=jobs)
-        measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"), kernel_op)
+        measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"), kernel_op, jobs=jobs)
         dropped = {"golden": dropped_golden, "measured": dropped_measured}
     provenance = {
         "source": source,

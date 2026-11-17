@@ -1003,9 +1003,9 @@ import filed beside the rows (the `constant` table), so the walk offers the fork
 a transposed weight among them, and the export opens no golden file. Both spaces carry the provenance — the DB, its
 sources by digest, the space, the sample and seed, the featurizer version and the compiler commit. `emmy fit` and
 `eval prior` read that directory and never
-the DB; exporting the same instance twice writes the same bytes. The schedule space's pools are enumerated `--jobs` at
-a time, one pool per worker process (default: `EMMY_WORKERS`, one per core) — the export's whole cost; the pools are independent and
-the draw is seeded, so the dataset is the same at any count. `freeze --db PATH --out DIR` writes an instance's
+the DB; exporting the same instance twice writes the same bytes. The pools are enumerated, walked and featurized
+`--jobs` at a time, one pool per worker process (default: `EMMY_WORKERS`, one per core) — the export's whole cost; the
+pools are independent and the draw is seeded, so the dataset is the same at any count. `freeze --db PATH --out DIR` writes an instance's
 admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check [--db
 PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits non-zero when
 any do. Every subcommand resolves its instance through `commands/db.db_path`, which refuses a missing one with the
@@ -1090,7 +1090,8 @@ emmy fit _data/schedule _tune/fits/ab/offline.json --folds 0 --out _tune/fits/ab
 ```
 
 The greedy reproduction walk compiles one matmul pool per worker process (`EMMY_WORKERS`, one per core); each worker
-draws its cold pools in-process. `emmy eval prior --rank-only --json PATH` writes the same golden rank report while
+draws its cold pools in-process. Over a placement dataset, the walk takes one placement pool per worker process the same
+way. `emmy eval prior --rank-only --json PATH` writes the same golden rank report while
 skipping that walk. `emmy eval prior DATASET --offline-file CURRENT --compare-to CANDIDATE --json PATH` scores both
 weights over the same golden pools and writes their summaries and a comparison decision to one report. It requires a
 5% lower median golden rank in at least one GPU/tier/pool-size group, no higher median in any group, and unchanged

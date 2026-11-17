@@ -194,3 +194,20 @@ def test_a_row_the_freeze_would_refuse_is_refused_here_too():
     groups, dropped = measured_groups(rows, _stamped)
     assert [g.latency_us.tolist() for g in groups] == [[500.0]]
     assert sorted(dropped) == ["implausible value"]
+
+
+def test_the_groups_are_the_same_at_any_worker_count():
+    """The export featurizes the groups one per worker process; the groups, their order and every feature row
+    are those one process builds."""
+    import numpy as np
+
+    rows = [
+        _row(f"n{i}", us=200.0 + 10 * i, knobs=_feats(TILE=f"f2x{2 + i % 3}"), gpu=gpu, precision=pins)
+        for i, (gpu, pins) in enumerate([(_GPU, {}), (_GPU2, {}), (_GPU, {"FAST_EXP": True})] * 2)
+    ]
+    serial, dropped = measured_groups(rows, _stamped)
+    parallel, dropped_parallel = measured_groups(rows, _stamped, jobs=2)
+    assert len(serial) == 3 and dropped == dropped_parallel
+    for one, other in zip(serial, parallel, strict=True):
+        assert (one.key, one.feat_names, one.latency_us.tolist()) == (other.key, other.feat_names, other.latency_us.tolist())
+        assert np.array_equal(one.feats, other.feats, equal_nan=True)
