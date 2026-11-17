@@ -1269,6 +1269,46 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     above (128.0 to 130.0). Programs 2, 10 and 11 read 5-13% above in a run of 13 at once and equal in the repeat.
   - Checks: all 18 programs compile strict from the golden alone, and the release audit deploys all 18 twins. Boot
     698 and 738 s.
+- **The last token of a prompt replays the decode graph (2026-11-17).** Round 4 of the 2026-11-13 ranking, main
+  `f1b7171fc`. Prefix caching ends a 4K prompt as steps of 3,920, 175 and 1 tokens, and Model Runner V2 runs any step
+  that still holds a prompt token eager. Its refusal guards speculative decoding, which is off here. With no
+  speculative decoding, a step whose every row is one token now replays the decode graph. The hosted Gated DeltaNet
+  already runs such a row as a decode row, and the sparse attention has no prefill path of its own. The change is
+  one patch of the runner in `emmy/serving/`, with no compiler change and no new twin.
+  - Where the host time went, on main, profiled: the 1-token step spans 236 ms against about 16 ms of its own GPU
+    work. Emmy's runner framing takes about 130 ms of host time (buffer views 38 ms, output prefixes 28 ms, the slot
+    program 50 ms). The hosted Gated DeltaNet takes 46 ms and the sparse attention 43 ms. The 175-token step spans
+    449 ms, with the GPU busy for 279 ms. Its host time is mostly the routed combine (97 ms), the Gated DeltaNet
+    (77 ms) and the sparse attention (47 ms).
+  - Gate, stated before the build: the 4K first token falls by at least 0.10 s. It passes, at -0.12 s in the A B B A
+    and -0.18 s in the step run. In the step run, a 2-token prompt's first token went from 0.265 to 0.047 s; the
+    fork's 1-token step is 0.09 s. A 176-token prompt's went from 0.386 to 0.271 s.
+  - A B B A on boots never profiled, two of main against two of the branch:
+
+    | Point | Main | This round |
+    | --- | ---: | ---: |
+    | One request, 1K / 512, per token | 16.89-16.91 ms | 16.89-16.90 ms |
+    | 2 requests, 4K / 1K, total output | 87.1-87.2 tok/s | 87.6-87.7 tok/s |
+    | 4 requests, 4K / 1K, total output | 148.9 tok/s | 149.6-149.8 tok/s |
+    | 8 requests, 4K / 1K, total output | 232.6-232.9 tok/s | 233.1-234.1 tok/s |
+    | First token, 1K | 0.77-0.83 s | 0.67-0.68 s |
+    | First token, 4K | 1.38-1.44 s | 1.28-1.30 s |
+    | First token, 8K | 2.49-2.51 s | 2.39 s |
+    | First token, 32K | 9.71-9.73 s | 9.65 s |
+
+  - Against the async fork (2026-11-13's numbers), the first token is 1.5x slower at 1K (1.7x on main) and 1.5x
+    slower at 4K (1.6x). Four and eight requests are 0.74x its output. The 4K gap is now 0.43 s, from the
+    3,920-token and 175-token steps, which still run eager.
+  - Checks on the branch: all 18 programs compile strict from the golden alone, and the release audit deploys all 18
+    twins. GSM8K 126 of 128 (2 at the output limit). Acceptance cases: 27, 27, 27 without thinking and 26, 27, 27
+    with it. Long-document lookups: 387 of 387 and 384 of 384. Six greedy texts are identical across the four
+    engines. The margin test passes on cards 12-15 with 750-752 MiB spare per card, the same as main on those cards.
+    A first run on cards 4-7 read 358 MiB, so the card set moves the number. Boot 719 and 728 s, main's 709 and
+    720 s.
+  - What it costs: 31 lines that patch a private method of the fork's runner. Drop the patch when the runner itself
+    counts such a step as a decode.
+  - Next: the 175-token step's host time (routed combine, Gated DeltaNet, sparse attention) and the 3,920-token step,
+    from the 2026-11-13 ranking, for the owner to pick.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

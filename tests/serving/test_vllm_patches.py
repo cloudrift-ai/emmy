@@ -10,7 +10,7 @@ import types
 
 import torch
 
-from emmy.serving.vllm_patches import clamp_dummy_run_seq_lens
+from emmy.serving.vllm_patches import clamp_dummy_run_seq_lens, one_token_prompt_rows_replay_decode_graphs
 
 
 class _RunnerBase:
@@ -71,3 +71,53 @@ def test_newer_runner_without_optimistic_seq_lens_passes_through(monkeypatch):
     del runner.optimistic_seq_lens_cpu
     assert runner._build_attention_metadata() == "metadata"
     assert runner.built == 1
+
+
+class _V2Runner:
+    """Model Runner V2's dispatch input: the stock count refuses every step that still holds a prompt token."""
+
+    def __init__(self, speculative_steps: int):
+        self.num_speculative_steps = speculative_steps
+
+    def _get_uniform_decode_token_count(self, scheduler_output, dummy_run):
+        return None
+
+
+def _install_v2_stub(monkeypatch) -> type:
+    class Runner(_V2Runner):  # fresh class per test: the patch mutates it
+        pass
+
+    for name in ("vllm", "vllm.v1", "vllm.v1.worker", "vllm.v1.worker.gpu"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    mod = types.ModuleType("vllm.v1.worker.gpu.model_runner")
+    mod.GPUModelRunner = Runner
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker.gpu.model_runner", mod)
+    return Runner
+
+
+def _step(*rows: int):
+    return types.SimpleNamespace(num_scheduled_tokens={f"r{i}": n for i, n in enumerate(rows)})
+
+
+def test_one_token_rows_replay_the_decode_graph(monkeypatch):
+    runner_cls = _install_v2_stub(monkeypatch)
+    one_token_prompt_rows_replay_decode_graphs()
+    runner = runner_cls(speculative_steps=0)
+    assert runner._get_uniform_decode_token_count(_step(1), False) == 1
+    assert runner._get_uniform_decode_token_count(_step(1, 1, 1, 1), False) == 1
+
+
+def test_wider_rows_and_speculative_steps_keep_the_stock_count(monkeypatch):
+    runner_cls = _install_v2_stub(monkeypatch)
+    one_token_prompt_rows_replay_decode_graphs()
+    assert runner_cls(speculative_steps=0)._get_uniform_decode_token_count(_step(1, 175), False) is None
+    assert runner_cls(speculative_steps=0)._get_uniform_decode_token_count(_step(2), False) is None
+    assert runner_cls(speculative_steps=2)._get_uniform_decode_token_count(_step(1), False) is None
+
+
+def test_one_token_patch_is_idempotent(monkeypatch):
+    runner_cls = _install_v2_stub(monkeypatch)
+    one_token_prompt_rows_replay_decode_graphs()
+    once = runner_cls._get_uniform_decode_token_count
+    one_token_prompt_rows_replay_decode_graphs()
+    assert runner_cls._get_uniform_decode_token_count is once
