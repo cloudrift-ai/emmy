@@ -57,16 +57,43 @@ exposes, or a pass-through of a value an output sweep beside the cells computes 
 `Fold.lower` opens the carrying loop outside the loops over the cells, with a nest of its own for the step's
 sweeps; the closed program is the Loop IR the roll wrote.
 
-A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@…/scan=g<n>k`, offered
-by `030_cut` through `_split.realize_carry_split`). It needs the step AFFINE in the state and column-wise
+A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@…/scan=g<n>k[<p>]`,
+offered by `030_cut` through `_split.realize_carry_split`). It needs the step AFFINE in the state and column-wise
 (`Fold.affine`: every carrier read keeps the cell's own coordinate at every position but one), because then a
-part's steps compose as an affine map `S ← A·S + b`, read off two walks of the part from known seeds — zero gives
-`b`, the identity packed along the kept cells gives `A` beside it — with no symbolic knowledge of the step. Three
-kernels, each lifted from Loop IR like the walk: the probe (both walks of every part, the state stored per step),
-the prefix (the state carried across the parts by their maps, each part's start stored), and the walk itself over
-each part's range from its start, one part per batch cell. Three walks of a part where the sequence took one, for
-`n` times the parallelism; whether that pays is evidence's decision. A step that is not affine (the forward
-substitution) offers nothing and stays one kernel.
+part's steps compose as an affine map `S ← A·S + b`. A step that is not affine (one that multiplies two reads of
+its state) offers nothing and stays one kernel. So does a walk under a free loop of more than one coordinate, and
+one whose stores the parts cannot write side by side.
+
+The split is up to five kinds of kernel, each lifted from Loop IR like the walk:
+
+1. **The parts' maps.** A part of several steps is probed: two walks of the part from known seeds, zero giving `b`
+   and the identity packed along the kept cells giving `A` beside it, with no symbolic knowledge of the step. A
+   part of ONE step is read off the step itself, with no walk: a contraction over the previous state collapses to
+   its one term at the map's column, and from zero it is nothing; any other read of the state is the identity's
+   own entry. A step that is zero from zero has no offset at any level, and its maps are their matrices alone.
+2. **Pairs** (`<p>` of them). Affine maps compose, and the composition is a matrix product:
+   `(A₁, b₁) ∘ (A₀, b₀) = (A₁·A₀, A₁·b₀ + b₁)`. Each composition is a kernel for the matrices and one for the
+   offsets over half the maps of the level below, each an ordinary reduction over the column the two maps meet at,
+   with a fork and a row of its own. An odd map out passes through. This is cyclic reduction.
+3. **The prefix** carries the state across the maps of the top level and stores each one's start. One map left
+   (`p = ⌈log₂ n⌉`) applies to the seed in a kernel that carries nothing.
+4. **A fill-in** per composition gives the maps of the level below their starts: the even ones their pair's
+   start, the odd ones that start through the even map.
+5. **The walk** runs every part from its start, one part per batch cell. A part of one step carries nothing: the
+   step reads its start where it read the state.
+
+The fork offers the catalog's widths with no composition, and one step a part at every depth of composition:
+there the maps cost no probe, and how far composing pays against walking what is left is the pieces' to price.
+
+What the walk stores decides where the split ends. Stores indexed by the step are written by the walk, each part
+its own cells. A walk whose one store is the state itself, each step over the last one's, ends at the prefix: the
+prefix stores the final state, and the split mints no start, fill-in or walk, since parts side by side would race
+on that store.
+
+The maps are dense, `mixed × mixed` per kept cell, so a composition is a full matrix product whatever structure
+the step's own matrix had. That decides where the split pays. A step that is itself a dense product gains: its
+walk does the same products one after another. A step that changes one row of its state is the identity plus a
+rank-one term, the dense form does not keep that, and its walk is cheaper than any composition of dense maps.
 
 The classic schedule realizes the carrying loop as ordered launches with a global state buffer: at its fork it
 lifts the kernel's Loop IR again with the state as a buffer the node owns and the loop as the kernel's **serial
