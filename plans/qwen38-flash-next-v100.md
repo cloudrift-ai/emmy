@@ -1309,6 +1309,48 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     counts such a step as a decode.
   - Next: the 175-token step's host time (routed combine, Gated DeltaNet, sparse attention) and the 3,920-token step,
     from the 2026-11-13 ranking, for the owner to pick.
+- **The short prefill step's pre and post programs (2026-11-17).** Main `8809bfc9e`. A 4K prompt ends with a
+  175-token step and a 1K prompt with a 239-token one. On main such a step took 0.238 s against the fork's 0.181, and
+  its GPU work was about 200 ms against the fork's 71. The symbolic pre and post programs took 54 ms of it against the
+  fork's 4: one pre kernel ran 499 us per layer on 12 blocks. The round re-tunes their rows on the card and makes the
+  expert launcher's index uploads non-blocking. It changes no compiler code and adds no twin.
+  - Rows: each piece tuned on the card with `--tune 40` on a fresh scratch DB, then recorded with
+    `--record-greedy`. The slow pre kernel takes a cross-CTA split (`g8k`), with its two pieces recorded under the
+    route. Six rows are new or faster at 512 tokens; the sixteen rows of unchanged kernels keep their old numbers,
+    so no row was re-recorded slower. Pre plus post at 512 tokens, cold: 1,788 to 1,053 us per layer.
+  - Uploads: the launcher sent its counts, offsets and picks with a blocking copy, 0.8-1.6 ms each on a busy card.
+    A pinned non-blocking copy takes about 70 us.
+  - Gates, stated before the build: pre plus post cold at 512 tokens -700 us per layer, passed at -735. The 1K
+    first token -50 ms, passed at -62 in the step run and -55 in the A B B A. The 4K first token -25 ms, **missed**:
+    -21 ms in the step run (5 pairs), with the 175-token step only -12 ms. The A B B A reads -33 ms.
+  - Why 4K moves less: after the tune the short step is host-bound. Rank 0's host time per 176-token prompt is the
+    routed experts about 74 ms (launch 44, combine 30), the pre and post program calls about 43 ms (run 13, output
+    clones 8, output views 5, symbolic binds 4), the hosted Gated DeltaNet about 49 ms and attention about 22 ms.
+    Profiled GPU time of pre plus post per step: 175 tokens 50 to 26 ms, 239 tokens 54.5 to 30.9 ms, 784 tokens
+    97.5 to 73.2 ms.
+  - A B B A on boots never profiled, two of main against two of the branch:
+
+    | Point | Main | This round |
+    | --- | ---: | ---: |
+    | One request, 1K / 512, per token | 16.88-16.89 ms | 16.89-16.90 ms |
+    | 2 requests, 4K / 1K, total output | 87.6 tok/s | 87.4-87.6 tok/s |
+    | 4 requests, 4K / 1K, total output | 149.3 tok/s | 150.1-150.3 tok/s |
+    | 8 requests, 4K / 1K, total output | 233.5-234.0 tok/s | 232.6-234.0 tok/s |
+    | First token, 1K | 0.670-0.674 s | 0.608-0.625 s |
+    | First token, 4K | 1.291-1.297 s | 1.254-1.268 s |
+    | First token, 8K | 2.391-2.397 s | 2.333-2.355 s |
+    | First token, 32K | 9.62-9.67 s | 9.44-9.53 s |
+
+  - Against the async fork (2026-11-13's numbers), the first token is 1.45x slower at 1K (1.6x on main) and 1.5x at
+    4K (1.6x).
+  - Checks on the branch: all 18 programs compile strict from the golden alone, and the release audit deploys all 18
+    twins. GSM8K 125 of 128, none at the output limit. Acceptance cases 27 of 28 in all six runs, with and without
+    thinking. Long-document lookups 387 of 387 and 384 of 384. Greedy texts: the two main boots agree with each
+    other and the two branch boots agree with each other; main and the branch part on three of six prompts after
+    783-1,220 characters, from the new sum order. The margin test on cards 12-15 leaves 360-366 MiB spare per card
+    on both sides. Boot 760-761 s, main's 759-761 s.
+  - Next: the short step's host time, in the order above: the routed experts' launch and combine, then the pre and
+    post program calls.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
