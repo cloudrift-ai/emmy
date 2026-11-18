@@ -2,6 +2,7 @@
 //! taken as typed and flat: a value without a dtype, an operand of another type than its reader, or an index of
 //! several coordinates is refused by the statement's name, and so is a statement or an operation with no rule yet.
 
+pub(crate) mod bf16;
 mod coop;
 mod fragment;
 mod hopper;
@@ -323,7 +324,10 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
     }
     let params = lowerer.parameters(kernel)?;
     lowerer.body(kernel.body, &SimplifyCtx::empty())?;
-    let code = lowerer.b.finish()?;
+    let mut code = lowerer.b.finish()?;
+    if target.sm < SM_AMPERE {
+        code.items = bf16::legalize(code.items, &mut code.registers);
+    }
     Ok(Module {
         version: lowerer.version,
         target: target.text(lowerer.arch_specific),
