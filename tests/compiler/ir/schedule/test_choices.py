@@ -112,7 +112,11 @@ def test_reduce_site_value_sheds_the_coop_width_and_keeps_the_finalize_letter() 
     composed = Reduce.parse("g8k2", None)
     assert (composed.cta, composed.finalize, composed.pairs, composed.spell()) == (8, "kernel", 2, "g8k2")
     assert Reduce.parse("g8k", None).pairs == 0
-    for refused in ("g8k0", "g8a2"):
+    # The letter after them: the composed maps kept in factors.
+    factored = Reduce.parse("g8k3f", None)
+    assert (factored.cta, factored.pairs, factored.factored, factored.spell()) == (8, 3, True, "g8k3f")
+    assert not composed.factored and composed != Reduce.parse("g8k2f", None)
+    for refused in ("g8k0", "g8a2", "g8kf", "g8af"):
         with pytest.raises(ValueError):
             Reduce.parse(refused, None)
     with pytest.raises(ValueError, match="thread WORK inventory"):
