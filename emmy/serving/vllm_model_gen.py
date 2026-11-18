@@ -490,10 +490,8 @@ def _emmy_query_key(layers, rows, dtype, positions):
     modules, about twenty small kernels per layer on a decode step; a wider step keeps the fork's. One instance per
     layer, lent the layer's two norm weights and the rotary cache, over one arena: the layers run one after another,
     and each consumes the outputs before the next runs. The program reads one row of positions, the text positions
-    every rotary axis carries (``get_mrope_input_positions``), and one copy in the model dtype of the first
-    ``positions`` rows of the rotary cache, the model's positions: M-RoPE caches four times as many for video, which a
-    text position never reaches. The fork's own cache stays as it is: converting all of it here costs about 380 MiB a
-    card."""
+    every rotary axis carries (``get_mrope_input_positions``), and the first ``positions`` rows of the rotary cache, the
+    model's positions: M-RoPE caches four times as many for video, which a text position never reaches."""
     import torch
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
 
@@ -502,14 +500,13 @@ def _emmy_query_key(layers, rows, dtype, positions):
     from emmy.compiler.dtype import get
     from emmy.serving.gen_runner import _compile_split, query_key_graph
 
-    arena, plans, caches = BufferArena(), PlanTemplateCache(), {}
+    arena, plans = BufferArena(), PlanTemplateCache()
     for layer in layers:
         if not isinstance(layer, Qwen4ExpQSAAttention):
             continue
+        # The cache the fork's rope reads for a query of the model dtype.
         rope = layer.rotary_emb
-        if rope not in caches:
-            caches[rope] = rope.cos_sin_cache[:positions].to(dtype)
-        cos_sin = caches[rope]
+        cos_sin = rope._match_cos_sin_cache_dtype(layer.q_norm.weight.new_empty(0, dtype=dtype))[:positions]
         dims = (layer.num_heads, layer.num_kv_heads, layer.head_dim, rope.rotary_dim, cos_sin.shape[0])
         graph, example = query_key_graph(*dims, layer.q_norm.variance_epsilon, dtype)
         lent = [layer.q_norm.weight.to(dtype), layer.k_norm.weight.to(dtype), cos_sin]
