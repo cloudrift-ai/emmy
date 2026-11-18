@@ -507,7 +507,7 @@ def _emmy_query_key(layers, rows, dtype):
         cos_sin = layer.rotary_emb._match_cos_sin_cache_dtype(layer.q_norm.weight.new_empty(0, dtype=dtype))
         dims = (layer.num_heads, layer.num_kv_heads, layer.head_dim, layer.rotary_emb.rotary_dim, cos_sin.shape[0])
         graph, example = query_key_graph(*dims, layer.q_norm.variance_epsilon, dtype)
-        lent = [layer.q_norm.weight, layer.k_norm.weight, cos_sin]
+        lent = [layer.q_norm.weight.to(dtype), layer.k_norm.weight.to(dtype), cos_sin]
         program, _ = _compile_split(
             torch.nn.Module(),
             example,
