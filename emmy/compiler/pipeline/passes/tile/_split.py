@@ -49,7 +49,7 @@ from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write, free_names
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
@@ -358,135 +358,6 @@ def _carrying_body(body: Body) -> Body | None:
     return body
 
 
-def _contracts(loop: Loop, state: str, mixed: int | None) -> bool:
-    """Whether ``loop`` is a contraction over the previous state: a sum over the mixed coordinate of its reads,
-    each term linear in them."""
-    reads = [stmt for stmt in loop.body if isinstance(stmt, Pre) and stmt.carrier == state]
-    if not loop.is_reduce or not reads or mixed is None or any(read.index[mixed] != Var(loop.axis.name) for read in reads):
-        return False
-    linear = {read.name for read in reads}
-    for stmt in loop.body:
-        if isinstance(stmt, Assign):
-            kind = _homogeneity(stmt.value, linear)
-            if kind is None:
-                return False
-            if kind == "linear":
-                linear.add(stmt.name)
-        elif isinstance(stmt, Accum):
-            additive = stmt.op.name == "add" and stmt.init == Literal(0.0, "float")
-            if not additive or not isinstance(stmt.value, Var) or stmt.value.name not in linear:
-                return False
-        elif not isinstance(stmt, Load | Let | Pre):
-            return False
-    return True
-
-
-_ONE = Literal(1.0, "float")
-
-
-def _linear_form(value, forms: dict) -> dict | None:
-    """``value`` as a sum of the names ``forms`` reads as linear, each with its coefficient: an expression free of
-    them. Empty for a value that reads none; ``None`` for one that is not linear in them."""
-    if isinstance(value, Var):
-        return forms.get(value.name, {})
-    if isinstance(value, Literal):
-        return {}
-    if value.operation is None:
-        return None
-    parts = [_linear_form(operand, forms) for operand in value.operands]
-    if any(part is None for part in parts):
-        return None
-    if not any(parts):
-        return {}
-    name = value.operation.name
-    if name in ("add", "subtract", "negative"):
-        out: dict = {}
-        for position, part in enumerate(parts):
-            for source, coefficient in part.items():
-                if name == "negative" or (name == "subtract" and position == 1):
-                    coefficient = apply("negative", coefficient)
-                out[source] = apply("add", out[source], coefficient) if source in out else coefficient
-        return out
-    if name == "multiply" and len(parts) == 2 and bool(parts[0]) != bool(parts[1]):
-        form, by = (parts[0], value.operands[1]) if parts[0] else (parts[1], value.operands[0])
-        return {source: by if coefficient is _ONE else apply("multiply", coefficient, by) for source, coefficient in form.items()}
-    if name == "divide" and len(parts) == 2 and parts[0] and not parts[1]:
-        return {source: apply("divide", coefficient, value.operands[1]) for source, coefficient in parts[0].items()}
-    return None
-
-
-def _step_factors(step: Body, state: str, own: tuple, mixed: int, kept: int) -> tuple | None:
-    """One step's map read off the step in factors, ``(scale, contractions)``, or ``None`` when it has none.
-
-    The step's next value is ``scale * own + sum_c left_c * (sum_k right_c[k] * S[k]) + offset``: ``own`` the
-    cell's previous value, and one term per contraction over the previous state. ``scale`` is an expression, or
-    ``None`` for a step that does not keep its own value; each contraction is ``(accumulator, left, right)``, the
-    two coefficients as expressions over the step's own names.
-
-    The map is the identity scaled plus a term of rank one per contraction, where its matrix is a product over the
-    whole state. That holds only while ``scale`` reads neither the mixed nor the kept coordinate, ``left`` not the
-    kept one and ``right`` neither: a step whose contraction weighs the state by a matrix of its own has a full
-    matrix and no factors. So has one that reads the state at any cell but its own outside a contraction."""
-    forms: dict[str, dict] = {}
-    rights: dict[str, object] = {}
-    carried: list[str] = []
-
-    def visit(body) -> bool:
-        for stmt in body:
-            if isinstance(stmt, Loop) and _contracts(stmt, state, mixed):
-                inner: dict[str, dict] = {}
-                for part in stmt.body:
-                    if isinstance(part, Pre):
-                        inner[part.name] = {part.name: _ONE}
-                    elif isinstance(part, Assign):
-                        inner[part.name] = _linear_form(part.value, inner)
-                    elif isinstance(part, Accum):
-                        coefficients = list(inner[part.value.name].values())
-                        right = coefficients[0]
-                        for more in coefficients[1:]:
-                            right = apply("add", right, more)
-                        rights[part.name], forms[part.name] = right, {part.name: _ONE}
-            elif isinstance(stmt, Loop) and not stmt.is_reduce:
-                if not visit(stmt.body):
-                    return False
-            elif isinstance(stmt, Pre) and stmt.carrier == state:
-                if tuple(stmt.index) != own:
-                    return False
-                forms[stmt.name] = {stmt.name: _ONE}
-            elif isinstance(stmt, Assign):
-                form = _linear_form(stmt.value, forms)
-                if form is None:
-                    return False
-                forms[stmt.name] = form
-            elif isinstance(stmt, Carry):
-                carried.append(stmt.value)
-            elif not isinstance(stmt, Load | Let | Write) and free_names(stmt) & {name for name, form in forms.items() if form}:
-                return False
-        return True
-
-    if not visit(step) or len(carried) != 1:
-        return None
-    form = forms.get(carried[0], {})
-    depends = step.axis_dependencies
-    axes = {loop.axis.name for loop in step.iter() if isinstance(loop, Loop)}
-
-    def reads(expression) -> frozenset:
-        names = expression.free_vars() if not isinstance(expression, Literal) else frozenset()
-        return frozenset().union(*(depends.get(name, frozenset({name} & axes)) for name in names))
-
-    cells = {own[mixed].name, own[kept].name}
-    scales = [coefficient for source, coefficient in form.items() if source not in rights]
-    scale = None
-    for coefficient in scales:
-        scale = coefficient if scale is None else apply("add", scale, coefficient)
-    contractions = tuple((name, form[name], right) for name, right in rights.items() if name in form)
-    if not contractions or (scale is not None and reads(scale) & cells):
-        return None
-    if any(own[kept].name in reads(left) or reads(right) & cells for _, left, right in contractions):
-        return None
-    return scale, contractions
-
-
 def _step_maps(step: Body, state: str, mixed: int | None, column, stores) -> tuple[Body, Body] | None:
     """One step's affine map read off the step itself — ``(matrix, offset)`` bodies, the step with its carrier
     reads resolved and its ``Carry`` handed to ``stores`` — or ``None`` when a read has a shape this does not take.
@@ -498,7 +369,28 @@ def _step_maps(step: Body, state: str, mixed: int | None, column, stores) -> tup
     coordinate is ``column``. No walk, and no contraction against a seed."""
 
     def contracts(loop: Loop) -> bool:
-        return _contracts(loop, state, mixed)
+        reads = [stmt for stmt in loop.body if isinstance(stmt, Pre) and stmt.carrier == state]
+        if not loop.is_reduce or not reads or mixed is None or any(read.index[mixed] != Var(loop.axis.name) for read in reads):
+            return False
+        linear = {read.name for read in reads}
+        for stmt in loop.body:
+            if isinstance(stmt, Assign):
+                kind = _homogeneity(stmt.value, linear)
+                if kind is None:
+                    return False
+                if kind == "linear":
+                    linear.add(stmt.name)
+            elif isinstance(stmt, Accum):
+                if (
+                    stmt.op.name != "add"
+                    or stmt.init != Literal(0.0, "float")
+                    or not isinstance(stmt.value, Var)
+                    or stmt.value.name not in linear
+                ):
+                    return False
+            elif not isinstance(stmt, Load | Let | Pre):
+                return False
+        return True
 
     def resolved(body, identity: bool) -> tuple | None:
         out: list = []
@@ -570,12 +462,10 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
     if view is None or carries_partition(tile) or tile.split_consumed or (body := _carrying_body(tile.loop_body)) is None:
         return None
     time = tile.axis_of(node.axis)
-    packs = True  # whether the probe can pack the identity: at least as many kept cells as mixed ones
     if view.mixed is not None:
         mixed, kept = (tile.axis_of(node.cells[position]).extent for position in (view.mixed, view.kept))
-        if not (mixed.is_static and kept.is_static):
+        if not (mixed.is_static and kept.is_static) or kept.as_static() < mixed.as_static():
             return None
-        packs = kept.as_static() >= mixed.as_static()
     (loop,) = (stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries)
     if (stores := _carry_stores(loop)) is None:
         return None
@@ -586,40 +476,27 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
     if pin is None:
         pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
 
-    def arm(cta: int, pairs: int = 0, factored: bool = False) -> DeferredFork:
-        spelling = Reduce.of(cta=cta, pairs=pairs, factored=factored).spell()
+    def arm(cta: int, pairs: int = 0) -> DeferredFork:
+        spelling = Reduce.of(cta=cta, pairs=pairs).spell()
         # The piece that stores the kernel's outputs may carry nothing, and the state port goes with the state: the
         # one map a last-state walk composes to, applied to the seed; a walk of one step a part, read from its start.
         whole = time.extent.as_static() == cta
         ends = pairs == (cta - 1).bit_length() if stores == "last" else whole
         kept = output_root(root, {spec.write.output for spec in tile.output_specs}) if ends else root
         output = redirects(kept) if match is not None else None  # an enumeration-only arm carries none
-        realize = (lambda: realize_factored_split(match, root, cta)) if factored else (lambda: realize_carry_split(match, root, cta, pairs))
-        return DeferredFork(realize, {key: spelling}, structural=True, output=output)
+        return DeferredFork(lambda: realize_carry_split(match, root, cta, pairs), {key: spelling}, structural=True, output=output)
 
     if pin is not None:
         work = kernel_pin("WORK", tile.name)
         plan = Reduce.parse(pin, Work.parse(work if work is not None else WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
-        if plan.factored:
-            # Pinned only: the maps kept in factors, one step a part composed to one map. A state narrower than it
-            # is tall takes this arm too, where the probe has no room for the identity.
-            count = time.extent.as_static() if time.extent.is_static else 0
-            depth = (count - 1).bit_length()
-            if view.mixed is None or count < 2 or count & (count - 1) or (plan.cta, plan.pairs) != (count, depth):
-                raise ValueError(f"REDUCE={pin}: factored maps compose one step a part to one map, over a power of two of steps")
-            return [arm(count, depth, factored=True)]
-        if not packs:
-            return None
         _enforce(splitk_width(time, plan.cta))
         if plan.finalize != "kernel":
             raise ValueError("a carried state's split composes its parts in a finalize kernel: spell it REDUCE=g<n>k")
         if plan.pairs > (plan.cta - 1).bit_length():
             raise ValueError(f"REDUCE={pin}: {plan.cta} parts are one map after {(plan.cta - 1).bit_length()} compositions")
         return [arm(plan.cta, plan.pairs)]
-    if not packs:
-        return None
     # The catalog's widths, then one step a part composed to every depth: at that width the maps are read off the
     # step, and how far composing them pays against walking what is left is the pieces' to price.
     steps = time.extent.as_static() if time.extent.is_static else 1
@@ -971,412 +848,6 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
         walk_tile = piece(Body((*before, *_nest(indexed(step, (part,), starts[0]), (sliced, part)), *after)))
     ports = owned(walk_tile)
     result = add_output_piece(frag, written, walk_tile, _piece_inputs(root, walk_tile, starts[0]), states=ports)
-    result.outputs.extend(port.name for port in ports if port.name.endswith("__split"))
-    return result
-
-
-def realize_factored_split(match: Match, root: Node, cta: int) -> Graph:
-    """Split a carried state's walk one step a part and compose the steps' maps to one, each map kept in factors.
-
-    A step's map is ``S <- scale * S + left . coef . (right . S) + offset`` (:func:`_step_factors`): ``right``
-    holds a row per contraction of the step and ``left`` a column, both read off the step into one buffer each and
-    never composed. A map of ``2^L`` steps is the ``scale``, the ``coef`` and the ``offset`` of its level over the
-    rows of ``right`` and ``left`` its steps wrote. Two maps compose on the small side alone::
-
-        coef  =  | scale_hi * coef_lo           0               |      gram = right_hi . left_lo
-                 | coef_hi . gram . coef_lo     coef_hi * scale_lo |
-
-    so a level is a product of the two factor buffers over the state's mixed coordinate (``gram``), two products
-    over the coefficient, and the offsets taken through the higher map. Applying a map is three products, the
-    first two of them kernels of their own (:func:`through`): a state read through ``right``, the result through
-    ``coef``, and that through ``left``.
-
-    The pieces are those of :func:`realize_carry_split` at one step a part composed to its last level: the maps,
-    then the start of every map of every level filled in from the one above, then the step itself from its start.
-    A kernel whose one store is its last state ends at the top map applied to the seed."""
-    tile: TileOp = root.op
-    node = head(tile.op)
-    view = node.affine()
-    assert view is not None and view.mixed is not None, "the factored split fires on a state its step contracts over"
-    (state,) = node.base.results
-    cells = node.cells
-    cell_axes = tuple(tile.axis_of(name) for name in cells)
-    own = tuple(Var(name) for name in cells)
-    levels = (cta - 1).bit_length()
-    out = root.output
-    body = _carrying_body(tile.loop_body)
-    (position,) = (index for index, stmt in enumerate(body) if isinstance(stmt, Loop) and stmt.carries)
-    loop, before, after = body[position], tuple(body[:position]), tuple(body[position + 1 :])
-    stores = _carry_stores(loop)
-    part = Axis("_part", Dim(cta))
-    here = Var(part.name)
-    once = Body(tuple(stmt.substitute(Sigma({loop.axis.name: here})) for stmt in loop.body))
-    factors = _step_factors(once, state, own, view.mixed, view.kept)
-    if factors is None:
-        raise ValueError("REDUCE: the step's map has no factors: its matrix is full, so its maps compose as g<n>k<p>")
-    scale_of, contractions = factors
-    rank = len(contractions)
-    mixed_axis, kept_axis = cell_axes[view.mixed], cell_axes[view.kept]
-    others = tuple(index for index in range(len(cells)) if index not in (view.mixed, view.kept))
-    other_axes, other = tuple(cell_axes[index] for index in others), tuple(own[index] for index in others)
-    basis = Axis("_basis", mixed_axis.extent)
-    along = Var(basis.name)
-    top = levels if stores == "last" else levels - 1  # the last level's map applies to the seed alone
-    name = out.name
-    left, right = f"{name}__left", f"{name}__right"
-    scales = [f"{name}__scale{level}" for level in range(top + 1)]
-    coefs = [f"{name}__coef{level}" for level in range(top + 1)]
-    offsets = [f"{name}__offset{level}" for level in range(top + 1)]
-    starts = [f"{name}__start{level or ''}" for level in range(levels + 1)]
-    extents = tuple(axis.extent for axis in cell_axes)
-    other_extents = tuple(axis.extent for axis in other_axes)
-    shapes = io_shapes(tile) | {
-        left: (Dim(cta * rank), *other_extents, mixed_axis.extent),
-        right: (Dim(cta * rank), *other_extents, mixed_axis.extent),
-        **{scales[level]: (Dim(cta >> level), *other_extents) for level in range(top + 1)},
-        **{coefs[level]: (Dim(cta >> level), *other_extents, Dim(rank << level), Dim(rank << level)) for level in range(1, top + 1)},
-        **{offsets[level]: (Dim(cta >> level), *extents) for level in range(top + 1)},
-        **{starts[level]: (Dim(cta >> level), *extents) for level in range(levels + 1)},
-    }
-    frag = _frag(match, root)
-
-    def piece(stmts: Body) -> TileOp:
-        lifted = lift_nest(stmts, shapes)
-        return replace(lifted, knobs=consume_kernel_row(lifted.knobs))
-
-    def add(buffer: str, stmts: Body, inputs: list[str]) -> None:
-        frag.add_node(op=piece(stmts), inputs=inputs, outputs=(Tensor(buffer, shapes[buffer], F32),), node_id=buffer)
-
-    def load(value: str, buffer: str, *index) -> Load:
-        return Load(names=(value,), input=buffer, index=index)
-
-    def product(value: str, a: str, b: str) -> Assign:
-        return Assign(value, apply("multiply", a, b))
-
-    def summed(axis: Axis, value: str, *stmts) -> Loop:
-        return Loop(axis=axis, body=Body((*stmts, Accum(name=value, value=stmts[-1].name))))
-
-    def named(value: str, expression) -> Statement:
-        return Let(name=value, value=expression.value) if isinstance(expression, Literal) else Assign(value, expression)
-
-    def row(where, level: int, at):
-        # The row of ``left`` and ``right`` that column ``at`` of map ``where`` of ``level`` reads.
-        return BinaryExpression("+", BinaryExpression("*", where, Literal(rank << level, "int")), at)
-
-    def cell(mixed, kept) -> tuple:
-        return tuple(mixed if index == view.mixed else kept if index == view.kept else coordinate for index, coordinate in enumerate(own))
-
-    def coefficient(level: int, where, a, b, value: str) -> tuple:
-        if level:
-            return (load(value, coefs[level], where, *other, a, b),)
-        hit = BinaryExpression("==", a, b)  # a step's own coefficient is the identity over its contractions
-        ones = (Let(name=f"{value}_one", value=1.0), Let(name=f"{value}_zero", value=0.0))
-        return (
-            *ones,
-            Select(name=value, branches=(SelectBranch(f"{value}_one", hit), SelectBranch(f"{value}_zero", Literal(True, "bool")))),
-        )
-
-    # ---- one step: its factors and its offset, each read off the step -------------------------------- #
-    taken = {accumulator for accumulator, _, _ in contractions}
-    one = Dim(1)
-
-    def read_off(carried: tuple, narrow: dict, contraction=None) -> Body:
-        def rewrite(stmt):
-            if isinstance(stmt, Loop):
-                sums = [inner.name for inner in stmt.body if isinstance(inner, Accum)]
-                if taken & set(sums):
-                    return tuple(Let(name=value, value=0.0) for value in sums) if contraction is None else contraction(sums)
-                return stmt.replace(axis=replace(stmt.axis, extent=narrow[stmt.axis.name])) if stmt.axis.name in narrow else stmt
-            if isinstance(stmt, Pre) and stmt.carrier == state:
-                return Let(name=stmt.name, value=0.0)
-            if isinstance(stmt, Write):
-                return None
-            return carried if isinstance(stmt, Carry) else stmt
-
-        return Body((*before, *_nest(once.map(rewrite).pruned(()), (part,)), *after))
-
-    originals = {inner.name: stmt for stmt in once.iter() if isinstance(stmt, Loop) for inner in stmt.body if isinstance(inner, Accum)}
-    column = own[view.kept]
-
-    def rights(sums: list[str]) -> tuple:
-        stmts: list = []
-        for at, (accumulator, _, expression) in enumerate(contractions):
-            if accumulator not in sums:
-                continue
-            reduced = originals[accumulator]
-            here_at = Sigma({reduced.axis.name: column})
-            for inner in reduced.body:
-                if isinstance(inner, Pre):
-                    stmts.append(Let(name=inner.name, value=1.0))
-                elif not isinstance(inner, Accum):
-                    stmts.append(inner.substitute(here_at))
-            stmts += [
-                named(f"_right{at}", expression),
-                Write(output=right, index=(row(here, 0, Literal(at, "int")), *other, column), values=(f"_right{at}",)),
-            ]
-        return tuple(stmts)
-
-    lefts = tuple(
-        stmt
-        for at, (_, expression, _) in enumerate(contractions)
-        for stmt in (
-            named(f"_left{at}", expression),
-            Write(output=left, index=(row(here, 0, Literal(at, "int")), *other, own[view.mixed]), values=(f"_left{at}",)),
-        )
-    )
-    kept_scale = (
-        named("_scale", Literal(0.0, "float") if scale_of is None else scale_of),
-        Write(output=scales[0], index=(here, *other), values=("_scale",)),
-    )
-    for buffer, stmts in (
-        (right, read_off((), {mixed_axis.name: one, kept_axis.name: mixed_axis.extent}, rights)),
-        (left, read_off(lefts, {kept_axis.name: one})),
-        (scales[0], read_off(kept_scale, {mixed_axis.name: one, kept_axis.name: one})),
-    ):
-        add(buffer, stmts, _piece_inputs(root, stmts))
-
-    def stored(carry: Carry, identity: bool) -> tuple:
-        return () if identity else (Write(output=offsets[0], index=(here, *own), values=(carry.value,)),)
-
-    direct = _step_maps(once, state, view.mixed, column, stored)
-    assert direct is not None, "a step with factors has an offset the step itself gives"
-    whole = Body((*before, *_nest(direct[1], (part,)), *after))
-    # Normalization folds a product with zero, so an offset that is nothing stores a literal zero.
-    formed = tuple(LoopOp(body=whole).body.iter())
-    zeros = {stmt.name for stmt in formed if isinstance(stmt, Let) and stmt.value == Literal(0.0, "float")}
-    linear = all(stmt.value in zeros for stmt in formed if isinstance(stmt, Write))
-    if not linear:
-        add(offsets[0], whole, _piece_inputs(root, whole))
-
-    def through(level: int, lead: tuple[Axis, ...], where, operand, tag: str, reads: list[str]):
-        """Map ``where`` of ``level`` taken through its factors on ``operand``: a kernel that reads it through
-        ``right``, one that takes the result through ``coef``, and the statements of the product with ``left``,
-        which the caller's own kernel runs at each cell."""
-        width = Dim(rank << level)
-        a, b = Axis("_a", width), Axis("_b", width)
-        index = tuple(Var(axis.name) for axis in lead)
-        read, mixed = f"{tag}__read", f"{tag}__mixed"
-        shapes[read] = shapes[mixed] = (*(axis.extent for axis in lead), *other_extents, width, kept_axis.extent)
-        stmts = (
-            summed(
-                basis,
-                "_y",
-                load("_r", right, row(where, level, Var(b.name)), *other, along),
-                *operand(cell(along, column), "_s"),
-                product("_rs", "_r", "_s"),
-            ),
-            Write(output=read, index=(*index, *other, Var(b.name), column), values=("_y",)),
-        )
-        add(read, _nest(Body(stmts), (*lead, *other_axes, b, kept_axis)), [right, *reads])
-        last = read
-        if level:
-            stmts = (
-                summed(
-                    b,
-                    "_z",
-                    *coefficient(level, where, Var(a.name), Var(b.name), "_c"),
-                    load("_y", read, *index, *other, Var(b.name), column),
-                    product("_cy", "_c", "_y"),
-                ),
-                Write(output=mixed, index=(*index, *other, Var(a.name), column), values=("_z",)),
-            )
-            add(mixed, _nest(Body(stmts), (*lead, *other_axes, a, kept_axis)), [coefs[level], read])
-            last = mixed
-
-        def final(where_now, index_now: tuple) -> tuple:
-            return (
-                summed(
-                    a,
-                    "_p",
-                    load("_l", left, row(where_now, level, Var(a.name)), *other, own[view.mixed]),
-                    load("_z", last, *index_now, *other, Var(a.name), column),
-                    product("_lz", "_l", "_z"),
-                ),
-            )
-
-        return final, last
-
-    def applied(level: int, where, product_stmts: tuple, operand_own: tuple, value: str) -> tuple:
-        # ``scale * operand + product (+ offset)`` of map ``where`` of ``level`` at the cell, as ``value``.
-        stmts = [*product_stmts, load("_scale", scales[level], where, *other), *operand_own, product("_kept", "_scale", "_same")]
-        if linear:
-            return (*stmts, Assign(value, apply("add", "_kept", "_p")))
-        stmts.append(Assign("_low", apply("add", "_kept", "_p")))
-        return (*stmts, load("_offset", offsets[level], where, *own), Assign(value, apply("add", "_low", "_offset")))
-
-    # ---- the levels: maps ``2t`` and ``2t + 1`` of the level below composed as one ---------------------- #
-    for level in range(1, top + 1):
-        below, width = level - 1, rank << (level - 1)
-        pair = Axis(part.name, Dim(cta >> level))
-        low = BinaryExpression("*", here, Literal(2, "int"))
-        high = BinaryExpression("+", low, Literal(1, "int"))
-        x, y = Axis("_x", Dim(width)), Axis("_y", Dim(width))
-        a, b = Axis("_a", Dim(2 * width)), Axis("_b", Dim(2 * width))
-        gram, mid = f"{name}__gram{level}", f"{name}__mid{level}"
-        shapes[gram] = shapes[mid] = (pair.extent, *other_extents, Dim(width), Dim(width))
-        stmts = (
-            summed(
-                basis,
-                "_g",
-                load("_r", right, row(high, below, Var(x.name)), *other, along),
-                load("_l", left, row(low, below, Var(y.name)), *other, along),
-                product("_rl", "_r", "_l"),
-            ),
-            Write(output=gram, index=(here, *other, Var(x.name), Var(y.name)), values=("_g",)),
-        )
-        add(gram, _nest(Body(stmts), (pair, *other_axes, x, y)), [right, left])
-        met = gram  # ``gram . coef_lo``: the gram itself where the lower maps are single steps
-        if below:
-            narrow = Axis("_b", Dim(width))
-            stmts = (
-                summed(
-                    y,
-                    "_m",
-                    load("_g", gram, here, *other, Var(x.name), Var(y.name)),
-                    *coefficient(below, low, Var(y.name), Var(narrow.name), "_c"),
-                    product("_gc", "_g", "_c"),
-                ),
-                Write(output=mid, index=(here, *other, Var(x.name), Var(narrow.name)), values=("_m",)),
-            )
-            add(mid, _nest(Body(stmts), (pair, *other_axes, x, narrow)), [gram, coefs[below]])
-            met = mid
-        size = Literal(width, "int")
-        a_low, b_low = (BinaryExpression("%", Var(axis.name), size) for axis in (a, b))
-        a_high, b_high = (BinaryExpression(">=", Var(axis.name), size) for axis in (a, b))
-        a_first, b_first = (BinaryExpression("<", Var(axis.name), size) for axis in (a, b))
-        if below:
-            lower = (
-                summed(
-                    x,
-                    "_bl",
-                    *coefficient(below, high, a_low, Var(x.name), "_ch"),
-                    load("_m", met, here, *other, Var(x.name), b_low),
-                    product("_cm", "_ch", "_m"),
-                ),
-            )
-        else:
-            lower = (load("_bl", met, here, *other, a_low, b_low),)
-        stmts = (
-            *lower,
-            *coefficient(below, low, a_low, b_low, "_cl"),
-            load("_sh", scales[below], high, *other),
-            product("_tl", "_cl", "_sh"),
-            *coefficient(below, high, a_low, b_low, "_cr"),
-            load("_sl", scales[below], low, *other),
-            product("_br", "_cr", "_sl"),
-            Let(name="_none", value=0.0),
-            Select(
-                name="_coef",
-                branches=(
-                    SelectBranch("_tl", BinaryExpression("&&", a_first, b_first)),
-                    SelectBranch("_bl", BinaryExpression("&&", a_high, b_first)),
-                    SelectBranch("_br", BinaryExpression("&&", a_high, b_high)),
-                    SelectBranch("_none", Literal(True, "bool")),
-                ),
-            ),
-            Write(output=coefs[level], index=(here, *other, Var(a.name), Var(b.name)), values=("_coef",)),
-        )
-        add(coefs[level], _nest(Body(stmts), (pair, *other_axes, a, b)), [met, scales[below], *coefs[below : below + 1][: bool(below)]])
-        stmts = (
-            load("_sl", scales[below], low, *other),
-            load("_sh", scales[below], high, *other),
-            product("_s", "_sl", "_sh"),
-            Write(output=scales[level], index=(here, *other), values=("_s",)),
-        )
-        add(scales[level], _nest(Body(stmts), (pair, *other_axes)), [scales[below]])
-        if not linear:
-            final, last = through(
-                below,
-                (pair,),
-                high,
-                lambda index, value, low=low, below=below: (load(value, offsets[below], low, *index),),
-                offsets[level],
-                [offsets[below]],
-            )
-            stmts = (
-                *applied(below, high, final(high, (here,)), (load("_same", offsets[below], low, *own),), "_through"),
-                Write(output=offsets[level], index=(here, *own), values=("_through",)),
-            )
-            add(offsets[level], _nest(Body(stmts), (pair, *cell_axes)), [left, last, scales[below], offsets[below]])
-
-    seed = node.init[0]
-    seeded = [seed] if isinstance(seed, str) else []
-
-    def prior(index: tuple, value: str) -> tuple:
-        if isinstance(seed, str):
-            return (load(value, seed, *seed_index(index, shapes[seed])),)
-        return (Let(name=value, value=seed),)
-
-    written = output_root(root, {spec.write.output for spec in tile.output_specs})
-
-    def owned(made: TileOp) -> tuple:
-        return tuple(
-            replace(port, name=f"{port.name}__split") if port.name in root.buffer_names() else port for port in state_ports(made, root.id)
-        )
-
-    if stores == "last":
-        final, last = through(levels, (), Literal(0, "int"), prior, f"{name}__last", seeded)
-        (kept,) = (stmt.replace(values=("_next",)) for stmt in loop.body.iter() if isinstance(stmt, Write))
-        stmts = (*applied(levels, Literal(0, "int"), final(Literal(0, "int"), ()), prior(own, "_same"), "_next"), kept)
-        last_tile = piece(_nest(Body(stmts), cell_axes))
-        ports = owned(last_tile)
-        reads = [left, last, scales[levels], *offsets[levels : levels + 1 - linear], *seeded]
-        result = add_output_piece(frag, written, last_tile, reads, states=ports)
-        result.outputs.extend(port.name for port in ports if port.name.endswith("__split"))
-        return result
-
-    stmts = (*prior(own, "_from"), Write(output=starts[levels], index=(Literal(0, "int"), *own), values=("_from",)))
-    add(starts[levels], _nest(Body(stmts), cell_axes), seeded)
-    # The fill-in: every map of the level below starts where its pair starts, the odd one through the even map.
-    for level in range(levels, 0, -1):
-        below = level - 1
-        pair = Axis(part.name, Dim(cta >> level))
-        even_map = BinaryExpression("*", here, Literal(2, "int"))
-        final, last = through(
-            below,
-            (pair,),
-            even_map,
-            lambda index, value, level=level: (load(value, starts[level], here, *index),),
-            starts[below],
-            [starts[level]],
-        )
-        half = BinaryExpression("/", here, Literal(2, "int"))
-        parity = BinaryExpression("%", here, Literal(2, "int"))
-        even = BinaryExpression("-", here, parity)
-        stmts = (
-            *applied(below, even, final(even, (half,)), (load("_same", starts[level], half, *own),), "_through"),
-            Select(
-                name="_from",
-                branches=(
-                    SelectBranch("_through", BinaryExpression("==", parity, Literal(1, "int"))),
-                    SelectBranch("_same", Literal(True, "bool")),
-                ),
-            ),
-            Write(output=starts[below], index=(here, *own), values=("_from",)),
-        )
-        reads = [left, last, scales[below], starts[level], *offsets[below : below + 1 - linear]]
-        add(starts[below], _nest(Body(stmts), (Axis(part.name, Dim(cta >> below)), *cell_axes)), reads)
-
-    # The walk: the step reads its start where it read the state. Its contractions do not read the row they are
-    # summed under, which is what gave the step its factors, so each is taken once a column in a kernel of its
-    # own, the start read through ``right``, and the step loads it.
-    _, sums_at = through(0, (part,), here, lambda index, value: (load(value, starts[0], here, *index),), f"{name}__walk", [starts[0]])
-    position = {accumulator: at for at, (accumulator, _, _) in enumerate(contractions)}
-
-    def started(stmt):
-        if isinstance(stmt, Loop):
-            sums = [inner.name for inner in stmt.body if isinstance(inner, Accum)]
-            if sums and taken >= set(sums):
-                return tuple(load(value, sums_at, here, *other, Literal(position[value], "int"), column) for value in sums)
-        if isinstance(stmt, Pre) and stmt.carrier == state:
-            return load(stmt.name, starts[0], here, *stmt.index)
-        return None if isinstance(stmt, Carry) else stmt
-
-    walk_body = Body((*before, *_nest(once.map(started), (part,)), *after))
-    walk_tile = piece(walk_body)
-    ports = owned(walk_tile)
-    made = [buffer for buffer in (starts[0], sums_at) if buffer in {read.input for read in walk_body.loads}]
-    result = add_output_piece(frag, written, walk_tile, _piece_inputs(root, walk_tile, *made), states=ports)
     result.outputs.extend(port.name for port in ports if port.name.endswith("__split"))
     return result
 

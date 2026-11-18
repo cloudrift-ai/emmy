@@ -122,17 +122,12 @@ class ReduceStage:
 
     ``pairs`` is meaningful only under the kernel finalize of a carried state's split: how many times
     the parts' affine maps are composed pairwise, each a product kernel over half the maps of the one
-    before, ahead of the kernel that walks what is left. The ``g<n>k<p>`` codec digits.
-
-    ``factored`` is meaningful only beside ``pairs``: each map is kept as a scale and a small coefficient between
-    the rows the steps read and the rows they write, and a composition is a product over the coefficient alone,
-    where the unfactored map is a matrix over the state. The ``g<n>k<p>f`` codec letter."""
+    before, ahead of the kernel that walks what is left. The ``g<n>k<p>`` codec digits."""
 
     level: Level
     width: int = 1
     finalize: str = "kernel"  # GRID only: "atomic" | "kernel" (the g<n> finalize letter)
     pairs: int = 0  # GRID + kernel finalize only: pairwise compositions of the parts' maps (``g<n>k<p>``)
-    factored: bool = False  # beside ``pairs`` only: the maps kept in factors (``g<n>k<p>f``)
     # BLOCK only (the ``coop-t`` codec token): swap the cooperative thread mapping for a
     # k-major B operand — warp lanes sweep the OUTPUT axis (contiguous B loads at every k
     # step) and the k partition rides the upper thread bits; the combine becomes the
@@ -159,8 +154,6 @@ class ReduceStage:
             raise ValueError("only a GRID ReduceStage can select atomic finalization")
         if type(self.pairs) is not int or self.pairs < 0 or (self.pairs and (self.level is not Level.GRID or self.finalize != "kernel")):
             raise ValueError(f"ReduceStage pairs must be a count of compositions under a GRID kernel finalize, got {self.pairs!r}")
-        if type(self.factored) is not bool or (self.factored and not self.pairs):
-            raise ValueError("ReduceStage factored maps are meaningful only where the parts' maps compose")
         if type(self.transposed) is not bool:
             raise TypeError("ReduceStage transposed must be a bool")
         if self.level is not Level.BLOCK and self.transposed:
@@ -228,7 +221,6 @@ class Reduce:
         reg: int = 1,
         finalize: str = "kernel",
         pairs: int = 0,
-        factored: bool = False,
         coop_transposed: bool = False,
         columns: int = 1,
         output_lanes: int = 32,
@@ -250,7 +242,7 @@ class Reduce:
             raise ValueError("Reduce output lanes are meaningful only when coop > 1")
         stages: list[ReduceStage] = []
         if cta > 1:
-            stages.append(ReduceStage(Level.GRID, cta, finalize=finalize, pairs=pairs, factored=factored))
+            stages.append(ReduceStage(Level.GRID, cta, finalize=finalize, pairs=pairs))
         elif pairs:
             raise ValueError("Reduce pairwise composition is meaningful only when cta > 1")
         if coop > 1:
@@ -262,14 +254,14 @@ class Reduce:
     def spell(self) -> str:
         """The ``REDUCE`` codec value for this plan — the pipeline coarse→fine, SITE-LOCAL: the
         coop WIDTH lives in the kernel's ``WORK`` inventory, never here, so the value is
-        ``[g<n>[a|k[<p>[f]]]][/coop[-t][/n8][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
+        ``[g<n>[a|k[<p>]]][/coop[-t][/n8][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
         serial remainder is never spelled — it derives as ``ceil(extent / parallel)``). The GRID
         finalize letter IS kept: ``a``/``k`` is the atomic-vs-deferred finalize MODE, a site-local
         fact — ``g4a`` and ``g2k`` are semantically different rows, both live in the golden
         corpus."""
         parts: list[str] = []
         if self.cta > 1:
-            parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}{self.pairs or ''}{'f' if self.factored else ''}")
+            parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}{self.pairs or ''}")
         if self.coop > 1:
             parts.append("coop-t" if self.coop_transposed else "coop")
         if self.coop_output_lanes != 32:
@@ -289,13 +281,11 @@ class Reduce:
         loud error, not a silent second reading."""
         s = (spec or "").strip()
         cta, coop, reg, finalize, pairs, transposed, columns, output_lanes = 1, 1, 1, "kernel", 0, False, 1, 32
-        factored = False
         for t in s.split("/") if s else ():
             if t.startswith("g"):
                 body, letter, composed = t[1:].partition("k")
                 if letter and composed:
-                    factored = composed.endswith("f")
-                    pairs = _codec_width(composed.removesuffix("f"), tok=t, codec="REDUCE")
+                    pairs = _codec_width(composed, tok=t, codec="REDUCE")
                 elif body.endswith("a"):
                     finalize, body = "atomic", body[:-1]
                 cta = _codec_width(body, tok=t, codec="REDUCE")
@@ -314,7 +304,7 @@ class Reduce:
                     raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop' or 'coop-t'")
                 columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
-                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k[<p>[f]]] / coop[-t][/n8][/v<n>] / r<n>)")
+                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k[<p>]] / coop[-t][/n8][/v<n>] / r<n>)")
         return _canonical_choice(
             "REDUCE",
             spec,
@@ -324,7 +314,6 @@ class Reduce:
                 reg=reg,
                 finalize=finalize,
                 pairs=pairs,
-                factored=factored,
                 coop_transposed=transposed,
                 columns=columns,
                 output_lanes=output_lanes,
@@ -374,11 +363,6 @@ class Reduce:
     def pairs(self) -> int:
         """The GRID stage's pairwise compositions of a carried state's part maps (0 if none)."""
         return next((s.pairs for s in self.stages if s.level is Level.GRID), 0)
-
-    @property
-    def factored(self) -> bool:
-        """Whether the GRID stage keeps the composed maps in factors."""
-        return any(s.factored for s in self.stages if s.level is Level.GRID)
 
     @property
     def reg(self) -> int:
