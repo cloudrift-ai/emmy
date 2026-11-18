@@ -852,6 +852,134 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
     return result
 
 
+# ---- a carried state with a further level of steps -------------------------------------------- #
+
+
+def has_levels(tile: TileOp) -> bool:
+    """Whether ``tile`` carries a state through more than one level of steps: a loop under its steps that does not
+    seed."""
+    return any(isinstance(stmt, Loop) and stmt.carries and not stmt.seed for stmt in tile.loop_body.iter())
+
+
+def levels_fork(match: Match, root: Node) -> DeferredFork:
+    """The one realization of a kernel with a further level of steps: no schedule runs two levels in one kernel,
+    so this is not a choice. When one does, it is the arm beside this one."""
+    frag, output = realize_levels(match, root)
+    return DeferredFork(lambda: frag, {}, structural=True, output=output)
+
+
+def realize_levels(match: Match, root: Node) -> tuple[Graph, dict[str, str]]:
+    """Unroll the outer level of a kernel that carries a state through two levels of steps.
+
+    The runner launches one kernel's steps to completion before the next kernel's first, so the two levels cannot
+    be one kernel's launches: what sits beside the inner level runs once per outer step, between two runs of the
+    inner steps. Here every outer step is its own kernels, in order:
+
+    - the inner level, a kernel that carries the state through that step's inner steps, from the state the outer
+      step before left, and stores what it leaves;
+    - what sits beside it, a kernel that carries nothing: its reads of the state are reads of what the inner level
+      just left, and the outer level's own state is what it stores, for the outer step after.
+
+    The last outer step's inner level stores what the kernel stored. Nothing here is scheduled: each piece is
+    lifted like any kernel and takes a row of its own. Returns the fragment and the buffers of the kernel it takes
+    over, each mapped to the fragment output that does."""
+    tile: TileOp = root.op
+    body = tile.loop_body
+    (position,) = (index for index, stmt in enumerate(body) if isinstance(stmt, Loop) and stmt.carries)
+    outer, before, after = body[position], tuple(body[:position]), tuple(body[position + 1 :])
+    inners = [stmt for stmt in outer.body if isinstance(stmt, Loop) and stmt.carries and not stmt.seed]
+    if len(inners) != 1 or not outer.axis.extent.is_static:
+        raise ValueError(f"kernel {tile.name}: two levels of steps unroll over a static outer level with one level under it")
+    (inner,) = inners
+    beside = tuple(stmt for stmt in outer.body if stmt is not inner)
+    carries = {stmt.name: stmt for stmt in outer.body.iter() if isinstance(stmt, Carry)}
+    below = [name for name in inner.carries]
+    own = [name for name in outer.carries if name not in below]
+    if len(below) != 1 or len(own) != 1:
+        raise ValueError(f"kernel {tile.name}: two levels of steps unroll with one state at each level, got {below} under {own}")
+    (state,), (kept_state,) = below, own
+    copies = {stmt.name: stmt.value.name for stmt in inner.body.iter() if isinstance(stmt, Assign) and isinstance(stmt.value, Var)}
+    stored = [stmt for stmt in inner.body.iter() if isinstance(stmt, Write)]
+    last = [
+        stmt
+        for stmt in stored
+        if tuple(copies.get(value, value) for value in stmt.values) == (carries[state].value,)
+        and tuple(stmt.index) == tuple(carries[state].index)
+    ]
+    if len(stored) != len(last) or len(last) > 1 or any(isinstance(stmt, Write) for stmt in (*beside, *before, *after)):
+        raise ValueError(f"kernel {tile.name}: two levels of steps unroll for a kernel that stores its inner state alone")
+    out = root.output
+    steps = outer.axis.extent.as_static()
+
+    def shape(name: str, level: Loop) -> tuple:
+        return tuple(Dim(1) if isinstance(cell, int) else cell.extent for cell in level.carries[name])
+
+    left = [f"{out.name}__{state}{at}" for at in range(steps)]
+    made = [f"{out.name}__{kept_state}{at}" for at in range(steps)]
+    shapes = io_shapes(tile) | dict.fromkeys(left, shape(state, inner)) | dict.fromkeys(made, shape(kept_state, outer))
+    frag = _frag(match, root)
+
+    def piece(stmts: Body) -> TileOp:
+        lifted = lift_nest(stmts, shapes)
+        return replace(lifted, knobs=consume_kernel_row(lifted.knobs))
+
+    def reads(stmts: Body) -> list[str]:
+        read = {load.input for load in stmts.loads} | {stmt.seed for stmt in stmts.iter() if isinstance(stmt, Carry)}
+        return [name for name in (*left, *made, *root.inputs) if name in read]
+
+    def held(name: str, index: tuple, source) -> Statement:
+        # A value of a state as some kernel left it, or the seed where none has run yet.
+        if not isinstance(source, str):
+            return Let(name=name, value=source)
+        return Load(names=(name,), input=source, index=seed_index(index, shapes[source]) if source in root.inputs else index)
+
+    written = output_root(root, {spec.write.output for spec in tile.output_specs})
+    for at in range(steps):
+        here = Sigma({outer.axis.name: Literal(at, "int")})
+        before_outer = made[at - 1] if at else carries[kept_state].seed
+        start = left[at - 1] if at else carries[state].seed
+        final = at == steps - 1
+
+        def stepped(stmt, before_outer=before_outer, start=start, final=final, at=at):
+            if isinstance(stmt, Pre) and stmt.carrier == kept_state:
+                return held(stmt.name, tuple(stmt.index), before_outer)
+            if isinstance(stmt, Carry):
+                carry = stmt.replace(seed=start)
+                return carry if last or final else (carry, Write(output=left[at], index=stmt.index, values=(stmt.value,)))
+            return stmt.replace(output=left[at]) if isinstance(stmt, Write) and not final else stmt
+
+        walked = Body(tuple(stmt.substitute(here) for stmt in inner.body)).map(stepped)
+        lets = tuple(stmt.substitute(here) for stmt in beside if not isinstance(stmt, Loop))
+        stmts = Body((*before, *lets, inner.replace(seed=True, body=walked), *after))
+        made_tile = piece(stmts)
+        if final:
+            # This piece takes the kernel's name, so its state buffer has the name of one of the kernel's: it
+            # travels under a temporary until the splice hands it over, the way every replaced buffer does.
+            ports = tuple(
+                replace(port, name=f"{port.name}__split") if port.name in root.buffer_names() else port
+                for port in state_ports(made_tile, root.id)
+            )
+            taken = {port.name.removesuffix("__split"): port.name for port in ports if port.name.endswith("__split")}
+            result = add_output_piece(frag, written, made_tile, reads(stmts), states=ports)
+            result.outputs.extend(taken.values())
+            return result, redirects(written) | taken
+        ports = state_ports(made_tile, left[at])
+        frag.add_node(op=made_tile, inputs=reads(stmts), outputs=(Tensor(left[at], shapes[left[at]], F32), *ports), node_id=left[at])
+
+        def between(stmt, before_outer=before_outer, at=at):
+            if isinstance(stmt, Pre):
+                source = left[at] if stmt.carrier == state else before_outer
+                return held(stmt.name, tuple(stmt.index), source)
+            if isinstance(stmt, Carry):
+                return Write(output=made[at], index=stmt.index, values=(stmt.value,))
+            return stmt
+
+        stmts = Body((*before, *Body(tuple(stmt.substitute(here) for stmt in beside)).map(between), *after)).pruned(())
+        made_tile = piece(stmts)
+        frag.add_node(op=made_tile, inputs=reads(stmts), outputs=(Tensor(made[at], shapes[made[at]], F32),), node_id=made[at])
+    raise AssertionError("unreachable: the last outer step returns")
+
+
 # ---- slicing the head fold -------------------------------------------------------------------- #
 
 
@@ -1241,7 +1369,17 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     return _add_projection_pieces(match, result, projection_pieces, free, shapes)
 
 
-__all__ = ["atomic_finalize", "realize_carry_split", "realize_split", "split_forks", "splitk_width", "state_ports"]
+__all__ = [
+    "atomic_finalize",
+    "has_levels",
+    "levels_fork",
+    "realize_carry_split",
+    "realize_levels",
+    "realize_split",
+    "split_forks",
+    "splitk_width",
+    "state_ports",
+]
 
 
 def projection_distributes(body, states: tuple[str, ...]) -> bool:

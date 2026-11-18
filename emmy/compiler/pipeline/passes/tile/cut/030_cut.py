@@ -27,7 +27,7 @@ from emmy.compiler.pipeline.passes.tile._cut import (
     realize,
 )
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
-from emmy.compiler.pipeline.passes.tile._split import split_forks
+from emmy.compiler.pipeline.passes.tile._split import has_levels, levels_fork, split_forks
 from emmy.compiler.pipeline.passes.tile.cut import takes_kernel_set_decision
 from emmy.compiler.pipeline.search.pins import composed_cuts_for, note_place_key
 
@@ -272,7 +272,8 @@ def rewrite(match: Match, root: Node, ctx=None):
         # the pieces of a cut could not interleave step by step: piece two's step c would read what
         # piece one stored at EVERY step. A kernel that carries a state takes no cut; its one
         # kernel-set decision is the split across the sequence (``_split.realize_carry_split``).
-        choices = split_forks(match, root)
+        # A further level of steps is the one case with no single kernel to run: its outer level is unrolled.
+        choices = [levels_fork(match, root)] if has_levels(tile) else split_forks(match, root)
         if choices is None:
             raise RuleSkipped("a kernel that carries a state is one kernel")
         options = [cut.kernel for cut in schedule(_CutContext(tuple(choices)))]

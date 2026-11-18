@@ -463,18 +463,61 @@ def test_a_further_level_of_steps_is_a_fold_under_the_fold() -> None:
     np.testing.assert_allclose(out.reshape(n, n) + np.eye(n), np.linalg.inv(np.eye(n) - a), rtol=1e-4, atol=1e-5)
 
 
+def _run_kernels(graph: Graph, arrays: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Every kernel of ``graph`` run from its Loop IR, in order: each buffer by its name."""
+    values = dict(arrays)
+    for node_id in graph.topological_order():
+        node = graph.nodes[node_id]
+        if not isinstance(node.op, TileOp):
+            continue
+        op = LoopOp(body=node.op.loop_body)
+        shapes = {tensor.name: tuple(dim.as_static() for dim in tensor.shape) for tensor in node.outputs}
+        result = execute_loop_op_cpp(op, {name: values[name] for name in node.inputs}, {name: shapes[name] for name in op.outputs})
+        values.update(zip(op.outputs, result if isinstance(result, tuple) else (result,), strict=True))
+    return values
+
+
+@pytest.mark.parametrize(("n", "width"), [(16, 4), (16, 8), (16, 16)], ids=["four-blocks", "two-blocks", "one-block"])
+def test_the_cut_runs_the_outer_level_as_kernels_in_order(n: int, width: int) -> None:
+    """One kernel's launches are one level of steps, so the cut unrolls the outer level: per block a kernel that
+    carries the state through the block's rows, and between two blocks a kernel that carries nothing and computes
+    the workspace. Every one is a kernel scheduling already takes."""
+    blocks = n // width
+    cut = Pipeline.build(["tile/lift", "tile/cut"], select=["lift", "cut"]).run(_kernel(_solve_in_blocks(n, width), {"A": (n, n)}, (n, n)))
+    kernels = [node for node in cut.nodes.values() if isinstance(node.op, TileOp)]
+    walks = [node for node in kernels if node.op.carries]
+    assert len(kernels) == 2 * blocks - 1 and len(walks) == blocks
+    for node in walks:
+        (steps,) = (stmt for stmt in node.op.loop_body.iter() if isinstance(stmt, Loop) and stmt.carries)
+        assert steps.seed and steps.axis.extent.as_static() == width, "a level of its own: it seeds, and walks one block"
+
+    a = _system(n)
+    got = _run_kernels(cut, {"A": a})["out"]
+    np.testing.assert_allclose(got + np.eye(n), np.linalg.inv(np.eye(n) - a), rtol=1e-4, atol=1e-5)
+    scheduled = Pipeline.build(["tile/schedule", "lowering/kernel"]).run(cut)
+    assert not any(isinstance(node.op, TileOp) for node in scheduled.nodes.values())
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_a_solve_in_blocks_runs_on_the_gpu() -> None:
+    from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
+
+    n = 32
+    a = _system(n)
+    passes = CUDA_PASSES[CUDA_PASSES.index("tile/lift") :]
+    result, _ = run_program(Pipeline.build(passes).run(_kernel(_solve_in_blocks(n, 8), {"A": (n, n)}, (n, n))), {"A": a})
+    got = np.asarray(result.outputs["out"]).reshape(n, n)
+    np.testing.assert_allclose(got + np.eye(n), np.linalg.inv(np.eye(n) - a), rtol=1e-4, atol=1e-5)
+
+
 def test_what_is_not_built_for_a_further_level_is_refused_by_name() -> None:
     """A fold that runs on carries a state. A level with no state of its own beside the level under it does not
-    lift. And nothing schedules a second level yet: the kernel stops at the pass that would have to."""
+    lift."""
     from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415
 
     with pytest.raises(ValueError, match="no state of its own"):
         Pipeline.build(["tile/lift"], select=["lift"]).run(_kernel(_levels(), {"X": (2, 3, N)}, (2, 3, N)))
-
-    n = 16
-    graph = _kernel(_solve_in_blocks(n, 4), {"A": (n, n)}, (n, n))
-    with pytest.raises(ValueError, match="carries a state inside loop"):
-        Pipeline.build(["tile/lift", "tile/cut", "tile/schedule"]).run(graph)
 
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(
         _kernel(_step("c, i, j"), {"D": (STEPS,), "W": (N, N), "U": (STEPS, N, N)}, (STEPS, N, N))
