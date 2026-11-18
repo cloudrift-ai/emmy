@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from fractions import Fraction
+from functools import lru_cache
 from itertools import product
 
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, affine_terms
@@ -66,6 +67,15 @@ def alternatives(condition: Expression, *, holds: bool = True) -> list[tuple[For
     raise ValueError(f"not a comparison: {condition}")
 
 
+def negated(condition: Expression) -> Expression:
+    """The comparison that holds exactly where ``condition`` does not."""
+    if isinstance(condition, Literal):
+        return Literal(not condition.value, "bool")
+    if condition.op in ("&&", "||"):
+        return BinaryExpression("||" if condition.op == "&&" else "&&", negated(condition.left), negated(condition.right))
+    return BinaryExpression(_FLIPPED[condition.op], condition.left, condition.right)
+
+
 def _solvable(forms: Iterable[Form]) -> bool:
     """Whether rationals make every form at most zero: eliminate one name at a time."""
     rows = [(dict(terms), constant) for terms, constant in set(forms)]
@@ -91,13 +101,17 @@ def _solvable(forms: Iterable[Form]) -> bool:
         rows = [(dict(terms), constant) for terms, constant in {(tuple(sorted(terms.items())), constant) for terms, constant in kept}]
 
 
+@lru_cache(maxsize=1 << 16)
+def _some(cases: tuple[tuple[tuple[Form, ...], ...], ...]) -> bool:
+    return any(_solvable(form for case in choice for form in case) for choice in product(*cases))
+
+
 def can_hold(*conditions: Expression) -> bool:
     """Whether every one of ``conditions`` can hold at once, for some integers."""
-    cases = [alternatives(condition) for condition in conditions]
-    return any(_solvable(form for case in choice for form in case) for choice in product(*cases))
+    return _some(tuple(sorted({tuple(alternatives(condition)) for condition in conditions})))
 
 
 def always(condition: Expression, *given: Expression) -> bool:
     """Whether ``condition`` holds wherever all of ``given`` do."""
-    cases = [alternatives(condition, holds=False), *(alternatives(known) for known in given)]
-    return not any(_solvable(form for case in choice for form in case) for choice in product(*cases))
+    cases = {tuple(alternatives(known)) for known in given}
+    return not _some((tuple(alternatives(condition, holds=False)), *sorted(cases)))

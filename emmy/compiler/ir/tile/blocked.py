@@ -573,119 +573,32 @@ class Reading:
 
     name: str  # the read's SSA name
     block: int  # -1 the rows of earlier blocks, 0 the block's own, 1 later ones
-    instances: int
-    live: bool  # some instance reads a cell an earlier step of the block wrote
+    live: bool  # some step reads a cell an earlier step of the block wrote
     lifted: bool  # whole blocks of the variable it sums over: no test inside one
 
 
-def _conditions(stmt) -> list:
-    """Every expression of ``stmt`` that can hold a test: a select's conditions and its index expressions."""
-    from emmy.compiler.ir.stmt import Pre, Select  # noqa: PLC0415 - the prototype above needs no IR
-
-    if isinstance(stmt, Select):
-        return [("test", branch.select) for branch in stmt.branches]
-    return [("index", index) for index in stmt.index] if isinstance(stmt, Pre) else []
-
-
-def _tested(tagged) -> set[str]:
-    """The variables a test reads: all of a condition's, and those of the conditions inside an index expression."""
-    from emmy.compiler.ir.expression import BinaryExpression, TernaryExpression  # noqa: PLC0415
-
-    kind, expression = tagged
-    if kind == "test":
-        return set(expression.free_vars())
-    if isinstance(expression, TernaryExpression):
-        inner = (_tested(("index", branch)) for branch in (expression.if_true, expression.if_false))
-        return set(expression.cond.free_vars()).union(*inner)
-    if isinstance(expression, BinaryExpression):
-        return _tested(("index", expression.left)) | _tested(("index", expression.right))
-    return set()
-
-
 class Walk:
-    """A Loop IR kernel that carries one state, as index sets: what its steps read and write, with nothing rewritten.
+    """A Loop IR kernel that carries one state and moves along one axis of it, a row a step.
 
-    The kernel spells its conditions as selects and as conditionals inside index expressions. They are not made
-    first class here: they are evaluated over an index set, the way the statements above are. A read counts where
-    a select lets its value reach the next state; a cell counts as written where the next state is not the cell's
-    own previous value."""
+    What its steps read and write is ``ir/guards.py``'s reading: the kernel's selects and index conditionals as
+    comparisons. Nothing here looks at an extent's size but the block bookkeeping below, which counts steps."""
 
     def __init__(self, body) -> None:
-        from emmy.compiler.ir.stmt import Carry, Loop  # noqa: PLC0415 - the prototype above needs no IR
+        from emmy.compiler.ir.guards import carried  # noqa: PLC0415 - the prototype above needs no IR
+        from emmy.compiler.ir.stmt import Loop  # noqa: PLC0415
 
-        (self.loop,) = (stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries)
-        loops = [self.loop, *(stmt for stmt in self.loop.body.iter() if isinstance(stmt, Loop))]
-        self.names = [loop.axis.name for loop in loops]
-        extents = [loop.axis.extent.as_static() for loop in loops]
+        self.facts = carried(body)
+        self.loop, self.carry = self.facts.loop, self.facts.carry
         self.stmts = list(self.loop.body.iter())
-        (self.carry,) = (stmt for stmt in self.stmts if isinstance(stmt, Carry))
-        self.cells = [index.name for index in self.carry.index]
+        self.cells = list(self.facts.cells)
+        axes = {stmt.axis.name: stmt.axis for stmt in self.stmts if isinstance(stmt, Loop)}
         #: The state's own shape.
-        self.shape = tuple(extents[self.names.index(name)] for name in self.cells)
-        # An axis no condition tests (a batch) changes nothing the steps decide: one coordinate of it stands for all.
-        tested = set().union(*(_tested(expression) for stmt in self.stmts for expression in _conditions(stmt)))
-        self.extents = [
-            extent if not axis or name in tested else 1 for axis, (name, extent) in enumerate(zip(self.names, extents, strict=True))
-        ]
-        self.sizes = tuple(self.extents[self.names.index(name)] for name in self.cells)
-        _, same, _ = self.trace(np.arange(self.extents[0]))
-        others = tuple(axis for axis, name in enumerate(self.names) if name not in self.cells and axis)
-        order = [self.names.index(name) for name in self.cells]
-        #: Per step, the cells it writes.
-        self.written = np.transpose(~same[self.carry.value].all(axis=others), [0, *(sorted(order).index(axis) + 1 for axis in order)])
-        across = [self.written.any(axis=tuple(a + 1 for a in range(len(self.cells)) if a != axis)) for axis in range(len(self.cells))]
-        #: The state's axis the steps move along, every step writing one coordinate of it, and that coordinate.
-        found = [axis for axis, hit in enumerate(across) if self.sizes[axis] > 1 and (hit.sum(axis=1) <= 1).all()]
-        self.moving = found[0] if len(found) == 1 else None
-        self.rows = np.full(self.extents[0], -1)
-        if self.moving is not None:
-            self.rows = np.array([np.flatnonzero(hit)[0] if hit.any() else -1 for hit in across[self.moving]])
-
-    def trace(self, steps: np.ndarray) -> tuple[dict, dict, dict]:
-        """Over ``steps``: where each name's value reaches the next state, where it is the cell's own previous
-        value, and each read's cell."""
-        from emmy.compiler.ir.expression import Var  # noqa: PLC0415
-        from emmy.compiler.ir.stmt import Accum, Assign, Pre, Select  # noqa: PLC0415
-
-        values = [steps, *(np.arange(extent) for extent in self.extents[1:])]
-        full = tuple(len(value) for value in values)
-        env = {
-            name: value.reshape([-1 if at == axis else 1 for at in range(len(values))])
-            for axis, (name, value) in enumerate(zip(self.names, values, strict=True))
-        }
-        at = {
-            stmt.name: tuple(np.broadcast_to(index.eval(env), full) for index in stmt.index) for stmt in self.stmts if isinstance(stmt, Pre)
-        }
-        own = tuple(np.broadcast_to(env[name], full) for name in self.cells)
-        same = {name: np.logical_and.reduce([a == b for a, b in zip(index, own, strict=True)]) for name, index in at.items()}
-        for stmt in self.stmts:
-            if isinstance(stmt, Select):
-                left, out = np.ones(full, dtype=bool), np.zeros(full, dtype=bool)
-                for branch in stmt.branches:
-                    taken = left & np.broadcast_to(branch.select.eval(env), full)
-                    out |= taken & same.get(branch.value, False)
-                    left &= ~taken
-                same[stmt.name] = out
-            elif isinstance(stmt, Assign) and isinstance(stmt.value, Var):
-                same[stmt.name] = same.get(stmt.value.name, np.zeros(full, dtype=bool))
-        same.setdefault(self.carry.value, np.zeros(full, dtype=bool))
-        used = {self.carry.value: np.ones(full, dtype=bool)}
-        for stmt in reversed(self.stmts):
-            mine = used.get(getattr(stmt, "name", None))
-            if mine is None:
-                continue
-            if isinstance(stmt, Select):
-                left = mine.copy()
-                for branch in stmt.branches:
-                    taken = left & np.broadcast_to(branch.select.eval(env), full)
-                    used[branch.value] = used.get(branch.value, False) | taken
-                    left &= ~taken
-            elif isinstance(stmt, Assign):
-                for name in stmt.value.free_vars():
-                    used[name] = used.get(name, False) | mine
-            elif isinstance(stmt, Accum):
-                used[stmt.value.name] = used.get(stmt.value.name, False) | mine
-        return used, same, at
+        self.shape = tuple(axes[name].extent.as_static() for name in self.cells)
+        found = self.facts.moving()
+        #: The state's axis the steps move along, and the row a step writes less the step.
+        self.moving, self.offset = found if found is not None else (None, 0)
+        steps = self.loop.axis.extent.as_static()
+        self.rows = np.arange(steps) + self.offset if found is not None else np.full(steps, -1)
 
     def steps_of(self, width: int, block: int) -> np.ndarray:
         """The steps that write the rows of ``block``."""
@@ -693,32 +606,42 @@ class Walk:
 
 
 def survey(body, width: int, block: int) -> list[Reading]:
-    """Split, lift and isolate, read off a Loop IR body that carries one state. Blocks are cut on the state's axis
-    the steps move along, and a block's steps are the ones that write its rows."""
-    from emmy.compiler.ir.stmt import Pre  # noqa: PLC0415
+    """Split, lift and isolate, read off a Loop IR body that carries one state: each read of the state, on each
+    side of the block of rows ``block`` it can fall on while a step of that block runs."""
+    from emmy.compiler.ir.constraints import always, can_hold  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpression, Literal, Var  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Loop  # noqa: PLC0415
 
     walk = Walk(body)
-    steps = walk.steps_of(width, block)
-    used, same, at = walk.trace(steps)
-    changed = ~same[walk.carry.value]  # a cell that keeps its own value reads nothing: that is the state staying put
-    cut = walk.written[steps]
-    before = np.zeros_like(cut)
-    before[1:] = np.logical_or.accumulate(cut, axis=0)[:-1]
-    place = np.broadcast_to(np.arange(len(steps)).reshape([-1] + [1] * (len(walk.names) - 1)), changed.shape)
-    out = []
-    for stmt in walk.stmts:
-        if not isinstance(stmt, Pre) or stmt.name not in used:
-            continue
-        index = tuple(np.clip(i, 0, extent - 1) for i, extent in zip(at[stmt.name], walk.sizes, strict=True))
-        side = np.sign(index[walk.moving] // width - block)
-        summed = [walk.names.index(name) for name in stmt.index[walk.moving].free_vars() if name in walk.names[1:]]
-        for value in (-1, 0, 1):
-            mask = used[stmt.name] & changed & (side == value)
-            if not mask.any():
+    if walk.moving is None:
+        return []
+    facts, at = walk.facts, walk.moving
+    low, high = Literal(block * width, "int"), Literal((block + 1) * width, "int")
+    row = BinaryExpression("+", Var(facts.step), Literal(walk.offset, "int"))
+    # A step of this block: the row it writes is one of the block's.
+    here = (*facts.bounds, BinaryExpression("<=", low, row), BinaryExpression("<", row, high))
+    summed = {stmt.axis.name for stmt in walk.stmts if isinstance(stmt, Loop) and stmt.is_reduce}
+    found: dict[tuple[str, int], Reading] = {}
+    for read in facts.reads:
+        cell = read.index[at]
+        tied = [condition for condition in read.guard if condition.free_vars() & cell.free_vars() & summed]
+        rest = [condition for condition in read.guard if condition not in tied]
+        sides = (
+            (-1, (BinaryExpression("<", cell, low),)),
+            (0, (BinaryExpression("<=", low, cell), BinaryExpression("<", cell, high))),
+            (1, (BinaryExpression("<=", high, cell),)),
+        )
+        for side, where in sides:
+            if not can_hold(*read.guard, *here, *where):
                 continue
-            lifted = True
-            for axis in summed:
-                pieces = np.array_split(mask, range(width, mask.shape[axis], width), axis=axis)
-                lifted &= all(bool((piece.any(axis=axis) == piece.all(axis=axis)).all()) for piece in pieces)
-            out.append(Reading(stmt.name, value, int(mask.sum()), bool((before[(place, *index)] & mask).any()), lifted))
-    return out
+            live = False
+            if side == 0:
+                # An earlier step of the block wrote this cell: the step whose row it is, where that step writes it.
+                then = {facts.step: BinaryExpression("-", cell, Literal(walk.offset, "int"))}
+                then |= dict(zip(facts.cells, read.index, strict=True))
+                earlier = BinaryExpression("<", cell, row)
+                live = any(can_hold(*read.guard, *here, *where, earlier, *(c.substitute(then) for c in guard)) for guard in facts.written)
+            lifted = all(always(condition, *rest, *here, *where) for condition in tied)
+            seen = found.get((read.name, side))
+            found[(read.name, side)] = Reading(read.name, side, live or bool(seen and seen.live), lifted and (seen is None or seen.lifted))
+    return list(found.values())

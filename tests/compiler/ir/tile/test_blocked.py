@@ -219,8 +219,8 @@ def test_a_cycle_that_is_not_linear_stays_serial_and_stays_right():
 
 def test_the_first_three_steps_read_the_compilers_own_kernel_for_the_solve():
     """The in-place solve as traced from PyTorch and rolled into one kernel that carries its state. Its conditions
-    are selects and conditionals inside index expressions; evaluated over one block's index set, they give the same
-    split as the statements above. Of the five reads of the state only one is live, and only inside the block."""
+    are selects and conditionals inside index expressions; read as comparisons they give the same split as the
+    statements above. Of the kernel's reads of its state only one is live, and only inside the block."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
@@ -230,15 +230,10 @@ def test_the_first_three_steps_read_the_compilers_own_kernel_for_the_solve():
     rolled = Pipeline.build(LOOP_PASSES).run(graph)
     (kernel,) = (node.op for node in rolled.nodes.values() if isinstance(node.op, LoopOp) and node.op.body.carries)
     found = survey(kernel.body, 16, 1)
-    live = [reading for reading in found if reading.live]
-    (cycle,) = live
+    (cycle,) = (reading for reading in found if reading.live)
     assert cycle.block == 0 and not cycle.lifted, "the block's own rows, under the triangle that does not lift"
-    (earlier,) = (reading for reading in found if reading.name == cycle.name and reading.block == -1)
-    assert earlier == Reading(cycle.name, -1, earlier.instances, live=False, lifted=True), "earlier rows: whole blocks, an input"
-    # The block's rows 16 to 30 (the roll leaves the last row to the kernel that reads the state), columns below
-    # the row: 16 earlier rows each, and a triangle of its own. One system stands for both: no condition tests the batch.
-    assert earlier.instances == sum(16 * row for row in range(16, 31))
-    assert cycle.instances == sum((row - 16) * row for row in range(16, 31))
-    assert all(reading.lifted and not reading.live for reading in found if reading.name != cycle.name)
-    # The first block has no earlier rows.
+    (earlier,) = (reading for reading in found if reading.block == -1)
+    assert earlier == Reading(cycle.name, -1, live=False, lifted=True), "earlier rows: whole blocks, an input"
+    assert all(reading.lifted and not reading.live and reading.block == 0 for reading in found if reading.name != cycle.name)
+    # The first block has no earlier rows, and no block reads a later one.
     assert {reading.block for reading in survey(kernel.body, 16, 0)} == {0}
