@@ -181,7 +181,7 @@ def test_emmy_runs_the_sparse_attention_query_and_key_norms_and_rope(built):
     with torch.no_grad():
         layer.q_norm.weight.normal_(0, 0.2)
         layer.k_norm.weight.normal_(0, 0.2)
-    _emmy_query_key([layer], 4, torch.float16)
+    _emmy_query_key([layer], 4, torch.float16, model.config.max_position_embeddings)
     try:
         for rows in (1, 4, 5):
             qkv = torch.randn(rows, 2 * (layer.q_size + layer.kv_size), dtype=torch.float16, device="cuda")

@@ -484,13 +484,14 @@ def _build_fork_attention(vllm_config, runner, n_layers, prefix):
     ]
 
 
-def _emmy_query_key(layers, rows, dtype):
+def _emmy_query_key(layers, rows, dtype, positions):
     """Give each hosted sparse-attention layer Emmy's program for its query and key norms and rope
     (:func:`~emmy.serving.gen_runner.query_key_graph`) on a step of up to ``rows`` tokens, in place of the fork's eager
     modules, about twenty small kernels per layer on a decode step; a wider step keeps the fork's. One instance per
     layer, lent the layer's two norm weights and the rotary cache, over one arena: the layers run one after another,
     and each consumes the outputs before the next runs. The program reads one row of positions, the text positions
-    every rotary axis carries (``get_mrope_input_positions``)."""
+    every rotary axis carries (``get_mrope_input_positions``), and the first ``positions`` rows of the rotary cache, the
+    model's positions: M-RoPE caches four times as many for video, which a text position never reaches."""
     import torch
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
 
@@ -504,8 +505,9 @@ def _emmy_query_key(layers, rows, dtype):
         if not isinstance(layer, Qwen4ExpQSAAttention):
             continue
         # The cache the fork's rope reads for a query of the model dtype.
-        cos_sin = layer.rotary_emb._match_cos_sin_cache_dtype(layer.q_norm.weight.new_empty(0, dtype=dtype))
-        dims = (layer.num_heads, layer.num_kv_heads, layer.head_dim, layer.rotary_emb.rotary_dim, cos_sin.shape[0])
+        rope = layer.rotary_emb
+        cos_sin = rope._match_cos_sin_cache_dtype(layer.q_norm.weight.new_empty(0, dtype=dtype))[:positions]
+        dims = (layer.num_heads, layer.num_kv_heads, layer.head_dim, rope.rotary_dim, cos_sin.shape[0])
         graph, example = query_key_graph(*dims, layer.q_norm.variance_epsilon, dtype)
         lent = [layer.q_norm.weight.to(dtype), layer.k_norm.weight.to(dtype), cos_sin]
         program, _ = _compile_split(
@@ -1429,7 +1431,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             if unloaded:
                 raise ValueError(f"EmmyGenModel: the checkpoint did not load the n-gram PLE parameters {sorted(unloaded)}")
             if self.runner.decode_bucket > 0:
-                _emmy_query_key(fork_attn, self.runner.decode_bucket, self.dtype)
+                _emmy_query_key(fork_attn, self.runner.decode_bucket, self.dtype, self.config.max_position_embeddings)
         if not is_last_rank:
             self.reclaim_device_memory()
             return loaded
