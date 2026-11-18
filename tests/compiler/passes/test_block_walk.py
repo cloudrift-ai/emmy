@@ -35,11 +35,13 @@ def _steps(op: LoopOp) -> int:
 @pytest.mark.parametrize(("n", "width"), [(16, 4), (20, 6), (32, 16), (16, 64)], ids=["even", "ragged", "two-blocks", "one-block"])
 def test_the_solve_in_blocks_matches_eager(n: int, width: int) -> None:
     graph, module = _blocked(n, width)
-    kernels = [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
-    walks = [op for op in kernels if op.body.carries]
+    walks = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp) and node.op.body.carries]
     # The roll leaves the first and the last row to its neighbours: rows 2 to n - 2 are the walk's.
     blocks = len({row // width for row in range(2, n - 1)})
-    assert len(walks) == blocks and sum(_steps(op) for op in walks) == n - 3 and max(_steps(op) for op in walks) <= width
+    assert len(walks) == blocks and sum(_steps(node.op) for node in walks) == n - 3
+    # A walk carries its block's rows alone: its state is as tall as the block, not as the system.
+    assert [node.output.shape[1].as_static() for node in walks] == [min(width, n - at * width) for at in range(blocks)]
+    assert all(_steps(node.op) <= node.output.shape[1].as_static() for node in walks)
     # Every block after the first has one kernel over the rows of the blocks before it, and it carries nothing.
     early = [node for node in graph.nodes.values() if "__early" in node.id]
     assert len(early) == blocks - 1 and not any(node.op.body.carries for node in early)
