@@ -66,8 +66,15 @@ def twin_width(name: str) -> int | None:
 
 
 def _bound_tensors(graph) -> frozenset:
-    """The checkpoint tensors a traced program binds."""
-    return frozenset(path for _, op in graph.loadable_constants() for path in (op.source_path, *(p for p, _ in op.source_parts)) if path)
+    """The checkpoint tensors a traced program binds, each with the shape it is read at. A path alone names a tensor
+    inside one checkpoint only: a hardware golden holds programs of many models, whose ``weight`` or
+    ``input_layernorm.weight`` are different tensors, and the shape keeps them apart where it differs."""
+    return frozenset(
+        (path, tuple(shape or ()))
+        for _, op in graph.loadable_constants()
+        for path, shape in ((op.source_path, op.source_shape), *op.source_parts)
+        if path
+    )
 
 
 def _width(graph) -> float:

@@ -22,7 +22,7 @@ from emmy.serving.twins import twins_in_build_order
 from tests.compiler.terms import contraction, slab
 
 
-def _traced(width, source: str | None) -> Graph:
+def _traced(width, source: str | None, shape=(8, 8)) -> Graph:
     """A traced program with ``width`` tokens (``"num_tokens"``: symbolic) binding checkpoint tensor ``source``."""
     from emmy.compiler.dim import Dim
 
@@ -30,7 +30,7 @@ def _traced(width, source: str | None) -> Graph:
     tokens = Dim(width) if isinstance(width, str) else width
     graph.add_node(InputOp(), [], Tensor("x", (tokens, 8), "f32"), node_id="x")
     if source is not None:
-        graph.add_node(ConstantOp(name="w", source_path=source, source_shape=(8, 8)), [], Tensor("w", (8, 8), "f32"), node_id="w")
+        graph.add_node(ConstantOp(name="w", source_path=source, source_shape=shape), [], Tensor("w", shape, "f32"), node_id="w")
     graph.inputs, graph.outputs = ["x"], ["x"]
     return graph
 
@@ -62,6 +62,18 @@ def test_twins_bind_one_layers_tensors_and_build_narrowest_first():
     lowered = []
     family = list(twins_in_build_order(graphs, lambda graph: lowered.append(graph) or set(), of="e"))
     assert [key for key, _ in family] == ["c", "e", "a"] and lowered == [graphs["a"], graphs["c"], graphs["e"]]
+
+
+def test_programs_of_two_models_that_name_a_tensor_alike_are_not_twins():
+    """A hardware golden holds programs of many models: a tensor path alone (``weight``) names a different tensor in
+    each, so programs reading it at another shape take scopes of their own, while one model's twins still share."""
+    graphs = {
+        "a1": _traced(1, "weight", (8, 8)),
+        "a16": _traced(16, "weight", (8, 8)),
+        "b1": _traced(1, "weight", (16, 8)),
+    }
+    scopes = dict(twins_in_build_order(graphs, lambda _graph: set()))
+    assert scopes["a1"] is scopes["a16"] and scopes["b1"] is not scopes["a1"]
 
 
 def _constants(*names):
@@ -250,7 +262,8 @@ def test_a_named_realization_compiles_with_the_layouts_its_narrower_twins_bound(
 
 
 def _twin(n: int) -> Graph:
-    """A traced width twin: one kernel reading the transposed weight ``w`` at output width ``n``."""
+    """A traced width twin: one kernel reading the transposed weight ``w`` at output width ``n``. Every twin binds the
+    same checkpoint tensor (its source shape does not depend on ``n``), as one layer's twins do."""
     axis_n, axis_k = Axis("n", n), Axis("k", 8)
     tile = TileOp(
         op=contraction(axis_k, slab("xv", "x", "k"), (slab("wv", "w", "k", "n"), "acc")),
@@ -261,7 +274,7 @@ def _twin(n: int) -> Graph:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (8,), "f32"), node_id="x")
     graph.add_node(
-        ConstantOp(name="w", load_ops=(TransposeOp((-2, -1)),), source_path="w", source_shape=(n, 8)),
+        ConstantOp(name="w", load_ops=(TransposeOp((-2, -1)),), source_path="w", source_shape=(64, 8)),
         [],
         Tensor("w", (8, n), "f32"),
         node_id="w",
