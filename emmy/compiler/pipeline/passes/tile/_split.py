@@ -1357,15 +1357,26 @@ def realize_factored_split(match: Match, root: Node, cta: int) -> Graph:
         reads = [left, last, scales[below], starts[level], *offsets[below : below + 1 - linear]]
         add(starts[below], _nest(Body(stmts), (Axis(part.name, Dim(cta >> below)), *cell_axes)), reads)
 
-    # The walk: the step reads its start where it read the state, and is a kernel like any other.
+    # The walk: the step reads its start where it read the state. Its contractions do not read the row they are
+    # summed under, which is what gave the step its factors, so each is taken once a column in a kernel of its
+    # own, the start read through ``right``, and the step loads it.
+    _, sums_at = through(0, (part,), here, lambda index, value: (load(value, starts[0], here, *index),), f"{name}__walk", [starts[0]])
+    position = {accumulator: at for at, (accumulator, _, _) in enumerate(contractions)}
+
     def started(stmt):
+        if isinstance(stmt, Loop):
+            sums = [inner.name for inner in stmt.body if isinstance(inner, Accum)]
+            if sums and taken >= set(sums):
+                return tuple(load(value, sums_at, here, *other, Literal(position[value], "int"), column) for value in sums)
         if isinstance(stmt, Pre) and stmt.carrier == state:
             return load(stmt.name, starts[0], here, *stmt.index)
         return None if isinstance(stmt, Carry) else stmt
 
-    walk_tile = piece(Body((*before, *_nest(once.map(started), (part,)), *after)))
+    walk_body = Body((*before, *_nest(once.map(started), (part,)), *after))
+    walk_tile = piece(walk_body)
     ports = owned(walk_tile)
-    result = add_output_piece(frag, written, walk_tile, _piece_inputs(root, walk_tile, starts[0]), states=ports)
+    made = [buffer for buffer in (starts[0], sums_at) if buffer in {read.input for read in walk_body.loads}]
+    result = add_output_piece(frag, written, walk_tile, _piece_inputs(root, walk_tile, *made), states=ports)
     result.outputs.extend(port.name for port in ports if port.name.endswith("__split"))
     return result
 

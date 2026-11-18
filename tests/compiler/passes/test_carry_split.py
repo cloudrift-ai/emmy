@@ -452,6 +452,8 @@ def test_maps_kept_in_factors_compose_to_the_sequential_walk(steps: int, values:
     tiles = {node.id: node.op for node in cut.nodes.values() if isinstance(node.op, TileOp)}
     assert {"out", "out__left", "out__right", "out__scale0"} <= set(tiles) and not any(tile.carries for tile in tiles.values())
     assert not any(name.startswith("out__map") for name in tiles), "no matrix over the state"
+    # The step's own contraction is taken once a column, in a kernel beside the one that stores the outputs.
+    assert last or ("out__walk__read" in tiles and not tiles["out"].op.operands)
     top = depth if last else depth - 1  # the last level's map applies to the seed alone
     assert sorted(name for name in tiles if "gram" in name) == [f"out__gram{level}" for level in range(1, top + 1)]
     # A level's coefficient is square over the steps below it, and its lower left block is the only product.
