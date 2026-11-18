@@ -1,5 +1,44 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## The 256-row Gated DeltaNet layer tuned (2026-11-18)
+
+One rented RTX 5090 (vast.ai; 61 vCPUs, driver 620.70, CUDA 13.0 toolkit), main at `41b940d75`. The goal was the
+7,680-token first token, 1.61 s against a bar of 1.34 s, through the Gated DeltaNet layer at 256 rows (0.85 ms
+served, needs about 0.66).
+
+- **The matrix-product arm of #1425 is not offered here.** The recurrence across the four 64-token chunks is one
+  kernel (24 us). Its step also writes a per-step output that reads the state at the output's own coordinates, so
+  `Fold.affine` refuses the step and the carried state's fork has no split to offer. #1425's own measurements
+  say a step this wide loses under composition anyway, so this was not pursued.
+- **The layer was a tune problem.** #1429 recorded the layer's kernel sets again without a tune, so most pieces
+  held the one or two schedules the record tried. Twenty pieces were tuned by name (60 schedules; 150 for the two
+  6144-wide FP8 products, which found nothing better; 250 for the MLP's two NVFP4 products), and the nine roots
+  that hold them were recorded alone. Two names from the golden's row names no longer exist (`k_4f62d9ae0676`,
+  `k_894fb90b13d9`); their kernels were found under their current names in a bench table.
+
+| a root of the 256-row layer, recorded | before | now |
+|---|---|---|
+| MLP gate-up (NVFP4) and its activation pieces | 185.6 us | 143.0 |
+| the readout (two FP8 products, the norm, the solve's consumers) | 225.7 | 158.8 |
+| MLP down (NVFP4) | 95.4 | 79.7 |
+| the input projections (qkv FP8 product) | 94.4 | 90.5 |
+| the chunk's state products | 53.0 | 35.2 |
+| the recurrence across chunks | 25.0 | 24.0 |
+| two small recurrence roots | 41.4 | 33.8 |
+| the gate's cumsum | 10.3 | 0.7 |
+| the layer, all twelve roots | 734 | 569 |
+
+- **Served, one session, the 256-row pack exported strictly from this golden.** First token 0.044 / 1.344 / 79.9 s
+  at 256 / 7,680 / 197,632 tokens (0.054 / 1.61 / 82.4 on 2026-11-17), the 7,680-token cell timed twice (1.345,
+  1.344). TPOT 8.0 / 8.2 / 10.0 ms; memory at rest 28.6 GiB. The strict serving audit passes with the 256-row chunk
+  (80 of 80 twins). The 7,680-token first token misses the bar by 4 ms, 0.3%.
+- **What the rows promised and what the chunk got.** The rows fell 165 us a layer, about 238 ms over a
+  7,680-token prefill; the first token fell 266 ms. But the MLP's wider tune alone was 58 us a layer in its rows
+  and only 25 ms of first token. Its rows are benched with the weight already in the card's L2; a served chunk
+  reads it cold.
+- **No faster schedule is known for** the three FP8 products (51, 42 and 42 us; the qkv one runs about 515 TFLOP/s,
+  the two 6144-wide ones about 390), the MLP products at their new picks, and the recurrence across chunks.
+
 ## The 256-row pack on W8A8, against stock in one session (2026-11-17)
 
 One rented RTX 5090 (vast.ai; 46 vCPUs, driver 595.99, CUDA 13.0 toolkit), main at `f1b7171fc`, native and stock
