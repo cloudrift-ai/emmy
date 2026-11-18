@@ -333,7 +333,7 @@ def capture_twin_graphs(
         retarget_constants_to_model,
         slice_routed_experts,
     )
-    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, embed_gather_graph, trace_split  # noqa: PLC0415
+    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, embed_gather_graph, query_key_graph, trace_split  # noqa: PLC0415
 
     model, revision = split_revision(model)
     cfg = AutoConfig.from_pretrained(model, revision=revision)
@@ -581,6 +581,14 @@ def capture_twin_graphs(
     # The gather of a token-embedding table serving pages (``EMMY_GEN_EMBED_GPU`` below its page count).
     if embed_gpu is not None and embed_gpu < -(-vocab // EMBED_PAGE_ROWS) and not tied:
         graphs["embed-sym"] = embed_gather_graph(vocab, hidden, td)
+    # The query and key norms and rope of the sparse attention the 1Cat fork hosts (Qwen3.8-Flash-Next), one program
+    # for every such layer, whose weights are its inputs, at a rank's heads.
+    if getattr(text, "model_type", None) == "qwen4_exp_text":
+        heads, kv_heads, head_dim = text.num_attention_heads, text.num_key_value_heads, text.head_dim
+        rotary = int(head_dim * text.rope_parameters.get("partial_rotary_factor", 1.0))
+        graphs["qk-norm-rope-sym"] = query_key_graph(
+            heads // expert_slices, max(1, kv_heads // expert_slices), head_dim, rotary, text.max_position_embeddings, text.rms_norm_eps, td
+        )[0]
     if images:
         from emmy.serving.vision_tower import tower_twins  # noqa: PLC0415
 
