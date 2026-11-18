@@ -40,6 +40,38 @@ def _plus(expression, amount: int):
     return BinaryExpression("+" if amount > 0 else "-", expression, Literal(abs(amount), "int"))
 
 
+def _constant(expression) -> tuple:
+    """``expression`` as a part with no constant added, and the constant."""
+    if isinstance(expression, Literal) and isinstance(expression.value, int):
+        return None, expression.value
+    if isinstance(expression, BinaryExpression) and expression.op in ("+", "-"):
+        (left, a), (right, b) = _constant(expression.left), _constant(expression.right)
+        sign = 1 if expression.op == "+" else -1
+        if right is None:
+            return left, a + sign * b
+        if left is None and sign > 0:
+            return right, a + b
+        if left is not None:
+            return BinaryExpression(expression.op, left, right), a + sign * b
+    return expression, 0
+
+
+def _compared(expression):
+    """A comparison with its constant on one side alone. Moving a walk into its block adds the block's first row to
+    both sides of every test of a row, and the kernel's tests are read by their shape: ``a < b + 1``, never
+    ``a + 16 < b + 17``."""
+    if not isinstance(expression, BinaryExpression) or expression.op not in ("<", "<=", "==", ">", ">="):
+        return expression
+    (left, a), (right, b) = _constant(expression.left), _constant(expression.right)
+    if left is None or right is None:
+        return expression
+    return BinaryExpression(expression.op, _plus(left, max(a - b, 0)), _plus(right, max(b - a, 0)))
+
+
+def _tidy(stmts: Body) -> Body:
+    return stmts.map(lambda stmt: stmt.map_expressions(lambda expression: expression.rebuild(_compared)))
+
+
 def _nest(stmts: tuple, axes: tuple) -> tuple:
     for axis in reversed(axes):
         stmts = (Loop(axis=axis, body=Body(stmts)),)
@@ -185,7 +217,7 @@ def block_walk(graph: Graph, node_id: str, width: int) -> Graph:
             only = loop.body.map(lambda stmt: None if isinstance(stmt, Carry | Write) else stmt).map(lifted).pruned(()).map(opened)
             nest = Loop(axis=replace(loop.axis, extent=Dim(count)), body=Body(tuple(stmt.substitute(shift) for stmt in only)))
             shape = (Dim(count), *other_extents, *((Dim(len(sums_names)),) if len(sums_names) > 1 else ()))
-            add(early_name, Body((*before, nest, *after)).pruned(()), shape, (seed, *kept.values()))
+            add(early_name, _tidy(Body((*before, nest, *after)).pruned(())), shape, (seed, *kept.values()))
 
         # The block's own rows: a walk over the block's steps that carries those rows alone.
         inward = Sigma({moving: _plus(moving, low)})
@@ -222,7 +254,7 @@ def block_walk(graph: Graph, node_id: str, width: int) -> Graph:
 
         only = loop.body.map(walked).map(homed)
         nest = Loop(axis=replace(loop.axis, extent=Dim(count)), body=Body(tuple(stmt.substitute(shift) for stmt in only)))
-        add(kept[block], Body((*before, nest, *after)), shaped(high - low), (started, early_name))
+        add(kept[block], _tidy(Body((*before, nest, *after))), shaped(high - low), (started, early_name))
 
     # The state again: every block's rows where they belong.
     whole = f"{out.name}__blocked"
