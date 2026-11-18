@@ -1,5 +1,85 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## The 256-row pack on W8A8, against stock in one session (2026-11-17)
+
+One rented RTX 5090 (vast.ai; 46 vCPUs, driver 595.99, CUDA 13.0 toolkit), main at `f1b7171fc`, native and stock
+vLLM 0.32.0 in one session with the settings of the 2026-10-25 section and prompts cut again from this tree. The
+pack is exported with 256-row prefill chunks under strict evidence from this golden alone, and the strict serving
+audit passes with the 256-row chunk (80 of 80 twins).
+
+| | native, 256-row chunks | stock vLLM 0.32.0 | native on 2026-11-15, W8A16 |
+|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 7.74 ms / 0.054 s | 7.34 ms / 0.160 s | 8.6 ms / 0.068 s |
+| TPOT / TTFT, 7,680-token prompt | 8.89 ms / 1.61 s | 7.96 ms / 0.670 s | 8.7 ms / 2.44 s |
+| TPOT / TTFT, 197,632-token prompt | 10.1 ms / 82.4 s | 10.05 ms / 68.3 s | 11.5 ms / 113 s |
+| device memory at rest | 28.6 GiB | 30.6 GiB | 28.9 GiB |
+
+- **Against the bar.** TPOT is inside it in every cell (1.05x, 1.12x and 1.01x stock; the bar 1.2x, 1.2x and 1.5x).
+  The first token is ahead of stock at 256 tokens, inside the bar at 197,632 (1.21x, the bar 2x) and outside it at
+  7,680: 2.4x stock, where 2x is 1.34 s. Every native cell was run twice, on two exports of the pack, and repeats to
+  about 1%. GSM8K was not scored and draft acceptance was not read in this session.
+- **The golden.** Main's file already held the 256-row Gated DeltaNet program as #1420 traces it, fully recorded,
+  so this file is main's plus the records of the section below for the other programs. Four roots were open after
+  that and are recorded here, each with its pieces tuned and the root recorded alone: the 16-row program's first
+  and second root (49 and 93 us) and its small recurrence root (28 us), and the 64-row program's second root
+  (125 us). A record compiles every root of its program, so the three 16-row roots had to be benched before any
+  of them could be recorded. Two roots of an older 16-row program that no fresh trace gives are dropped with the
+  pieces only they reached, and two rows of one alternative piece are proposals again.
+- **Where a 256-row chunk goes.** A 7,680-token prefill is 30 chunks of about 53 ms. From `nsys
+  --cuda-graph-trace=node` over ten 256-token and four 7,680-token requests (130 chunks), kernel time a chunk: the
+  Gated DeltaNet layers 40.8 ms (0.85 ms a layer), the attention layers 11.1 ms (`post` 5.5, the fold 3.4, `pre`
+  2.2), everything else under 1 ms. So the chunk is kernel time now: the 25 ms that no row explained on 2026-11-15
+  is not there on this pack. Inside a Gated DeltaNet layer the two MLP kernels take 161 and 94 us and the largest
+  recurrence and projection pieces 71, 58, 53 and 52 us.
+- **Where a decode step goes.** The same trace holds 1,497 verify steps. The three-row Gated DeltaNet programs take
+  13.2 ms of kernel time a step, more than everything else in the step together: the next are the 16-row `post`
+  and `pre` programs (2.2 and 1.2 ms), the head (1.4 ms) and the drafter (1.2 ms). One three-row kernel alone,
+  71 us a launch, is 3.4 ms a step.
+- **What the 7,680-token cell still needs.** 1.34 s is about 44 ms a chunk, 9 ms less than now. Only the Gated
+  DeltaNet layers hold that much.
+
+## Nineteen W8A8 roots recorded (2026-11-16)
+
+The W8A8 programs of the section below had no rows in this golden, so no strict export worked on main. Recorded on
+one rented RTX 5090 (48 vCPUs, CUDA 13.3), main at `0d69a2def`: every root the fresh trace adds, 19 of them, each
+with a cut route, its pieces tuned (`--tune 40`) and the root recorded alone under strict evidence. The golden
+drops the four targets only the replaced W8A16 programs wrote. The rental ended before the export passed: no pack
+was served and no cell was timed in this session.
+
+Main then moved under these records: #1420 traces the 256-row Gated DeltaNet program another way and settles a
+new normal form, which re-keys pieces of the first root at 3, 16 and 64 rows. The section above holds what was
+recorded again; the 256-row column below is the program as it was traced before #1420.
+
+| a layer's new roots, warm | 1 row | 2 rows | 3 rows | 16 rows | 64 rows | 256 rows |
+|---|---|---|---|---|---|---|
+| Gated DeltaNet, first / second root | 94 us (one root) | 59 / 34 | 61 / 38 | 45 / 100 | 58 / 143 | 114 / 204 |
+| attention `pre` | | | | 35 | 52 | 128 |
+| attention `post` (the out projection's root) | | | | 18 | 31 | 76 |
+
+The any-width `pre` and `post` roots take 233 and 94 us at 512 rows.
+
+- **What is left before a strict export.** Five small recurrence roots that #1411's restamp left as proposals: one
+  of the 16-row program and four of the 256-row one. Routes were benched for all five (37 us; 6, 41, 0.7 and 229 us,
+  the last untuned) and none was recorded: the strict record of each stops in the 16-row program's first root, at a
+  piece (`type_as`, the FP8 codes) that one route cuts and another leaves whole, where the whole piece's measured
+  row is not among the schedules the family compile offers. The export from this golden alone gets through the
+  vision tower, the drafter and the decode and verify programs and stops at the 256-row prefill program's first
+  such root.
+- **What the rows say, with those five missing.** A 256-row Gated DeltaNet layer sums to 0.65 ms without the four
+  unrecorded roots (0.86 ms before, all roots) and an attention layer to 0.69 ms (0.90 ms). A three-row Gated
+  DeltaNet layer of the verify step sums to 0.14 ms. Sums of isolated rows, not a measurement of a chunk or a step.
+- **The routes.** As the priors pick them, all 19 roots run as one kernel on one block and hang. What worked: cut
+  every contraction, every reduction and every whole output, on the root and on each piece; inside a piece that
+  encodes an FP8 activation, cut the activation too, so the products are pure e4m3 products; leave a
+  contraction's other operands inside it. Cutting an operand that gathers the chunk state out of its product
+  writes a 200 MB buffer (the 256-row second root: 2.4 ms against 0.20 ms). Cutting every seam makes copy kernels
+  (the one-row root: 294 us against 94 us). The priors then give a state contraction a cooperative reduce on a
+  grid of up to 393,216 blocks (175 us) where a tuned tile takes 3 us, so every piece over a few microseconds has
+  to be tuned by name.
+- **Two things that cost the session time.** The first 256-row pack was exported without strict evidence to
+  profile it, and never returned its first token: the priors' picks for the unrecorded roots are that slow. And
+  the host stopped the instance once; the tune DB was in memory and its unrecorded rows were lost.
+
 ## The FP8 layers as W8A8, measured root by root (2026-11-15)
 
 The checkpoint declares its FP8 leaves' activations static: a modelopt `config_groups` entry with 8-bit float
@@ -64,8 +144,11 @@ Stock vLLM was not measured in this session, so the bar below is the 2026-11-12 
 | twins that deploy from the golden alone | 67 of 67 | 80 of 80 | |
 
 - **Width halves the first token and does not reach the 7,680-token bar.** A 256-row chunk takes about 81 ms where
-  four 64-row chunks take about 149 ms. From the golden's rows, the 48 Gated DeltaNet layers are about 51 ms of it
-  (1.06 ms each) and the 64 MLPs about 25 ms; the bar needs about 45 ms a chunk.
+  four 64-row chunks take about 149 ms. The bar needs about 45 ms a chunk. The golden's rows hold about
+  55.5 ms of it: a Gated DeltaNet layer is 0.86 ms (FP8 projections 0.40, MLP 0.29, the recurrence 0.16) and an
+  attention layer 0.90 ms at a 4,096 window (projections 0.40, MLP 0.28, the fold 0.21). Over the chunk the FP8
+  projections are 25.5 ms, the MLPs 18.6 ms, the recurrence 7.4 ms and the fold 3.3 ms. About 25 ms is in no row;
+  a served chunk was not profiled. (Corrected 2026-11-16: the split first written here counted the MLP twice.)
 - **The 197,632-token first token is inside the bar.** Long-window attention at 256 rows takes 4.96 ms a layer at
   131,072 positions, 3.1x the 64-row fold for four times the rows.
 - **GSM8K.** The two packs differ by 0.015 strict and 0.040 flexible, with a standard error of 0.033 on each score:
