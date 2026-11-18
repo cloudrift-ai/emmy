@@ -128,12 +128,14 @@ def test_random_input_values_draw_routed_expert_weights_at_weight_scale():
     assert 0.9 < float(_random_input_values(np.random.default_rng(7), (1024,), "f16", name="x").std()) < 1.1
 
 
-def test_block_scale_inputs_of_a_stored_kernel_are_drawn_as_a_checkpoint_scale():
-    """A stored kernel reads an FP8 weight's block scale as an input. Drawn at unit std, a gated MLP's FP16 output is
-    infinity or zero but for a few elements, and two orders of the same FP32 sum disagree on those."""
+def test_weight_scale_inputs_are_drawn_as_a_checkpoint_scale():
+    """A stored kernel reads an FP8 weight's block scale as an input, and a program reads an NVFP4 expert's per-tensor
+    scale as one. Drawn at unit std, a gated MLP's FP16 output is infinity or zero but for a few elements: the eager
+    reference holds NaN, or two orders of the same FP32 sum disagree on those."""
     import numpy as np
 
-    from emmy.compiler.backend.cuda.compare import _block_scale_inputs, _random_source_values
+    from emmy.compiler.backend.cuda.compare import _random_source_values, _weight_scale_inputs
+    from emmy.compiler.dtype import decode_f8
 
     dtypes = {
         "x": "f16",
@@ -142,11 +144,21 @@ def test_block_scale_inputs_of_a_stored_kernel_are_drawn_as_a_checkpoint_scale()
         "x_scale": "f32",
         "q_bits": "f4e2m1x2",
         "q_scale": "f16",
+        "w_gate_up": "f4e2m1x2",
+        "w_gate_up_scale": "f8e4m3",
+        "w_gate_up_scale_2": "f32",
     }
-    assert _block_scale_inputs(dtypes) == {"p_gate_weight_scale"}
-    scale = _random_source_values(np.random.default_rng(7), (136, 1, 40, 1), "f32", name="weight_scale_inv")
+    leaves = _weight_scale_inputs(dtypes)
+    assert leaves == {"p_gate_weight_scale": "weight_scale_inv", "w_gate_up_scale_2": "weight_scale_2"}
+    scale = _random_source_values(np.random.default_rng(7), (136, 1, 40, 1), "f32", name=leaves["p_gate_weight_scale"])
     assert scale.dtype == np.float32
     assert 0.02 <= float(scale.min()) * 448 and float(scale.max()) * 448 <= 0.08
+    # The largest e2m1 code (6) times an e4m3 block scale (drawn as a checkpoint's from its dtype) times this
+    # per-tensor scale is one to four weight std (0.02): each 16-value block's amax.
+    scale_2 = _random_source_values(np.random.default_rng(7), (64, 1), "f32", name=leaves["w_gate_up_scale_2"])
+    block = _random_source_values(np.random.default_rng(7), (64, 160), "f8e4m3", name="w_gate_up_scale")
+    amax = 6 * decode_f8(block, "f8e4m3") * scale_2
+    assert np.allclose([amax.min(), amax.max()], [0.02, 0.08])
 
 
 def test_run_no_code_errors(run_cli):
