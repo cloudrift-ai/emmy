@@ -1286,6 +1286,26 @@ def test_a_value_stored_once_per_group_of_a_flattened_axis_is_one_seam_with_its_
         np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
 
 
+def test_a_piece_formed_again_keeps_every_output_it_owns(monkeypatch) -> None:
+    """A piece that writes an output beside its workspace, formed again as a closed nest at one row, lost that
+    output's store: the region that does not read the row sat outside the row loop. The formed kernel then declared
+    an output nothing wrote, and a Gemma-3 layer's first half had no kernel once a prior picked that cut and the
+    weight's source layout. A formed kernel that owns fewer outputs is not taken; the piece stays as minted."""
+    from emmy.compiler.pipeline.passes.tile import _row
+
+    tile = _lifted_parent(_mimo_graph())
+    owned = [spec.write.output for spec in tile.output_specs]
+    assert len(owned) == 2
+    lift = _row.lift_nest
+
+    def one_output(body, shapes):
+        formed = lift(body, shapes)
+        return replace(formed, output_specs=formed.output_specs[:1])
+
+    monkeypatch.setattr(_row, "lift_nest", one_output)
+    assert [spec.write.output for spec in _row.reformed(tile, _row.io_shapes(tile)).output_specs] == owned
+
+
 def _head_norm_graph() -> Graph:
     """A product normalized over each head of a flat (head, head-dim) width that a projection then reads: the shape of
     a Gated DeltaNet readout. The statistic reads the product under its own reduce over the head dim; the normalized
