@@ -62,19 +62,19 @@ DEFAULT_NEGATIVES = 500
 # linear kernels whose 5090 twin records a smaller split — which the gate reports as red hardware-golden slices.
 PLACEMENT_ITERATIONS = 3000
 # Mining rounds. Round 0 is the uniform draw; each further round adds the rows the current model ranks near the
-# golden. ONE by default — mining is implemented and reachable (``--rounds 2``), but it is not on, because the
-# only measurement of it says it hurts: over the 1278-group golden dataset, round 1 moved top-1 from 545 to 517
-# and the mean log2 rank from 2.08 to 2.35, i.e. worse on the fit's own objective, scored over full pools.
+# golden. ONE by default — mining is implemented and reachable (``--rounds 2``), but it is not on, because every
+# measurement of it says it hurts. Over the 1278-group golden dataset, round 1 moved top-1 from 545 to 517 and the
+# mean log2 rank from 2.08 to 2.35, in-sample. Cross-validated over the 2098-group dataset with the candidate files'
+# labeled negatives (2026-11-18, 5 shape folds), it moved held-out top-1 from 1113 to 1081, top-5 from 1547 to 1503
+# and the mean log2 rank from 1.50 to 1.57; labeling the negatives did not change the verdict.
 #
-# The likely reason is that our negatives are UNLABELED, not known-bad. Mining selects the rows the model ranks
-# closest to the golden, which in a ~78k-row pool are exactly the rows most likely to be genuinely faster than
-# it; labelling those 0.0 teaches the model to bury good configs. That is the contamination the debiased
-# contrastive-learning bound predicts — it scales with the expected NUMBER of better-but-unlabeled rows in the
-# contrast set, and mining maximizes that number by construction. Standard hard-negative mining assumes the
-# negatives are known bad; here only the pinned rows are verified.
-#
-# The evidence is in-sample (no cross-validation run yet), so this is a default, not a verdict: re-measure
-# ``--rounds 2`` held-out before concluding mining is useless.
+# The likely reason is that most of our negatives are still UNLABELED, not known-bad: the labeled ones are a few per
+# pool against a draw of hundreds. Mining selects the rows the model ranks closest to the golden, which in a
+# ~78k-row pool are exactly the rows most likely to be genuinely faster than it; labelling those 0.0 teaches the
+# model to bury good configs. That is the contamination the debiased contrastive-learning bound predicts — it scales
+# with the expected NUMBER of better-but-unlabeled rows in the contrast set, and mining maximizes that number by
+# construction. Standard hard-negative mining assumes the negatives are known bad; here only the pinned rows and the
+# labeled negatives are measured. Re-measure ``--rounds 2`` held out once the candidate files cover far more rows.
 DEFAULT_ROUNDS = 1
 
 

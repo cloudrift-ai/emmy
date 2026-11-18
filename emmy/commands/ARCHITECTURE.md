@@ -1037,9 +1037,9 @@ a positive: `--iterations N` (trees; 400 by default, 3000 for the placement spac
 records the cross-validation behind it), `--depth D`, `--learning-rate η`, `--negatives K` (sampled negatives per pool per
 round, drawn from the rows with no measurement, beside every labeled negative the pool holds — the full corpus is ~38 M rows, so training samples while the rank metric still
 covers whole pools) and `--rounds R` (the first draws negatives uniformly, each further one mines hard negatives from
-what the current model ranks near the golden — **default 1, so mining is off**: the one measurement of it moved top-1
-from 545 to 517 over the 1278-group golden dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is
-the expected direction when the negatives are unlabeled rather than known-bad). Fits are not byte-reproducible —
+what the current model ranks near the golden — **default 1, so mining is off**: held out over the 2098-group dataset with the labeled negatives it moved top-1
+from 1113 to 1081, and `fit/catboost.DEFAULT_ROUNDS` records the numbers and why that is the expected direction while
+most negatives are unlabeled rather than known-bad). Fits are not byte-reproducible —
 CatBoost's histogram build is threaded — so two fits are compared by their metrics files rather than by a checksum.
 
 **A group is a candidate pool, not a golden.** A pool is one kernel on one card, in one precision regime, at one
