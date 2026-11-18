@@ -211,6 +211,14 @@ UNROLL = Knob(
     help="Max static loop trip count a lowering site flags for unrolling; pin 0 to keep loops rolled. Unset = per-site cap.",
 )
 
+#: The block width of a carried walk: ``tile/lift/005_block`` rewrites a kernel that carries a state into two levels
+#: of steps, blocks of this many. Pin-only, like ``UNROLL``: never stamped, featurized or enumerated.
+BLOCK = Knob(
+    "BLOCK",
+    KnobType.INT,
+    help="Steps a block of a carried walk holds; pin a width to run the walk in two levels of steps. Unset = one level.",
+)
+
 FAST_EXP = Knob(
     "FAST_EXP",
     KnobType.BOOL,

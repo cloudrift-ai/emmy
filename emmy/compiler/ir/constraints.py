@@ -76,6 +76,46 @@ def negated(condition: Expression) -> Expression:
     return BinaryExpression(_FLIPPED[condition.op], condition.left, condition.right)
 
 
+def spelled(condition: Expression) -> Expression:
+    """A comparison with what its two sides share cancelled and its constant on one side: ``a < b + 1``, never
+    ``a + 16 < b + 17``. A literal where nothing is left to vary. Anything else is handed back as it is.
+
+    A rewrite that moves a loop variable adds the same amount to both sides of every test of it, and a kernel's
+    tests are read by their shape, so a pass that moves one spells its comparisons again."""
+    if not isinstance(condition, BinaryExpression) or condition.op not in _FLIPPED:
+        return condition
+    sums: dict[str, tuple[Expression, Fraction]] = {}
+    constant = Fraction(0)
+    for sign, side in ((1, condition.left), (-1, condition.right)):
+        terms, offset, _ = affine_terms(side)
+        constant += sign * Fraction(offset)
+        for coefficient, operand in terms:
+            if isinstance(operand, Literal) and isinstance(operand.value, int):
+                constant += sign * Fraction(coefficient) * operand.value
+            else:
+                sums[str(operand)] = (operand, sums.get(str(operand), (operand, Fraction(0)))[1] + sign * Fraction(coefficient))
+    if constant.denominator != 1 or any(value.denominator != 1 for _, value in sums.values()):
+        return condition
+    if not any(value for _, value in sums.values()):
+        holds = {"<": constant < 0, "<=": constant <= 0, ">": constant > 0, ">=": constant >= 0, "==": constant == 0, "!=": constant != 0}
+        return Literal(holds[condition.op], "bool")
+
+    def side(sign: int) -> Expression:
+        parts = [
+            operand if value * sign == 1 else BinaryExpression("*", Literal(int(value * sign), "int"), operand)
+            for operand, value in sums.values()
+            if value * sign > 0
+        ]
+        if constant * sign > 0 or not parts:
+            parts.append(Literal(max(int(constant * sign), 0), "int"))
+        total = parts[0]
+        for part in parts[1:]:
+            total = BinaryExpression("+", total, part)
+        return total
+
+    return BinaryExpression(condition.op, side(1), side(-1))
+
+
 def _solvable(forms: Iterable[Form]) -> bool:
     """Whether rationals make every form at most zero: eliminate one name at a time."""
     rows = [(dict(terms), constant) for terms, constant in set(forms)]

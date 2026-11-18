@@ -2,7 +2,7 @@
 
 import pytest
 
-from emmy.compiler.ir.constraints import always, can_hold
+from emmy.compiler.ir.constraints import always, can_hold, spelled
 from emmy.compiler.ir.expression import parse
 
 
@@ -52,3 +52,24 @@ def test_what_follows_and_what_does_not():
     assert always(parse("a < c"), *_all("a < b", "b < c"))
     assert not always(parse("a < c"), *_all("a < b"))
     assert always(parse("a + 16 < b + 17"), parse("a < b + 1")) and always(parse("a < b + 1"), parse("a + 16 < b + 17"))
+
+
+@pytest.mark.parametrize(
+    ("written", "read"),
+    [
+        ("a + 16 < b + 17", "a < b + 1"),
+        ("4 * c + a < 4 * c + b + 2", "a < b + 2"),
+        ("a + 12 < 14", "a < 2"),
+        ("b + 10 <= b + 10", "true"),
+        ("b + 11 < b + 10", "false"),
+        ("a < b", "a < b"),
+        ("3 < a", "3 < a"),
+        ("a + b", "a + b"),  # no comparison: as it is
+    ],
+)
+def test_a_comparison_is_spelled_with_what_its_sides_share_cancelled(written, read):
+    """A rewrite that moves a loop variable adds to both sides of its tests; spelled again they are the tests the
+    kernel had, and one that no longer varies is a literal."""
+    assert str(spelled(parse(written))) == read
+    if read not in ("true", "false", "a + b"):
+        assert always(parse(written), parse(read)) and always(parse(read), parse(written))

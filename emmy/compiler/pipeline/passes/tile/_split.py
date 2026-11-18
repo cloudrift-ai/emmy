@@ -41,6 +41,7 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.constraints import can_hold, spelled
 from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, apply
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
@@ -868,6 +869,25 @@ def levels_fork(match: Match, root: Node) -> DeferredFork:
     return DeferredFork(lambda: frag, {}, structural=True, output=output)
 
 
+def _steps_that_write(axis: Axis, body: Body) -> int:
+    """How many of the steps of ``axis`` can write the state ``body`` carries. A step whose every cell can only keep
+    its own value writes nothing, and a walk's last steps that write nothing are no steps: a walk cut into blocks
+    of a width its length is no multiple of ends in such steps."""
+    count = axis.extent.as_static()
+    (carry,) = (stmt for stmt in body.iter() if isinstance(stmt, Carry))
+    defined = {stmt.name: stmt for stmt in body.iter() if isinstance(stmt, Select | Pre)}
+    chosen = defined.get(carry.value)
+    if not isinstance(chosen, Select) or len(chosen.branches) != 2:
+        return count
+    taken, kept = chosen.branches
+    own = defined.get(kept.value)
+    if not isinstance(own, Pre) or own.carrier != carry.name or tuple(own.index) != tuple(carry.index):
+        return count
+    while count > 1 and not can_hold(taken.select, BinaryExpression("==", Var(axis.name), Literal(count - 1, "int"))):
+        count -= 1
+    return count
+
+
 def realize_levels(match: Match, root: Node) -> tuple[Graph, dict[str, str]]:
     """Unroll the outer level of a kernel that carries a state through two levels of steps.
 
@@ -906,7 +926,7 @@ def realize_levels(match: Match, root: Node) -> tuple[Graph, dict[str, str]]:
         if tuple(copies.get(value, value) for value in stmt.values) == (carries[state].value,)
         and tuple(stmt.index) == tuple(carries[state].index)
     ]
-    if len(stored) != len(last) or len(last) > 1 or any(isinstance(stmt, Write) for stmt in (*beside, *before, *after)):
+    if len(stored) != 1 or len(last) != 1 or any(isinstance(stmt, Write) for stmt in (*beside, *before, *after)):
         raise ValueError(f"kernel {tile.name}: two levels of steps unroll for a kernel that stores its inner state alone")
     out = root.output
     steps = outer.axis.extent.as_static()
@@ -920,8 +940,15 @@ def realize_levels(match: Match, root: Node) -> tuple[Graph, dict[str, str]]:
     frag = _frag(match, root)
 
     def piece(stmts: Body) -> TileOp:
-        lifted = lift_nest(stmts, shapes)
+        # The outer step is a number now. Once the normal form has folded what that settles, every test is spelled
+        # again, the way a kernel's tests are read.
+        formed = LoopOp(body=stmts).body.map(lambda stmt: stmt.map_expressions(lambda expression: expression.rebuild(spelled)))
+        lifted = lift_nest(formed, shapes)
         return replace(lifted, knobs=consume_kernel_row(lifted.knobs))
+
+    def at_step(stmts, at: int) -> tuple:
+        here = Sigma({outer.axis.name: Literal(at, "int")})
+        return tuple(stmt.substitute(here) for stmt in stmts)
 
     def reads(stmts: Body) -> list[str]:
         read = {load.input for load in stmts.loads} | {stmt.seed for stmt in stmts.iter() if isinstance(stmt, Carry)}
@@ -935,7 +962,6 @@ def realize_levels(match: Match, root: Node) -> tuple[Graph, dict[str, str]]:
 
     written = output_root(root, {spec.write.output for spec in tile.output_specs})
     for at in range(steps):
-        here = Sigma({outer.axis.name: Literal(at, "int")})
         before_outer = made[at - 1] if at else carries[kept_state].seed
         start = left[at - 1] if at else carries[state].seed
         final = at == steps - 1
@@ -944,13 +970,13 @@ def realize_levels(match: Match, root: Node) -> tuple[Graph, dict[str, str]]:
             if isinstance(stmt, Pre) and stmt.carrier == kept_state:
                 return held(stmt.name, tuple(stmt.index), before_outer)
             if isinstance(stmt, Carry):
-                carry = stmt.replace(seed=start)
-                return carry if last or final else (carry, Write(output=left[at], index=stmt.index, values=(stmt.value,)))
+                return stmt.replace(seed=start)
             return stmt.replace(output=left[at]) if isinstance(stmt, Write) and not final else stmt
 
-        walked = Body(tuple(stmt.substitute(here) for stmt in inner.body)).map(stepped)
-        lets = tuple(stmt.substitute(here) for stmt in beside if not isinstance(stmt, Loop))
-        stmts = Body((*before, *lets, inner.replace(seed=True, body=walked), *after))
+        walked = Body(at_step(inner.body, at)).map(stepped)
+        steps_left = replace(inner.axis, extent=Dim(_steps_that_write(inner.axis, walked)))
+        lets = at_step((stmt for stmt in beside if not isinstance(stmt, Loop)), at)
+        stmts = Body((*before, *lets, inner.replace(axis=steps_left, seed=True, body=walked), *after))
         made_tile = piece(stmts)
         if final:
             # This piece takes the kernel's name, so its state buffer has the name of one of the kernel's: it
@@ -974,7 +1000,7 @@ def realize_levels(match: Match, root: Node) -> tuple[Graph, dict[str, str]]:
                 return Write(output=made[at], index=stmt.index, values=(stmt.value,))
             return stmt
 
-        stmts = Body((*before, *Body(tuple(stmt.substitute(here) for stmt in beside)).map(between), *after)).pruned(())
+        stmts = Body((*before, *Body(at_step(beside, at)).map(between), *after)).pruned(())
         made_tile = piece(stmts)
         frag.add_node(op=made_tile, inputs=reads(stmts), outputs=(Tensor(made[at], shapes[made[at]], F32),), node_id=made[at])
     raise AssertionError("unreachable: the last outer step returns")

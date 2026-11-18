@@ -1,4 +1,4 @@
-"""A fold in block form, in four steps: a prototype, wired into no pass.
+"""A fold in block form, in four steps: a worked model in numpy, the reference the compiler's own step is read against.
 
 A fold runs its statements once a step, each ``target[..] += product of reads`` summed over the statement's other
 variables, under its conditions. A step reads the state as the step found it and its writes land when it ends.
@@ -19,8 +19,10 @@ A product, a reduction and a map have no cycle and end at step 3 as one operatio
 cycle one block wide and its reads of earlier blocks become one product. The delta rule is all cycle, and step 4 on
 it is its chunk rule.
 
-The dependence questions are answered by evaluating the index conditions over the block's own index sets, which is
-exact for the extents given and reads no data. A compiler with symbolic extents needs a dependence test there.
+The model answers its dependence questions by evaluating the index conditions over the block's own index sets, which
+is exact for the extents given and reads no data. The compiler asks the same questions of comparisons
+(``ir/constraints.py``), and takes the first three steps for a walk that sums over the rows of its state
+(``tile/lift/005_block``). The fourth step is in the model alone.
 """
 
 from __future__ import annotations
@@ -560,88 +562,3 @@ def _components(earlier: dict[int, set[int]]) -> list[list[int]]:
         if node not in order:
             visit(node)
     return out
-
-
-# ---------------------------------------------------------------------------------------------------------------
-# The first three steps on a Loop IR kernel that carries a state.
-# ---------------------------------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Reading:
-    """One read of the carried state in a Loop IR kernel, for one block of rows and one side of it."""
-
-    name: str  # the read's SSA name
-    block: int  # -1 the rows of earlier blocks, 0 the block's own, 1 later ones
-    live: bool  # some step reads a cell an earlier step of the block wrote
-    lifted: bool  # whole blocks of the variable it sums over: no test inside one
-
-
-class Walk:
-    """A Loop IR kernel that carries one state and moves along one axis of it, a row a step.
-
-    What its steps read and write is ``ir/guards.py``'s reading: the kernel's selects and index conditionals as
-    comparisons. Nothing here looks at an extent's size but the block bookkeeping below, which counts steps."""
-
-    def __init__(self, body) -> None:
-        from emmy.compiler.ir.guards import carried  # noqa: PLC0415 - the prototype above needs no IR
-        from emmy.compiler.ir.stmt import Loop  # noqa: PLC0415
-
-        self.facts = carried(body)
-        self.loop, self.carry = self.facts.loop, self.facts.carry
-        self.stmts = list(self.loop.body.iter())
-        self.cells = list(self.facts.cells)
-        axes = {stmt.axis.name: stmt.axis for stmt in self.stmts if isinstance(stmt, Loop)}
-        #: The state's own shape.
-        self.shape = tuple(axes[name].extent.as_static() for name in self.cells)
-        found = self.facts.moving()
-        #: The state's axis the steps move along, and the row a step writes less the step.
-        self.moving, self.offset = found if found is not None else (None, 0)
-        steps = self.loop.axis.extent.as_static()
-        self.rows = np.arange(steps) + self.offset if found is not None else np.full(steps, -1)
-
-    def steps_of(self, width: int, block: int) -> np.ndarray:
-        """The steps that write the rows of ``block``."""
-        return np.flatnonzero((self.rows >= 0) & (self.rows // width == block))
-
-
-def survey(body, width: int, block: int) -> list[Reading]:
-    """Split, lift and isolate, read off a Loop IR body that carries one state: each read of the state, on each
-    side of the block of rows ``block`` it can fall on while a step of that block runs."""
-    from emmy.compiler.ir.constraints import always, can_hold  # noqa: PLC0415
-    from emmy.compiler.ir.expression import BinaryExpression, Literal, Var  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Loop  # noqa: PLC0415
-
-    walk = Walk(body)
-    if walk.moving is None:
-        return []
-    facts, at = walk.facts, walk.moving
-    low, high = Literal(block * width, "int"), Literal((block + 1) * width, "int")
-    row = BinaryExpression("+", Var(facts.step), Literal(walk.offset, "int"))
-    # A step of this block: the row it writes is one of the block's.
-    here = (*facts.bounds, BinaryExpression("<=", low, row), BinaryExpression("<", row, high))
-    summed = {stmt.axis.name for stmt in walk.stmts if isinstance(stmt, Loop) and stmt.is_reduce}
-    found: dict[tuple[str, int], Reading] = {}
-    for read in facts.reads:
-        cell = read.index[at]
-        tied = [condition for condition in read.guard if condition.free_vars() & cell.free_vars() & summed]
-        rest = [condition for condition in read.guard if condition not in tied]
-        sides = (
-            (-1, (BinaryExpression("<", cell, low),)),
-            (0, (BinaryExpression("<=", low, cell), BinaryExpression("<", cell, high))),
-            (1, (BinaryExpression("<=", high, cell),)),
-        )
-        for side, where in sides:
-            if not can_hold(*read.guard, *here, *where):
-                continue
-            live = False
-            if side == 0:
-                # An earlier step of the block wrote this cell: the step whose row it is, where that step writes it.
-                then = {facts.step: BinaryExpression("-", cell, Literal(walk.offset, "int"))}
-                then |= dict(zip(facts.cells, read.index, strict=True))
-                earlier = BinaryExpression("<", cell, row)
-                live = any(can_hold(*read.guard, *here, *where, earlier, *(c.substitute(then) for c in guard)) for guard in facts.written)
-            lifted = all(always(condition, *rest, *here, *where) for condition in tied)
-            seen = found.get((read.name, side))
-            found[(read.name, side)] = Reading(read.name, side, live or bool(seen and seen.live), lifted and (seen is None or seen.lifted))
-    return list(found.values())
