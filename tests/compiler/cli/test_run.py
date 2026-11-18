@@ -128,6 +128,27 @@ def test_random_input_values_draw_routed_expert_weights_at_weight_scale():
     assert 0.9 < float(_random_input_values(np.random.default_rng(7), (1024,), "f16", name="x").std()) < 1.1
 
 
+def test_block_scale_inputs_of_a_stored_kernel_are_drawn_as_a_checkpoint_scale():
+    """A stored kernel reads an FP8 weight's block scale as an input. Drawn at unit std, a gated MLP's FP16 output is
+    infinity or zero but for a few elements, and two orders of the same FP32 sum disagree on those."""
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.compare import _block_scale_inputs, _random_source_values
+
+    dtypes = {
+        "x": "f16",
+        "p_gate_weight_bits": "f8e4m3",
+        "p_gate_weight_scale": "f32",
+        "x_scale": "f32",
+        "q_bits": "f4e2m1x2",
+        "q_scale": "f16",
+    }
+    assert _block_scale_inputs(dtypes) == {"p_gate_weight_scale"}
+    scale = _random_source_values(np.random.default_rng(7), (136, 1, 40, 1), "f32", name="weight_scale_inv")
+    assert scale.dtype == np.float32
+    assert 0.02 <= float(scale.min()) * 448 and float(scale.max()) * 448 <= 0.08
+
+
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0

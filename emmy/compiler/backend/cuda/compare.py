@@ -150,6 +150,22 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
     return rng.standard_normal(shape, dtype=np.float32)
 
 
+def _block_scale_inputs(dtypes: dict) -> set[str]:
+    """The inputs, among ``dtypes`` (each input's dtype by name), that are the block scale of an 8-bit float weight: a
+    ``<weight>_scale`` beside its ``<weight>_bits``. A stored kernel reads its constants as inputs, and these are drawn
+    as a checkpoint's are (:func:`_random_source_values`). Drawn at unit std the weight is ten thousand times a real
+    one: a gated MLP's product of two such projections is infinity or zero in FP16, but for the few elements whose
+    gate is near zero, and on those two orders of the same FP32 sum disagree past any tolerance."""
+    from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
+
+    weights = {
+        name.removesuffix("_bits")
+        for name, dtype in dtypes.items()
+        if name.endswith("_bits") and get_dtype(dtype).name in {"f8e4m3", "f8e5m2"}
+    }
+    return {f"{weight}_scale" for weight in weights} & dtypes.keys()
+
+
 def _chunk_position(graph, static) -> int | None:
     """The ``position`` a bench gives a native step's program, whose rows start there in its cache (``q``, ``keys``):
     the window's last chunk, the one its attention is priced for. Drawn at random the rows sit at the cache's start,
@@ -256,9 +272,12 @@ async def bench_lowered_vs_torch(
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
     position = _chunk_position(lowered, _static)
+    block_scales = _block_scale_inputs({nid: node.output.dtype for nid, node in lowered.nodes.items() if isinstance(node.op, InputOp)})
     for nid, node in lowered.nodes.items():
         if isinstance(node.op, InputOp):
-            arr = _random_input_values(rng, _static(node.output.shape), node.output.dtype, name=nid)
+            # The checkpoint key's leaf is what names a block scale to the draw of a source.
+            draw, name = (_random_source_values, "weight_scale_inv") if nid in block_scales else (_random_input_values, nid)
+            arr = draw(rng, _static(node.output.shape), node.output.dtype, name=name)
             if nid == "position" and position is not None:
                 arr = np.full(arr.shape, position)
             # Keep the ndarray shape (no flatten) — a symbolic graph's launch
