@@ -238,6 +238,7 @@ def resolve_golden_arg(args) -> None:
         from emmy.compiler.pipeline.search.golden.restamp import isolated_program  # noqa: PLC0415
 
         document = GoldenFile.load(golden_file)
+        document.identities()  # a kernel's name is computed from its identity: every one at once, on EMMY_WORKERS processes
         found = [k for k in document.kernels if k.name == kernel_name] or [k for k in document.kernels if kernel_name in k.name]
         if len(found) != 1:
             logger.error(

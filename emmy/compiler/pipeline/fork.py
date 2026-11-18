@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import Op
 
+from emmy import config
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused, schedule
 from emmy.compiler.pipeline.knob import evidence_row_vouches, values_equal
 
@@ -314,22 +315,24 @@ def parallel_descent_rows(
     jobs = [job for job in jobs if job[1]]
     _DRAWING = (options, skip)
     try:
-        chunks = _forked(_draw_chunk, jobs, workers)
+        chunks = forked(_draw_chunk, jobs, workers)
     finally:
         _DRAWING = None
     return [row for chunk in chunks for row in chunk]
 
 
-def _forked(fn: Callable, jobs: Sequence, workers: int) -> list:
+def forked(fn: Callable, jobs: Sequence, workers: int) -> list:
     """``fn`` over ``jobs``, on up to ``workers`` forked processes that inherit this process's memory — the fork
-    is the point: the children read what the parent set up and send back only results. One worker runs them here,
-    and so does a daemonic process, which may not start children (a vLLM worker compiling a kernel with no
-    evidence draws its cold pool in place)."""
+    is the point: the children read what the parent set up and send back only results. A child runs on one worker
+    (``config.set_workers``), so a compile it runs draws in-process. One worker runs the jobs here, and so does a
+    daemonic process, which may not start children (a vLLM worker compiling a kernel with no evidence draws its
+    cold pool in place)."""
     if workers <= 1 or len(jobs) < 2 or current_process().daemon:
         return [fn(job) for job in jobs]
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
-        with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=get_context("fork")) as pool:
+        context = get_context("fork")
+        with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=context, initializer=config.set_workers, initargs=(1,)) as pool:
             return list(pool.map(fn, jobs))
 
 
@@ -385,7 +388,7 @@ def parallel_expand(arms: Sequence[DeferredFork], *, workers: int = 1) -> None:
     pending = [index for index, arm in enumerate(arms) if "_built" not in arm.__dict__]
     _EXPANDING = arms
     try:
-        built = _forked(_expand_arm, pending, workers)
+        built = forked(_expand_arm, pending, workers)
     finally:
         _EXPANDING = None
     for index, (value, facts) in zip(pending, built, strict=True):
@@ -407,6 +410,36 @@ def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | F
             stack.append(iter(option.expand()))
         else:
             yield option
+
+
+#: The pieces a parallel walk is cut into before it forks: enough that uneven subtrees still fill every worker.
+_WALK_PIECES = 256
+
+#: The subtrees a forked walk worker enumerates: set by the parent before the fork, so the lazy tree is inherited,
+#: never pickled.
+_WALKING: Sequence[Op | Graph | Fork] | None = None
+
+
+def _walk_piece(piece: range) -> list[dict]:
+    return [leaf_knobs(leaf) for leaf in iter_leaves(_WALKING[piece.start : piece.stop])]
+
+
+def parallel_leaf_rows(options: Iterable[Op | Graph | Fork], *, workers: int = 1) -> list[dict]:
+    """The knob rows of every leaf, in :func:`iter_leaves` order, walked on up to ``workers`` forked processes. The
+    tree is expanded level by level here, each fork replaced in place by its children so the order holds, until
+    it is at least :data:`_WALK_PIECES` subtrees wide; they are cut into that many runs, each walked whole by one
+    worker. A worker returns rows, not leaves, as a draw does (:func:`parallel_descent_rows`)."""
+    global _WALKING
+    trees = list(options)
+    while len(trees) < _WALK_PIECES and any(isinstance(o, Fork) and not o.is_leaf for o in trees):
+        trees = [child for o in trees for child in (o.expand() if isinstance(o, Fork) and not o.is_leaf else [o])]
+    run = -(-len(trees) // _WALK_PIECES) or 1
+    _WALKING = trees
+    try:
+        chunks = forked(_walk_piece, [range(i, min(i + run, len(trees))) for i in range(0, len(trees), run)], workers)
+    finally:
+        _WALKING = None
+    return [row for chunk in chunks for row in chunk]
 
 
 def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callable[[dict], bool] | None = None):

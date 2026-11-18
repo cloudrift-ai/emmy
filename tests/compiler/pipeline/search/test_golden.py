@@ -262,3 +262,15 @@ def test_restamp_drops_what_the_fresh_lowering_no_longer_writes(tmp_path) -> Non
     again, report2 = restamp(fresh)
     assert again == fresh and not report2.changed, "a restamped file is current"
     fresh.dump(tmp_path / "golden.json", repository=True)
+
+
+def test_a_files_identities_are_the_same_on_forked_workers(monkeypatch) -> None:
+    """A loaded file's kernel identities are computed on ``EMMY_WORKERS`` forked processes and kept on the kernels:
+    the same identities one process computes, under the same refs."""
+    path = _RECORDS_DIR / "rtx4080_sm89.json"
+    serial = GoldenFile.load(path).identities()
+    monkeypatch.setenv("EMMY_WORKERS", "3")
+    document = GoldenFile.load(path)
+    assert len(serial) > 1
+    assert document.identities() == serial
+    assert all(kernel.__dict__["exact_identity"] == serial[kernel.ref] for kernel in document.kernels)
