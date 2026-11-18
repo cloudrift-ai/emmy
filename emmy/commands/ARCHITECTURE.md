@@ -1006,10 +1006,12 @@ file stays behind. A source's rows are filed under its kind and digest — `gold
 tune DB; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A held source is
 recorded in the `source` table whatever became of its rows, so naming it again is a no-op and a report can list its
 sources. `export --db PATH OUT
-[--space {schedule,placement}] [--pool-sample N] [--seed N] [--jobs N]` writes the instance's rows as the dataset of
+[--space {schedule,placement}] [--pool-sample N] [--seed N] [--jobs N] [--candidates PATH…]` writes the instance's rows as the dataset of
 one space at `OUT` (`search/dataset/document.py` owns the format): the schedule space is every golden pool enumerated
 from its kernel's definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline
-ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with its microseconds; the placement space is
+ARCHITECTURE's Part 8 owns the pool), each holding the rows the candidate files `--candidates` names (files or
+directories) measured on its group — over 1.1× slower than the golden a labeled negative, faster a stale golden the
+manifest lists (`stale`) — and every measured pool labelled with its microseconds; the placement space is
 every golden kernel's placement forks, each the arms the cut pass offers with the golden's arm marked
 (`ranking.build_placement_groups`); each pool carries the constant inputs its own file's program binds, which the
 import filed beside the rows (the `constant` table), so the walk offers the forks a deploy sees, the layout fork of
@@ -1033,7 +1035,7 @@ and any written one can be pointed at with `EMMY_OFFLINE_FILE` and A/B'd against
 The fit is a `QuerySoftMax` CatBoost ranker, one group per candidate pool with every golden matched into that pool as
 a positive: `--iterations N` (trees; 400 by default, 3000 for the placement space — `fit/catboost.PLACEMENT_ITERATIONS`
 records the cross-validation behind it), `--depth D`, `--learning-rate η`, `--negatives K` (sampled negatives per pool per
-round, drawn from the unpinned rows — the full corpus is ~38 M rows, so training samples while the rank metric still
+round, drawn from the rows with no measurement, beside every labeled negative the pool holds — the full corpus is ~38 M rows, so training samples while the rank metric still
 covers whole pools) and `--rounds R` (the first draws negatives uniformly, each further one mines hard negatives from
 what the current model ranks near the golden — **default 1, so mining is off**: the one measurement of it moved top-1
 from 545 to 517 over the 1278-group golden dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is
@@ -1094,7 +1096,8 @@ which the loader checks against the fork it is asked at.
 
 ```bash
 emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json   # the rows
-emmy db export --db _data/dataset.db _data/schedule --space schedule     # the dataset the schedule fit reads
+emmy db export --db _data/dataset.db _data/schedule --space schedule \
+  --candidates emmy/compiler/pipeline/search/candidates/records          # the dataset the schedule fit reads
 emmy db export --db _data/dataset.db _data/placement --space placement   # the dataset the placement fit reads
 emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json     # the shipped weights, 5 shape folds
 emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
