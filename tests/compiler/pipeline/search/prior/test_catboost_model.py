@@ -11,7 +11,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, pack_features
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior import OfflinePrior
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, CatBoostModel
@@ -162,6 +162,31 @@ def test_a_verified_row_is_never_drawn_as_a_negative():
     scores = np.arange(50, dtype=float)[::-1]  # row 0 scores highest, so the pins sit inside the window
     mined = trainer._hard(scores, (0, 1))
     assert len(mined) == 12 and not {0, 1} & set(mined.tolist())
+
+
+def test_every_labeled_negative_trains_and_no_measured_row_is_drawn(monkeypatch):
+    """A pool's labeled negatives ride into every fit at label 0.0, and the uniform draw takes only rows with no
+    measurement: a candidate measured within noise of the golden (row 5 here) is neither a positive nor a negative."""
+    import catboost
+
+    seen = []
+    real = catboost.Pool
+
+    def spy(data, label, group_id):
+        seen.append((data, label))
+        return real(data, label, group_id=group_id)
+
+    monkeypatch.setattr(catboost, "Pool", spy)
+    rows = [{"D_a": float(i), "D_b": 0.0} for i in range(20)]
+    packed = pack_features(rows)
+    group = GoldenGroup.over("gpuA/p", "p", "warp", "gpuA", "s", packed, 19, negatives=(0, 1), measured=(0, 1, 5, 19))
+    fit = CatBoostTrainer(feature_names=FEATURES, iterations=5, negatives=100).fit([group])
+    [(data, label)] = seen
+    trained = dict(zip(data[:, FEATURES.index("D_a")].astype(int).tolist(), label.tolist(), strict=True))
+    assert trained == {19: 1.0, 0: 0.0, 1: 0.0, **{i: 0.0 for i in range(20) if i not in (0, 1, 5, 19)}}
+    assert fit.rows == len(trained) == 19
+    mined = CatBoostTrainer(feature_names=FEATURES, negatives=3)._hard(-np.abs(np.arange(20.0) - 5), (0, 1, 5, 19))
+    assert len(mined) == 3 and not {0, 1, 5, 19} & set(mined.tolist())  # row 5 scores highest, and is measured
 
 
 def test_row_accounting_covers_every_positive():

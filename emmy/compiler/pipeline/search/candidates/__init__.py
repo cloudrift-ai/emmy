@@ -80,6 +80,23 @@ def space_size(pool: GoldenPool) -> int:
     return size
 
 
+def measured_rows(paths: Sequence[Path]) -> dict[tuple, tuple[GoldenRow, ...]]:
+    """The measured rows of the candidate files at ``paths`` by card and group — ``(gpu, exact identity, sizes,
+    regime)``, the key a golden pool of the dataset export joins on — each filed under its file's source."""
+    from emmy.compiler.pipeline.search.golden.evidence import file_source  # noqa: PLC0415
+
+    out: dict[tuple, tuple[GoldenRow, ...]] = {}
+    for path in paths:
+        document = GoldenFile.load(path)
+        source = file_source("candidate", path)
+        for key, rows in _groups(document).items():
+            measured = [row for row in rows if row.measured]
+            out[(document.gpu_name, *key)] = tuple(
+                GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.measurements.emmy_us, source) for row in measured
+            )
+    return out
+
+
 def _groups(document: GoldenFile) -> dict[tuple, list[Row]]:
     """``document``'s rows that spell a schedule, by group: the kernel's exact identity, the sizes and the regime."""
     identity = document.identities()

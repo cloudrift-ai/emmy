@@ -124,6 +124,37 @@ def test_a_carried_kernels_pool_offers_both_storages_and_a_golden_lands_on_its_o
     assert skipped == [] and [group.feats[i, column] for i in group.golden_ids] == [1.0]
 
 
+def test_candidates_label_a_pool_by_how_much_slower_than_its_golden_they_measured():
+    """The candidate file's rows on a golden pool's group label it: one measured more than ``POSITIVE_WITHIN``
+    slower than the golden is a negative, one faster is no positive but a stale golden the export reports, one within
+    the noise is neither. A verified row the golden beats by more than the noise is a negative too. All of them are
+    measured rows, which the trainer never draws."""
+    from emmy.compiler.pipeline.search.dataset import GoldenRow, KernelDef, regime_of
+    from emmy.compiler.pipeline.search.db import knobs_json
+    from emmy.compiler.pipeline.search.db.export import with_candidates
+    from tests.compiler.passes.test_shared_carry import _graph as carried_state_graph
+
+    kernel = KernelDef(loop_ir=carried_state_graph().to_wire(), formed=True)
+    regime = regime_of(False, {"FAST_MATH": True})
+    bare = GoldenPool(CARDS[(7, 0)], (7, 0), regime, kernel, {}, ())
+    rows = enumerate_pool(bare, pool_context(bare)).rows
+    first = {}
+    for i, row in enumerate(rows):
+        first.setdefault(tile_signature(row), (i, {str(k): str(v) for k, v in row.items()}))
+    (golden, knobs), (slow_golden, slow_knobs), *others = first.values()
+    (slower, a), (faster, b), (near, c) = others[:3]
+    pool = replace(bare, rows=(GoldenRow(knobs, 1.0, "golden:a"), GoldenRow(slow_knobs, 1.5, "golden:b")))
+    measured = (GoldenRow(a, 1.2, "candidate:c"), GoldenRow(b, 0.5, "candidate:c"), GoldenRow(c, 1.05, "candidate:c"))
+    key = (pool.gpu, kernel.exact_identity, knobs_json({}), regime)
+    [labeled], stale = with_candidates([pool], {key: measured, (*key[:3], ""): measured})
+    assert labeled.candidates == measured and stale == [(pool.gpu, pool.name, 0.5, 1.0)]
+    assert with_candidates([pool], {}) == ([pool], [])
+    [group], skipped = build_golden_groups([labeled])
+    assert skipped == [] and group.golden_ids == (golden,)
+    assert group.negative_ids == tuple(sorted((slow_golden, slower)))
+    assert group.measured_ids == tuple(sorted((golden, slow_golden, slower, faster, near)))
+
+
 def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp_path):
     """A golden that cut its kernel is, in the placement space, the parent's placement fork: the arms the cut
     pass offers unpinned — keep fused, one kernel; the cut, two — featurized from the kernels each leaves, the
