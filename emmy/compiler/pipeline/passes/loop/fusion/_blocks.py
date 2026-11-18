@@ -19,7 +19,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, apply
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, Var, apply
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Pre, Write
@@ -140,10 +140,14 @@ def block_walk(graph: Graph, node_id: str, width: int) -> Graph:
                 cut = Loop(axis=replace(stmt.axis, extent=Dim(top - low)), body=Body(inner))
                 if not early:
                     return cut
+                # Only the row the step writes takes the lifted part. Every other cell reads one fixed cell of it,
+                # the way the kernel's own reads do, so the walk does not pull the buffer in once a row.
+                mine = BinaryExpression("==", Var(moving), _plus(step, int(rows[0])))
+                where = tuple(TernaryExpression(mine, index, Literal(0, "int")) for index in (local, *others))
                 joined = []
                 for name, slot in zip(sums_names, slots, strict=True):
                     joined += [
-                        Load(names=(f"{name}__early",), input=early_name, index=(local, *others, *slot)),
+                        Load(names=(f"{name}__early",), input=early_name, index=(*where, *slot)),
                         Assign(name, apply("add", f"{name}__own", f"{name}__early")),
                     ]
                 return (cut, *joined)
