@@ -94,7 +94,17 @@ hardware golden, which `tests/github/test_golden_fill_recipe.py` keeps whole —
 `run --record-greedy` (a proposal) or `run --record` (a `torch.compile` time) until its two-hour budget is spent. The
 job copies the returned file over the golden, holds it to `emmy golden check`, and pushes it to `main`, after a
 timed-out fill too, so a large file fills over several nights. The other jobs tolerate the hardware goldens moving on
-`main` while they run.
+`main` while they run. A hardware golden's candidate file copies the golden's tables (GLOSSARY, "Candidate file"), so
+where the filled golden has one the job copies them again with `emmy candidates build`, reading no freeze, and pushes
+the two files together.
+
+The freeze job, after the prior job's fold, compiles every row of the measurement freeze and of the candidate files
+under its own schedule and drops the rows the compiler no longer realizes (`emmy golden realize --drop`, `emmy
+candidates realize --drop`), folds the freeze once more and pushes both. It rents nothing.
+
+`.github/candidates-fill/recipe.yaml` is the fill recipe's twin for the candidate files: one row per hardware golden
+on its card, a tune of every kernel `emmy candidates build --json` lists as under its target, and the tunes' freeze
+files returned. No workflow runs it; the `refresh-candidates` skill does, on a rented card or a box handed to it.
 
 The workflow ends with one GitHub-hosted notification job that waits for every other job and posts a single summary to
 #emmy-robots: each job's result, whether the durations changed, each prior's comparison and picks, the compiler gaps,

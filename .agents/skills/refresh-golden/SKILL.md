@@ -187,9 +187,9 @@ evidence at a cut fork (DeepSeek V4, after #981 and again after #1003). It prove
 not that every fork a deploy meets has a measured arm.
 
 A hardware golden has a candidate file beside it (`emmy/compiler/pipeline/search/candidates/records/<same name>`,
-GLOSSARY "Candidate file"), which carries the golden's programs, kernels and decisions. After the golden changes, run
-`emmy candidates restamp` and then `emmy candidates build`, which copies the golden's tables again and keeps the
-candidate rows whose group the golden still holds.
+GLOSSARY "Candidate file"), which copies the golden's programs, kernels and decisions. A change to the golden leaves
+it stale and the candidate tests red: finish with the `refresh-candidates` skill's repair steps (`emmy candidates
+restamp`, then `emmy candidates build`) in the same PR.
 Keep the prior reproduction gate green (AGENTS.md finalization step 22): a refreshed hardware golden refits both priors
 in the same PR; a refreshed recipe golden the shipped priors do not reproduce is refit for or tagged `prior-pending`.
 

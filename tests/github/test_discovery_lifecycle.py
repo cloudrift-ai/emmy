@@ -182,7 +182,7 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
 def test_nightly_drops_the_rows_the_compiler_no_longer_realizes_after_the_fold():
     """The freeze job runs after the prior job's fold, on the branch's tip rather than the run's commit: it drops the
     rows the compiler no longer realizes, folds the files again and commits them, only from main and only while main
-    moved in no path the realization depends on."""
+    moved in no path the realization depends on. The candidate files take the same drop in the same step."""
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
     job = document["jobs"]["freeze"]
     checkout, lfs, _setup, drop, commit, summary = job["steps"]
@@ -195,18 +195,41 @@ def test_nightly_drops_the_rows_the_compiler_no_longer_realizes_after_the_fold()
     assert freezes == "emmy/compiler/pipeline/search/freezes"
     # A compiler change on main while the rows compiled must stop the push: the freeze and the compiler are not tolerated.
     assert not any(path.startswith("emmy/compiler/pipeline/search/freezes") for path in job["env"]["TOLERATED_PATHS"].split())
+    candidates = job["env"]["CANDIDATES"]
+    assert candidates == "emmy/compiler/pipeline/search/candidates/records"
+    assert not any(path.startswith(candidates) for path in job["env"]["TOLERATED_PATHS"].split())
     steps = [
         'emmy golden realize "$FREEZES" --drop --json _data/realize.json',
+        'emmy candidates realize "$CANDIDATES" --drop --json _data/realize_candidates.json',
         "emmy db import",
         'emmy db freeze --db _data/fold.db --out "$FREEZES"',
     ]
     assert sorted(steps, key=drop["run"].index) == steps
     assert "continue-on-error" not in drop
     assert commit["if"] == "steps.drop.outputs.updated == 'true' && github.ref == 'refs/heads/main'"
-    assert (commit["uses"], commit["with"]["paths"]) == ("./.github/actions/push-to-main", freezes)
+    assert (commit["uses"], commit["with"]["paths"]) == ("./.github/actions/push-to-main", f"{freezes} {candidates}")
     assert summary["if"] == "always()" and summary["env"]["DROPPED"] == "${{ steps.commit.outcome }}"
     assert "jq -r -f .github/workflows/scripts/freeze_realized.jq _data/realize.json" in summary["run"]
     assert (Path(__file__).parents[2] / ".github" / "workflows" / "scripts" / "freeze_realized.jq").is_file()
+    assert "jq -r -f .github/workflows/scripts/candidates_realized.jq _data/realize_candidates.json" in summary["run"]
+    assert (Path(__file__).parents[2] / ".github" / "workflows" / "scripts" / "candidates_realized.jq").is_file()
+
+
+def test_nightly_fill_rebuilds_the_candidate_file_of_the_golden_it_filled():
+    """A candidate file copies its golden's tables, so the fill job copies them again after it takes the filled
+    golden — where the golden has a candidate file, reading no freeze — and commits the two together; the jobs that
+    write no candidate file let one land on main meanwhile."""
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
+    jobs = document["jobs"]
+    candidates = jobs["fill"]["env"]["CANDIDATES"]
+    take = next(step for step in jobs["fill"]["steps"] if step.get("id") == "take")
+    commit = next(step for step in jobs["fill"]["steps"] if step.get("id") == "commit")
+    steps = ['cp "$working" "$GOLDEN"', 'emmy golden check "$GOLDEN"', 'emmy candidates build "$GOLDEN" --freeze "$(mktemp -d)"']
+    assert sorted(steps, key=take["run"].index) == steps
+    assert 'if [ -f "$candidates" ]' in take["run"]
+    assert commit["with"]["paths"] == "${{ steps.choose.outputs.golden }} ${{ steps.take.outputs.candidates }}"
+    for job in ("durations", "prior", "fill"):
+        assert f"{candidates}/*.json" in jobs[job]["env"]["TOLERATED_PATHS"].split()
 
 
 def test_onboarding_requires_platform_results_snapshot_and_git_lfs():

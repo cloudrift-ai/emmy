@@ -25,6 +25,7 @@ jobs:
         emmy/compiler/pipeline/search/prior/weights/placement.json
         emmy/compiler/pipeline/search/golden/records/*.json
         emmy/compiler/pipeline/search/freezes/*.json
+        emmy/compiler/pipeline/search/candidates/records/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
@@ -91,6 +92,7 @@ jobs:
         tests/durations_cpu.json
         emmy/compiler/pipeline/search/golden/records/*.json
         emmy/compiler/pipeline/search/freezes/*.json
+        emmy/compiler/pipeline/search/candidates/records/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
@@ -248,6 +250,7 @@ jobs:
       summary: ${{ steps.summary.outputs.summary || steps.choose.outputs.summary }}
     env:
       GOLDENS: emmy/compiler/pipeline/search/golden/records
+      CANDIDATES: emmy/compiler/pipeline/search/candidates/records
       EMMY_RENTAL_TAGS: emmy,workflow:golden-fill,gh-job:${{ github.run_id }}-${{ github.run_attempt }}
       SSH_KEY: /tmp/emmy-fill-ssh-${{ github.run_id }}-${{ github.run_attempt }}
       PROVIDER_CONFIG: /tmp/emmy-fill-provider-${{ github.run_id }}-${{ github.run_attempt }}.yaml
@@ -258,6 +261,7 @@ jobs:
         emmy/compiler/pipeline/search/prior/weights/schedule.json
         emmy/compiler/pipeline/search/prior/weights/placement.json
         emmy/compiler/pipeline/search/freezes/*.json
+        emmy/compiler/pipeline/search/candidates/records/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
@@ -338,6 +342,13 @@ jobs:
           cp "$working" "$GOLDEN"
           ./venv/bin/emmy golden check "$GOLDEN"
           ./venv/bin/emmy golden list "$GOLDEN" --missing --json _data/still_missing.json
+          # A candidate file copies its golden's tables: copy them again and keep its rows. No freeze is read (this
+          # job fetches none), so no candidate is added here.
+          candidates="$CANDIDATES/$(basename "$GOLDEN")"
+          if [ -f "$candidates" ]; then
+            ./venv/bin/emmy candidates build "$GOLDEN" --freeze "$(mktemp -d)"
+            echo "candidates=$candidates" >> "$GITHUB_OUTPUT"
+          fi
           failed=$(find .github/golden-fill -name '*_failed.txt' | sort | tail -1)
           echo "failed=$(cat "${failed:-/dev/null}" | wc -l)" >> "$GITHUB_OUTPUT"
           if git diff --quiet -- "$GOLDEN"; then
@@ -354,7 +365,7 @@ jobs:
           app-id: ${{ secrets.EXPERIMENT_APP_ID }}
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           message: "goldens: fill missing measurements on ${{ steps.choose.outputs.gpu }}"
-          paths: ${{ steps.choose.outputs.golden }}
+          paths: ${{ steps.choose.outputs.golden }} ${{ steps.take.outputs.candidates }}
 
       - name: Summarize the fill
         id: summary
@@ -636,6 +647,9 @@ jobs:
       summary: ${{ steps.summary.outputs.summary }}
     env:
       FREEZES: emmy/compiler/pipeline/search/freezes
+      # The candidate files take the same check: a candidate the compiler no longer realizes is dropped, and a tune
+      # refills its group.
+      CANDIDATES: emmy/compiler/pipeline/search/candidates/records
       # The other jobs may land their files on main while this job compiles; any other move stops the push, so rows
       # realized under one compiler are never dropped from under another.
       TOLERATED_PATHS: >-
@@ -665,9 +679,12 @@ jobs:
           git lfs install --local
           mkdir -p _data
           ./venv/bin/emmy golden realize "$FREEZES" --drop --json _data/realize.json
+          ./venv/bin/emmy candidates realize "$CANDIDATES" --drop --json _data/realize_candidates.json
           if [ -n "$(git status --porcelain -- "$FREEZES")" ]; then
             ./venv/bin/emmy db import --db _data/fold.db --fresh "$FREEZES"
             ./venv/bin/emmy db freeze --db _data/fold.db --out "$FREEZES"
+          fi
+          if [ -n "$(git status --porcelain -- "$FREEZES" "$CANDIDATES")" ]; then
             echo "updated=true" >> "$GITHUB_OUTPUT"
           else
             echo "updated=false" >> "$GITHUB_OUTPUT"
@@ -680,8 +697,8 @@ jobs:
         with:
           app-id: ${{ secrets.EXPERIMENT_APP_ID }}
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          message: "compiler: drop the rows the compiler no longer realizes from the measurement freeze"
-          paths: emmy/compiler/pipeline/search/freezes
+          message: "compiler: drop the rows the compiler no longer realizes from the measurement freeze and the candidate files"
+          paths: emmy/compiler/pipeline/search/freezes emmy/compiler/pipeline/search/candidates/records
 
       # Runs after a failed step too, so the message carries what the job finished.
       - name: Summarize the realization
@@ -694,8 +711,11 @@ jobs:
           if [ -f _data/realize.json ]; then
             summary=$(jq -r -f .github/workflows/scripts/freeze_realized.jq _data/realize.json)
           fi
+          if [ -f _data/realize_candidates.json ]; then
+            summary="$summary. Candidate files: $(jq -r -f .github/workflows/scripts/candidates_realized.jq _data/realize_candidates.json)"
+          fi
           if [ "$DROPPED" = success ]; then
-            summary="$summary. Dropped them from the measurement freeze on main"
+            summary="$summary. Dropped the rows not realized on main"
           fi
           echo "$summary"
           echo "summary=$summary" >> "$GITHUB_OUTPUT"

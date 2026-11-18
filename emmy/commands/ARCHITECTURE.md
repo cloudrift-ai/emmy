@@ -287,10 +287,12 @@ deletes a file: one nothing survives in is left alone and reported. Every comman
 through `GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
 
 `emmy candidates {build,check,restamp,realize}` maintains the candidate files (GLOSSARY, "Candidate file"; the module
-`search/candidates`). `build [GOLDEN…] [--freeze DIR] [--out DIR]` writes each hardware golden's candidate file: the
-golden's programs, kernels and decisions, the candidate rows the file already holds, and each group topped up to its
-target from the rows the freeze of the same card measured on it — a spread across their latency, never a schedule the
-golden holds. It logs the groups still under their target, which a tune on the card fills, and warns of a candidate
+`search/candidates`). `build [GOLDEN…] [--freeze DIR] [--out DIR] [--json PATH]` writes each hardware golden's
+candidate file: the golden's programs, kernels and decisions, the measured candidate rows the file already holds (a
+row a restamp left with a schedule and no time is dropped), and each group topped up to its target from the rows the
+freeze of the same card measured on it — a spread across their latency, never a schedule the golden holds. It logs
+the groups still under their target, which a tune on the card fills, and `--json PATH` writes them with the kernel,
+regime and sizes a tune runs at: the list `.github/candidates-fill/recipe.yaml` tunes from. It warns of a candidate
 faster than its golden's row. A card nothing was measured on gets no file. `check`, `restamp` and `realize` are the
 `emmy golden` subcommands over the candidate files, every repository candidate file where no path is named.
 
