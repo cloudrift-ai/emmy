@@ -473,3 +473,16 @@ def test_a_step_with_a_full_matrix_or_a_scale_per_row_has_no_factors() -> None:
     graph, _, _ = _rank_one(8, 6)
     with pytest.raises(ValueError, match="one step a part to one map"):
         _cut(graph, {SCAN: "g4k2f"})
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("last", [False, True], ids=["every-state", "last-state"])
+def test_maps_kept_in_factors_match_the_sequential_walk_on_the_gpu(last: bool) -> None:
+    from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
+
+    graph, arrays, want = _rank_one(8, 6, seed="S0", last=last)
+    with pinned_knobs({SCAN: "g8k3f"}):
+        graph = Pipeline.build(CUDA_PASSES).run(graph)
+    result, _ = run_program(graph, arrays)
+    np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=1e-4, atol=1e-5)
