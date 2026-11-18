@@ -163,3 +163,34 @@ def test_the_last_gated_residual_closes_the_streams(built):
     streams = torch.randn(3, 4 * 512, dtype=torch.float16, device="cuda")
     with torch.no_grad():
         torch.testing.assert_close(model.runner.final_norm_device(streams), mixer(streams))
+
+
+def test_emmy_runs_the_sparse_attention_query_and_key_norms_and_rope(built):
+    """On a step of up to the decode bucket's tokens, a hosted sparse-attention layer takes its query and key norms and
+    rope from Emmy's program, which returns what the fork's eager modules return for text positions, every rotary axis
+    the same: the query and the key to within fp16 rounding, the value and the gate exactly. A wider step keeps the
+    fork's modules."""
+    import torch
+
+    from emmy.serving.vllm_model_gen import _emmy_query_key
+
+    _path, _vllm_config, model = built
+    layer = model.fork_attn[2]
+    fork = layer._project_qkv_gate
+    torch.manual_seed(2)
+    with torch.no_grad():
+        layer.q_norm.weight.normal_(0, 0.2)
+        layer.k_norm.weight.normal_(0, 0.2)
+    _emmy_query_key([layer], 4, torch.float16, model.config.max_position_embeddings)
+    try:
+        for rows in (1, 4, 5):
+            qkv = torch.randn(rows, 2 * (layer.q_size + layer.kv_size), dtype=torch.float16, device="cuda")
+            positions = torch.randint(0, 256, (1, rows), device="cuda").expand(3, rows).contiguous()
+            want, got = fork(qkv, positions), layer._project_qkv_gate(qkv, positions)
+            for name, w, g in zip(("query", "key", "value", "gate"), want, got, strict=True):
+                if name in ("query", "key") and rows <= 4:
+                    torch.testing.assert_close(g, w, atol=4e-3, rtol=4e-3, msg=f"{rows} rows: {name}")
+                else:
+                    assert torch.equal(g, w), f"{rows} rows: {name}"
+    finally:
+        del layer._project_qkv_gate

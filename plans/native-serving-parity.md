@@ -585,6 +585,18 @@ What the session changes for the milestones:
    about 0.66). The same trace says the verify step's largest term is the three-row Gated DeltaNet programs,
    13.2 ms of kernel time a step. GSM8K was not scored on this pack.
 
+   2026-11-18, fourth rental: the 256-row Gated DeltaNet layer tuned (the recipe's DISCOVERY has the table). #1425's
+   matrix-product arm is not offered on this program: the recurrence across chunks also writes a per-step output
+   that reads the state off its own coordinates, so the step is not affine as `Fold.affine` reads it, and #1425's
+   measurements say so wide a step loses anyway. The real lever was the tune #1429 skipped: twenty pieces tuned by
+   name, the MLP's two NVFP4 products over 250 schedules, nine roots recorded alone. The layer's rows sum to 569 us
+   (734 before). Served, strict export, audit 80 of 80: first token 0.044 / 1.344 / 79.9 s at 256 / 7,680 /
+   197,632 tokens. The 7,680-token cell misses the 1.34 s bar by 4 ms (timed twice). The rows promised more than
+   the chunk got: the MLP tune was 58 us a layer in its hot-cache rows and 25 ms of first token, because a served
+   chunk reads each layer's weights cold. Left, for the last 4 ms or more: an MLP schedule ranked cold (nsys over
+   a served chunk, as the decode matmul rows are), the two 6144-wide FP8 products (about 390 TFLOP/s against 515
+   for the qkv one, no faster schedule in 150), and the 24 us recurrence across chunks.
+
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
 
