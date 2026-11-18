@@ -1,5 +1,6 @@
 """``emmy db export`` — a DB instance's rows as a :class:`~..dataset.Dataset`: its golden pools, each enumerated from
-the kernel's definition and packed into a training group (``ranking.build_golden_groups``), its measured pools
+the kernel's definition and packed into a training group (``ranking.build_golden_groups``) with the rows the
+candidate files measured on its group, its measured pools
 labelled with their microseconds, and the provenance a reader needs to know what it holds.
 
 This is the one place the DB's rows become the dataset's groups, and the one direction the two packages meet: the
@@ -11,11 +12,13 @@ from __future__ import annotations
 import logging
 import math
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from multiprocessing import get_context
+from pathlib import Path
 
 from emmy.compiler.pipeline.search import progress
+from emmy.compiler.pipeline.search.candidates import measured_rows
 from emmy.compiler.pipeline.search.dataset import (
     REGIME_PINS,
     Dataset,
@@ -64,6 +67,19 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
         golden = tuple(GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.us, row.source) for row in rows)
         pools.append(GoldenPool(gpu, cap, regime, kernels[identity], dict(rows[0].bindings), golden))
     return pools, dict(dropped)
+
+
+def with_candidates(pools: list[GoldenPool], candidates: Mapping[tuple, tuple[GoldenRow, ...]]) -> tuple[list[GoldenPool], list[tuple]]:
+    """``pools``, each holding the rows ``candidates`` (``candidates.measured_rows``) measured on its group — the
+    card, the kernel's exact identity, the sizes and the regime — and the stale goldens: each candidate faster than
+    every golden row of its pool, as ``(gpu, pool name, candidate µs, golden µs)``. A faster candidate is no
+    positive; the golden that missed it is re-recorded on the card."""
+    out, stale = [], []
+    for pool in pools:
+        rows = candidates.get((pool.gpu, pool.kernel.exact_identity, knobs_json(pool.bindings), pool.regime), ())
+        stale.extend((pool.gpu, pool.name, row.us, pool.emmy_us) for row in rows if row.us < pool.emmy_us)
+        out.append(replace(pool, candidates=rows) if rows else pool)
+    return out, stale
 
 
 def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
@@ -177,11 +193,14 @@ def export_dataset(
     seed: int,
     space: str = "schedule",
     jobs: int | None = None,
+    candidates: Sequence[Path] = (),
 ) -> Dataset:
     """Every row of ``db`` as a dataset of one ``space``. The schedule space: the golden pools enumerated under
     their own card's context and packed (``sample`` candidates drawn per pool during enumeration, 0 for every
-    row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
-    the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
+    row), each holding what the candidate files at ``candidates`` measured on its group (:func:`with_candidates`:
+    the labeled negatives, and the stale goldens the dataset reports), and the measured pools. The placement
+    space: each kernel's placement forks, the arms featurized and the golden's marked (:func:`placement_pools`),
+    and no measured pools. Both carry the provenance — ``source``
     names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
     golden pools, walk the placement pools and featurize the measured pools side by side — the export's whole cost
     — ``EMMY_WORKERS`` by default."""
@@ -191,6 +210,7 @@ def export_dataset(
     with progress.phase("read golden pools"):
         kernel_op = kernel_ops(db)
         pools, dropped_golden = golden_pools(db, kernel_op)
+    stale: list[tuple] = []
     if space == "placement":
         with progress.phase("read placement pools"):
             pools = placement_pools(db, pools)
@@ -200,6 +220,7 @@ def export_dataset(
         golden, skipped = build_placement_groups(pools, jobs=jobs)
         measured, dropped = [], {"golden": dropped_golden, "measured": {}}
     else:
+        pools, stale = with_candidates(pools, measured_rows(candidates))
         logger.info("Building %d golden pools (each under its own card's context, %d at a time) ...", len(pools), jobs)
         golden, skipped = build_golden_groups(pools, sample=pool_sample, seed=seed, jobs=jobs)
         measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"), kernel_op, jobs=jobs)
@@ -213,9 +234,10 @@ def export_dataset(
         "source": source,
         "space": space,
         "sources": dict(sorted(db.perf_sources().items())),
+        "candidates": dict(sorted(Counter(row.source for pool in pools for row in pool.candidates).items())),
         "pool_sample": pool_sample,
         "seed": seed,
         "feat_ver": FEATURIZER_VERSION,
         "compiler": repo_commit(),
     }
-    return Dataset(golden, measured, skipped, dropped, provenance)
+    return Dataset(golden, measured, skipped, dropped, provenance, stale)
