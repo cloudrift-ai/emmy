@@ -73,6 +73,8 @@ declare(
         ("base", Lambda | None, None),
         ("twist", Twist | None, None),
         ("observe", Lambda | None, None),
+        # A fold that carries a state and does not seed it is a further level of the steps of the fold it sits in.
+        ("seed", bool, True),
     ),
 )
 

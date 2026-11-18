@@ -376,12 +376,11 @@ def test_a_read_beside_the_inner_level_sees_the_state_the_inner_steps_left() -> 
     np.testing.assert_allclose(got["seen"], walk[[2, 5]])
 
 
-def test_a_solve_in_blocks_is_one_kernel() -> None:
+def _solve_in_blocks(n: int, width: int) -> Body:
     """Forward substitution in blocks of rows, as one kernel: the outer level walks the blocks, the inner one the
     rows of a block, summing over the block's own rows alone. The part of every row's sum over earlier blocks is
     a second state, carried by the blocks: computed once a block, beside the inner level, for the block after."""
-    n, width = 16, 4
-    body = parse_body(
+    return parse_body(
         f"""
         let zero = 0.0
         for b in 0..{n // width}:
@@ -418,15 +417,71 @@ def test_a_solve_in_blocks_is_one_kernel() -> None:
                     E[u, j] <- earlier_rows seed 0.0
         """
     )
-    a = np.tril(np.random.default_rng(0).standard_normal((n, n)) * 0.3, -1).astype(np.float32)
-    got = execute_loop_op_cpp(LoopOp(body=body), {"A": a}, {"out": (n, n)})
+
+
+def _system(n: int) -> np.ndarray:
+    return np.tril(np.random.default_rng(0).standard_normal((n, n)) * 0.3, -1).astype(np.float32)
+
+
+def test_a_solve_in_blocks_is_one_kernel() -> None:
+    n = 16
+    a = _system(n)
+    got = execute_loop_op_cpp(LoopOp(body=_solve_in_blocks(n, 4)), {"A": a}, {"out": (n, n)})
     np.testing.assert_allclose(got + np.eye(n), np.linalg.inv(np.eye(n) - a), rtol=1e-4, atol=1e-5)
 
 
-def test_a_second_level_of_steps_is_not_lifted_yet() -> None:
+def _kernel(body: Body, inputs: dict[str, tuple[int, ...]], out: tuple[int, ...]) -> Graph:
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("X", (2, 3, N), "f32"), node_id="X")
-    graph.add_node(LoopOp(body=_levels()), ["X"], Tensor("out", (2, 3, N), "f32"), node_id="out")
-    graph.inputs, graph.outputs = ["X"], ["out"]
-    with pytest.raises(ValueError, match="further level of steps"):
-        Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
+    for name, shape in inputs.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
+    graph.add_node(LoopOp(body=body), list(inputs), Tensor("out", out, "f32"), node_id="out")
+    graph.inputs, graph.outputs = list(inputs), ["out"]
+    return graph
+
+
+def test_a_further_level_of_steps_is_a_fold_under_the_fold() -> None:
+    """The lift reads the inner level as a fold of its own, an operand of the fold over the outer level, which
+    carries its state on and does not seed. Lowered, the kernel is the two levels again, and still the solve."""
+    from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415
+
+    n = 16
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_kernel(_solve_in_blocks(n, 4), {"A": (n, n)}, (n, n)))
+    (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    outer = head(node.op.op)
+    (inner,) = (operand for operand in outer.operands if operand.carries)
+    assert outer.carries and outer.seed and not inner.seed and len(inner.cells) == len(outer.cells) == 2
+    assert set(inner.cells).isdisjoint(outer.cells), "the matrix's cells and the workspace's are two nests"
+
+    lowered = LoopOp(body=node.op.loop_body)
+    blocks, rows = _loops(lowered.body)[:2]
+    assert sorted(blocks.carries) == sorted(["acc0", "acc1"]) and list(rows.carries) == ["acc0"] and blocks.seed and not rows.seed
+    a = _system(n)
+    shapes = {tensor.name: tuple(dim.as_static() for dim in tensor.shape) for tensor in node.outputs}
+    result = execute_loop_op_cpp(lowered, {"A": a}, shapes)
+    got = dict(zip(lowered.outputs, result if isinstance(result, tuple) else (result,), strict=True))
+    (out,) = (value for name, value in got.items() if name.startswith("out"))
+    np.testing.assert_allclose(out.reshape(n, n) + np.eye(n), np.linalg.inv(np.eye(n) - a), rtol=1e-4, atol=1e-5)
+
+
+def test_what_is_not_built_for_a_further_level_is_refused_by_name() -> None:
+    """A fold that runs on carries a state. A level with no state of its own beside the level under it does not
+    lift. And nothing schedules a second level yet: the kernel stops at the pass that would have to."""
+    from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="no state of its own"):
+        Pipeline.build(["tile/lift"], select=["lift"]).run(_kernel(_levels(), {"X": (2, 3, N)}, (2, 3, N)))
+
+    n = 16
+    graph = _kernel(_solve_in_blocks(n, 4), {"A": (n, n)}, (n, n))
+    with pytest.raises(ValueError, match="carries a state inside loop"):
+        Pipeline.build(["tile/lift", "tile/cut", "tile/schedule"]).run(graph)
+
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(
+        _kernel(_step("c, i, j"), {"D": (STEPS,), "W": (N, N), "U": (STEPS, N, N)}, (STEPS, N, N))
+    )
+    (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    walk = head(node.op.op)
+    (product,) = (operand for operand in walk.operands if operand.axis is not None)
+    assert walk.seed and walk.replace(seed=False) != walk and "seed=False" in repr(walk.replace(seed=False))
+    with pytest.raises(ValueError, match="carries a state"):
+        product.replace(seed=False)

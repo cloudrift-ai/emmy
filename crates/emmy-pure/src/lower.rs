@@ -616,7 +616,9 @@ impl Lowering<'_> {
         let mut within = inside.clone();
         within.extend(cells.iter().copied());
         for edge in placed {
-            let path = if edge.free_axes().is_subset(&within) {
+            // A fold that carries a state on is a further level of these steps: it sits beside the loops over this
+            // fold's cells, under the steps, never inside them.
+            let path = if edge.free_axes().is_subset(&within) && !edge.runs_on() {
                 Some(cells.clone())
             } else {
                 None
@@ -640,7 +642,7 @@ impl Lowering<'_> {
                 axis: coordinate,
                 body,
                 unroll: false,
-                seed: true,
+                seed: !term.runs_on(),
                 unrolled: false,
             })));
         }

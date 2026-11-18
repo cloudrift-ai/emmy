@@ -86,6 +86,7 @@ pub struct Data {
     base: Option<Lambda>,
     twist: Option<Twist>,
     observe: Option<Lambda>,
+    runs_on: bool,
     hash: u64,
     exposes: OnceLock<Vec<Name>>,
     bindings: OnceLock<Vec<Binding>>,
@@ -109,6 +110,9 @@ pub struct Parts {
     pub base: Option<Lambda>,
     pub twist: Option<Twist>,
     pub observe: Option<Lambda>,
+    /// A fold that carries a state and does not seed it: a further level of the steps of the fold it sits in, the
+    /// state running on through it from where that fold's step left it. `Loop.seed = false`, said of the term.
+    pub runs_on: bool,
 }
 
 impl PartialEq for Fold {
@@ -124,6 +128,7 @@ impl PartialEq for Fold {
             && a.base == b.base
             && a.twist == b.twist
             && a.observe == b.observe
+            && a.runs_on == b.runs_on
             && a.operands == b.operands
     }
 }
@@ -506,6 +511,11 @@ impl Fold {
         let fold = Fold::formed(parts);
         // What the term exposes is read off its applied lift: a lift that does not apply is refused here.
         fold.applied()?;
+        if fold.runs_on() && !fold.carries() {
+            return Err(Error::Value(
+                "only a fold that carries a state can run on without seeding it".into(),
+            ));
+        }
         if let Some(observe) = fold.observe() {
             fold.check_observer(observe)?;
         }
@@ -522,6 +532,7 @@ impl Fold {
             base,
             twist,
             observe,
+            runs_on,
         } = parts;
         let lift = lift.expect("a formed Fold has a lift");
         let hash = {
@@ -535,6 +546,7 @@ impl Fold {
                 .map(|t| (t.recipe.name.clone(), t.channels.clone()))
                 .hash(&mut hasher);
             observe.hash(&mut hasher);
+            runs_on.hash(&mut hasher);
             for edge in &operands {
                 edge.0.hash.hash(&mut hasher);
             }
@@ -548,6 +560,7 @@ impl Fold {
             base,
             twist,
             observe,
+            runs_on,
             hash,
             exposes: OnceLock::new(),
             bindings: OnceLock::new(),
@@ -573,7 +586,13 @@ impl Fold {
             base: self.0.base.clone(),
             twist: self.0.twist.clone(),
             observe: self.0.observe.clone(),
+            runs_on: self.0.runs_on,
         }
+    }
+
+    /// Whether this fold carries its state on without seeding it: a further level of the steps of the fold outside.
+    pub fn runs_on(&self) -> bool {
+        self.0.runs_on
     }
 
     /// The shared data: what a table keyed per term holds a weak handle on.
@@ -862,6 +881,7 @@ impl Fold {
             base,
             twist: self.0.twist.clone(),
             observe,
+            runs_on: self.0.runs_on,
         })?;
         Ok(self.0.canonical.get_or_init(|| canonical).clone())
     }

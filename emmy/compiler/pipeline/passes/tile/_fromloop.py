@@ -458,7 +458,8 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
             if stmt.axis.name in bound:
                 stmt = _renamed_sweep(stmt, bound)
             bound.add(stmt.axis.name)
-        if isinstance(stmt, Loop) and stmt.is_reduce:
+        if isinstance(stmt, Loop) and (stmt.is_reduce or (stmt.carries and not stmt.seed)):
+            # A reduction, or a further level of the steps of the loop this level is the step of.
             fold, trailing = scan_from_loop(stmt, axes, inner_levels)
             seeds = set(fold.exposes)  # the accumulators, or the epilogue's names for them once hoisted factors wrap the fold
             level.stmts = [m for m in level.stmts if not (isinstance(m, Init) and m.name in seeds)]
@@ -648,11 +649,6 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     streamed value is a result of the fold's own and the store, rewritten to read it, rides the
     stream position after the node like a scan's."""
     loop = _stamp_axes(loop)
-    further = [stmt.axis.name for stmt in loop.body.iter() if isinstance(stmt, Loop) and not stmt.seed and stmt.carries]
-    if further:
-        # A loop under the steps that does not seed carries the state on: a second level of steps. Loop IR says it
-        # and runs it; a fold has one axis of steps.
-        raise ValueError(f"loop {loop.axis.name!r}: a state carried on through a further level of steps ({further[0]!r}) is not lifted")
     cells: list[Axis] = []
 
     def flatten(body: Body) -> list[Statement]:
@@ -661,7 +657,13 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
         # corrected values, over the chunk's rows beside the state's), left as one.
         if any(isinstance(stmt, Carry) for stmt in body):
             return list(body)
-        chain = [index for index, stmt in enumerate(body) if isinstance(stmt, Loop) and not stmt.is_reduce and stmt.body.carries]
+        # A loop that carries a state on (``seed=False``) is a further level of these steps, not a loop over cells:
+        # it stays a statement of the step, and lifts to a fold of its own under this one (:func:`lift_body`).
+        chain = [
+            index
+            for index, stmt in enumerate(body)
+            if isinstance(stmt, Loop) and not stmt.is_reduce and stmt.body.carries and not (stmt.carries and not stmt.seed)
+        ]
         if len(chain) != 1:
             return list(body)
         (index,) = chain
@@ -670,6 +672,8 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
 
     flat = Body(flatten(loop.body))
     defined = tuple(stmt for stmt in flat if isinstance(stmt, Carry))
+    if not defined:
+        raise ValueError(f"loop {loop.axis.name!r}: a level of steps with no state of its own beside the level under it is not lifted")
     if any(
         carry.cells != defined[0].cells or [isinstance(e, Var) for e in carry.index] != [isinstance(e, Var) for e in defined[0].index]
         for carry in defined
@@ -698,9 +702,16 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     swept = tuple(dict.fromkeys(value for sweep in sweeps for stmt in sweep.body.iter_of_type(Write) for value in stmt.values))
     skip = {id(stmt) for stmt in (*carried, *writes, *sweeps)}
     slabs, plain = _slabs(tuple(stmt for stmt in body if id(stmt) not in skip), carriers, _values_in_scope(levels))
+    # A store of a further level of these steps is that level's: its value is already one the fold under this one
+    # exposes, and the store rides after that fold, inside its steps.
+    below = {name for edge in edges if edge.carries and not edge.seed for name in edge.exposes}
+    passed = tuple(stmt for stmt in writes if set(stmt.values) <= below)
+    writes = tuple(stmt for stmt in writes if stmt not in passed)
     observed = {value: f"{value}__obs" for stmt in writes for value in stmt.values}
     plain = Body((*plain, *(Assign(fresh, Var(value)) for value, fresh in observed.items())))
-    results = (*(carry.value for carry in carried), *observed.values(), *swept)
+    # What the level under this one stores passes through as results of this fold too, so the boundary can bind it.
+    through = tuple(dict.fromkeys(value for stmt in passed for value in stmt.values))
+    results = (*(carry.value for carry in carried), *observed.values(), *swept, *through)
     edges, lift = _close((loop.axis.name,), (*edges, *slabs), plain, results, scope, levels)
     names = tuple(carry.name for carry in carried)
     fold = Fold(
@@ -709,8 +720,9 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
         init=tuple(carry.seed for carry in carried),
         base=Lambda.componentwise(("next",) * len(names), names),
         cells=carried[0].cells,
+        seed=loop.seed,
     )
-    return fold, (*(stmt.replace(values=tuple(observed[value] for value in stmt.values)) for stmt in writes), *sweeps)
+    return fold, (*(stmt.replace(values=tuple(observed[value] for value in stmt.values)) for stmt in writes), *passed, *sweeps)
 
 
 def carrying_loops(body: Body, outer: tuple[Axis, ...] = ()) -> list[tuple[Loop, tuple[Axis, ...]]]:

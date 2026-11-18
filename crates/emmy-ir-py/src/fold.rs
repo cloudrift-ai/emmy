@@ -777,6 +777,7 @@ impl PyFold {
         base: Option<&Bound<'_, PyAny>>,
         twist: Option<&Bound<'_, PyAny>>,
         observe: Option<&Bound<'_, PyAny>>,
+        seed: bool,
     ) -> PyResult<Parts> {
         Ok(Parts {
             operands: PyFold::terms(operands)?,
@@ -786,6 +787,7 @@ impl PyFold {
             base: optional_lambda(base)?,
             twist: optional_twist(twist)?,
             observe: optional_lambda(observe)?,
+            runs_on: !seed,
         })
     }
 
@@ -808,7 +810,7 @@ impl PyFold {
 #[pymethods]
 impl PyFold {
     #[new]
-    #[pyo3(signature = (operands = None, init = None, *, lift, cells = None, base = None, twist = None, observe = None))]
+    #[pyo3(signature = (operands = None, init = None, *, lift, cells = None, base = None, twist = None, observe = None, seed = true))]
     #[allow(clippy::too_many_arguments)]
     fn py_new<'py>(
         py: Python<'py>,
@@ -819,13 +821,15 @@ impl PyFold {
         base: Option<&Bound<'py, PyAny>>,
         twist: Option<&Bound<'py, PyAny>>,
         observe: Option<&Bound<'py, PyAny>>,
+        seed: bool,
     ) -> PyResult<Py<PyFold>> {
-        let parts = PyFold::parts(operands, lift, init, cells, base, twist, observe)?;
+        let parts = PyFold::parts(operands, lift, init, cells, base, twist, observe, seed)?;
         Ok(PyFold::built(py, &Fold::new(parts).py()?)?.unbind())
     }
 
     /// A term from its stored parts, taken as formed: what transport reads back.
     #[staticmethod]
+    #[pyo3(signature = (operands, lift, init, cells, base, twist, observe, seed = true))]
     #[allow(clippy::too_many_arguments)]
     fn _formed<'py>(
         py: Python<'py>,
@@ -836,6 +840,7 @@ impl PyFold {
         base: &Bound<'py, PyAny>,
         twist: &Bound<'py, PyAny>,
         observe: &Bound<'py, PyAny>,
+        seed: bool,
     ) -> PyResult<Bound<'py, PyFold>> {
         let parts = PyFold::parts(
             Some(operands),
@@ -845,6 +850,7 @@ impl PyFold {
             Some(base),
             Some(twist),
             Some(observe),
+            seed,
         )?;
         PyFold::built(py, &Fold::formed(parts))
     }
@@ -916,6 +922,13 @@ impl PyFold {
             .cloned()
             .map(|l| PyLambda::wrap(py, l))
             .transpose()
+    }
+
+    /// Whether a fold that carries a state seeds it. `False` is a further level of the steps of the fold outside:
+    /// the state runs on through this fold from where that fold's step left it.
+    #[getter]
+    fn seed(&self) -> bool {
+        !self.fold.runs_on()
     }
 
     /// The name of the axis this term binds, or `None` for a zero-axis term.
@@ -1365,6 +1378,7 @@ impl PyFold {
                 "base" => parts.base = optional_lambda(value)?,
                 "twist" => parts.twist = optional_twist(value)?,
                 "observe" => parts.observe = optional_lambda(value)?,
+                "seed" => parts.runs_on = !value.expect("a value").extract::<bool>()?,
                 other => return Err(PyTypeError::new_err(format!("Fold has no field {other:?}"))),
             }
         }
@@ -1387,14 +1401,19 @@ impl PyFold {
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
         let part = |name: &str| -> PyResult<String> { Ok(slf.getattr(name)?.repr()?.to_string()) };
         Ok(format!(
-            "Fold(operands={}, lift={}, init={}, cells={}, base={}, twist={}, observe={})",
+            "Fold(operands={}, lift={}, init={}, cells={}, base={}, twist={}, observe={}{})",
             part("operands")?,
             part("lift")?,
             part("init")?,
             part("cells")?,
             part("base")?,
             part("twist")?,
-            part("observe")?
+            part("observe")?,
+            if slf.get().fold.runs_on() {
+                ", seed=False"
+            } else {
+                ""
+            }
         ))
     }
 
@@ -1403,7 +1422,7 @@ impl PyFold {
         slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
         let parts = [
-            "operands", "lift", "init", "cells", "base", "twist", "observe",
+            "operands", "lift", "init", "cells", "base", "twist", "observe", "seed",
         ]
         .iter()
         .map(|name| slf.getattr(*name))
