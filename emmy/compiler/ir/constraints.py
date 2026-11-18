@@ -39,11 +39,12 @@ def _form(left: Expression, right: Expression, slack: int) -> Form:
 
 
 def alternatives(condition: Expression, *, holds: bool = True) -> list[tuple[Form, ...]]:
-    """``condition`` (or, with ``holds`` false, its negation) as alternatives, each a set of forms that all hold."""
+    """``condition`` (or, with ``holds`` false, its negation) as alternatives, each a set of forms that all hold.
+    What is no comparison, a flag read from data say, places no constraint: it may hold or not."""
     if isinstance(condition, Literal):
         return [()] if bool(condition.value) == holds else []
-    if not isinstance(condition, BinaryExpression):
-        raise ValueError(f"not a comparison: {condition}")
+    if not isinstance(condition, BinaryExpression) or condition.op not in (*_FLIPPED, "&&", "||"):
+        return [()]
     op = condition.op
     if op in ("&&", "||"):
         left, right = alternatives(condition.left, holds=holds), alternatives(condition.right, holds=holds)
@@ -62,15 +63,15 @@ def alternatives(condition: Expression, *, holds: bool = True) -> list[tuple[For
         return [(_form(b, a, 0),)]
     if op == "==":
         return [(_form(a, b, 0), _form(b, a, 0))]
-    if op == "!=":
-        return [(_form(a, b, 1),), (_form(b, a, 1),)]
-    raise ValueError(f"not a comparison: {condition}")
+    return [(_form(a, b, 1),), (_form(b, a, 1),)]  # !=
 
 
 def negated(condition: Expression) -> Expression:
     """The comparison that holds exactly where ``condition`` does not."""
     if isinstance(condition, Literal):
         return Literal(not condition.value, "bool")
+    if not isinstance(condition, BinaryExpression) or condition.op not in (*_FLIPPED, "&&", "||"):
+        raise ValueError(f"not a comparison: {condition}")
     if condition.op in ("&&", "||"):
         return BinaryExpression("||" if condition.op == "&&" else "&&", negated(condition.left), negated(condition.right))
     return BinaryExpression(_FLIPPED[condition.op], condition.left, condition.right)

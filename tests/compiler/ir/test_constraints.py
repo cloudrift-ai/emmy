@@ -42,6 +42,8 @@ def test_a_test_the_block_settles_is_always_true_there():
         (("x / 16 < y", "y < x / 16"), False),  # a quotient is a name of its own
         (("true",), True),
         (("false",), False),
+        (("a + b", "a < b"), True),  # no comparison: no constraint
+        (("a + b", "a < b", "b < a"), False),
     ],
 )
 def test_comparisons_that_can_and_cannot_hold(conditions, holds):
