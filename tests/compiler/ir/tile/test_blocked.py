@@ -235,10 +235,10 @@ def test_the_first_three_steps_read_the_compilers_own_kernel_for_the_solve():
     assert cycle.block == 0 and not cycle.lifted, "the block's own rows, under the triangle that does not lift"
     (earlier,) = (reading for reading in found if reading.name == cycle.name and reading.block == -1)
     assert earlier == Reading(cycle.name, -1, earlier.instances, live=False, lifted=True), "earlier rows: whole blocks, an input"
-    # Two systems, the block's rows 16 to 30 (the roll leaves the last row to the kernel that reads the state),
-    # columns below the row: 16 earlier rows each, and a triangle of its own.
-    assert earlier.instances == 2 * sum(16 * row for row in range(16, 31))
-    assert cycle.instances == 2 * sum((row - 16) * row for row in range(16, 31))
+    # The block's rows 16 to 30 (the roll leaves the last row to the kernel that reads the state), columns below
+    # the row: 16 earlier rows each, and a triangle of its own. One system stands for both: no condition tests the batch.
+    assert earlier.instances == sum(16 * row for row in range(16, 31))
+    assert cycle.instances == sum((row - 16) * row for row in range(16, 31))
     assert all(reading.lifted and not reading.live for reading in found if reading.name != cycle.name)
     # The first block has no earlier rows.
     assert {reading.block for reading in survey(kernel.body, 16, 0)} == {0}

@@ -578,6 +578,30 @@ class Reading:
     lifted: bool  # whole blocks of the variable it sums over: no test inside one
 
 
+def _conditions(stmt) -> list:
+    """Every expression of ``stmt`` that can hold a test: a select's conditions and its index expressions."""
+    from emmy.compiler.ir.stmt import Pre, Select  # noqa: PLC0415 - the prototype above needs no IR
+
+    if isinstance(stmt, Select):
+        return [("test", branch.select) for branch in stmt.branches]
+    return [("index", index) for index in stmt.index] if isinstance(stmt, Pre) else []
+
+
+def _tested(tagged) -> set[str]:
+    """The variables a test reads: all of a condition's, and those of the conditions inside an index expression."""
+    from emmy.compiler.ir.expression import BinaryExpression, TernaryExpression  # noqa: PLC0415
+
+    kind, expression = tagged
+    if kind == "test":
+        return set(expression.free_vars())
+    if isinstance(expression, TernaryExpression):
+        inner = (_tested(("index", branch)) for branch in (expression.if_true, expression.if_false))
+        return set(expression.cond.free_vars()).union(*inner)
+    if isinstance(expression, BinaryExpression):
+        return _tested(("index", expression.left)) | _tested(("index", expression.right))
+    return set()
+
+
 class Walk:
     """A Loop IR kernel that carries one state, as index sets: what its steps read and write, with nothing rewritten.
 
@@ -592,11 +616,18 @@ class Walk:
         (self.loop,) = (stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries)
         loops = [self.loop, *(stmt for stmt in self.loop.body.iter() if isinstance(stmt, Loop))]
         self.names = [loop.axis.name for loop in loops]
-        self.extents = [loop.axis.extent.as_static() for loop in loops]
+        extents = [loop.axis.extent.as_static() for loop in loops]
         self.stmts = list(self.loop.body.iter())
         (self.carry,) = (stmt for stmt in self.stmts if isinstance(stmt, Carry))
         self.cells = [index.name for index in self.carry.index]
-        self.shape = tuple(self.extents[self.names.index(name)] for name in self.cells)
+        #: The state's own shape.
+        self.shape = tuple(extents[self.names.index(name)] for name in self.cells)
+        # An axis no condition tests (a batch) changes nothing the steps decide: one coordinate of it stands for all.
+        tested = set().union(*(_tested(expression) for stmt in self.stmts for expression in _conditions(stmt)))
+        self.extents = [
+            extent if not axis or name in tested else 1 for axis, (name, extent) in enumerate(zip(self.names, extents, strict=True))
+        ]
+        self.sizes = tuple(self.extents[self.names.index(name)] for name in self.cells)
         _, same, _ = self.trace(np.arange(self.extents[0]))
         others = tuple(axis for axis, name in enumerate(self.names) if name not in self.cells and axis)
         order = [self.names.index(name) for name in self.cells]
@@ -604,13 +635,11 @@ class Walk:
         self.written = np.transpose(~same[self.carry.value].all(axis=others), [0, *(sorted(order).index(axis) + 1 for axis in order)])
         across = [self.written.any(axis=tuple(a + 1 for a in range(len(self.cells)) if a != axis)) for axis in range(len(self.cells))]
         #: The state's axis the steps move along, every step writing one coordinate of it, and that coordinate.
-        found = [axis for axis, hit in enumerate(across) if (hit.sum(axis=1) <= 1).all()]
+        found = [axis for axis, hit in enumerate(across) if self.sizes[axis] > 1 and (hit.sum(axis=1) <= 1).all()]
         self.moving = found[0] if len(found) == 1 else None
-        self.rows = (
-            np.array([np.flatnonzero(hit)[0] if hit.any() else -1 for hit in across[self.moving]])
-            if found
-            else np.full(self.extents[0], -1)
-        )
+        self.rows = np.full(self.extents[0], -1)
+        if self.moving is not None:
+            self.rows = np.array([np.flatnonzero(hit)[0] if hit.any() else -1 for hit in across[self.moving]])
 
     def trace(self, steps: np.ndarray) -> tuple[dict, dict, dict]:
         """Over ``steps``: where each name's value reaches the next state, where it is the cell's own previous
@@ -680,7 +709,7 @@ def survey(body, width: int, block: int) -> list[Reading]:
     for stmt in walk.stmts:
         if not isinstance(stmt, Pre) or stmt.name not in used:
             continue
-        index = tuple(np.clip(i, 0, extent - 1) for i, extent in zip(at[stmt.name], walk.shape, strict=True))
+        index = tuple(np.clip(i, 0, extent - 1) for i, extent in zip(at[stmt.name], walk.sizes, strict=True))
         side = np.sign(index[walk.moving] // width - block)
         summed = [walk.names.index(name) for name in stmt.index[walk.moving].free_vars() if name in walk.names[1:]]
         for value in (-1, 0, 1):
