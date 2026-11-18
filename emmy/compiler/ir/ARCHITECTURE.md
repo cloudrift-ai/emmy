@@ -477,6 +477,22 @@ the action `next`, with the `Carry` index as its `cells` and a `Pre` as a carrie
 The classic schedule realizes the loop as a serial launch axis over a state buffer, or, where the row's `STAGE` keeps
 the state in shared memory or registers, inside a CTA as a loop.
 
+A state's steps can have more than one level. A loop between the carrying loop and the cells that does not seed
+(`Loop.seed` false, `seed=false` in the text) is a further level of the same steps: the state runs on through it, and
+two levels of 4 and 16 steps are one walk of 64. The outermost level seeds the state. What the levels buy is the place
+between them: a statement beside the inner loop runs once per outer step and reads the state as the inner steps left
+it, and a second state carried by the outer level alone holds what one outer step computes for the next. In the term
+the inner level is a `Fold` of its own, an operand of the fold over the outer level, that carries on and does not seed
+(`Fold.seed` false), so each fold still has one list of cells.
+
+What a carried kernel's steps read and write is said by its selects and by the conditionals inside its index
+expressions. `ir/guards.py` reads those as comparisons: the guards under which a cell takes a new value, and each
+read of the state with the guard it counts under. A dependence question, "can this read meet a cell an earlier step
+wrote", is then a few comparisons that must all hold, and `ir/constraints.py` answers it by Fourier-Motzkin
+elimination over their affine forms. The answer looks at no extent's size, so it costs the same for 64 rows and for a
+symbolic count, and it is exact when it says no. `constraints.spelled` is the one spelling of a comparison a pass
+uses after it moves a loop variable: what the two sides share cancelled, the constant on one side.
+
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
 

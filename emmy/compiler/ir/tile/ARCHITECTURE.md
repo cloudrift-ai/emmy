@@ -57,6 +57,12 @@ exposes, or a pass-through of a value an output sweep beside the cells computes 
 `Fold.lower` opens the carrying loop outside the loops over the cells, with a nest of its own for the step's
 sweeps; the closed program is the Loop IR the roll wrote.
 
+A carrying fold seeds its state unless it says it does not (`Fold.seed`, true by default and left out of the stored
+form). One that does not is a further level of the steps of the fold it is an operand of: it lowers to a loop under
+that fold's carrying loop, beside the outer fold's own cells, and the outer fold exposes its stores as results. Each
+level's state has its own cells because the levels are two folds. The cut pass takes a kernel of two levels apart
+before any schedule sees it (the passes `ARCHITECTURE.md`).
+
 A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@…/scan=g<n>k[<p>]`,
 offered by `030_cut` through `_split.realize_carry_split`). It needs the step AFFINE in the state and column-wise
 (`Fold.affine`: every carrier read keeps the cell's own coordinate at every position but one), because then a

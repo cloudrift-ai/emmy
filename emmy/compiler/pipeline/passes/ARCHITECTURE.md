@@ -106,6 +106,23 @@ belongs to one CTA per independent batch and fits the card's shared-memory limit
 keeping the scheduled reduction order and requested snapshots while moving the ordered axis into the CTA. Global
 storage, one launch per step, is the third value.
 
+`005_block` runs before the lift and gives a carried walk its block form. A kernel whose step sums over the rows of
+its state reads, at each step, rows that earlier steps wrote. With the steps cut into blocks, that sum splits at the
+block's first step: the rows before the block are finished when it starts, so their part of every step's sum is
+computed once a block, for all of the block's steps, and the steps keep summing only over the block's own rows. The
+pass writes this as one kernel with two levels of steps and a second state (the IR `ARCHITECTURE.md` owns the form).
+It reorganizes the kernel's axes and decides no kernel set. Whether the split is right is one dependence question
+over the kernel's own comparisons: no step of a block writes a cell a later step of the block reads among the rows
+before the block. The width is the pin-only `BLOCK` knob (`EMMY_BLOCK=<steps>`): nothing enumerates it, so no compile
+takes the form unless told to, and a walk the form does not hold is left as it was.
+
+One kernel's launches are one level of steps, so no schedule runs two levels in one kernel. `030_cut` therefore takes
+a kernel of two levels apart, as its one realization: per outer step a kernel that carries the state through the
+inner steps, and between two of them a kernel that carries nothing and computes the outer level's own state
+(`_split.realize_levels`). Each piece is lifted like any kernel. With the outer step a number, a last block's steps
+that write nothing are dropped and every comparison is spelled again. Running both levels inside one kernel, or a
+symbolic number of outer steps, would need the runner to loop over a group of kernels; neither is built.
+
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over three ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
