@@ -1351,6 +1351,41 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     on both sides. Boot 760-761 s, main's 759-761 s.
   - Next: the short step's host time, in the order above: the routed experts' launch and combine, then the pre and
     post program calls.
+- **The sparse-attention layers' query and key norms and rope as an Emmy twin (2026-11-18).** Round 3 of the
+  2026-11-13 ranking, main `ad56f5d38`. Each of the 12 sparse-attention layers splits its query, key and gate,
+  RMS-norms the query and the key and applies the rope. On main the fork runs this eager: 25 kernels per layer on a
+  decode step. The fork's compiled model runs it as 3. The round adds one symbolic twin, `qk-norm-rope-sym`, at a
+  rank's heads, lent the layer's two norm weights and the first 262,144 rows of the rotary cache. A step of up to
+  the decode bucket's rows runs it; a wider step keeps the fork's path. No compiler change.
+  - Measured first, profiled, rank 0, per decode step at one, four and eight requests: main 300 kernels and a span of
+    1.16, 1.26 and 1.26 ms (96-105 us per layer); the async fork 36 kernels and 0.15 ms (12 us per layer). The
+    decode step is a graph replay, so the work costs no host time per kernel.
+  - Rows: the twin tuned on the card on a fresh scratch DB, then recorded with `--record-greedy`. The prior's pick
+    cuts it into three kernels, 18.4 us per layer cold at 8 rows; the fused root runs on one block (about 450 us).
+    The seed root row was dropped. On the branch, profiled: 60 kernels per step and a span of 0.17-0.18 ms (15 us
+    per layer, with the two input uploads).
+  - Gates, stated before the build: the twin cold at most 25 us per layer at 8 rows, passed at 18.4. One request's
+    step at least 0.5 ms shorter on boots never profiled, passed at -0.84 ms.
+  - A B B A on boots never profiled, two of main against two of the branch:
+
+    | Point | Main | This round |
+    | --- | ---: | ---: |
+    | One request, 1K / 512, per token | 16.90-16.91 ms | 16.05-16.07 ms |
+    | 2 requests, 4K / 1K, total output | 87.4-87.7 tok/s | 91.0-91.3 tok/s |
+    | 4 requests, 4K / 1K, total output | 148.4-149.6 tok/s | 153.9-155.3 tok/s |
+    | 8 requests, 4K / 1K, total output | 233.0-234.1 tok/s | 239.5-241.4 tok/s |
+    | First token, 1K | 0.60-0.65 s | 0.62-0.63 s |
+    | First token, 4K | 1.27-1.29 s | 1.26-1.29 s |
+
+  - Against the async fork (2026-11-13's numbers): one request 1.67x slower per token (1.76x on main); four and
+    eight requests 0.76x its output (0.74x on main).
+  - Checks on the branch: all 19 programs compile strict from the golden alone, and the release audit deploys all 19
+    twins. `emmy golden check` reads current, and the prior reproduction gate passes. GSM8K 124 of 128 (2 at the output limit). Acceptance cases: 27, 27, 27
+    of 28 without thinking and 27, 26, 27 with it. Long-document lookups: 387 of 387 and 384 of 384. Greedy texts:
+    the two main boots agree and the two branch boots agree; main and the branch part on two of six prompts, after
+    318 and 1,118 characters, from the twin's rounding. MARGIN_LINE Boot 730 and 739 s, main's 721 and
+    740 s.
+  - Next: from the 2026-11-13 ranking, for the owner to pick.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

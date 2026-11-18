@@ -553,8 +553,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   excludes. Its `q_proj` (query and output gate), `k_proj` and `v_proj` load as the three shards of `qkv_proj`. On a
   step of up to the decode bucket's tokens, each such layer takes its query and key norms and rope from one Emmy
   program (`qk-norm-rope-sym`, `query_key_graph`) in place of the fork's eager modules, about twenty small kernels
-  per layer: one instance per layer, lent the layer's norm weights and the rotary cache to the model's positions, which
-  the twin traces at a rank's heads (`_emmy_query_key`). A wider step keeps the fork's modules. Its
+  per layer: one instance per layer, lent the layer's norm weights and one copy in the model dtype of the rotary
+  cache's rows up to the model's positions, at a rank's heads (`_emmy_query_key`). A wider step keeps the fork's
+  modules. Its
   Gated DeltaNet layers get vLLM's `QwenGatedDeltaNetAttention`, as the fork's own model builds them: `in_proj_qkv`
   and `in_proj_z` load as the shards of `in_proj_qkvz`, `in_proj_b` and `in_proj_a` as those of `in_proj_ba`. Before
   the checkpoint loads, both kinds of sublayer move their unquantized projections onto the fork's single-token fp16
