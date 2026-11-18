@@ -578,42 +578,58 @@ class Reading:
     lifted: bool  # whole blocks of the variable it sums over: no test inside one
 
 
-def survey(body, width: int, block: int) -> list[Reading]:
-    """Split, lift and isolate, read off a Loop IR body that carries one state, with nothing rewritten.
+class Walk:
+    """A Loop IR kernel that carries one state, as index sets: what its steps read and write, with nothing rewritten.
 
     The kernel spells its conditions as selects and as conditionals inside index expressions. They are not made
-    first class here: they are evaluated over the block's index set, the way the statements above are. A read
-    counts where a select lets its value reach the next state; a cell counts as written where the next state is
-    not the cell's own previous value. Blocks are cut on the state's axis the steps move along, and a block's steps
-    are the ones that write its rows."""
-    from emmy.compiler.ir.expression import Var  # noqa: PLC0415 - the prototype above needs no IR
-    from emmy.compiler.ir.stmt import Accum, Assign, Carry, Loop, Pre, Select  # noqa: PLC0415
+    first class here: they are evaluated over an index set, the way the statements above are. A read counts where
+    a select lets its value reach the next state; a cell counts as written where the next state is not the cell's
+    own previous value."""
 
-    (carrying,) = (stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries)
-    loops = [carrying, *(stmt for stmt in carrying.body.iter() if isinstance(stmt, Loop))]
-    names = [loop.axis.name for loop in loops]
-    extents = [loop.axis.extent.as_static() for loop in loops]
-    stmts = list(carrying.body.iter())
-    (carry,) = (stmt for stmt in stmts if isinstance(stmt, Carry))
-    cells = [index.name for index in carry.index]
+    def __init__(self, body) -> None:
+        from emmy.compiler.ir.stmt import Carry, Loop  # noqa: PLC0415 - the prototype above needs no IR
 
-    def grids(steps: np.ndarray) -> dict[str, np.ndarray]:
-        sizes = [len(steps), *extents[1:]]
-        values = [steps, *(np.arange(extent) for extent in extents[1:])]
-        return {
-            name: value.reshape([-1 if at == axis else 1 for at in range(len(names))])
-            for axis, (name, value) in enumerate(zip(names, values, strict=True))
-        } | {"": np.zeros(sizes, dtype=bool)}
+        (self.loop,) = (stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries)
+        loops = [self.loop, *(stmt for stmt in self.loop.body.iter() if isinstance(stmt, Loop))]
+        self.names = [loop.axis.name for loop in loops]
+        self.extents = [loop.axis.extent.as_static() for loop in loops]
+        self.stmts = list(self.loop.body.iter())
+        (self.carry,) = (stmt for stmt in self.stmts if isinstance(stmt, Carry))
+        self.cells = [index.name for index in self.carry.index]
+        self.shape = tuple(self.extents[self.names.index(name)] for name in self.cells)
+        _, same, _ = self.trace(np.arange(self.extents[0]))
+        others = tuple(axis for axis, name in enumerate(self.names) if name not in self.cells and axis)
+        order = [self.names.index(name) for name in self.cells]
+        #: Per step, the cells it writes.
+        self.written = np.transpose(~same[self.carry.value].all(axis=others), [0, *(sorted(order).index(axis) + 1 for axis in order)])
+        across = [self.written.any(axis=tuple(a + 1 for a in range(len(self.cells)) if a != axis)) for axis in range(len(self.cells))]
+        #: The state's axis the steps move along, every step writing one coordinate of it, and that coordinate.
+        found = [axis for axis, hit in enumerate(across) if (hit.sum(axis=1) <= 1).all()]
+        self.moving = found[0] if len(found) == 1 else None
+        self.rows = (
+            np.array([np.flatnonzero(hit)[0] if hit.any() else -1 for hit in across[self.moving]])
+            if found
+            else np.full(self.extents[0], -1)
+        )
 
-    def trace(steps: np.ndarray) -> tuple[dict, dict, dict]:
-        """Where each name's value reaches the next state, where it is the cell's own previous value, and each
-        read's cell."""
-        env = grids(steps)
-        full = env.pop("").shape
-        at = {stmt.name: tuple(np.broadcast_to(index.eval(env), full) for index in stmt.index) for stmt in stmts if isinstance(stmt, Pre)}
-        own = tuple(np.broadcast_to(env[name], full) for name in cells)
+    def trace(self, steps: np.ndarray) -> tuple[dict, dict, dict]:
+        """Over ``steps``: where each name's value reaches the next state, where it is the cell's own previous
+        value, and each read's cell."""
+        from emmy.compiler.ir.expression import Var  # noqa: PLC0415
+        from emmy.compiler.ir.stmt import Accum, Assign, Pre, Select  # noqa: PLC0415
+
+        values = [steps, *(np.arange(extent) for extent in self.extents[1:])]
+        full = tuple(len(value) for value in values)
+        env = {
+            name: value.reshape([-1 if at == axis else 1 for at in range(len(values))])
+            for axis, (name, value) in enumerate(zip(self.names, values, strict=True))
+        }
+        at = {
+            stmt.name: tuple(np.broadcast_to(index.eval(env), full) for index in stmt.index) for stmt in self.stmts if isinstance(stmt, Pre)
+        }
+        own = tuple(np.broadcast_to(env[name], full) for name in self.cells)
         same = {name: np.logical_and.reduce([a == b for a, b in zip(index, own, strict=True)]) for name, index in at.items()}
-        for stmt in stmts:
+        for stmt in self.stmts:
             if isinstance(stmt, Select):
                 left, out = np.ones(full, dtype=bool), np.zeros(full, dtype=bool)
                 for branch in stmt.branches:
@@ -623,8 +639,9 @@ def survey(body, width: int, block: int) -> list[Reading]:
                 same[stmt.name] = out
             elif isinstance(stmt, Assign) and isinstance(stmt.value, Var):
                 same[stmt.name] = same.get(stmt.value.name, np.zeros(full, dtype=bool))
-        used = {carry.value: np.ones(full, dtype=bool)}
-        for stmt in reversed(stmts):
+        same.setdefault(self.carry.value, np.zeros(full, dtype=bool))
+        used = {self.carry.value: np.ones(full, dtype=bool)}
+        for stmt in reversed(self.stmts):
             mine = used.get(getattr(stmt, "name", None))
             if mine is None:
                 continue
@@ -641,34 +658,31 @@ def survey(body, width: int, block: int) -> list[Reading]:
                 used[stmt.value.name] = used.get(stmt.value.name, False) | mine
         return used, same, at
 
-    every = np.arange(extents[0])
-    _, same, _ = trace(every)
-    shape = tuple(extents[names.index(name)] for name in cells)
-    others = tuple(axis for axis, name in enumerate(names) if name not in cells and axis)
-    order = [names.index(name) for name in cells]
-    written = np.transpose(~same[carry.value].all(axis=others), [0, *(sorted(order).index(axis) + 1 for axis in order)])
-    # The axis the steps move along: every step writes one coordinate of it.
-    (moving,) = (
-        axis
-        for axis in range(len(cells))
-        if (written.any(axis=tuple(a + 1 for a in range(len(cells)) if a != axis)).sum(axis=1) <= 1).all()
-    )
-    rows = written.any(axis=tuple(a + 1 for a in range(len(cells)) if a != moving))
-    steps = every[[bool((np.flatnonzero(row) // width == block).any()) for row in rows]]
+    def steps_of(self, width: int, block: int) -> np.ndarray:
+        """The steps that write the rows of ``block``."""
+        return np.flatnonzero((self.rows >= 0) & (self.rows // width == block))
 
-    used, same, at = trace(steps)
-    changed = ~same[carry.value]  # a cell that keeps its own value reads nothing: that is the state staying put
-    cut = written[steps]
+
+def survey(body, width: int, block: int) -> list[Reading]:
+    """Split, lift and isolate, read off a Loop IR body that carries one state. Blocks are cut on the state's axis
+    the steps move along, and a block's steps are the ones that write its rows."""
+    from emmy.compiler.ir.stmt import Pre  # noqa: PLC0415
+
+    walk = Walk(body)
+    steps = walk.steps_of(width, block)
+    used, same, at = walk.trace(steps)
+    changed = ~same[walk.carry.value]  # a cell that keeps its own value reads nothing: that is the state staying put
+    cut = walk.written[steps]
     before = np.zeros_like(cut)
     before[1:] = np.logical_or.accumulate(cut, axis=0)[:-1]
-    place = np.broadcast_to(np.arange(len(steps)).reshape([-1] + [1] * (len(names) - 1)), used[carry.value].shape)
+    place = np.broadcast_to(np.arange(len(steps)).reshape([-1] + [1] * (len(walk.names) - 1)), changed.shape)
     out = []
-    for stmt in stmts:
+    for stmt in walk.stmts:
         if not isinstance(stmt, Pre) or stmt.name not in used:
             continue
-        index = tuple(np.clip(i, 0, extent - 1) for i, extent in zip(at[stmt.name], shape, strict=True))
-        side = np.sign(index[moving] // width - block)
-        summed = [names.index(name) for name in stmt.index[moving].free_vars() if name in names and names.index(name)]
+        index = tuple(np.clip(i, 0, extent - 1) for i, extent in zip(at[stmt.name], walk.shape, strict=True))
+        side = np.sign(index[walk.moving] // width - block)
+        summed = [walk.names.index(name) for name in stmt.index[walk.moving].free_vars() if name in walk.names[1:]]
         for value in (-1, 0, 1):
             mask = used[stmt.name] & changed & (side == value)
             if not mask.any():
