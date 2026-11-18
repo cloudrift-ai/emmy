@@ -488,8 +488,13 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
     out: list[str] = []
     # A carried state is two slots of its cell shape: the one the previous step left, which every read sees, and the
-    # one this step defines, committed when the step ends.
+    # one this step defines, committed when the step ends. A loop that does not seed is a further level of the
+    # state's steps: the slots are the ones the level outside declared, and the state runs on through it.
     for name, shape in node.carries.items():
+        if not node.seed:
+            if name not in ctx.shapes:
+                raise ValueError(f"render: the loop over {node.axis.name} carries {name} on, and no loop outside it starts that state")
+            continue
         carry = next(c for c in node.body.carries if c.name == name)
         extents = tuple(1 if isinstance(d, int) else int(d.extent.as_static()) for d in shape)
         size = 1

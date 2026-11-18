@@ -329,3 +329,104 @@ def test_validation_refuses(stmts: tuple[str, ...], message: str) -> None:
 
     with pytest.raises(ValueError, match=message):
         LoopOp(body=parse_body(text))
+
+
+# ---- more than one level of steps ------------------------------------------------------------------ #
+
+
+def _levels(inner: str = " seed=false", between: str = "") -> Body:
+    return parse_body(
+        f"""
+        for b in 0..2:
+            for c in 0..3{inner}:
+                for i in 0..{N}:
+                    own = pre S[i]
+                    x = load X[b, c, i]
+                    next = add(own, x)
+                    S[i] <- next seed 0.0
+                    out[b, c, i] = next
+            {between}
+        """
+    )
+
+
+def test_a_loop_that_does_not_seed_is_a_further_level_of_the_steps() -> None:
+    """Two levels of 2 and 3 steps are one walk of 6: the state runs on through the inner loop from where the outer
+    step left it. The same nest with a seeding inner loop is a walk started again for every outer coordinate."""
+    x = np.arange(2 * 3 * N, dtype=np.float32).reshape(2, 3, N)
+    body = _levels()
+    outer, inner = _loops(body)[:2]
+    assert list(outer.carries) == ["S"] and list(inner.carries) == ["S"] and outer.seed and not inner.seed
+    got = execute_loop_op_cpp(LoopOp(body=body), {"X": x}, {"out": (2, 3, N)})
+    np.testing.assert_allclose(got, x.reshape(6, N).cumsum(0).reshape(2, 3, N))
+
+    apart = _levels(inner="")
+    assert not _loops(apart)[0].carries
+    np.testing.assert_allclose(execute_loop_op_cpp(LoopOp(body=apart), {"X": x}, {"out": (2, 3, N)}), x.cumsum(1))
+
+
+def test_a_read_beside_the_inner_level_sees_the_state_the_inner_steps_left() -> None:
+    """A statement between the levels runs once per outer step, and its read of the state follows the inner loop,
+    as a read after any loop that carries a state does."""
+    x = np.arange(2 * 3 * N, dtype=np.float32).reshape(2, 3, N)
+    between = f"for i in 0..{N}:\n                last = pre S[i]\n                seen[b, i] = last"
+    op = LoopOp(body=_levels(between=between))
+    got = dict(zip(op.outputs, execute_loop_op_cpp(op, {"X": x}, {"seen": (2, N), "out": (2, 3, N)}), strict=True))
+    walk = x.reshape(6, N).cumsum(0)
+    np.testing.assert_allclose(got["seen"], walk[[2, 5]])
+
+
+def test_a_solve_in_blocks_is_one_kernel() -> None:
+    """Forward substitution in blocks of rows, as one kernel: the outer level walks the blocks, the inner one the
+    rows of a block, summing over the block's own rows alone. The part of every row's sum over earlier blocks is
+    a second state, carried by the blocks: computed once a block, beside the inner level, for the block after."""
+    n, width = 16, 4
+    body = parse_body(
+        f"""
+        let zero = 0.0
+        for b in 0..{n // width}:
+            for s in 0..{width} seed=false:
+                for i in 0..{n}:
+                    for j in 0..{n}:
+                        for k in 0..{width}:
+                            coefficient = pre S[{width} * b + s, {width} * b + k]
+                            above = pre S[{width} * b + k, j]
+                            product = multiply(coefficient, above)
+                            term = select:
+                                product when k < s
+                                zero when true
+                            own_rows <- add(own_rows, term) over k
+                        lifted = pre E[s, j]
+                        mine = pre S[i, j]
+                        sum = add(own_rows, lifted)
+                        new = add(sum, mine)
+                        next = select:
+                            new when i == {width} * b + s && j < {width} * b + s
+                            mine when true
+                        S[i, j] <- next seed A
+                        out[i, j] = next
+            for u in 0..{width}:
+                for j in 0..{n}:
+                    for k in 0..{n}:
+                        coefficient = pre S[{width} * b + {width} + u < {n} ? {width} * b + {width} + u : 0, k]
+                        above = pre S[k, j]
+                        product = multiply(coefficient, above)
+                        term = select:
+                            product when k < {width} * b + {width}
+                            zero when true
+                        earlier_rows <- add(earlier_rows, term) over k
+                    E[u, j] <- earlier_rows seed 0.0
+        """
+    )
+    a = np.tril(np.random.default_rng(0).standard_normal((n, n)) * 0.3, -1).astype(np.float32)
+    got = execute_loop_op_cpp(LoopOp(body=body), {"A": a}, {"out": (n, n)})
+    np.testing.assert_allclose(got + np.eye(n), np.linalg.inv(np.eye(n) - a), rtol=1e-4, atol=1e-5)
+
+
+def test_a_second_level_of_steps_is_not_lifted_yet() -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("X", (2, 3, N), "f32"), node_id="X")
+    graph.add_node(LoopOp(body=_levels()), ["X"], Tensor("out", (2, 3, N), "f32"), node_id="out")
+    graph.inputs, graph.outputs = ["X"], ["out"]
+    with pytest.raises(ValueError, match="further level of steps"):
+        Pipeline.build(["tile/lift"], select=["lift"]).run(graph)

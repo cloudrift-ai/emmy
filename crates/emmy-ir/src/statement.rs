@@ -169,6 +169,12 @@ macro_rules! with_statement_types {
                 /// the loops over the cells, which is what lets a step read OTHER cells of its own state (a delta rule's `k @ S`)
                 /// through `Pre`; a scalar `Accum` lives inside the cell loops and cannot. One statement defines a state;
                 /// a cell it skips keeps its value.
+                ///
+                /// The steps may have more than one level. A loop between the carrying loop and the cells that does not
+                /// seed (`seed=false`) is a further level of the same steps: the state runs on through it from where the
+                /// level outside left it, so two levels of 4 and 16 are one walk of 64. What the levels buy is the place
+                /// between them: a statement beside the inner loop runs once per outer step, and a read of the state
+                /// there follows that loop, as a read after any loop that carries it does.
                 shared Carry {} {
                     name: Name [DEFINES],
                     value: Name [READS],

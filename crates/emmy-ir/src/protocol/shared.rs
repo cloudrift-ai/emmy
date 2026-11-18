@@ -30,6 +30,10 @@ pub fn seeded_accumulators(stmt: &Statement) -> Vec<Name> {
 
 /// The carried states a loop over `body` carries, each with its cell shape: an axis per index position, `None`
 /// where normalization dropped a size-one axis.
+///
+/// A loop between the two that does not seed (`seed=false`) and is not a loop over the state's cells is a further
+/// level of steps: the state runs on through it from where the step outside left it. So a state is carried by
+/// every level of its steps, and the outermost one, which seeds, is where it starts.
 pub fn carried_cells(body: &Body) -> Vec<(Name, Vec<Option<AxisRef>>)> {
     if body.carries().is_empty() {
         return vec![];
@@ -38,12 +42,16 @@ pub fn carried_cells(body: &Body) -> Vec<(Name, Vec<Option<AxisRef>>)> {
     fn walk(
         body: &Body,
         inner: &HashMap<Name, AxisRef>,
+        levels: &HashSet<Name>,
         out: &mut Vec<(Name, Vec<Option<AxisRef>>)>,
     ) {
         for stmt in body.stmts() {
             if let Statement::Carry(carry) = &**stmt {
                 let cells: HashSet<&Name> = carry.cells().into_iter().collect();
-                let keys: HashSet<&Name> = inner.keys().collect();
+                let keys: HashSet<&Name> = inner
+                    .keys()
+                    .filter(|name| cells.contains(name) || !levels.contains(name))
+                    .collect();
                 if cells == keys {
                     let shape = carry
                         .index
@@ -60,14 +68,20 @@ pub fn carried_cells(body: &Body) -> Vec<(Name, Vec<Option<AxisRef>>)> {
                 if let Statement::Loop(l) = &**stmt {
                     let mut deeper = inner.clone();
                     deeper.insert(l.axis.name, l.axis.clone());
-                    walk(&child, &deeper, out);
+                    if l.seed {
+                        walk(&child, &deeper, levels, out);
+                    } else {
+                        let mut further = levels.clone();
+                        further.insert(l.axis.name);
+                        walk(&child, &deeper, &further, out);
+                    }
                 } else {
-                    walk(&child, inner, out);
+                    walk(&child, inner, levels, out);
                 }
             }
         }
     }
-    walk(body, &HashMap::new(), &mut out);
+    walk(body, &HashMap::new(), &HashSet::new(), &mut out);
     out
 }
 
@@ -208,6 +222,50 @@ mod tests {
         );
         assert!(!over_i.is_reduce() && !over_j.is_reduce());
         assert!(over_k.is_reduce() && over_k.carries().is_empty());
+    }
+
+    #[test]
+    fn a_state_is_carried_by_every_level_of_its_steps() {
+        // A loop under the steps that does not seed is a further level of them: the state runs on through it.
+        let two = body(
+            "
+      for b in 0..2:
+        for c in 0..3 seed=false:
+          for i in 0..4:
+            u = load U[b, c, i]
+            own = pre S[i]
+            next = add(own, u)
+            S[i] <- next seed 0
+            out[b, c, i] = next
+    ",
+        );
+        let Statement::Loop(blocks) = &*two.stmts()[0] else {
+            panic!("not a loop");
+        };
+        let Statement::Loop(steps) = &*blocks.body.stmts()[0] else {
+            panic!("not a loop");
+        };
+        let Statement::Loop(cells) = &*steps.body.stmts()[0] else {
+            panic!("not a loop");
+        };
+        let carried = [(Name::from("S"), vec![Some(cells.axis.clone())])];
+        assert_eq!(blocks.carries(), carried);
+        assert_eq!(steps.carries(), carried);
+        assert!(blocks.seed && !steps.seed && cells.carries().is_empty());
+        // The same nest with the inner loop seeding is a walk restarted for every outer coordinate.
+        let apart = body(
+            "
+      for b in 0..2:
+        for c in 0..3:
+          for i in 0..4:
+            own = pre S[i]
+            S[i] <- own seed 0
+    ",
+        );
+        let Statement::Loop(batch) = &*apart.stmts()[0] else {
+            panic!("not a loop");
+        };
+        assert!(batch.carries().is_empty());
     }
 
     #[test]

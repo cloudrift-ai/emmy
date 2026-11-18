@@ -648,6 +648,11 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     streamed value is a result of the fold's own and the store, rewritten to read it, rides the
     stream position after the node like a scan's."""
     loop = _stamp_axes(loop)
+    further = [stmt.axis.name for stmt in loop.body.iter() if isinstance(stmt, Loop) and not stmt.seed and stmt.carries]
+    if further:
+        # A loop under the steps that does not seed carries the state on: a second level of steps. Loop IR says it
+        # and runs it; a fold has one axis of steps.
+        raise ValueError(f"loop {loop.axis.name!r}: a state carried on through a further level of steps ({further[0]!r}) is not lifted")
     cells: list[Axis] = []
 
     def flatten(body: Body) -> list[Statement]:
