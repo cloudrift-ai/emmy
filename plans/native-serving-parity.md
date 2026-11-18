@@ -597,6 +597,13 @@ What the session changes for the milestones:
    a served chunk, as the decode matmul rows are), the two 6144-wide FP8 products (about 390 TFLOP/s against 515
    for the qkv one, no faster schedule in 150), and the 24 us recurrence across chunks.
 
+   The two FP8 products, read off the card the same day (the recipe's DISCOVERY has the evidence): their gap to
+   the qkv product is the grid. At 256 rows a 5120- or 6144-wide output gives the qkv product's 128 x 128 block
+   only 80 or 96 blocks on 170 SMs; per block it runs as fast as the qkv one. The fix is the K split `030_cut`
+   already offers (`REDUCE=g2k`): a tune by name never measures a kernel-set arm, so no card has timed it. Next
+   on a card: bench both products with `--ab` rows on their split arms, tune the partials by name, record the
+   readout root that holds both alone, export strictly and time the first token twice.
+
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
 
