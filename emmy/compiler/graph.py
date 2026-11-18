@@ -1414,7 +1414,11 @@ class Graph(Wire):
 
     @staticmethod
     def from_dict(data: dict) -> Graph:
-        """Deserialize a graph from a JSON-compatible dict (inverse of to_dict)."""
+        """Deserialize a graph from a JSON-compatible dict (inverse of to_dict). A program in the wire a golden
+        stores (its nodes a list: ``to_wire``, what ``compile --ir torch -o PATH.json`` writes) is read as that wire,
+        so one card's stored program can be traced into another card's golden."""
+        if isinstance(data.get("nodes"), list):
+            return Graph.from_wire(data)
         g = Graph()
         g.hints = Hints.from_dict(data.get("hints", {}))
         # Restore every buffer before constructing ops: schedule validation reads their layouts,

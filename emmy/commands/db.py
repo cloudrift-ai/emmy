@@ -77,7 +77,7 @@ def register_db_command(subparsers) -> None:
         "--jobs",
         type=int,
         default=None,
-        help="Worker processes enumerating golden pools side by side (default: EMMY_WORKERS, one per core). The pools are independent "
+        help="Worker processes building pools side by side (default: EMMY_WORKERS, one per core). The pools are independent "
         "and the draw is seeded, so the dataset is the same at any count.",
     )
     pe.add_argument(

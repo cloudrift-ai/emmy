@@ -244,6 +244,19 @@ def test_trace_accepts_debug_graph_json_as_input_but_emits_a_golden_file(monkeyp
     assert json.loads(source.read_text()) == source_graph.to_dict()
 
 
+def test_trace_appends_a_program_another_golden_stores(tmp_path) -> None:
+    # The wire a golden stores (`compile --golden PATH --program N --ir torch -o`) is a trace input, so one card's
+    # program can be appended to another card's golden; nodes a list is that wire, nodes a mapping a debug dump.
+    stored, relu = tmp_path / "stored.json", trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    write_trace_inventory(trace_inline_code("torch.softmax(torch.randn(4, 16), dim=-1)")["graph"], stored, ctx=_TARGET_CTX)
+    program = tmp_path / "program.json"
+    program.write_text(json.dumps(GoldenFile.load(stored).programs[0]))
+    working = tmp_path / "working.json"
+    write_trace_inventory(relu, working, ctx=_TARGET_CTX)
+    append_trace_inventory(Graph.from_dict(json.loads(program.read_text())), working, ctx=_TARGET_CTX)
+    assert GoldenFile.load(working).programs == [relu.to_wire(), GoldenFile.load(stored).programs[0]]
+
+
 def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
 
     graph = trace_inline_code("torch.relu(torch.randn(16,32))")["graph"]
