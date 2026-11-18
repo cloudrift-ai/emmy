@@ -491,7 +491,11 @@ log-scaled, rides the featurization as an ordinary fit signal.)
 What a newcomer needs to know about the fit:
 
 - **The objective is the deployed ranking.** `QuerySoftMax` over one group per candidate pool: every row a golden
-  verified is a positive, and a uniform draw of the other rows (`--negatives` per pool) are the negatives. The rank
+  verified is a positive. The negatives are the labeled ones (`GoldenGroup.negative_ids`: a candidate from the card's
+  candidate file, or a verified row, measured more than `ranking.POSITIVE_WITHIN` slower than the pool's golden),
+  every one in every fit, and a uniform draw (`--negatives` per pool) of the rows with no measurement
+  (`GoldenGroup.measured_ids`): a candidate within the noise of the golden, or faster than it (a stale golden, which
+  the dataset lists), is neither a positive nor a negative. The rank
   every report quotes is still taken over the FULL pool, through the same `CatBoostModel.score_rows` the deploy path
   ranks by, so the sampling never reaches a metric.
 - **The trainer is an object, and fitting is pure.** `CatBoostTrainer` carries the hyperparameters — feature names,
@@ -1051,7 +1055,8 @@ one way in.
   regime knob, since a tune's row spells every knob its kernel carries and a golden row only what its record pinned.
   `candidates.build` fills a file from the DB instance the card's tunes wrote (`SearchDB.measured`, the group's
   kernel on the card, in its regime and at its sizes) and keeps the rows it already holds. It is not a repository
-  golden: no compile, import, export, fit or gate reads it. It restamps as its golden does, and a change to a
+  golden: no compile, import, fit or gate reads it. The schedule export reads it when `--candidates` names it, to
+  label each golden pool's negatives (Part 8). It restamps as its golden does, and a change to a
   hardware golden is followed by a build, which copies the golden's tables again.
 
 **Recording benches** is Part 5's subject: a `run --bench` that benched rows with hand-forced knob values (golden or

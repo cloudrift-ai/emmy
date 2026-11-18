@@ -138,7 +138,8 @@ compilation when no compatible measurement is available. You can refit them from
 emmy db import --db _data/dataset.db --fresh --repository
 
 # Export a dataset for each prior
-emmy db export --db _data/dataset.db _data/schedule --space schedule
+emmy db export --db _data/dataset.db _data/schedule --space schedule \
+  --candidates emmy/compiler/pipeline/search/candidates/records
 emmy db export --db _data/dataset.db _data/placement --space placement
 
 # Refit the shipped weights
@@ -184,7 +185,8 @@ the kernel's schedule space is small, up to 10 where it is large, the slow ones 
 candidates build --db TUNE_DB` fills the files from the tune DB the card's tunes wrote and lists the groups still
 under their target; a tune of such a kernel on its card (`emmy run --golden PATH --kernel REF --bench --tune N`)
 measures the rows the next build takes. `emmy candidates check`, `restamp` and `realize --drop` keep the files
-current, as the `emmy golden` commands keep a golden. No compile reads a candidate file.
+current, as the `emmy golden` commands keep a golden. No compile reads a candidate file; the schedule dataset export reads them (`--candidates`), and a
+candidate over 1.1× slower than its group's golden trains the schedule prior as a negative.
 
 ## Deploy
 
