@@ -434,7 +434,6 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
         "expert1",
         "expert256",
         "expert-slots",
-        "qk-norm-rope-sym",
     }
     pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]

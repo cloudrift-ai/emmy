@@ -583,7 +583,7 @@ def capture_twin_graphs(
         graphs["embed-sym"] = embed_gather_graph(vocab, hidden, td)
     # The query and key norms and rope of the sparse attention the 1Cat fork hosts (Qwen3.8-Flash-Next), one program
     # for every such layer, whose weights are its inputs, at a rank's heads.
-    if getattr(text, "indexer_n_heads", None) is not None:
+    if getattr(text, "model_type", None) == "qwen4_exp_text":
         heads, kv_heads, head_dim = text.num_attention_heads, text.num_key_value_heads, text.head_dim
         rotary = int(head_dim * text.rope_parameters.get("partial_rotary_factor", 1.0))
         graphs["qk-norm-rope-sym"] = query_key_graph(
