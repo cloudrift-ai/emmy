@@ -484,6 +484,52 @@ def _build_fork_attention(vllm_config, runner, n_layers, prefix):
     ]
 
 
+def _emmy_query_key(layers, rows, dtype):
+    """Give each hosted sparse-attention layer Emmy's program for its query and key norms and rope
+    (:func:`~emmy.serving.gen_runner.query_key_graph`) on a step of up to ``rows`` tokens, in place of the fork's eager
+    modules, about twenty small kernels per layer on a decode step; a wider step keeps the fork's. One instance per
+    layer, lent the layer's two norm weights and the rotary cache, over one arena: the layers run one after another,
+    and each consumes the outputs before the next runs. The program reads one row of positions, the text positions
+    every rotary axis carries (``get_mrope_input_positions``)."""
+    import torch
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
+
+    from emmy.compiler.backend.cuda.program import BufferArena
+    from emmy.compiler.backend.plan_cache import PlanTemplateCache
+    from emmy.compiler.dtype import get
+    from emmy.serving.gen_runner import _compile_split, query_key_graph
+
+    arena, plans = BufferArena(), PlanTemplateCache()
+    for layer in layers:
+        if not isinstance(layer, Qwen4ExpQSAAttention):
+            continue
+        # The cache the fork's rope reads for a query of the model dtype.
+        cos_sin = layer.rotary_emb._match_cos_sin_cache_dtype(layer.q_norm.weight.new_empty(0, dtype=dtype))
+        dims = (layer.num_heads, layer.num_kv_heads, layer.head_dim, layer.rotary_emb.rotary_dim, cos_sin.shape[0])
+        graph, example = query_key_graph(*dims, layer.q_norm.variance_epsilon, dtype)
+        lent = [layer.q_norm.weight, layer.k_norm.weight, cos_sin]
+        program, _ = _compile_split(
+            torch.nn.Module(),
+            example,
+            ["qkv", "positions"],
+            get(str(dtype).removeprefix("torch.")),
+            arena=arena,
+            capacity=rows,
+            aux_examples=dict(zip(("q_weight", "k_weight", "cos_sin"), lent, strict=True)),
+            plan_cache=plans,
+            twin="qk-norm-rope-sym",
+            traced=graph,
+        )
+
+        def project(qkv, positions, program=program, lent=lent, fork=layer._project_qkv_gate, layer=layer):
+            if qkv.shape[0] > rows:
+                return fork(qkv, positions)
+            query, key, gate = program.run_device_sym([qkv, positions[0] if positions.ndim == 2 else positions, *lent])
+            return query, key, qkv[:, 2 * layer.q_size + layer.kv_size :], gate
+
+        layer._project_qkv_gate = project
+
+
 def _fork_fp16_projections(layers):
     """Move the hosted sublayers' unquantized projections onto the fork's single-token fp16 GEMV before the
     checkpoint loads, as the fork's own model does (``enable_qwen38_sm70_fp16_gemv``): every projection one of its
@@ -1382,6 +1428,8 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             unloaded = {f"fork_ple.{name}" for name, _ in fork_ple.named_parameters()} - loaded
             if unloaded:
                 raise ValueError(f"EmmyGenModel: the checkpoint did not load the n-gram PLE parameters {sorted(unloaded)}")
+            if self.runner.decode_bucket > 0:
+                _emmy_query_key(fork_attn, self.runner.decode_bucket, self.dtype)
         if not is_last_rank:
             self.reclaim_device_memory()
             return loaded

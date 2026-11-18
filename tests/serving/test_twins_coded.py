@@ -434,6 +434,7 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
         "expert1",
         "expert256",
         "expert-slots",
+        "qk-norm-rope-sym",
     }
     pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
@@ -462,6 +463,7 @@ def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp
         "expert1",
         "expert256",
         "expert-slots",
+        "qk-norm-rope-sym",
     }
     pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
@@ -511,7 +513,7 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
     graphs = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch)
     assert set(graphs) == {f"pre{w}" for w in ("4", "-sym")} | {f"post{w}" for w in ("4", "-sym")} | {
         f"expert{w}@nvfp4" for w in ("4", "-sym", "1", "256", "-slots")
-    }
+    } | {"qk-norm-rope-sym"}
     expert = graphs["expert4@nvfp4"]
     shapes = {i: (tuple(expert.nodes[i].output.shape), expert.nodes[i].output.dtype.name) for i in expert.inputs[1:]}
     assert shapes == {
@@ -519,6 +521,27 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
         "w_gate_up_scale": ((32, 2), "f8e4m3"), "w_gate_up_scale_2": ((32, 1), "f32"),
         "w_down_scale": ((32, 1), "f8e4m3"), "w_down_scale_2": ((32, 1), "f32"),
     }  # fmt: skip
+
+
+def test_qwen4_exp_query_key_twin_takes_a_ranks_heads(tmp_path, monkeypatch):
+    """The sparse attention's query and key norms and rope trace at a rank's heads: six of the 24 query heads, each
+    beside its gate, and one key and one value head of the two, which every rank of four holds. The program takes the
+    two norm weights and the rotary cache, half of each head wide here, as inputs, and returns the query, the key and
+    the gate."""
+    import torch
+
+    from emmy.compiler.pipeline.search.golden.format import program_text
+    from emmy.serving.gen_runner import query_key_graph
+
+    heads = {"num_attention_heads": 24, "num_key_value_heads": 2, "moe_intermediate_size": 64}
+    graph = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, heads, expert_slices=4)["qk-norm-rope-sym"]
+    shapes = {i: tuple(str(d) for d in graph.nodes[i].output.shape) for i in graph.inputs}
+    assert shapes == {
+        "qkv": ("num_tokens", str(14 * 16)), "positions": ("num_tokens",), "q_weight": ("16",), "k_weight": ("16",),
+        "cos_sin": ("64", "8"),
+    }  # fmt: skip
+    assert [tuple(str(d) for d in graph.nodes[o].output.shape)[1:] for o in graph.outputs] == [("96",), ("16",), ("96",)]
+    assert program_text(graph) == program_text(query_key_graph(6, 1, 16, 8, 64, 1e-6, torch.float16)[0])
 
 
 @pytest.mark.parametrize("rows", [4, 256])
