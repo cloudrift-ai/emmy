@@ -237,14 +237,16 @@ def handle_golden_list(args) -> None:
             print(f"{Path(entry['file']).stem}  {entry['gpu']}  {entry['missing']:8s}  {entry['row']}")
         print(f"{len(entries)} measurement(s) missing")
         return
-    entries = [entry for path in _goldens(args.paths) for entry in listing(path, GoldenFile.load(path))]
-    entries = [
-        entry
-        for entry in entries
-        if (not args.gpu or args.gpu in entry["card"])
-        and (not args.kernel or args.kernel in entry["row"] or args.kernel in entry["kernel"])
-        and (not args.behind or (entry["vs_tcompile"] or 0) > 1)
-    ]
+    entries = []
+    for path in _goldens(args.paths):
+        document = GoldenFile.load(path)
+        entries.extend(
+            entry
+            for entry in listing(path, document)
+            if (not args.gpu or args.gpu in entry["card"])
+            and (not args.kernel or args.kernel in entry["row"] or args.kernel in document.kernels[entry["kernel"]].name)
+            and (not args.behind or (entry["vs_tcompile"] or 0) > 1)
+        )
     entries.sort(key=lambda entry: (-(entry["vs_tcompile"] or 0), -(entry["emmy_us"] or entry["whole_us"] or 0)))
     if args.json_out == "-":
         print(json.dumps(entries, indent=2))

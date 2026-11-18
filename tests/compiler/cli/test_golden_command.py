@@ -307,6 +307,8 @@ def test_list_reads_each_measured_row_beside_torch_compile(golden, capsys):
     assert next(entry for entry in entries if entry["row"] == second.name)["tried"] == 12
     assert [entry["row"] for entry in listed(behind=True)] == [first.name]
     assert listed(gpu="H100") == []
+    kernel = GoldenFile.load(golden).kernels[second.kernel].name
+    assert {entry["row"] for entry in listed(kernel=kernel)} == {row.name for row in document.rows if row.kernel == second.kernel}
 
 
 def test_list_missing_names_each_proposal_and_each_target_with_no_torch_compile_time(golden, capsys):
