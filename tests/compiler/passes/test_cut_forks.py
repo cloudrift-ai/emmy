@@ -1286,6 +1286,72 @@ def test_a_value_stored_once_per_group_of_a_flattened_axis_is_one_seam_with_its_
         np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
 
 
+def test_a_piece_formed_again_keeps_every_output_it_owns(monkeypatch) -> None:
+    """A piece that writes an output beside its workspace, formed again as a closed nest at one row, lost that
+    output's store: the region that does not read the row sat outside the row loop. The formed kernel then declared
+    an output nothing wrote, and a Gemma-3 layer's first half had no kernel once a prior picked that cut and the
+    weight's source layout. A formed kernel that owns fewer outputs is not taken; the piece stays as minted."""
+    from emmy.compiler.pipeline.passes.tile import _row
+
+    tile = _lifted_parent(_mimo_graph())
+    owned = [spec.write.output for spec in tile.output_specs]
+    assert len(owned) == 2
+    lift = _row.lift_nest
+
+    def one_output(body, shapes):
+        formed = lift(body, shapes)
+        return replace(formed, output_specs=formed.output_specs[:1])
+
+    monkeypatch.setattr(_row, "lift_nest", one_output)
+    assert [spec.write.output for spec in _row.reformed(tile, _row.io_shapes(tile)).output_specs] == owned
+
+
+def _head_norm_graph() -> Graph:
+    """A product normalized over each head of a flat (head, head-dim) width that a projection then reads: the shape of
+    a Gated DeltaNet readout. The statistic reads the product under its own reduce over the head dim; the normalized
+    value reads it at the flat coordinate's head and remainder. A stacked operand selected by the chunk keeps the
+    product from being one contraction group."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda q, s0, s1, w: (lambda y: (y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + 1e-6))"
+        ".permute(0, 2, 1, 3).reshape(8, 48) @ w)(torch.matmul(q, torch.stack([s0, s1]))))"
+        "(torch.randn(2, 4, 4, 12), torch.randn(4, 12, 12), torch.randn(4, 12, 12), torch.randn(48, 5))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_value_read_at_a_flat_coordinates_remainder_is_one_seam_with_its_copy_over_that_axis() -> None:
+    """The copy at the flat coordinate reads ``(i / 12, i % 12)`` where the copy under the statistic reads
+    ``(i / 12, j)``. Cut once, the product is computed once and both read its workspace: the flat copy at the
+    remainder. Two seams ran the product twice (a Gated DeltaNet layer's readout, 87 of 315 microseconds)."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    lowered = Pipeline.build(LOOP_PASSES).run(_head_norm_graph(), ctx=_CTX)
+    graph = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    (root,) = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
+    (product,) = [seam for seam in cuttable_seams(root.op) if seam.node.as_contraction() is not None]
+    ((_, pairs, _),) = product.siblings
+    assert dict(pairs)[product.axes[-1].name] == Var(product.axes[-2].name) % 12
+
+    fragment = realize(Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[])), root, (product,))
+    fragment.inputs = list(graph.inputs)
+    rng = np.random.default_rng(3)
+    inputs = {name: rng.standard_normal(tuple(d.as_static() for d in graph.buffer(name).shape)).astype(np.float32) for name in graph.inputs}
+
+    def run(program: Graph) -> dict:
+        program = program.copy()
+        for node in program.nodes.values():
+            if isinstance(node.op, TileOp):
+                node.op = LoopOp(body=node.op.op.lower(bound=frozenset(), stores=node.op.output_specs, axes=node.op.axes))
+        backend = NumpyBackend()
+        return backend.run(backend.compile(program), input_data=inputs)[0].outputs
+
+    for got, want in zip(run(fragment).values(), run(graph).values(), strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+
+
 def _block_scaled_norm_residual_graph() -> Graph:
     """The norm-and-residual readers of ``_norm_residual_graph`` over a block-scaled linear: weight
     row ``n`` times its scale row ``n // 8``, the shape of an FP8 linear with a per-block scale."""
