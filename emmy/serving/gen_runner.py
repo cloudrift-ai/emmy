@@ -3336,6 +3336,7 @@ class EmmyGenRunner:
         all of it: its blocks come last, in the order they run, followed by that span spare, and every
         block is lent with everything after it. Eager only — never under an outer capture (MoE serves
         eager above T=1; see the boot guard)."""
+        import numpy as np
         import torch
 
         tiers = self._expert_tiers[moe["group"]]  # this layer's shape group
@@ -3380,7 +3381,9 @@ class EmmyGenRunner:
             batches.setdefault(prog, []).append((e, block, count))
             offsets[e] = block - first
             block += width
-        count_t, offset_t = torch.tensor([counts, offsets], device=xn.device)
+        # The index lists cross without a blocking copy, which would wait for the stream once per layer and keep the
+        # card idle while it does.
+        count_t, offset_t = torch.from_numpy(np.array([counts, offsets])).to(xn.device, non_blocking=True)
         at = torch.arange(start, device=xn.device) + offset_t.repeat_interleave(count_t, output_size=start)
         source = torch.zeros(block, dtype=torch.long, device=xn.device)
         source[at] = take
@@ -3398,7 +3401,7 @@ class EmmyGenRunner:
         if picks:
             # One launch per EXPERT_GROUP blocks, each lent its blocks of the rows and of the output and its experts'
             # entries of the selector; a padding block repeats the program's last expert and lands in rows nothing reads.
-            sel = torch.tensor(picks, dtype=torch.int64, device=xn.device)
+            sel = torch.from_numpy(np.array(picks, dtype=np.int64)).to(xn.device, non_blocking=True)
             for prog, width, first, pick, n in launches:
                 span, name = EXPERT_GROUP * width, prog.output_names[0]
                 runs = [
