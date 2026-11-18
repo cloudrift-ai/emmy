@@ -156,7 +156,9 @@ def test_the_parts_maps_compose_pairwise_and_match_the_sequential_walk(pin: str)
     that gives the parts below their starts. The walk stores what it stored. The products carry no
     state, so each is a kernel with a fork and a row of its own."""
     parts, pairs = int(pin[1]), int(pin[-1])
-    graph = _cut(_graph(steps=STEPS), {SCAN: pin, "REDUCE": ""})  # the products unsplit: the runner takes no atomic store
+    # The products unsplit: the runner takes no atomic store. And uncut: a prior may cut a fill-in, which is its
+    # own decision and not what this test lists.
+    graph = _cut(_graph(steps=STEPS), {SCAN: pin, "REDUCE": "", "PLACE": "fuse"})
     tiles = {node.id: node.op for node in graph.nodes.values() if isinstance(node.op, TileOp)}
     # One step a part reads the step's maps off the step; longer parts walk a probe.
     read = ["out__map0", "out__offset0"] if parts == STEPS else ["out__probe", "out__probe_seed"]
