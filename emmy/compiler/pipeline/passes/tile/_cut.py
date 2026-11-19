@@ -313,10 +313,9 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             continue
         if not all(_closed_at(node, scope) for scope in scopes):
             continue
-        if node.observe is not None or node.carries:
+        if node.observe is not None:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
-            # A carried state is the same: its steps run in order inside one loop.
             continue
         if not taken.get(id(node), node.exposes):
             # No reader takes any component: lowering drops the edge outright, so a workspace
@@ -1156,7 +1155,6 @@ def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
         or node.as_contraction() is None
         or node.twist is not None
         or node.observe is not None
-        or node.carries
         or {index for index, _ in node.bilinear_channels()} != set(range(len(node.exposes)))
     ):
         return None
@@ -1339,7 +1337,6 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
         len(node.exposes) < 2
         or node.twist is not None
         or node.observe is not None
-        or node.carries
         or seam.frontier is not None
         or seam.owned is not None
     ):

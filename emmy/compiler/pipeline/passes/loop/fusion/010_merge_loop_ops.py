@@ -14,7 +14,6 @@ from emmy.compiler.ir.loop import LoopOp, observes_running_accumulator
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import (
     build_merged_region,
-    carries_state,
     live_outputs_of,
     wrap_multi_output_fragment,
     writes_in_place,
@@ -77,7 +76,7 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     fusable = {
         nid
         for nid in order
-        if isinstance(nodes[nid].op, LoopOp) and not (carries_state(nodes[nid].op) or observes_running_accumulator(nodes[nid].op))
+        if isinstance(nodes[nid].op, LoopOp) and not observes_running_accumulator(nodes[nid].op)
     }
     stops = {nid for nid in fusable if _packed(graph, nodes[nid]) or writes_in_place(nodes[nid])}
     stops |= {

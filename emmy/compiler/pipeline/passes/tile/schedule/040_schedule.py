@@ -27,8 +27,6 @@ from __future__ import annotations
 
 from emmy.compiler.dim import paged_declarations
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule.base import Schedule
-from emmy.compiler.ir.schedule.choices import Stage
 from emmy.compiler.ir.schedule.classic import (
     ClassicProblem,
     ClassicScheduleCodec,
@@ -46,7 +44,6 @@ from emmy.compiler.pipeline.fork import Fork, exact_schedule_leaf, iter_leaves
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import family_pins, kernel_pin, schedule_pin_fingerprint
 from emmy.compiler.pipeline.passes.tile._cut import PIECE
-from emmy.compiler.pipeline.passes.tile._fromloop import carried_program, serial_form, shared_state, shared_state_bytes
 from emmy.compiler.pipeline.schedule import fork_schedule
 from emmy.compiler.structural import digest
 
@@ -94,25 +91,12 @@ def cpu_forks(tile: TileOp, knobs: dict, ctx) -> list[Fork]:
     )
 
 
-def _shared_state_fits(tile: TileOp, ctx) -> bool:
-    """Whether the one state the serial kernel ``tile`` carries can be kept in shared memory: one CTA owns each
-    state whole (:func:`carried_program`), and the two padded buffers the steps alternate between fit beside
-    nothing else. What only the lowered kernel shows is the kernel lowering's to decline."""
-    program = carried_program(tile)
-    state = shared_state(tile, program) if program is not None else None
-    if state is None:
-        return False
-    port, shape = state
-    return shared_state_bytes(shape, tile.outputs[port].dtype) <= ctx.max_dynamic_smem
-
-
 def classic_forks(
     tile: TileOp,
     knobs: dict,
     ctx,
     *,
     kernel_set: bool = False,
-    node: str = "",
     published: bool = True,
     paged: dict | None = None,
 ) -> list[Fork]:
@@ -122,24 +106,11 @@ def classic_forks(
     ``kernel_set`` says the kernel is one piece of a cut kernel set. A hand pin is published to
     every piece at once, so each takes the values it can and keeps its catalog where it cannot —
     the reading a row published across peer kernels takes — instead of refusing a value that names
-    a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin. ``node`` is the
-    kernel's graph node id, which names the buffer a carried state's serial form keeps it in."""
-    from emmy.compiler.ir.schedule.register import materialize_register  # noqa: PLC0415
+    a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
     row = pin_row(tile.name, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
     catalog = () if published else ("catalog",)  # a pool without the published pins is another pool
-    # A kernel that carries a state has a ``STAGE`` site for it. Direct is the serial form: a buffer in global
-    # memory, one launch per step. ``d1/smem`` runs the steps of that form inside one launch; ``d1/reg`` keeps the
-    # state in registers, and the carrying kernel itself is what the lowering then reads.
-    carrying, state_stages = tile, ()
-    if tile.carries:
-        tile = serial_form(carrying, node)
-        if _shared_state_fits(tile, ctx):
-            state_stages += (Stage(transport="smem"),)
-        if carrying.register_program is not None:
-            state_stages += (Stage(transport="reg"),)
-
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band). A finalize that cannot take that row keeps its own
     # domain instead of refusing every row and falling unmapped. The partial, like every other
@@ -163,7 +134,6 @@ def classic_forks(
         validate_pins=ctx.validate_pins and not kernel_set,
         tolerate_kernel_pins=peer,
         paged=paged or {},
-        state_stages=state_stages,
         _strict_row_keys=named,
     )
     context = ClassicScheduleContext(tile, ctx, problem)
@@ -181,11 +151,7 @@ def classic_forks(
         context,
         codec=codec,
         inherited_knobs=knobs,
-        materialize=lambda schedule, row: (
-            materialize_register(carrying, Schedule(schedule.kernel, {}, {}), row)
-            if schedule.kernel.state.transport == "reg"
-            else materialize_classic(tile, knobs=row, target=ctx, schedule=schedule)
-        ),
+        materialize=lambda schedule, row: materialize_classic(tile, knobs=row, target=ctx, schedule=schedule),
         pool_id=pool_id,
         sample=getattr(ctx, "pool_sample", None),
     )
@@ -200,7 +166,7 @@ def classic_forks(
         # can still leave a piece no complete row (an f32 GDN piece under a GEMM sweep's ``STAGE=d1/smem``,
         # which none of its scalar tiles' loads resolve). That piece keeps its catalog instead of running
         # unscheduled; its own kernel pins still hold.
-        return classic_forks(tile, knobs, ctx, kernel_set=kernel_set, node=node, published=False, paged=paged)
+        return classic_forks(tile, knobs, ctx, kernel_set=kernel_set, published=False, paged=paged)
     return forks
 
 
@@ -216,7 +182,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     if getattr(ctx, "backend_name", "cuda") == "cpu":
         options = cpu_forks(tile, tile.knobs, ctx)
     else:
-        options = classic_forks(tile, tile.knobs, ctx, kernel_set=kernel_set, node=root.id, paged=paged)
+        options = classic_forks(tile, tile.knobs, ctx, kernel_set=kernel_set, paged=paged)
     # A pin that names THIS kernel and leaves it no row is refused here, with the pins that did it.
     # Left to the lazy fork, the empty enumeration was skipped: the kernel ran unscheduled and the
     # pin looked realized by nothing (a SiLU-prologue down projection under a mma TILE pin).

@@ -68,9 +68,6 @@ class CudaOp(Op):
     comment: str = ""
     tma_descriptors: tuple[TmaDescMeta, ...] = field(default_factory=tuple)
     runtime_args: tuple[str, ...] = ()
-    #: Serial launch axes ``(name, extent)``: the launcher runs the kernel once per coordinate in
-    #: order, passing the coordinate through the ``runtime_args`` slot of the same name.
-    serial: tuple[tuple[str, int], ...] = ()
     #: Whether the kernel waits on the grid ahead of it before its first memory access, so the runtime may launch
     #: it as a programmatic dependent launch. Every lowered kernel does; a hand-written source says so itself.
     dependent_launch: bool = False

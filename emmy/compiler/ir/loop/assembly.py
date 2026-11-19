@@ -51,10 +51,10 @@ class NotSupported(Exception):
 class UnfusableStmt(NotSupported):
     """One named loop's statement cannot be spliced, and no other loop in the region is implicated.
     Two reasons reach it: ``origin``'s statements multiply σ-bindings past the construction bound
-    instead of deduplicating (a recurrence the roller did not roll), and a Write of ``origin`` that
+    instead of deduplicating (an unrolled recurrence), and a Write of ``origin`` that
     observes a running accumulator (a scan), whose order no merged body preserves. Raised, never
     folded into ``None``: fusion decides its regions before it splices, so a region it cannot build
-    is a compiler bug to fix, and the roller declines a step it cannot splice."""
+    is a compiler bug to fix."""
 
     def __init__(self, message: str, origin: str) -> None:
         super().__init__(message)
@@ -236,7 +236,7 @@ class Splicer(BodyBuilder):
     # COMPOSITIONS of σs, so bindings multiply per stage instead of deduplicating (DeepSeek-V4's
     # 20-iteration Sinkhorn chain drove 4.5M distinct bindings from 2,287 input statements and
     # never finished). Such a merge cannot be constructed at any budget; the first binding past
-    # the bound raises, and the answer is the roller (``loop/fusion/005_roll_recurrence``), never
+    # the bound raises, never
     # a smaller region — a termination bound, not a fusion-quality gate: placement still owns
     # every cut on a merge that CAN be built.
     # Whole layers legitimately take over a hundred bindings per source statement: the tracer
@@ -327,7 +327,7 @@ class Splicer(BodyBuilder):
         if len(self._binding) >= self._BINDING_RATIO * self.program.source_stmts:
             raise UnfusableStmt(
                 f"the merged body takes over {self._BINDING_RATIO} bindings per source statement, at {name!r} of loop "
-                f"{origin!r} — the region's σ-bindings multiply instead of deduplicating: a recurrence the roller did not roll",
+                f"{origin!r} — the region's σ-bindings multiply instead of deduplicating: an unrolled recurrence",
                 origin=origin,
             )
         bound = self.fresh(name)

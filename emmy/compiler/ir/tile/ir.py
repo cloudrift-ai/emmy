@@ -69,8 +69,6 @@ def observed_result_names(op) -> frozenset[str]:
             continue
         if node.observe is not None:
             names.update(node.observe.results)
-        if node.carries:  # a carried state's per-step outputs stream the same way
-            names.update(node.exposes[len(node.base.results) :])
         stack.extend(node.operands)
         stack.extend(s for s in node.lift.body if isinstance(s, Fold))
     return frozenset(names)
@@ -452,35 +450,6 @@ class TileOp(Op):
             return all(_dense_axis_suffix(spec.write.index, free[0].name) for spec in self.output_specs)
         return {axis.name for axis in free} == role
 
-    @cached_property
-    def carries(self) -> bool:
-        """Whether this kernel carries a state: a fold of its tree folds the action ``next``
-        (:attr:`Fold.carries`), so its steps run in order inside one loop and the kernel stays one
-        kernel — the classic schedule realizes the loop as one launch per step over a state buffer,
-        the register schedule as a loop inside each CTA."""
-        return any(site.node.carries for site in self.sites)
-
-    @cached_property
-    def state_routes(self) -> tuple[str, ...]:
-        """The route of every fold whose carried state this kernel keeps between steps: the carrying folds of the
-        kernel itself, or, for its serial form (:attr:`Placement.serial`), of the carrying kernel that form was
-        lifted from. A state is a value its fold reads again at every step, so each route is a ``STAGE`` site."""
-        carrying = self._carrying
-        return tuple(site.path for site in carrying.sites if site.node.carries) if carrying is not None else ()
-
-    @cached_property
-    def state_program(self):
-        """The register program of the state this kernel keeps between steps (:attr:`register_program` of the
-        carrying kernel), or ``None``: what makes register storage one of the values its ``STAGE`` site offers."""
-        return self._carrying.register_program if self._carrying is not None else None
-
-    @cached_property
-    def _carrying(self) -> TileOp | None:
-        if self.carries:
-            return self
-        ancestors = (op for op in self.source_chain() if isinstance(op, TileOp) and op.carries)
-        return next(ancestors, None) if self.place.serial else None
-
     def _own_axes(self) -> None:
         """The kernel owns its axis table, COMPLETE by construction: the free axes' extents are the
         placement's and join the table here; every reduce axis the term binds and every store
@@ -490,7 +459,7 @@ class TileOp(Op):
         if self.op is None:
             return
         table = {axis.name: axis for axis in self.axes}
-        for axis in (*self.place.serial, *self.place.free):
+        for axis in self.place.free:
             table.setdefault(axis.name, axis)
         needed = {site.node.axis for site in sites(self.op) if site.node.axis is not None}
         needed |= {axis.name for spec in self.output_specs for axis in spec.sweep}
@@ -511,13 +480,6 @@ class TileOp(Op):
         if not callable(validate):
             raise TypeError("schedule materialization must provide validate(schedule, source, place=..., workers=...)")
         validate(self.schedule, self, place=self.place, workers=self.workers)
-
-    @cached_property
-    def register_program(self):
-        """The rectangular loop whose state can be owned by independent register rows."""
-        from emmy.compiler.ir.schedule.register import RegisterProgram  # noqa: PLC0415
-
-        return RegisterProgram.from_tile(self)
 
     @cached_property
     def grid_sched(self):
@@ -779,12 +741,9 @@ class TileOp(Op):
         # evaluated over it — is the kernel's to bind: the term opens every coordinate it declares
         # and those loops wrap outside, in grid order.
         glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
-        serial = tuple(self.place.serial)
         with binding_extents(self.extents):
-            body = self.op.lower(frozenset(axis.name for axis in (*glue, *serial)), self.output_specs, self.axes)
-        # A serial axis is time: it encloses every cell, so a lagged read of this kernel's own
-        # output sees the previous step's stores from every cell.
-        for axis in reversed((*serial, *glue)):
+            body = self.op.lower(frozenset(axis.name for axis in glue), self.output_specs, self.axes)
+        for axis in reversed(glue):
             body = Body((Loop(axis=axis, body=body),))
         return body
 

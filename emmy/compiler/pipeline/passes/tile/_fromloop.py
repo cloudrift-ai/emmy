@@ -12,12 +12,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from itertools import count
-from math import prod
 from typing import TYPE_CHECKING
 
-from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, TernaryExpression, Var, apply
+from emmy.compiler.ir.expression import Expression, Literal, Var, apply
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import EXTENTS, Fold, binding_extents
@@ -26,14 +23,11 @@ from emmy.compiler.ir.stmt import (
     Accum,
     Assign,
     Body,
-    Carry,
     Init,
     Let,
     Load,
     Loop,
-    Pre,
     Select,
-    SelectBranch,
     Statement,
     Write,
 )
@@ -41,9 +35,8 @@ from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 from emmy.compiler.ir.tile.ir import guarded_store
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
 
-    from emmy.compiler.graph import Tensor
+    pass
 
 
 def _stamp_axes(loop: Loop) -> Loop:
@@ -71,9 +64,6 @@ class _Level:
     exposed: dict = field(default_factory=dict)
     consumed: set = field(default_factory=set)
     drained: set = field(default_factory=set)
-    #: The carried states in scope, each with the axis of the loop carrying it — what a ``Pre``
-    #: read below this level names (:meth:`Fold.carrier_read`).
-    carriers: dict = field(default_factory=dict)
 
 
 def _supply(names: set[str], levels: tuple[_Level, ...]) -> tuple[Fold, ...]:
@@ -423,7 +413,7 @@ def _renamed_sweep(loop: Loop, taken: set[str]) -> Loop:
     return loop.replace(axis=replace(loop.axis, name=fresh), body=Body(tuple(stmt.substitute(coords) for stmt in loop.body)))
 
 
-def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None = None) -> tuple[tuple, Body]:
+def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     """Lift one statement tree into ``(operand terms, statements)`` — SEPARATED, bottom up.
 
     A reduction becomes an operand EDGE of the level it sat in; it is never substituted into the
@@ -445,11 +435,9 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
     :func:`_peel`; ``levels`` are the enclosing levels under construction, the providers a term
     formed here may close over. A term cannot tell an axis from a value — both are a bare ``Var``
     — but the binder can, because it bound them; so the classification arrives from above rather
-    than being inferred by walking a lowered body for names that look axis-shaped. ``carriers``
-    are the carried states in scope with their carrying axes, inherited from the enclosing level
-    unless a carrying loop adds its own.
+    than being inferred by walking a lowered body for names that look axis-shaped.
     """
-    level = _Level(axes, carriers=carriers if carriers is not None else (levels[-1].carriers if levels else {}))
+    level = _Level(axes)
     inner_levels = (*levels, level)
     edges: list = []
     bound = {axis.name for axis in axes}  # one coordinate per name: a sibling sweep reusing one is renamed apart
@@ -535,8 +523,6 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     observed name. The rewritten stores ride the stream position after the node (the observed
     names are the fold's extra ``defines``), where boundary extraction claims them as ordinary
     ``OutputSpec``\\ s and reconstitution splices them back into the loop."""
-    if loop.carries:
-        return _carried_from_loop(loop, axes, levels)
     loop = _stamp_axes(loop)
     scope = (*axes, loop.axis)
     edges, body = lift_body(loop.body, scope, levels)
@@ -566,7 +552,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # it reads is not an axis, and a slab would declare it as one. A LOAD defines such a value too:
     # a code read from gmem indexes the next table read, and reading only the arithmetic
     # here left that index declared as a coordinate the kernel could hand no extent.
-    slabs, plain = _slabs(step, levels[-1].carriers if levels else {}, _values_in_scope(levels))
+    slabs, plain = _slabs(step, _values_in_scope(levels))
     ops = tuple(stmt.op for stmt in accums)
     edges, plain, hoists = _factor_products(plain, values, ops, (*edges, *slabs), scope, levels, axes, hoist=not writes)
     # FORM the lift closed: a value the step reads from an enclosing level arrives as an operand;
@@ -601,7 +587,7 @@ def _observers(step: tuple, stored: tuple[str, ...], names: tuple[str, ...], axi
     while pending:
         value = pending.pop()
         stmt = defined.get(value)
-        if stmt is None or isinstance(stmt, (Load, Pre, Loop)):
+        if stmt is None or isinstance(stmt, (Load, Loop)):
             raise ValueError(f"a per-step store may only observe the carried state {names}, not {value!r}")
         if id(stmt) in taken:
             continue
@@ -619,10 +605,9 @@ def _values_in_scope(levels: tuple) -> frozenset[str]:
     )
 
 
-def _slabs(step: tuple, carriers: dict, known: frozenset[str]) -> tuple[tuple[Fold, ...], Body]:
+def _slabs(step: tuple, known: frozenset[str]) -> tuple[tuple[Fold, ...], Body]:
     """The step's reads as terms and what remains of it: every ``Load`` over COORDINATES becomes a
-    SLAB — a term declaring the coordinates it indexes — and every ``Pre`` a CARRIER READ, a slab
-    over the carried state naming the axis of the loop carrying it. A data-dependent GATHER — an
+    SLAB — a term declaring the coordinates it indexes. A data-dependent GATHER — an
     index reading a VALUE, one the step computes (the packed-pair table read by a decoded code) or
     one an enclosing level holds (``known``: an expert's weights picked by a routed index) — is a
     statement of its cone: the value it reads is not an axis, and a slab would declare it as one.
@@ -631,197 +616,8 @@ def _slabs(step: tuple, carriers: dict, known: frozenset[str]) -> tuple[tuple[Fo
     extent."""
     defined = {name for stmt in step for name in stmt.defines()} | known
     gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expression.free_vars() & defined for expression in stmt.index)}
-    slabs = tuple(
-        Fold.carrier_read(stmt, carriers[stmt.carrier]) if isinstance(stmt, Pre) else Fold.slab(stmt)
-        for stmt in step
-        if isinstance(stmt, (Load, Pre)) and id(stmt) not in gathers
-    )
-    return slabs, Body(stmt for stmt in step if not isinstance(stmt, (Load, Pre)) or id(stmt) in gathers)
-
-
-def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tuple[Write, ...]]:
-    """Lift a loop that CARRIES A STATE into a fold whose ⊕ is the action ``next``: the cell loops
-    are the fold's ``cells``, each ``Carry`` a state whose lift result is its value and whose seed
-    is the fold's ``init``, a ``Pre`` a carrier-read slab the way a ``Load`` is a slab. A per-step
-    ``Write`` streams a value of the step — one the step defines, or one an operand exposes (the
-    state a step read) — and that value enters the lift as a fresh ``<value>__obs`` copy, so every
-    streamed value is a result of the fold's own and the store, rewritten to read it, rides the
-    stream position after the node like a scan's."""
-    loop = _stamp_axes(loop)
-    cells: list[Axis] = []
-
-    def flatten(body: Body) -> list[Statement]:
-        # The chain of loops over the cells, from the carrying loop down to the level that defines
-        # the state; a free loop beside that chain is an output SWEEP of the step (the delta rule's
-        # corrected values, over the chunk's rows beside the state's), left as one.
-        if any(isinstance(stmt, Carry) for stmt in body):
-            return list(body)
-        chain = [index for index, stmt in enumerate(body) if isinstance(stmt, Loop) and not stmt.is_reduce and stmt.body.carries]
-        if len(chain) != 1:
-            return list(body)
-        (index,) = chain
-        cells.append(body[index].axis)
-        return [*body[:index], *flatten(body[index].body), *body[index + 1 :]]
-
-    flat = Body(flatten(loop.body))
-    defined = tuple(stmt for stmt in flat if isinstance(stmt, Carry))
-    if any(
-        carry.cells != defined[0].cells or [isinstance(e, Var) for e in carry.index] != [isinstance(e, Var) for e in defined[0].index]
-        for carry in defined
-    ):
-        raise ValueError(f"loop {loop.axis.name!r}: every carried state is one value per cell over the same cell axes")
-    # A position where normalization dropped a size-one axis is ``0`` in every index over the
-    # state; the term's cells are the axes alone, so the reads and the definition drop it too.
-    unit = tuple(position for position, e in enumerate(defined[0].index) if not isinstance(e, Var))
-
-    def strip(stmt: Statement) -> Statement:
-        if isinstance(stmt, Carry) or (isinstance(stmt, Pre) and stmt.carrier in loop.carries):
-            return stmt.replace(index=tuple(e for position, e in enumerate(stmt.index) if position not in unit))
-        return stmt
-
-    if unit:
-        flat = flat.map(strip)
-    carriers = {**(levels[-1].carriers if levels else {}), **dict.fromkeys(loop.carries, loop.axis.name)}
-    scope = (*axes, loop.axis, *cells)
-    edges, body = lift_body(flat, scope, levels, carriers=carriers)
-    carried = tuple(stmt for stmt in body if isinstance(stmt, Carry))
-    writes = tuple(stmt for stmt in body if isinstance(stmt, Write))
-    # An output sweep of the step keeps its stores alone (:func:`lift_body`); the values it
-    # writes are results of terms evaluated over the sweep, which the fold passes through as
-    # results of its own so the boundary can bind them.
-    sweeps = tuple(stmt for stmt in body if isinstance(stmt, Loop))
-    swept = tuple(dict.fromkeys(value for sweep in sweeps for stmt in sweep.body.iter_of_type(Write) for value in stmt.values))
-    skip = {id(stmt) for stmt in (*carried, *writes, *sweeps)}
-    slabs, plain = _slabs(tuple(stmt for stmt in body if id(stmt) not in skip), carriers, _values_in_scope(levels))
-    observed = {value: f"{value}__obs" for stmt in writes for value in stmt.values}
-    plain = Body((*plain, *(Assign(fresh, Var(value)) for value, fresh in observed.items())))
-    results = (*(carry.value for carry in carried), *observed.values(), *swept)
-    edges, lift = _close((loop.axis.name,), (*edges, *slabs), plain, results, scope, levels)
-    names = tuple(carry.name for carry in carried)
-    fold = Fold(
-        operands=edges,
-        lift=lift,
-        init=tuple(carry.seed for carry in carried),
-        base=Lambda.componentwise(("next",) * len(names), names),
-        cells=carried[0].cells,
-    )
-    return fold, (*(stmt.replace(values=tuple(observed[value] for value in stmt.values)) for stmt in writes), *sweeps)
-
-
-def carrying_loops(body: Body, outer: tuple[Axis, ...] = ()) -> list[tuple[Loop, tuple[Axis, ...]]]:
-    """Every loop of ``body`` that carries a state, with the free loops outside it."""
-    out = []
-    for stmt in Body.coerce(body):
-        if isinstance(stmt, Loop) and stmt.carries:
-            out.append((stmt, outer))
-        elif isinstance(stmt, Loop):
-            out.extend(carrying_loops(stmt.body, (*outer, stmt.axis)))
-    return out
-
-
-def stored_states(loop: Loop, outer: tuple[Axis, ...]) -> dict[str, tuple[Carry, Write]]:
-    """The states ``loop`` carries whose next value the term stores itself, every step: a plain store of the
-    ``Carry``'s value (or an exact copy of it a normalization step named) at the step, the free coordinates
-    outside the loop and the cell, with ``0`` where a size-one dim pins the coordinate — the per-step store the
-    roll gives a rolled recurrence's state. Such a state needs no buffer of its own: that output holds every
-    step, so the lagged read is a read of it one step back (:func:`states_as_buffers`)."""
-    fixed = {loop.axis.name, *(axis.name for axis in outer)}
-    stmts = tuple(loop.body.iter())
-    carries = {s.value: s for s in stmts if isinstance(s, Carry) and s.name in loop.carries}
-    copies = {s.name: s.value.name for s in stmts if isinstance(s, Assign) and isinstance(s.value, Var) and s.dtype in (None, F32)}
-    out: dict[str, tuple[Carry, Write]] = {}
-    for stmt in stmts:
-        if not (isinstance(stmt, Write) and stmt.is_scalar and not stmt.atomic):
-            continue
-        value = stmt.value
-        while value not in carries and value in copies:
-            value = copies[value]
-        if value not in carries:
-            continue
-        carry = carries[value]
-        cells = {cell.name for cell in carry.index if isinstance(cell, Var)}
-        names = [expression.name for expression in stmt.index if isinstance(expression, Var)]
-        plain = all(isinstance(expression, Var) or expression == Literal(0, "int") for expression in stmt.index)
-        if plain and len(set(names)) == len(names) and set(names) == fixed | cells:
-            out.setdefault(carry.name, (carry, stmt))
-    return out
-
-
-def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> tuple[Body, tuple[Axis, ...], dict[str, tuple]]:
-    """``body`` with every carried state spelled as a STATE BUFFER — ``(body, serial axes,
-    buffer shapes)`` — the form a serial launch axis realizes (:attr:`Placement.serial`): the
-    classic schedule's realization of a carried state, taken at its fork from the carrying
-    kernel's own Loop IR (:func:`lift_serial`).
-
-    The loop that carries a state becomes the kernel's time: one launch per step, in order. The
-    buffer keeps every step, indexed by the step, the free axes outside the loop and the cell. A
-    ``Pre`` read is a load one step back, the seed where there is no step before the first; the
-    ``Carry`` is a store of its value at this step. A state the term already stores that way
-    (:func:`stored_states`) keeps that output as its buffer: the read is a read of it one step
-    back, the ``Carry`` stores nothing twice, and ``shapes`` names no buffer for it. Nothing of the
-    step's own algebra changes, so the rest of the nest lifts as it always did. ``inputs`` are the
-    kernel's input tensors, the seeds among them (:func:`seed_index`).
-    """
-    serial: list[Axis] = []
-    shapes: dict[str, tuple] = {}
-
-    def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str], stored: dict) -> tuple[Statement, ...]:
-        step = Var(time.name)
-        after_first = BinaryExpression(">", step, Literal(0, "int"))
-        previous = TernaryExpression(after_first, step - Literal(1, "int"), Literal(0, "int"))
-        if stmt.carrier in stored:
-            carry, write = stored[stmt.carrier]
-            cells = {cell.name: at for cell, at in zip(carry.index, stmt.index, strict=True) if isinstance(cell, Var)}
-            buffer, index = write.output, tuple(expression.substitute({time.name: previous, **cells}) for expression in write.index)
-        else:
-            buffer, index = f"{prefix}__{stmt.carrier}", (previous, *(Var(axis.name) for axis in outer), *stmt.index)
-        held, seed = f"{stmt.name}__prev", f"{stmt.name}__seed"
-        start = seeds[stmt.carrier]
-        # The seed is a buffer of the state's shape (the tensor an unrolled loop started from) or a constant.
-        if isinstance(start, str):
-            cell = (*(Var(axis.name) for axis in outer), *stmt.index)
-            seeded: Statement = Load(names=(seed,), input=start, index=seed_index(cell, inputs[start].shape))
-        else:
-            seeded = Let(name=seed, value=Literal(start))
-        return (
-            Load(names=(held,), input=buffer, index=index),
-            seeded,
-            Select(name=stmt.name, branches=(SelectBranch(held, after_first), SelectBranch(seed, Literal(True, "bool")))),
-        )
-
-    def define(stmt: Carry, time: Axis, outer: tuple[Axis, ...], stored: dict) -> tuple[Statement, ...]:
-        if stmt.name in stored:
-            return ()
-        index = (Var(time.name), *(Var(axis.name) for axis in outer), *stmt.index)
-        return (Write(output=f"{prefix}__{stmt.name}", index=index, values=(stmt.value,)),)
-
-    def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float | str], stored: dict) -> Body:
-        out: list[Statement] = []
-        for stmt in stmts:
-            if isinstance(stmt, Pre):
-                if stmt.carrier not in seeds:
-                    raise ValueError(f"a read of {stmt.carrier!r} outside the loop that carries it has no launch to run in")
-                out.extend(read(stmt, time, outer, seeds, stored))
-            elif isinstance(stmt, Carry):
-                out.extend(define(stmt, time, outer, stored))
-            elif isinstance(stmt, Loop) and stmt.carries:
-                if time is not None:
-                    raise ValueError(f"loop {stmt.axis.name!r} carries a state inside loop {time.name!r}, which carries one too")
-                serial.append(stmt.axis)
-                carried = {carry.name: carry.seed for carry in stmt.body.carries if carry.name in stmt.carries}
-                stored = stored_states(stmt, outer)
-                buffers = {name: cells for name, cells in stmt.carries.items() if name not in stored}
-                shapes.update((f"{prefix}__{name}", (stmt.axis, *outer, *cells)) for name, cells in buffers.items())
-                out.append(stmt.replace(body=walk(stmt.body, outer, stmt.axis, carried, stored)))
-            elif isinstance(stmt, Loop) and time is None:
-                out.append(stmt.replace(body=walk(stmt.body, (*outer, stmt.axis), time, seeds, stored)))
-            elif stmt.nested():
-                out.append(stmt.with_bodies(tuple(walk(child, outer, time, seeds, stored) for child in stmt.nested())))
-            else:
-                out.append(stmt)
-        return Body(out)
-
-    return walk(Body.coerce(body), (), None, {}, {}), tuple(serial), shapes
+    slabs = tuple(Fold.slab(stmt) for stmt in step if isinstance(stmt, Load) and id(stmt) not in gathers)
+    return slabs, Body(stmt for stmt in step if not isinstance(stmt, Load) or id(stmt) in gathers)
 
 
 def _peel(body: Body) -> tuple[list, list[Statement]]:
@@ -867,22 +663,19 @@ def _root_results(body: Body) -> tuple[str, ...]:
     return ()
 
 
-def lift_loop_op(op: LoopOp, *, body: Body | None = None, serial: tuple[Axis, ...] = ()) -> TileOp:
+def lift_loop_op(op: LoopOp, *, body: Body | None = None) -> TileOp:
     """Peel free axes and lift the complete remaining nest as one Fold tree.
 
     ``body`` lifts a rewritten spelling of ``op``'s program instead of the stored one. Constructing
     a ``LoopOp`` around such a spelling would not preserve it — Loop-IR normalization is what drops
     a size-one free axis, so the one caller that restores one (``_row``) hands its body here.
-    ``serial`` names the peeled axes that are the kernel's time (:func:`states_as_buffers`).
     """
     with binding_extents(name for tensor in op.inputs.values() for dim in tensor.shape for name in dim.expression.free_vars()):
-        return _lift_loop_op(op, body, serial)
+        return _lift_loop_op(op, body)
 
 
-def _lift_loop_op(op: LoopOp, body, serial: tuple[Axis, ...]) -> TileOp:
+def _lift_loop_op(op: LoopOp, body) -> TileOp:
     free, cell = _peel(op.body if body is None else Body.coerce(body))
-    if any(axis not in free for axis in serial):
-        raise ValueError(f"a loop that carries a state must sit outside every reduction: {[axis.name for axis in serial]}")
     edges, stmts = lift_body(cell, tuple(free))
     split = extract_output_specs(stmts)
     if split is None:
@@ -906,170 +699,11 @@ def _lift_loop_op(op: LoopOp, body, serial: tuple[Axis, ...]) -> TileOp:
     axes.update((axis.name, axis) for spec in output_specs for axis in spec.sweep)  # a renamed sibling sweep
     return TileOp(
         op=Fold(operands=edges, lift=lift),
-        place=Placement(free=tuple(axis for axis in free if axis not in serial), serial=serial),
+        place=Placement(free=tuple(free)),
         axes=tuple(axes.values()),
         inputs=dict(op.inputs),
         output_specs=output_specs,
     )
 
 
-def seed_index(cell: tuple[Expression, ...], shape: tuple) -> tuple[Expression, ...]:
-    """A seed read at ``cell``, one coordinate per dim of the seed tensor (``shape``). The state's cells
-    are its axes alone: a size-one dim, which normalization pins to ``0`` in every index over the state,
-    holds no cell (``_carried_from_loop``). The seed keeps that dim, so it reads ``0`` there."""
-    if len(shape) == len(cell):
-        return cell
-    units = [dim for dim, extent in enumerate(shape) if extent == 1]
-    if len(shape) - len(cell) != len(units):
-        raise ValueError(f"a seed of shape {shape} is not its state's cells {len(cell)} with size-one dims beside them")
-    rest = iter(cell)
-    return tuple(Literal(0, "int") if dim in units else next(rest) for dim in range(len(shape)))
-
-
-def conjuncts(expression):
-    return (
-        conjuncts(expression.left) | conjuncts(expression.right)
-        if isinstance(expression, BinaryExpression) and expression.op == "&&"
-        else frozenset((expression,))
-    )
-
-
-def owned_cells(body, carry):
-    """The leading cells every live state read addresses in its own independent batch.
-
-    Coordinate selects can clamp a discarded branch to another batch. Each use contributes
-    its predicate separately; a coordinate is owned only when every consuming path proves it.
-    """
-    demand = {}
-
-    def need(name, predicates):
-        demand.setdefault(name, set()).update(predicates)
-
-    for stmt in reversed(tuple(body.iter())):
-        wanted = demand.get(getattr(stmt, "name", ""), {frozenset()})
-        if isinstance(stmt, Select):
-            remaining = wanted
-            for i, branch in enumerate(stmt.branches):
-                if i == len(stmt.branches) - 1:
-                    need(branch.value, remaining)
-                else:
-                    need(branch.value, {path | conjuncts(branch.select) for path in remaining})
-                    remaining = {path | {BinaryExpression("==", branch.select, Literal(0, "int"))} for path in remaining}
-        elif isinstance(stmt, (Assign, Accum)):
-            for name in stmt.deps():
-                if name != stmt.name:
-                    need(name, wanted)
-        elif isinstance(stmt, (Carry, Write)):
-            need(stmt.value, {frozenset()})
-    reads = tuple(stmt for stmt in body.iter() if isinstance(stmt, Pre))
-    owned = []
-    for dim, cell in enumerate(carry.index):
-        if not isinstance(cell, Var):
-            continue
-        for read in reads:
-            if read.carrier != carry.name:
-                return ()
-            coordinate = read.index[dim]
-            for path in demand.get(read.name, {frozenset()}):
-                value = coordinate
-                while isinstance(value, TernaryExpression) and conjuncts(value.cond) <= path:
-                    value = value.if_true
-                if value != cell:
-                    return tuple(owned)
-        owned.append(cell.name)
-    return tuple(owned)
-
-
-def carried_program(op):
-    """The one loop ``op`` carries a state across, as ``(loop, carry, owned cells)``, read off the Loop IR of the
-    first op of its rewrite chain that holds one — or ``None`` where the loop is none shared storage can hold: several
-    states, an atomic store, a per-step output off the state's own cells."""
-    for source in op.source_chain():
-        body = getattr(source, "loop_body", None)
-        if body is not None:
-            loops = [s for s in body.iter() if isinstance(s, Loop) and s.carries]
-            if loops:
-                if len(loops) != 1:
-                    return None
-                loop = loops[0]
-                carries = tuple(s for s in loop.body.iter() if isinstance(s, Carry))
-                if len(carries) != 1 or any(
-                    not isinstance(s, (Loop, Let, Load, Pre, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
-                ):
-                    return None
-                carry = carries[0]
-                if any(s.atomic for s in loop.body.iter() if isinstance(s, Write)):
-                    return None
-                # A store keeps every step, at the step and the cell, or the cell alone: the state the loop ends with.
-                cells = tuple(e for e in carry.index if isinstance(e, Var))
-                if any(
-                    tuple(e for e, n in zip(s.index, source.outputs[s.output].shape, strict=True) if n != 1)
-                    not in ((Var(loop.axis.name), *cells), cells)
-                    for s in loop.body.iter()
-                    if isinstance(s, Write)
-                ):
-                    return None
-                return loop, carry, owned_cells(loop.body, carry)
-    return None
-
-
-def shared_state(op, program) -> tuple[str, tuple[int, ...]] | None:
-    """The buffer the serial kernel ``op`` keeps its carried state in and the state's static shape below the
-    step and the owned batch cells, or ``None``: the port the lift added, or the output the term stores the
-    state into itself. Its two padded copies are what shared storage holds (:func:`shared_state_bytes`)."""
-    loop, carry, batch = program
-    written = {s.output for s in loop.body.iter() if isinstance(s, Write)}
-    ports = [name for name in op.outputs if name not in written]
-    if not ports and carry.name in (stored := stored_states(loop, ())):
-        ports = [stored[carry.name][1].output]
-    if len(ports) != 1:
-        return None
-    tensor = op.outputs[ports[0]]
-    kept = tuple(dim for dim, n in enumerate(tensor.shape) if n != 1)  # the dims a size-one coordinate pins to 0 hold no cell
-    dimensions = tuple(tensor.shape[dim] for dim in kept[1 + len(batch) :])
-    if not dimensions or any(not n.is_static for n in dimensions):
-        return None
-    return ports[0], tuple(n.as_static() for n in dimensions)
-
-
-def shared_state_bytes(shape: tuple[int, ...], dtype) -> int:
-    """Shared memory the two buffers of a state of ``shape`` take, each row padded by one column."""
-    return 2 * prod(shape[:-1]) * (shape[-1] + 1) * dtype.nbytes
-
-
-def lift_serial(op: LoopOp, *, prefix: str) -> tuple[TileOp, dict[str, tuple]]:
-    """A kernel that carries a state lifted as a serial kernel: its carried states become state
-    buffers (:func:`states_as_buffers`, named under ``prefix``) and the loop that carries them the
-    kernel's time. Returns the tile and the state buffers' shapes."""
-    body, serial, shapes = states_as_buffers(op.body, prefix, op.inputs)
-    return lift_loop_op(op, body=body, serial=serial), shapes
-
-
-def serial_form(tile: TileOp, prefix: str) -> TileOp:
-    """A kernel that carries a state as the classic schedule realizes it: its Loop IR lifted again
-    with every carried state a buffer the kernel owns — the port the lift added, named under
-    ``prefix`` — and the carrying loop the kernel's serial launch axis (``lift_serial``): one
-    launch per step, each reading the previous launch's stores. The term the classic tiers then
-    tile is the STEP, a projection over ordinary slabs; the register schedule reads the carrying
-    fold itself."""
-    formed, _ = lift_serial(LoopOp(body=tile.loop_body, inputs=tile.inputs), prefix=prefix)
-    # The kernel's own knobs and its BOUND I/O: a standalone loop op seeds placeholder tensors, and
-    # the schedule reads operand dtypes, output shapes and the ``with_io`` identity off these maps.
-    # Its source is the carrying kernel: the serial form reads the routes of the states it keeps off it.
-    return replace(formed, knobs=tile.knobs, inputs=tile.inputs, outputs=tile.outputs, source=tile)
-
-
-__all__ = [
-    "carried_program",
-    "carrying_loops",
-    "conjuncts",
-    "fold_from_loop",
-    "lift_body",
-    "lift_loop_op",
-    "lift_serial",
-    "owned_cells",
-    "seed_index",
-    "serial_form",
-    "states_as_buffers",
-    "stored_states",
-]
+__all__ = ["fold_from_loop", "lift_body", "lift_loop_op"]

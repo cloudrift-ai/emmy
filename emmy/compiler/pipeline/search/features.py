@@ -426,16 +426,6 @@ def knob_features(knobs: dict) -> dict[str, float]:
     return feats
 
 
-def _state_key(kernel: Op, knobs: Mapping) -> str | None:
-    """The key ``knobs`` spells the storage of ``kernel``'s one carried state under, or ``None``: the carrying
-    fold's route, or the bare ``STAGE`` of a kernel whose step stages no operand."""
-    tile = kernel_tile(kernel)
-    routes = tile.state_routes if tile is not None else ()
-    if len(routes) != 1:
-        return None
-    return next((key for key in (f"STAGE@{routes[0]}", "STAGE") if key in knobs), None)
-
-
 class Featurizer:
     """The one featurizer every prior reads: a candidate's row is the card's ``H_*`` features, the decided kernel's
     stamps (:func:`stamps`), whether its schedule space holds a warp plan, and the candidate's knobs
@@ -460,11 +450,6 @@ class Featurizer:
         base = {**self.base, **stamps(kernel)}
         if pieces is None and self.warp_eligible(kernel):
             base["S_warp_eligible"] = 1.0
-        if (key := _state_key(kernel, knobs)) is not None:
-            # A carried state's storage is no operand fill: the row prices it as its own facts.
-            base["D_state_shared"] = float(knobs[key] == "d1/smem")
-            base["D_state_reg"] = float(knobs[key] == "d1/reg")
-            knobs = {name: value for name, value in knobs.items() if name != key}
         left = [(kernel, None)] if pieces is None else kernel_pieces(pieces)
         of_pieces = piece_features(left)
         if base.get("S_ext_trips"):
@@ -482,7 +467,6 @@ class Featurizer:
         kernel competes against tensor cores. ``False`` for a kernel no tile stands behind and for a featurizer
         given no context. Computed once per kernel."""
         from emmy.compiler.ir.schedule.classic import ClassicProblem  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
         from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
         tile = kernel_tile(kernel)
@@ -491,7 +475,7 @@ class Featurizer:
         if (known := self._warp_eligible.get(id(tile))) is not None:
             return known[1]
         problem = ClassicProblem(
-            serial_form(tile, tile.name) if tile.carries else tile,
+            tile,
             self.ctx,
             allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
             allow_fp8=precision_pin(FP8_MMA) is True,

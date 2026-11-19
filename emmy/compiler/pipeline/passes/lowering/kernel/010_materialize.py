@@ -29,7 +29,6 @@ from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, THREAD_COORDS
 from emmy.compiler.ir.pure.fold import EXTENTS
-from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write, exposed_defines, free_names
 from emmy.compiler.ir.tile import TileOp
@@ -46,26 +45,14 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     # structural ``tile/030_cut`` fork's, decided BEFORE scheduling (the walk's catalog
     # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
-    resident = isinstance(tile.materialization, RegisterMaterialization)
-    if tile.carries and not resident:
-        from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
-
-        tile = serial_form(tile, root.id)
-    rplan = reduce_plan(tile) if tile.op is not None and not resident else None
+    rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
-        materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0))
-        if not resident:
-            materialized = _pointwise_strip(tile, materialized)
+        materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
         body = Body((materialized,))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
-        kernel = KernelOp(body=body, serial=() if resident else tuple(tile.place.serial))
-        if resident:
-            # The state's port — the buffer the lift added for the classic realization, which no
-            # store of the term writes. Register storage has no global state allocation, so the
-            # port goes: a graph splice; snapshots with external readers remain ordinary outputs.
-            return _drop_private_ports(match, root, replace(kernel, source=tile, knobs=tile.knobs), "register")
+        kernel = KernelOp(body=body)
         # An output no statement writes is a store the emission lost: the kernel would compile and
         # leave the buffer unwritten. Decline the row, so the retry moves on or the compile fails loudly.
         written = {name for stmt in body.iter() for name in stmt.external_writes()}
@@ -124,8 +111,7 @@ def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
     for. Each of those used to surface as an undefined identifier deep in a generated kernel, attributed to
     whichever candidate the tuner happened to be benching. Asking it here names the kernel and the value instead, in
     the pass that built them."""
-    serial = (axis.name for axis in tile.place.serial)
-    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *serial, *tile.extents, *EXTENTS.get()}
+    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *tile.extents, *EXTENTS.get()}
     for axis in (*tile.axes, *tile.place.free):
         bound |= set(axis.extent_expression().free_vars())
     return set().union(*(free_names(stmt) for stmt in body)) - bound

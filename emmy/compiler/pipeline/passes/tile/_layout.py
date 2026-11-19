@@ -104,7 +104,7 @@ def _undecided(op, name: str) -> bool:
     decision any more (:func:`takes_kernel_set_decision`) or has no loop body yet, when it carries a state (its one
     kernel-set decision is the split), when its layout of ``name`` is already decided, or when it reads ``name``
     other than through 2-D indices (or not at all)."""
-    if not takes_kernel_set_decision(op) or op.loop_body is None or op.carries or name in op.layout_decided:
+    if not takes_kernel_set_decision(op) or op.loop_body is None or name in op.layout_decided:
         return False
     reads = _loads(op).get(name)
     return bool(reads) and all(len(load.index) == 2 for load in reads)
