@@ -2409,7 +2409,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump, selection: GoldenSelection |
     else:
         graph = embedded.copy()
     if getattr(args, "dynamic", None):
-        raise CommandError("--dynamic is incompatible with --ir (the trace is already complete)")
+        raise CommandError("--dynamic is incompatible with an IR file or a golden's stored program (the trace is already complete)")
 
     stage, tail = _replay_stage_and_passes(graph, embedded_golden=embedded is not None)
     logger.info("Loaded %s IR; running tail passes: %s", stage, tail or "(none)")
