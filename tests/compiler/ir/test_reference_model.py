@@ -268,3 +268,105 @@ for t2 in 0..3:
 def test_a_value_without_a_seed_is_read_only_where_it_was_defined() -> None:
     with pytest.raises(ValueError, match="before any statement defined it"):
         reference_model.run("for i in 0..2:\n  x = pre v[i]\n  O[i] = x\n  v[i] <- x", {}, {"O": (2,)})
+
+
+#: FlashInfer's Gated DeltaNet chunk rule for one head, in the value form: the blocked inverse of
+#: ``I + strict_lower(k kT * g)`` beside the walk over chunks. Every piece of the form is in it. The ranges are
+#: ``mb in 0..rb``, whose trips depend on a block coordinate, and ``m2 in 2 * rb..r``, a second coordinate over the
+#: rows of one block. The values defined once are ``gram``, ``kS`` and ``u``, each read at two places. The reads of
+#: a value itself are ``X[c, m, n]``, an earlier row of the inverse, and ``S[c - 1, i, j]``, the state one chunk back.
+CHUNK_RULE = """
+for c in 0..3:
+  for r0 in 0..4:
+    for m0 in 0..4:
+      for d in 0..3:
+        ka = load K[c, r0, d]
+        kb = load K[c, m0, d]
+        kk = multiply(ka, kb)
+        gs <- add(gs, kk) over d
+      gg = load G[c, r0, m0]
+      ga = multiply(gs, gg)
+      gram[c, r0, m0] <- ga
+  for rb in 0..2:
+    for r in 2 * rb..2 * rb + 2 of 4:
+      for n in 0..4:
+        for mb in 0..rb of 2:
+          for m in 2 * mb..2 * mb + 2 of 4:
+            a1 = pre gram[c, r, m]
+            x1 = pre X[c, m, n]
+            p1 = multiply(a1, x1)
+            e1 <- add(e1, p1) over m
+          e2 <- add(e2, e1) over mb
+        for m2 in 2 * rb..r of 4:
+          a2 = pre gram[c, r, m2]
+          x2 = pre X[c, m2, n]
+          p2 = multiply(a2, x2)
+          e3 <- add(e3, p2) over m2
+        eye = load EYE[r, n]
+        t1 = subtract(eye, e2)
+        xv = subtract(t1, e3)
+        X[c, r, n] <- xv
+  for r1 in 0..4:
+    for j1 in 0..2:
+      for i1 in 0..3:
+        k1 = load K[c, r1, i1]
+        s1 = pre S[c - 1, i1, j1]
+        ks1 = multiply(k1, s1)
+        ksa <- add(ksa, ks1) over i1
+      kS[c, r1, j1] <- ksa
+  for r2 in 0..4:
+    for j2 in 0..2:
+      for m3 in 0..4:
+        x3 = pre X[c, r2, m3]
+        v3 = load V[c, m3, j2]
+        k3 = pre kS[c, m3, j2]
+        d3 = subtract(v3, k3)
+        xd = multiply(x3, d3)
+        ua <- add(ua, xd) over m3
+      u[c, r2, j2] <- ua
+  for r3 in 0..4:
+    for j3 in 0..2:
+      for i3 in 0..3:
+        q3 = load Q[c, r3, i3]
+        s3 = pre S[c - 1, i3, j3]
+        qs = multiply(q3, s3)
+        oa <- add(oa, qs) over i3
+      for m4 in 0..4:
+        w4 = load QK[c, r3, m4]
+        u4 = pre u[c, m4, j3]
+        wu = multiply(w4, u4)
+        ob <- add(ob, wu) over m4
+      ov = add(oa, ob)
+      O[c, r3, j3] = ov
+  for i5 in 0..3:
+    for j5 in 0..2:
+      for r5 in 0..4:
+        k5 = load K[c, r5, i5]
+        u5 = pre u[c, r5, j5]
+        ku = multiply(k5, u5)
+        sa <- add(sa, ku) over r5
+      dc = load D[c]
+      s5 = pre S[c - 1, i5, j5]
+      ds = multiply(dc, s5)
+      sn = add(ds, sa)
+      S[c, i5, j5] <- sn seed S0
+      P[c, i5, j5] = sn
+"""
+
+
+def test_the_chunk_rule_with_a_blocked_inverse_is_one_body_of_ranges_values_and_self_reads() -> None:
+    """The test of the form: the whole chunk rule written with ranges, values defined once and values that read
+    themselves, and no statement kind beside them, computes what the algorithm computes in numpy."""
+    rng = np.random.default_rng(2)
+    shapes = {"K": (3, 4, 3), "Q": (3, 4, 3), "V": (3, 4, 2), "G": (3, 4, 4), "QK": (3, 4, 4), "D": (3,), "S0": (3, 2)}
+    inputs = {name: (0.5 * rng.standard_normal(shape)).astype(np.float32) for name, shape in shapes.items()}
+    inputs["EYE"] = np.eye(4, dtype=np.float32)
+    got = reference_model.run(CHUNK_RULE, inputs, {"O": (3, 4, 2), "P": (3, 3, 2)})
+    state = inputs["S0"].astype(np.float64)
+    for c in range(3):
+        keys = inputs["K"][c].astype(np.float64)
+        inverse = np.linalg.inv(np.eye(4) + np.tril((keys @ keys.T) * inputs["G"][c], -1))
+        update = inverse @ (inputs["V"][c] - keys @ state)
+        np.testing.assert_allclose(got["O"][c], inputs["Q"][c] @ state + inputs["QK"][c] @ update, rtol=1e-4, atol=1e-4)
+        state = inputs["D"][c] * state + keys.T @ update
+        np.testing.assert_allclose(got["P"][c], state, rtol=1e-4, atol=1e-4)
