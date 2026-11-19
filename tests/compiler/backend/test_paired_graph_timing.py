@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from emmy.commands import run
 from emmy.compiler.backend.base import BenchmarkResult, LaunchTime
+from emmy.compiler.backend.cuda import compare as compare_mod
 
 
 @pytest.fixture
@@ -81,7 +81,7 @@ def test_torch_windows_capture_the_full_batch_once_and_share_the_measured_suffix
         return _result()
 
     results, _, captured = asyncio.run(
-        run._bench_interleaved_captured(
+        compare_mod._bench_interleaved_captured(
             None,
             (),
             {},
@@ -112,7 +112,7 @@ def test_torch_windows_capture_the_full_batch_once_and_share_the_measured_suffix
 
 @pytest.mark.parametrize("failure", ["initial_torch", "calibrated_torch", "emmy_program"])
 def test_capture_failure_reruns_every_backend_uncaptured(monkeypatch, fake_cuda, failure):
-    original = run._capture_torch_fns
+    original = compare_mod._capture_torch_fns
     calls = []
 
     def capture(fns, batch_size=1):
@@ -126,9 +126,9 @@ def test_capture_failure_reruns_every_backend_uncaptured(monkeypatch, fake_cuda,
         on_iter(8)
         return _result(captured=capture_graphs, launches=2 if failure == "emmy_program" else 1)
 
-    monkeypatch.setattr(run, "_capture_torch_fns", capture)
+    monkeypatch.setattr("emmy.compiler.backend.cuda.compare._capture_torch_fns", capture)
     _, _, captured = asyncio.run(
-        run._bench_interleaved_captured(
+        compare_mod._bench_interleaved_captured(
             None,
             (),
             {},
@@ -152,7 +152,7 @@ def test_unrelated_benchmark_failure_is_not_retried(fake_cuda):
 
     with pytest.raises(ValueError, match="invalid executable"):
         asyncio.run(
-            run._bench_interleaved_captured(
+            compare_mod._bench_interleaved_captured(
                 None,
                 (),
                 {},
@@ -174,7 +174,7 @@ def test_cold_emmy_only_capture_does_not_require_a_whole_program_window(fake_cud
         return _result(launches=2)
 
     _, result, captured = asyncio.run(
-        run._bench_interleaved_captured(
+        compare_mod._bench_interleaved_captured(
             None,
             (),
             {},

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from emmy.compiler.backend.cuda import compare as compare_mod
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
@@ -922,7 +923,7 @@ def test_emmy_only_benchmark_returns_same_input_reference():
     """Embedded Loop replay can return its greedy inputs/outputs without a Torch twin."""
     import numpy as np
 
-    from emmy.commands.run import bench_lowered_vs_torch
+    from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
 
     graph = Graph()
     graph.add_node(ConstantOp(name="y", value=2.0), [], Tensor("y", (1,)), node_id="y")
@@ -987,12 +988,11 @@ def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
             return SimpleNamespace(time_ms=0.001, captured=True)
 
     monkeypatch.setattr(
-        run_module,
-        "_to_cuda_tensor",
+        "emmy.compiler.backend.cuda.compare.to_cuda_tensor",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reference-free replay must not make a Torch copy")),
     )
     asyncio.run(
-        run_module.bench_lowered_vs_torch(None, graph, FakeBackend(), seed=0, do_bench=True, warmup=1, iters=1, bench_backends="emmy")
+        compare_mod.bench_lowered_vs_torch(None, graph, FakeBackend(), seed=0, do_bench=True, warmup=1, iters=1, bench_backends="emmy")
     )
 
 

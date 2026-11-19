@@ -59,28 +59,6 @@ import sys
 import traceback
 
 
-@contextlib.contextmanager
-def _reference_precision(strict: bool):
-    """Use full-width reductions for strict Torch comparisons, without changing the next worker job."""
-    if not strict:
-        yield
-        return
-    import torch
-
-    matmul = torch.backends.cuda.matmul
-    # Newer Torch versions pair the precision flag with an independent split-K flag.
-    # The native getter retains both; the public getter returns only the first.
-    fp16 = torch._C._get_cublas_allow_fp16_reduced_precision_reduction()
-    bf16 = torch._C._get_cublas_allow_bf16_reduced_precision_reduction()
-    try:
-        matmul.allow_fp16_reduced_precision_reduction = (False, fp16[1]) if isinstance(fp16, tuple) else False
-        matmul.allow_bf16_reduced_precision_reduction = (False, bf16[1]) if isinstance(bf16, tuple) else False
-        yield
-    finally:
-        matmul.allow_fp16_reduced_precision_reduction = fp16
-        matmul.allow_bf16_reduced_precision_reduction = bf16
-
-
 def _read_n(fd: int, n: int) -> bytes:
     out = bytearray()
     while len(out) < n:
@@ -134,11 +112,13 @@ async def _run_job(req: dict) -> dict:
         device().synchronize()
         return {"warmed": True}
 
+    from emmy.compiler.backend.correctness import reference_precision
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
+    # A strict comparison takes Torch's full-width reductions for the whole job, the timed forwards included.
     with (
         pinned_knobs({**req.get("precision", {}), "COLD_CACHE": req.get("cold_cache", False)}),
-        _reference_precision(req.get("strict_accuracy", False)),
+        reference_precision() if req.get("strict_accuracy", False) else contextlib.nullcontext(),
     ):
         spec = req.get("torch_spec")
         if spec is None:
@@ -174,7 +154,7 @@ async def _run_job(req: dict) -> dict:
         accuracy_error = run_io = correctness = greedy_error = reference_run_us = stats_sym_env = None
         retire_worker = False
         if kind == "frontend_graph":
-            from emmy.commands.run import bench_lowered_vs_torch
+            from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
 
             want_reference = req.get("want_ref", False) or req.get("strict_accuracy", False)
             refs, ref_times, sym_envs = [], [], []
@@ -219,7 +199,7 @@ async def _run_job(req: dict) -> dict:
             import types
 
             from emmy.commands.compile import load_or_trace
-            from emmy.commands.run import bench_full_model_real
+            from emmy.compiler.backend.cuda.compare import bench_full_model_real
 
             _, _, bundle = load_or_trace(types.SimpleNamespace(**payload))
             if bundle is None:
@@ -233,27 +213,26 @@ async def _run_job(req: dict) -> dict:
                 # benching a miscompiling program would be wasted GPU time. ``want_ref``
                 # ships this run's (inputs, outputs) back as the pinned rows' wrong-answer
                 # reference (bounded: pinned rows only exist for --code inputs).
-                from emmy.commands.run import (
-                    _bind_inputs,
-                    _check_accuracy,
-                    _comparison_outputs,
-                    _eager_output,
-                    _strict_correctness_proof,
-                    correctness_oracle,
+                from emmy.compiler.backend.correctness import (
+                    check_accuracy,
+                    comparison_outputs,
+                    eager_output,
+                    strict_correctness_proof,
                 )
+                from emmy.compiler.loader.binder import bind_inputs
 
-                input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
+                input_data = bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
-                run_outputs = _comparison_outputs(run_result.outputs, req["graph"])
+                run_outputs = comparison_outputs(run_result.outputs, req["graph"])
                 if req.get("accuracy") or req.get("strict_accuracy"):
-                    with correctness_oracle():
-                        eager_out = _eager_output(module, args_t, kwargs)
+                    with reference_precision():
+                        eager_out = eager_output(module, args_t, kwargs)
                     if req.get("strict_accuracy"):
-                        correctness = _strict_correctness_proof(run_outputs, eager_out)
+                        correctness = strict_correctness_proof(run_outputs, eager_out)
                         if correctness["status"] != "pass":
                             accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
                     else:
-                        accuracy_error = _check_accuracy(run_outputs, eager_out)
+                        accuracy_error = check_accuracy(run_outputs, eager_out)
                     if accuracy_error is not None:
                         return {
                             "result": None,

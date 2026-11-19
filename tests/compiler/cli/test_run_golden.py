@@ -9,6 +9,7 @@ from unittest import mock
 import pytest
 
 from emmy.commands import run as run_mod
+from emmy.compiler.backend import correctness as correctness_mod
 from emmy.compiler.pipeline.search.db import RoutingRow
 from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Row
 
@@ -578,31 +579,31 @@ def test_a_reference_that_disagrees_with_itself_is_reported_unusable_not_per_row
 
     # The reference reproduces: a row that differs from it is genuinely suspect, and says so.
     verdict = "wrong-answer: rel err 2.177 vs greedy output"
-    assert run_mod.resolve_reference_disagreement([(other, verdict), (ref, None)], ref) == [verdict, None]
+    assert correctness_mod.resolve_reference_disagreement([(other, verdict), (ref, None)], ref) == [verdict, None]
 
     # The reference disagrees with a row that IS the reference: one statement, and nothing per row.
-    resolved = run_mod.resolve_reference_disagreement(
+    resolved = correctness_mod.resolve_reference_disagreement(
         [(ref, "wrong-answer: rel err 15.992 vs greedy output"), (other, "wrong-answer: rel err 15.859 vs greedy output")],
         ref,
     )
-    assert resolved == [run_mod.REFERENCE_SELF_DISAGREES, None]
-    assert "unusable" in run_mod.REFERENCE_SELF_DISAGREES
+    assert resolved == [correctness_mod.REFERENCE_SELF_DISAGREES, None]
+    assert "unusable" in correctness_mod.REFERENCE_SELF_DISAGREES
     # It is stated once, not once per row.
-    assert resolved.count(run_mod.REFERENCE_SELF_DISAGREES) == 1
+    assert resolved.count(correctness_mod.REFERENCE_SELF_DISAGREES) == 1
 
     # Order does not matter: the witness may be any row, and the others still lose their verdicts.
-    resolved = run_mod.resolve_reference_disagreement(
+    resolved = correctness_mod.resolve_reference_disagreement(
         [(other, "wrong-answer: rel err 15.859 vs greedy output"), (ref, "wrong-answer: rel err 15.992 vs greedy output")],
         ref,
     )
-    assert resolved == [None, run_mod.REFERENCE_SELF_DISAGREES]
+    assert resolved == [None, correctness_mod.REFERENCE_SELF_DISAGREES]
 
     # A reference row that AGREES is no witness -- the others keep their verdicts.
-    assert run_mod.resolve_reference_disagreement([(ref, None), (other, verdict)], ref) == [None, verdict]
+    assert correctness_mod.resolve_reference_disagreement([(ref, None), (other, verdict)], ref) == [None, verdict]
 
     # Without the greedy's realized knobs there is nothing to compare, so verdicts pass through.
-    assert run_mod.resolve_reference_disagreement([(other, verdict)], None) == [verdict]
-    assert run_mod.resolve_reference_disagreement([(other, verdict)], []) == [verdict]
+    assert correctness_mod.resolve_reference_disagreement([(other, verdict)], None) == [verdict]
+    assert correctness_mod.resolve_reference_disagreement([(other, verdict)], []) == [verdict]
 
 
 def test_the_correctness_oracle_runs_torch_gemms_at_full_precision_and_restores_the_defaults():
@@ -614,7 +615,7 @@ def test_the_correctness_oracle_runs_torch_gemms_at_full_precision_and_restores_
 
     matmul = torch.backends.cuda.matmul
     before = (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction)
-    with run_mod.correctness_oracle():
+    with correctness_mod.reference_precision():
         assert not matmul.allow_fp16_reduced_precision_reduction
         assert not matmul.allow_bf16_reduced_precision_reduction
     assert (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction) == before

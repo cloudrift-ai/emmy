@@ -49,7 +49,7 @@ def test_random_input_values_bound_u8_scale_codes_without_changing_adjacent_inpu
     """
     import numpy as np
 
-    from emmy.commands.run import _random_input_values
+    from emmy.compiler.backend.cuda.compare import _random_input_values
     from emmy.compiler.dtype import decode_f8
 
     scales = _random_input_values(np.random.default_rng(7), (1024,), "u8", name="w_gate_up_scale")
@@ -71,7 +71,7 @@ def test_random_input_values_bound_u8_scale_codes_without_changing_adjacent_inpu
 def test_a_native_chunk_is_benched_last_in_the_window_it_is_priced_at():
     """A causal chunk reads keys only up to its rows, and a random draw puts its rows at the cache's start: a bench
     gives native's attention the position of the window's last chunk, so its time is the window's."""
-    from emmy.commands.run import _chunk_position
+    from emmy.compiler.backend.cuda.compare import _chunk_position
     from emmy.compiler.specialize import specialize_program
     from emmy.compiler.trace.torch import trace_module
     from emmy.serving.native.prepare import attend_module
@@ -90,7 +90,7 @@ def test_a_native_chunk_is_benched_last_in_the_window_it_is_priced_at():
 def test_random_input_values_use_adapter_scale_and_binary_selection():
     import numpy as np
 
-    from emmy.commands.run import _random_input_values
+    from emmy.compiler.backend.cuda.compare import _random_input_values
     from emmy.serving.lora import WEIGHT_INPUTS
 
     assert WEIGHT_INPUTS == {"q_a", "q_b", "k_a", "k_b", "v_a", "v_b", "o_a", "o_b", "gate_a", "gate_b", "up_a", "up_b", "down_a", "down_b"}
@@ -107,7 +107,7 @@ def test_random_input_values_draw_routed_expert_weights_at_weight_scale():
     """An expert program takes its weights as inputs; drawn at unit scale its FP16 projections overflow."""
     import numpy as np
 
-    from emmy.commands.run import _random_input_values
+    from emmy.compiler.backend.cuda.compare import _random_input_values
     from emmy.compiler.trace.huggingface import EXPERT_WEIGHT_INPUTS
 
     for name in EXPERT_WEIGHT_INPUTS:
@@ -210,7 +210,7 @@ def test_hint_sized_inputs_tiles_symbolic_axes():
     """A symbolic input axis grows to its Dim hint (DEFAULT_SEQ_HINT) by tiling
     the trace-time values; static inputs pass through untouched (the full-model table
     must bench torch at the same hint shape emmy benches at)."""
-    from emmy.commands.run import _hint_sized_inputs
+    from emmy.compiler.backend.cuda.compare import _hint_sized_inputs
     from emmy.compiler.dim import DEFAULT_SEQ_HINT
 
     x = torch.randn(1, 32, 8)
@@ -227,7 +227,7 @@ def test_hint_sized_inputs_tiles_symbolic_axes():
 
 
 def test_hint_sized_inputs_static_graph_is_noop():
-    from emmy.commands.run import _hint_sized_inputs
+    from emmy.compiler.backend.cuda.compare import _hint_sized_inputs
     from tests.compiler.helpers import matmul_graph
 
     a, b = torch.randn(4, 8), torch.randn(8, 4)
@@ -238,8 +238,8 @@ def test_hint_sized_inputs_static_graph_is_noop():
 
 def test_hint_sized_inputs_resizes_kwargs_in_nested_structure():
     """Tensors inside kwargs containers (HF's ``position_embeddings`` tuple
-    style) are paired in ``_flatten_tensors`` order and rebuilt in place."""
-    from emmy.commands.run import _hint_sized_inputs
+    style) are paired in ``flatten_tensors`` order and rebuilt in place."""
+    from emmy.compiler.backend.cuda.compare import _hint_sized_inputs
     from emmy.compiler.dim import Dim
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
@@ -261,7 +261,7 @@ def test_hint_sized_inputs_resizes_kwargs_in_nested_structure():
 
 
 def test_tile_to_non_divisible_and_dtype():
-    from emmy.commands.run import _tile_to
+    from emmy.compiler.backend.cuda.compare import _tile_to
 
     t = torch.tensor([[1, 2]], dtype=torch.long)
     out = _tile_to(t, 1, 5)
@@ -285,7 +285,7 @@ def test_build_torch_fns_resets_dynamo_before_compile(monkeypatch):
     tcompile column. ``_build_torch_fns`` must reset dynamo before each compile."""
     import torch._dynamo
 
-    from emmy.commands.run import _build_torch_fns
+    from emmy.compiler.backend.cuda.compare import _build_torch_fns
 
     calls: list[bool] = []
     real_reset = torch._dynamo.reset
@@ -308,7 +308,8 @@ def test_build_torch_fns_reports_a_wrong_inductor_output_as_a_failed_backend(mon
     in the closure dict and stands in the table and the record where the latency would."""
     import torch._dynamo
 
-    from emmy.commands.run import BackendFailure, _build_torch_fns, _print_table
+    from emmy.commands.run import _print_table
+    from emmy.compiler.backend.cuda.compare import BackendFailure, _build_torch_fns
 
     monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
 
@@ -332,7 +333,7 @@ def test_build_torch_fns_accepts_inductor_rounding_drift(monkeypatch):
     scaled check the Emmy output gets, not a flat 1e-3 that rejected it on three of six shapes."""
     import torch._dynamo
 
-    from emmy.commands.run import _build_torch_fns
+    from emmy.compiler.backend.cuda.compare import _build_torch_fns
 
     monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
     reference = torch.full((8,), 60.0, dtype=torch.float16)
@@ -592,32 +593,32 @@ def test_wrong_answer_flag_catches_bad_pinned_output():
     and a missing / mis-shaped output flags rather than crashing."""
     import numpy as np
 
-    from emmy.commands.run import _wrong_answer_flag
+    from emmy.compiler.backend.correctness import wrong_answer_flag
 
     ref = {"o": np.full((4, 4), 100.0)}
     none = frozenset()
-    assert _wrong_answer_flag({"o": ref["o"].copy()}, ref, none) is None
-    assert _wrong_answer_flag({"o": ref["o"] + 1.0}, ref, none) is None  # 1% off — reorder noise
-    assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref, none)
-    assert "missing" in _wrong_answer_flag({}, ref, none)
-    assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref, none)
+    assert wrong_answer_flag({"o": ref["o"].copy()}, ref, none) is None
+    assert wrong_answer_flag({"o": ref["o"] + 1.0}, ref, none) is None  # 1% off — reorder noise
+    assert "wrong-answer" in wrong_answer_flag({"o": ref["o"] * 0.5}, ref, none)
+    assert "missing" in wrong_answer_flag({}, ref, none)
+    assert "shape" in wrong_answer_flag({"o": np.zeros((2, 2))}, ref, none)
 
 
 def test_wrong_answer_flag_forgives_sparse_code_flips_only_in_quantized_outputs():
     """One bad row among 64 has a mean error under 0.5% of peak. It is a fault in an ordinary output, and the same
     sparse pattern is a rounding-boundary code flip in a quantized one; an output wrong everywhere fails either way."""
-    from emmy.commands.run import _wrong_answer_flag
+    from emmy.compiler.backend.correctness import wrong_answer_flag
 
     ref = {"o": np.full((64, 64), 6.0)}
     one_row = ref["o"].copy()
     one_row[17] *= 0.7  # 30% off on one row: mean error 0.47% of peak
-    assert "wrong-answer" in _wrong_answer_flag({"o": one_row}, ref, frozenset())
+    assert "wrong-answer" in wrong_answer_flag({"o": one_row}, ref, frozenset())
     flips = ref["o"].copy()
     flips.flat[::97] = 4.0  # sparse code flips, one quantization step each
-    assert _wrong_answer_flag({"o": flips}, ref, frozenset({"o"})) is None
-    assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref, frozenset({"o"}))
+    assert wrong_answer_flag({"o": flips}, ref, frozenset({"o"})) is None
+    assert "wrong-answer" in wrong_answer_flag({"o": ref["o"] * 0.5}, ref, frozenset({"o"}))
     with pytest.raises(AssertionError, match="frozenset"):
-        _wrong_answer_flag({"o": flips}, ref, {"o"})
+        wrong_answer_flag({"o": flips}, ref, {"o"})
 
 
 @pytest.mark.parametrize(
@@ -632,20 +633,20 @@ def test_wrong_answer_flag_forgives_sparse_code_flips_only_in_quantized_outputs(
 )
 def test_wrong_answer_flag_compares_non_finite_values_by_position(got, ref, flagged):
     """A NaN must not pass because ``max`` ignores it; a matching mask is not a wrong answer."""
-    from emmy.commands.run import _wrong_answer_flag
+    from emmy.compiler.backend.correctness import wrong_answer_flag
 
     reference = np.full((2, 3), 100.0)
     reference[1, 2] = ref
     output = reference.copy()
     output[1, 2] = got
-    assert (_wrong_answer_flag({"o": output}, {"o": reference}, frozenset()) is not None) is flagged
+    assert (wrong_answer_flag({"o": output}, {"o": reference}, frozenset()) is not None) is flagged
 
 
 def test_random_packed_sources_spread_codes_and_scales_stay_positive():
     """A generated NVFP4 weight looks like a real one: its 4-bit codes spread over the format and its
     block scales decode positive and finite. Near-zero codes or negative scales bench a kernel on data no
     checkpoint holds."""
-    from emmy.commands.run import _random_source_values
+    from emmy.compiler.backend.cuda.compare import _random_source_values
     from emmy.compiler.dtype import decode_f8
 
     rng = np.random.default_rng(0)
@@ -664,7 +665,7 @@ def test_random_nvfp4_scales_match_the_synthesized_weights_and_activations():
     and its ``input_scale`` quantizes a synthesized activation with e4m3 block scales well under the e4m3 maximum of
     448. Scales out of proportion saturate every activation block scale and pin its codes at the e2m1 extremes, and
     the eager reference then differs from a float64 evaluation of the same graph by thousands."""
-    from emmy.commands.run import _random_input_values, _random_source_values
+    from emmy.compiler.backend.cuda.compare import _random_input_values, _random_source_values
     from emmy.compiler.dtype import decode_f4x2, decode_f8
 
     rng = np.random.default_rng(0)
@@ -685,7 +686,7 @@ def test_random_block_fp8_scales_match_the_synthesized_weights():
     """A synthesized block-FP8 linear (e4m3 codes, an f32 ``weight_scale_inv`` per block) dequantizes to weights of the
     0.02 standard deviation the unquantized sources have. Scales out of proportion make weights hundreds of times too
     large, and an FP16 trunk's projections then overflow and the eager reference holds NaN."""
-    from emmy.commands.run import _random_source_values
+    from emmy.compiler.backend.cuda.compare import _random_source_values
     from emmy.compiler.dtype import decode_f8
 
     rng = np.random.default_rng(0)
@@ -701,31 +702,31 @@ def test_random_block_fp8_scales_match_the_synthesized_weights():
 def test_bf16_bits_bind_by_reinterpretation_for_the_eager_reference():
     """A folded BF16 table evaluates to its bits on a ``uint16`` carrier; converting them would read each bit pattern
     as a number, and the eager reference would disagree with every NVFP4 kernel by orders of magnitude."""
-    from emmy.commands.run import _to_cuda_tensor
+    from emmy.compiler.backend.correctness import to_cuda_tensor
     from emmy.compiler.dtype import encode_bf16
 
     values = np.array([0.5, -6.0, 1.5], dtype=np.float32)
-    assert _to_cuda_tensor(encode_bf16(values), "bf16").float().cpu().numpy().tolist() == values.tolist()
+    assert to_cuda_tensor(encode_bf16(values), "bf16").float().cpu().numpy().tolist() == values.tolist()
 
 
 def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
     import numpy as np
 
-    from emmy.commands.run import _strict_correctness_proof
+    from emmy.compiler.backend.correctness import strict_correctness_proof
 
     eager = {"o": np.array([1.0, 100.0], dtype=np.float32)}
-    passed = _strict_correctness_proof({"o": np.array([1.0015, 100.05], dtype=np.float32)}, eager)
+    passed = strict_correctness_proof({"o": np.array([1.0015, 100.05], dtype=np.float32)}, eager)
     assert passed["status"] == "pass"
     assert passed["reference"] == "eager"
     assert passed["rtol"] == passed["atol"] == 1e-3
     assert passed["max_abs_error"] > 0
     assert passed["mean_abs_error"] > 0
 
-    failed = _strict_correctness_proof({"o": np.array([1.01, 100.0], dtype=np.float32)}, eager)
+    failed = strict_correctness_proof({"o": np.array([1.01, 100.0], dtype=np.float32)}, eager)
     assert failed["status"] == "fail"
     assert "exceeds" in failed["error"]
 
-    greedy = _strict_correctness_proof(
+    greedy = strict_correctness_proof(
         {"o": np.array([1.0015, 100.05], dtype=np.float32)},
         eager,
         reference="same-input-greedy",
@@ -743,12 +744,12 @@ def test_strict_correctness_proof_accepts_a_mask_that_matches_its_reference():
     fails where the two disagree."""
     import numpy as np
 
-    from emmy.commands.run import _strict_correctness_proof
+    from emmy.compiler.backend.correctness import strict_correctness_proof
 
     mask = {"o": np.array([0.0, -np.inf], dtype=np.float32)}
-    assert _strict_correctness_proof({"o": np.array([0.0005, -np.inf], dtype=np.float32)}, mask)["status"] == "pass"
+    assert strict_correctness_proof({"o": np.array([0.0005, -np.inf], dtype=np.float32)}, mask)["status"] == "pass"
     for wrong in ([0.0, np.inf], [-np.inf, 0.0], [0.0, np.nan]):
-        assert _strict_correctness_proof({"o": np.array(wrong, dtype=np.float32)}, mask)["status"] == "fail"
+        assert strict_correctness_proof({"o": np.array(wrong, dtype=np.float32)}, mask)["status"] == "fail"
 
 
 def test_strict_correctness_proof_weighs_a_rounding_flip_against_fp64():
@@ -756,43 +757,43 @@ def test_strict_correctness_proof_weighs_a_rounding_flip_against_fp64():
     it is no less accurate than that reference against the exact values; a real fault still fails."""
     import numpy as np
 
-    from emmy.commands.run import _strict_correctness_proof
+    from emmy.compiler.backend.correctness import strict_correctness_proof
 
     exact = {"o": np.array([0.0422, 1.0, 2.0, 3.0])}
     eager = {"o": np.array([0.0432, 1.0005, 2.0004, 3.0002])}
     flip = {"o": np.array([0.0412, 1.0, 2.0, 3.0])}
-    assert _strict_correctness_proof(flip, eager)["status"] == "fail"
-    proof = _strict_correctness_proof(flip, eager, exact_out=lambda: exact)
+    assert strict_correctness_proof(flip, eager)["status"] == "fail"
+    proof = strict_correctness_proof(flip, eager, exact_out=lambda: exact)
     assert proof["status"] == "pass"
     stats = proof["exact_comparison"]["per_output"]["o"]
     assert stats["candidate_max"] <= stats["reference_max"]
 
     wrong = {"o": np.array([0.0412, 1.0, 2.0, 3.01])}
-    assert _strict_correctness_proof(wrong, eager, exact_out=exact)["status"] == "fail"
+    assert strict_correctness_proof(wrong, eager, exact_out=exact)["status"] == "fail"
     biased = {"o": np.array([0.0412, 1.001, 2.001, 3.001])}
-    assert _strict_correctness_proof(biased, eager, exact_out=exact)["status"] == "fail"
+    assert strict_correctness_proof(biased, eager, exact_out=exact)["status"] == "fail"
 
 
 def test_strict_proof_allows_one_rounding_step_above_the_references_largest_error():
     """A bf16 candidate whose worst element sits at a larger magnitude than the reference's may exceed the reference's
     largest error against FP64 by one bf16 ULP there, when its mean error is no worse. Several ULPs, a worse mean, or
     no known format still fail."""
-    from emmy.commands.run import _rounding_step, _strict_correctness_proof
+    from emmy.compiler.backend.correctness import _rounding_step, strict_correctness_proof
 
     exact = {"o": np.array([4.19, 2.62, 1.0, 1.0])}
     eager = {"o": exact["o"] + [0.02, 0.0222, 0.022, 0.022]}
     candidate = {"o": exact["o"] + [0.0247, 0.0, 0.0, 0.0]}
     bf16 = {"o": "bf16"}
-    proof = _strict_correctness_proof(candidate, eager, exact_out=exact, formats=bf16)
+    proof = strict_correctness_proof(candidate, eager, exact_out=exact, formats=bf16)
     assert proof["status"] == "pass", proof
     assert proof["exact_comparison"]["per_output"]["o"]["rounding_step"] == 2.0**-5
-    assert _strict_correctness_proof(candidate, eager, exact_out=exact)["status"] == "fail"
-    assert _strict_correctness_proof(candidate, eager, exact_out=exact, formats={"o": "f32"})["status"] == "fail"
+    assert strict_correctness_proof(candidate, eager, exact_out=exact)["status"] == "fail"
+    assert strict_correctness_proof(candidate, eager, exact_out=exact, formats={"o": "f32"})["status"] == "fail"
 
     several_ulps = {"o": exact["o"] + [0.0222 + 2 * 2.0**-5, 0.0, 0.0, 0.0]}
-    assert _strict_correctness_proof(several_ulps, eager, exact_out=exact, formats=bf16)["status"] == "fail"
+    assert strict_correctness_proof(several_ulps, eager, exact_out=exact, formats=bf16)["status"] == "fail"
     worse_mean = {"o": exact["o"] + [0.0247, 0.03, 0.03, 0.03]}
-    assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=bf16)["status"] == "fail"
+    assert strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=bf16)["status"] == "fail"
 
     assert _rounding_step(2.62, "bf16") == 2.0**-6
     assert _rounding_step(-4.0, "f4e2m1x2") == 2.0
@@ -826,16 +827,16 @@ def test_strict_proof_takes_a_float_outputs_step_in_the_format_it_is_computed_in
     """An f32 output cast from bf16 math may differ from FP64 by the reference's largest error plus one bf16 step, not
     one f32 step, when its mean error is no worse. Graph inputs, constants and quantized values in the chain do not
     set the format; an f32 output of f32 math keeps the f32 step. Several bf16 steps or a worse mean still fail."""
-    from emmy.commands.run import _computed_from_formats, _output_formats, _strict_correctness_proof
+    from emmy.compiler.backend.correctness import computed_from_formats, output_formats, strict_correctness_proof
 
     def formats(g):
-        return _output_formats({"o": None}, g, _computed_from_formats(g))
+        return output_formats({"o": None}, g, computed_from_formats(g))
 
     assert formats(_cast_chain_graph("bf16", "f32")) == {"o": "bf16"}
     assert formats(_cast_chain_graph("f32", "f32")) == {"o": "f32"}
     assert formats(_cast_chain_graph("f32", "bf16", "f32", "f8e4m3")) == {"o": "f8e4m3"}
     assert formats(_cast_chain_graph("f32", "f8e4m3", "f32")) == {"o": "f32"}
-    assert _output_formats({"o": None}, _cast_chain_graph("f32", "f32")) == {"o": "f32"}
+    assert output_formats({"o": None}, _cast_chain_graph("f32", "f32")) == {"o": "f32"}
 
     # The shape of gdn64's view_5 (an f32 copy of bf16 values): 0.00078 above eager's largest error, under one bf16
     # step at 0.2 (2**-10) and some 26,000 f32 steps; the mean is better.
@@ -843,15 +844,15 @@ def test_strict_proof_takes_a_float_outputs_step_in_the_format_it_is_computed_in
     eager = {"o": exact["o"] + [0.0, 0.003724, 0.003, 0.003]}
     candidate = {"o": exact["o"] + [0.004501, 0.0, 0.0, 0.0]}
     bf16_math, f32_math = formats(_cast_chain_graph("bf16", "f32")), formats(_cast_chain_graph("f32", "f32"))
-    proof = _strict_correctness_proof(candidate, eager, exact_out=exact, formats=bf16_math)
+    proof = strict_correctness_proof(candidate, eager, exact_out=exact, formats=bf16_math)
     assert proof["status"] == "pass", proof
     assert proof["exact_comparison"]["per_output"]["o"]["rounding_step"] == 2.0**-10
-    assert _strict_correctness_proof(candidate, eager, exact_out=exact, formats=f32_math)["status"] == "fail"
+    assert strict_correctness_proof(candidate, eager, exact_out=exact, formats=f32_math)["status"] == "fail"
 
     several_steps = {"o": exact["o"] + [0.003724 + 3 * 2.0**-10, 0.0, 0.0, 0.0]}
-    assert _strict_correctness_proof(several_steps, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
+    assert strict_correctness_proof(several_steps, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
     worse_mean = {"o": exact["o"] + [0.004501, 0.003, 0.003, 0.003]}
-    assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
+    assert strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
 
 
 @pytest.mark.parametrize(
@@ -865,11 +866,11 @@ def test_strict_proof_takes_a_float_outputs_step_in_the_format_it_is_computed_in
 def test_strict_proof_takes_a_float_outputs_step_from_the_ops_that_round(code, fmt):
     """A bf16 input sliced and cast to f32 carries no bf16 rounding, so f32 math on it gets the f32 step. bf16 math
     before the cast, or a cast that narrows f32 to bf16, rounds into bf16 and sets the bf16 step."""
-    from emmy.commands.run import _computed_from_formats, _output_formats
     from emmy.commands.trace import graph_from_code
+    from emmy.compiler.backend.correctness import computed_from_formats, output_formats
 
     graph, *_ = graph_from_code(code)
-    formats = _output_formats(dict.fromkeys(graph.outputs), graph, _computed_from_formats(graph))
+    formats = output_formats(dict.fromkeys(graph.outputs), graph, computed_from_formats(graph))
     assert formats == dict.fromkeys(graph.outputs, fmt)
 
 
@@ -877,42 +878,42 @@ def test_strict_proof_passes_a_quantized_output_one_code_from_the_reference():
     """A quantized output whose values are each the reference's code or one beside it passes when it misses the FP64
     code on no more elements than the reference and its mean error is no worse, even where its worst element sits two
     codes from FP64. Two codes from the reference, or a worse mean, still fail."""
-    from emmy.commands.run import _strict_correctness_proof
+    from emmy.compiler.backend.correctness import strict_correctness_proof
 
     fp8 = {"o": "f8e4m3"}
     exact = {"o": np.array([240.0, 256.0, 256.0, 256.0])}
     eager = {"o": np.array([256.0, 240.0, 240.0, 240.0])}
     candidate = {"o": np.array([288.0, 256.0, 256.0, 256.0])}
-    proof = _strict_correctness_proof(candidate, eager, exact_out=exact, formats=fp8)
+    proof = strict_correctness_proof(candidate, eager, exact_out=exact, formats=fp8)
     assert proof["status"] == "pass", proof
     stats = proof["exact_comparison"]["per_output"]["o"]
     assert (stats["candidate_misses"], stats["reference_misses"], stats["beyond_one_code"]) == (1, 4, 0)
     assert stats["candidate_max"] > stats["reference_max"] + stats["rounding_step"]
 
     two_codes = {"o": np.array([320.0, 256.0, 256.0, 256.0])}
-    assert _strict_correctness_proof(two_codes, eager, exact_out=exact, formats=fp8)["status"] == "fail"
+    assert strict_correctness_proof(two_codes, eager, exact_out=exact, formats=fp8)["status"] == "fail"
     worse_mean = {"o": np.array([288.0, 224.0, 256.0, 256.0])}
-    assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=fp8)["status"] == "fail"
+    assert strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=fp8)["status"] == "fail"
 
 
 def test_same_input_proof_passes_a_quantized_output_one_code_from_the_reference():
     """Without an FP64 evaluation (a pinned row against the greedy program on the same inputs), a quantized output one
     code from the reference passes and reports its differing values. Two codes, an unknown format, or a float output
     off by the same amount still fail."""
-    from emmy.commands.run import _strict_correctness_proof
+    from emmy.compiler.backend.correctness import strict_correctness_proof
 
     greedy = {"scales": np.array([-11.0, 1.0, 2.0, 448.0]), "y": np.array([1.0, 2.0])}
     pinned = {"scales": np.array([-12.0, 1.0, 2.0, 416.0]), "y": np.array([1.0, 2.0])}
     formats = {"scales": "f8e4m3", "y": "bf16"}
-    proof = _strict_correctness_proof(pinned, greedy, reference="same-input-greedy", formats=formats)
+    proof = strict_correctness_proof(pinned, greedy, reference="same-input-greedy", formats=formats)
     assert proof["status"] == "pass", proof
     assert proof["one_code_outputs"] == {"scales": 2}
-    assert _strict_correctness_proof(pinned, greedy, reference="same-input-greedy")["status"] == "fail"
+    assert strict_correctness_proof(pinned, greedy, reference="same-input-greedy")["status"] == "fail"
 
     two_codes = {**pinned, "scales": np.array([-13.0, 1.0, 2.0, 448.0])}
-    assert _strict_correctness_proof(two_codes, greedy, reference="same-input-greedy", formats=formats)["status"] == "fail"
+    assert strict_correctness_proof(two_codes, greedy, reference="same-input-greedy", formats=formats)["status"] == "fail"
     float_off = {**pinned, "y": np.array([1.0, 2.0078125])}
-    assert _strict_correctness_proof(float_off, greedy, reference="same-input-greedy", formats=formats)["status"] == "fail"
+    assert strict_correctness_proof(float_off, greedy, reference="same-input-greedy", formats=formats)["status"] == "fail"
 
 
 def test_strict_proof_adopts_the_candidates_fp4_codes_at_an_activation_quantize(tmp_path):
@@ -922,13 +923,13 @@ def test_strict_proof_adopts_the_candidates_fp4_codes_at_an_activation_quantize(
     node itself."""
     import torch
 
-    from emmy.commands.run import _graft_candidate, _quantize_nodes, _strict_eager_proof
     from emmy.compiler.backend import torch_ref
+    from emmy.compiler.backend.correctness import _graft_candidate, quantize_nodes, strict_eager_proof
     from emmy.compiler.loader.safetensors import load_constants_from_safetensors
     from tests.compiler.passes.test_nvfp4_w4a4 import _w4a4_linear
 
     g = _w4a4_linear(tmp_path, m=4, n=32, k=64)
-    quantized = _quantize_nodes(g, g)
+    quantized = quantize_nodes(g, g)
     assert sorted(g.nodes[name].output.dtype.name for name in quantized) == ["f4e2m1x2", "f8e4m3"]
     bits = next(name for name in quantized if g.nodes[name].output.dtype.name == "f4e2m1x2")
 
@@ -952,18 +953,18 @@ def test_strict_proof_adopts_the_candidates_fp4_codes_at_an_activation_quantize(
     fed = {f"{name}_candidate": torch.from_numpy(v) for name, v in taps.items()}
     outputs = {"y": evaluate(_graft_candidate(g, quantized), {**inputs, **fed})[0].astype(np.float32)}
 
-    assert _strict_eager_proof(g, inputs, outputs, g, {})[0]["status"] == "fail"
-    proof = _strict_eager_proof(g, inputs, outputs, g, taps)[0]
+    assert strict_eager_proof(g, inputs, outputs, g, {})[0]["status"] == "fail"
+    proof = strict_eager_proof(g, inputs, outputs, g, taps)[0]
     assert proof["status"] == "pass", proof
     assert proof["quantize_nodes"][bits]["rounded_differently"] == 1
 
     wrong = {"y": outputs["y"].copy()}
     wrong["y"].flat[5] += 0.01 * float(np.abs(outputs["y"]).max())
-    assert _strict_eager_proof(g, inputs, wrong, g, taps)[0]["status"] == "fail"
+    assert strict_eager_proof(g, inputs, wrong, g, taps)[0]["status"] == "fail"
 
     far = {**taps, bits: taps[bits].copy()}
     far[bits].flat[0] = (int(taps[bits].flat[0]) & 0xF0) | (code + 2 if code & 7 < 6 else code - 2)
-    proof = _strict_eager_proof(g, inputs, outputs, g, far)[0]
+    proof = strict_eager_proof(g, inputs, outputs, g, far)[0]
     assert proof["status"] == "fail" and f"quantize node {bits!r}: 1/" in proof["error"], proof
     assert proof["quantize_nodes"][bits]["beyond_one_code"] == 1
 
@@ -972,7 +973,7 @@ def test_quantize_tap_codes_pass_within_one_code_and_fail_beyond():
     """The strict proof accepts a tap value that is the reference's code or one of the two beside it on the format's
     grid, and rejects one two codes away: in either direction, across zero, at the largest magnitude, for every
     quantized format."""
-    from emmy.commands.run import _adjacent_codes, _quantized_values
+    from emmy.compiler.backend.correctness import _adjacent_codes, _quantized_values
 
     def decode(codes, fmt):
         return _quantized_values(np.array(codes, dtype=np.uint8), fmt)
@@ -1499,7 +1500,7 @@ def test_parse_ncu_csv_keeps_both_sides_and_aggregates():
     """The parser keeps the reference (cuBLAS / aten) rows beside the ``k_*`` rows
     (the comparison table needs both) and aggregates multi-launch rows: ``.sum`` /
     ``smsp__*`` counters add up, percentages average."""
-    from emmy.commands.run import _ncu_units, _parse_ncu_csv
+    from emmy.commands.ncu import _ncu_units, _parse_ncu_csv
 
     parsed = _parse_ncu_csv(_NCU_CSV)
     assert set(parsed) == {"k_matmul_abc123", "ampere_sgemm_128x64_nn"}
@@ -1513,7 +1514,7 @@ def test_parse_ncu_csv_keeps_both_sides_and_aggregates():
 def test_print_ncu_compare_renders_dep_then_ref(capsys):
     """The compare table puts emmy rows above the reference rows, carries the
     duration unit in the header, and dashes out metrics a side didn't report."""
-    from emmy.commands.run import _ncu_units, _parse_ncu_csv, _print_ncu_compare
+    from emmy.commands.ncu import _ncu_units, _parse_ncu_csv, _print_ncu_compare
 
     _print_ncu_compare(_parse_ncu_csv(_NCU_CSV), _ncu_units(_NCU_CSV))
     out = capsys.readouterr().out
@@ -1860,22 +1861,22 @@ def test_run_code_dynamic_seq_len(run_cli):
 
 
 # ---------------------------------------------------------------------------
-# _bind_inputs: integer-dtype preservation
+# bind_inputs: integer-dtype preservation
 # ---------------------------------------------------------------------------
 
 
 def test_bind_inputs_preserves_int_dtype():
-    """``_bind_inputs`` must cast each torch input to the numpy dtype
+    """``bind_inputs`` must cast each torch input to the numpy dtype
     that matches the graph's declared ``Tensor.dtype`` — not blanket-
     cast to float32 as it did before integer placeholders (``input_ids``,
     ``position_ids``) became part of whole-model traces. A float32 cast
     of int64 indices would silently corrupt the embedding-lookup path."""
     import numpy as np
 
-    from emmy.commands.run import _bind_inputs
     from emmy.compiler import dtype as dt
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.loader.binder import bind_inputs
 
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("input_ids", (1, 8), dt.I64), node_id="input_ids")
@@ -1894,7 +1895,7 @@ def test_bind_inputs_preserves_int_dtype():
     position_ids = torch.arange(8, dtype=torch.int32).unsqueeze(0)
     activations = torch.randn(1, 8, 16)
 
-    bound = _bind_inputs(g, _EmptyModule(), (input_ids, position_ids, activations), {})
+    bound = bind_inputs(g, _EmptyModule(), (input_ids, position_ids, activations), {})
 
     assert bound["input_ids"].dtype == np.int64
     assert bound["position_ids"].dtype == np.int32
@@ -1906,10 +1907,11 @@ def test_bind_inputs_preserves_int_dtype():
 def test_bind_inputs_preserves_bf16_bits_for_inputs_and_constants():
     import numpy as np
 
-    from emmy.commands.run import _bind_inputs, _comparison_outputs
     from emmy.compiler import dtype as dt
+    from emmy.compiler.backend.correctness import comparison_outputs
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.loader.binder import bind_inputs
 
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (2,), dt.BF16), node_id="x")
@@ -1928,13 +1930,13 @@ def test_bind_inputs_preserves_bf16_bits_for_inputs_and_constants():
             self.weight = torch.nn.Parameter(torch.tensor([3.0, -4.0], dtype=torch.bfloat16))
 
     x = torch.tensor([1.0, -2.0], dtype=torch.bfloat16)
-    bound = _bind_inputs(g, _Module(), (x,), {})
+    bound = bind_inputs(g, _Module(), (x,), {})
 
     assert bound["x"].dtype == np.uint16
     assert bound["weight"].dtype == np.uint16
     np.testing.assert_array_equal(bound["x"], x.view(torch.uint16).numpy())
     np.testing.assert_array_equal(
-        _comparison_outputs({"x": bound["x"]}, g)["x"],
+        comparison_outputs({"x": bound["x"]}, g)["x"],
         np.array([1.0, -2.0], dtype=np.float32),
     )
 
@@ -1950,16 +1952,16 @@ def test_bind_inputs_preserves_bf16_bits_for_inputs_and_constants():
 def test_quantized_correctness_decodes_signed_zero_but_rejects_other_codes(fmt, codes, reference, changed):
     import numpy as np
 
-    from emmy.commands.run import (
-        _check_accuracy,
-        _comparison_outputs,
-        _eager_outputs_by_name,
-        _exact_outputs,
-        _quantized_outputs,
-        _strict_correctness_proof,
-        _wrong_answer_flag,
-    )
     from emmy.compiler import dtype as dt
+    from emmy.compiler.backend.correctness import (
+        _exact_outputs,
+        check_accuracy,
+        comparison_outputs,
+        eager_outputs_by_name,
+        quantized_outputs,
+        strict_correctness_proof,
+        wrong_answer_flag,
+    )
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
 
@@ -1967,29 +1969,29 @@ def test_quantized_correctness_decodes_signed_zero_but_rejects_other_codes(fmt, 
     graph.add_node(op=InputOp(), inputs=[], output=Tensor("packed", (1, 2), fmt), node_id="packed")
     graph.inputs = graph.outputs = ["packed"]
 
-    emmy = _comparison_outputs({"packed": np.array([codes], dtype=np.uint8)}, graph)
+    emmy = comparison_outputs({"packed": np.array([codes], dtype=np.uint8)}, graph)
     tensor = torch.tensor([reference], dtype=torch.uint8)
-    eager = _eager_outputs_by_name(emmy, tensor, graph)
+    eager = eager_outputs_by_name(emmy, tensor, graph)
     exact = _exact_outputs(graph, {"packed": tensor}, emmy)
     np.testing.assert_array_equal(exact["packed"], eager["packed"])
-    quantized = _quantized_outputs(emmy, graph)
+    quantized = quantized_outputs(emmy, graph)
     assert quantized == (frozenset({"packed"}) if fmt == "f4e2m1x2" else frozenset())
-    assert _wrong_answer_flag(emmy, eager, quantized) is None
-    assert _check_accuracy(emmy, eager) is None
-    assert _strict_correctness_proof(emmy, eager, exact_out=exact)["status"] == "pass"
+    assert wrong_answer_flag(emmy, eager, quantized) is None
+    assert check_accuracy(emmy, eager) is None
+    assert strict_correctness_proof(emmy, eager, exact_out=exact)["status"] == "pass"
     if fmt != "f4e2m1x2":
         torch_format = torch.float8_e4m3fn if fmt == "f8e4m3" else torch.float8_e5m2
-        native = _eager_outputs_by_name(emmy, tensor.view(torch_format), graph)
+        native = eager_outputs_by_name(emmy, tensor.view(torch_format), graph)
         np.testing.assert_array_equal(native["packed"], eager["packed"])
     for code in changed:
-        bad = _comparison_outputs({"packed": np.array([[codes[0], code]], dtype=np.uint8)}, graph)
-        assert _wrong_answer_flag(bad, eager, quantized) is not None
-        assert _strict_correctness_proof(bad, eager, exact_out=exact)["status"] == "fail"
+        bad = comparison_outputs({"packed": np.array([[codes[0], code]], dtype=np.uint8)}, graph)
+        assert wrong_answer_flag(bad, eager, quantized) is not None
+        assert strict_correctness_proof(bad, eager, exact_out=exact)["status"] == "fail"
 
     opaque = Graph()
     opaque.add_node(op=InputOp(), inputs=[], output=Tensor("packed", (1, 2), dt.U8), node_id="packed")
     opaque.inputs = opaque.outputs = ["packed"]
-    bits = _comparison_outputs({"packed": np.array([[0x88, 0x21]], dtype=np.uint8)}, opaque)
+    bits = comparison_outputs({"packed": np.array([[0x88, 0x21]], dtype=np.uint8)}, opaque)
     assert bits["packed"].dtype == np.uint8
     np.testing.assert_array_equal(bits["packed"], [[0x88, 0x21]])
 
@@ -1998,10 +2000,10 @@ def test_bind_inputs_arity_mismatch_raises():
     """Binding failures RAISE (with the real cause) instead of ``sys.exit`` — the function
     also runs inside the bench worker child, where an exit(1) reached the parent as an
     opaque ``SystemExit(1)`` with the cause stranded in the child's log stream."""
-    from emmy.commands.run import _bind_inputs
     from emmy.compiler import dtype as dt
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.loader.binder import bind_inputs
 
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), dt.F32), node_id="x")
@@ -2015,7 +2017,7 @@ def test_bind_inputs_arity_mismatch_raises():
             return iter(())
 
     with pytest.raises(RuntimeError, match="arity mismatch"):
-        _bind_inputs(g, _EmptyModule(), (), {})
+        bind_inputs(g, _EmptyModule(), (), {})
 
 
 def test_compare_wall_s_scales_with_kernel_count():
@@ -2087,13 +2089,13 @@ def test_accuracy_check_fails_scrambled_output_passes_outliers():
     import numpy as np
     import torch
 
-    from emmy.commands.run import _check_accuracy
+    from emmy.compiler.backend.correctness import check_accuracy
 
     rng = np.random.default_rng(0)
     eager = torch.from_numpy((rng.standard_normal(1 << 16) * 20).astype(np.float32))
 
     def verdicts(arr):
-        return _check_accuracy({"o": arr}, eager) is not None
+        return check_accuracy({"o": arr}, eager) is not None
 
     base = eager.numpy()
     # Scrambled (permutation of the correct values): must FAIL.
@@ -2110,7 +2112,7 @@ def test_accuracy_check_rejects_missing_or_misordered_output_shape():
     import numpy as np
     import torch
 
-    from emmy.commands.run import _check_accuracy
+    from emmy.compiler.backend.correctness import check_accuracy
 
     outputs = {
         "small": np.zeros(4, dtype=np.float32),
@@ -2118,7 +2120,7 @@ def test_accuracy_check_rejects_missing_or_misordered_output_shape():
     }
     eager = (torch.zeros(8), torch.zeros(4))
 
-    error = _check_accuracy(outputs, eager)
+    error = check_accuracy(outputs, eager)
 
     assert error is not None
     assert "size 4 does not match eager 8" in error
@@ -2128,7 +2130,7 @@ def test_accuracy_check_pairs_named_outputs_independent_of_mapping_order():
     import numpy as np
     import torch
 
-    from emmy.commands.run import _check_accuracy, _strict_correctness_proof
+    from emmy.compiler.backend.correctness import check_accuracy, strict_correctness_proof
 
     outputs = {
         "small": np.zeros(4, dtype=np.float32),
@@ -2139,8 +2141,8 @@ def test_accuracy_check_pairs_named_outputs_independent_of_mapping_order():
         "small": torch.zeros(4),
     }
 
-    assert _check_accuracy(outputs, eager) is None
-    assert _strict_correctness_proof(outputs, eager)["status"] == "pass"
+    assert check_accuracy(outputs, eager) is None
+    assert strict_correctness_proof(outputs, eager)["status"] == "pass"
 
 
 def test_accuracy_check_gaussian_fp16_budget_not_free():
@@ -2159,7 +2161,7 @@ def test_accuracy_check_gaussian_fp16_budget_not_free():
     import numpy as np
     import torch
 
-    from emmy.commands.run import _check_accuracy
+    from emmy.compiler.backend.correctness import check_accuracy
 
     rng = np.random.default_rng(3)
     n = 1 << 20
@@ -2168,7 +2170,7 @@ def test_accuracy_check_gaussian_fp16_budget_not_free():
     peak = float(np.abs(base).max())
 
     def fails(arr):
-        return _check_accuracy({"o": arr.astype(np.float16)}, eager) is not None
+        return check_accuracy({"o": arr.astype(np.float16)}, eager) is not None
 
     window = base.copy()
     window[10_000:13_000] += 1.1 * peak
@@ -2194,7 +2196,7 @@ def test_accuracy_check_heavy_tailed_fp16_outputs():
     import numpy as np
     import torch
 
-    from emmy.commands.run import _check_accuracy
+    from emmy.compiler.backend.correctness import check_accuracy
 
     rng = np.random.default_rng(7)
     n = 1 << 20
@@ -2206,7 +2208,7 @@ def test_accuracy_check_heavy_tailed_fp16_outputs():
     peak = float(np.abs(base).max())
 
     def fails(arr):
-        return _check_accuracy({"o": arr.astype(np.float16)}, eager) is not None
+        return check_accuracy({"o": arr.astype(np.float16)}, eager) is not None
 
     # The measured correct-run shape: ~1.5% relative noise on every cell plus a heavy
     # diff tail — a few cells drifting past peak (the flake draw). Must PASS.
@@ -2235,12 +2237,12 @@ def test_accuracy_check_holds_a_large_output_in_arrays_not_lists():
     import numpy as np
     import torch
 
-    from emmy.commands.run import _check_accuracy
+    from emmy.compiler.backend.correctness import check_accuracy
 
     cells = 1 << 21
     eager = torch.from_numpy(np.random.default_rng(0).standard_normal(cells).astype(np.float16))
     tracemalloc.start()
-    assert _check_accuracy({"o": eager.numpy().copy()}, eager) is None
+    assert check_accuracy({"o": eager.numpy().copy()}, eager) is None
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     # Measured: 4.3 f64 copies of the output in arrays, 13.3 in lists.
@@ -2341,7 +2343,7 @@ def test_build_torch_fns_times_an_unchecked_twin_without_holding_it_to_eager(mon
     timed unchecked, as Emmy's row is, instead of lost to the verdict."""
     import torch._dynamo
 
-    from emmy.commands.run import BackendFailure, _build_torch_fns
+    from emmy.compiler.backend.cuda.compare import BackendFailure, _build_torch_fns
 
     monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
     monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: lambda: torch.tensor([2.0]))
@@ -2356,21 +2358,21 @@ def test_build_torch_fns_times_an_unchecked_twin_without_holding_it_to_eager(mon
 def test_a_twin_is_quantized_when_it_rounds_a_value_not_when_it_reads_one():
     """A twin that quantizes an activation is held to no elementwise verdict; one that only reads quantized weights
     (a weight-only format) computes in floats and stays checked."""
-    from emmy.commands.run import _quantized_twin
+    from emmy.compiler.backend.correctness import quantized_twin
     from emmy.compiler.dtype import F8E4M3, F16
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.tensor.ir import ElementwiseOp
 
-    assert _quantized_twin(None) is False
+    assert quantized_twin(None) is False
     reads = Graph()
     reads.add_node(InputOp(), [], Tensor("w_bits", (6, 8), F8E4M3), node_id="w_bits")
     reads.add_node(ElementwiseOp(op="from_f8e4m3"), ["w_bits"], Tensor("w", (6, 8), F16), node_id="w")
-    assert _quantized_twin(reads) is False
+    assert quantized_twin(reads) is False
     rounds = Graph()
     rounds.add_node(InputOp(), [], Tensor("x", (4, 8), F16), node_id="x")
     rounds.add_node(ElementwiseOp(op="to_f8e4m3"), ["x"], Tensor("x_bits", (4, 8), F8E4M3), node_id="x_bits")
-    assert _quantized_twin(rounds) is True
+    assert quantized_twin(rounds) is True
 
 
 def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
