@@ -78,7 +78,6 @@ def cpu_forks(tile: TileOp, knobs: dict, ctx) -> list[Fork]:
     from emmy.compiler.ir.schedule.cpu import CpuCodec, CpuContext, CpuProblem, materialize_cpu  # noqa: PLC0415
 
     row = pin_row(tile.name, split_consumed=False, families=CpuCodec.keys())
-    tile = tile.masked()
     context = CpuContext(CpuProblem(tile, ctx, row=row))
     if row and not context.problem.bound:
         # A pin published to every kernel takes where it fits; a kernel it does not fit keeps its catalog.
