@@ -106,7 +106,7 @@ class Ctx:
     # The accepted classic schedule bound to its Fold sites (read through ``ops.Sched``): all
     # per-node tile/reduce and per-edge stage reads go through here; the term stores no choices.
     sched: object = None
-    # The placement's FREE axes — the un-shrunk originals. A split partial may prefix ``_ksplit``;
+    # The placement's FREE axes — the un-shrunk originals. A split partial may prefix its block axis;
     # contraction views derive their output axes from the trailing pair.
     free: tuple = ()
     # Threads per output cell for a kernel whose ONLY work is a free output sweep — the ``WORK``
