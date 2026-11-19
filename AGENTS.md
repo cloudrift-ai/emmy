@@ -127,6 +127,25 @@ The pipeline `ARCHITECTURE.md` owns the design; `tests/architecture/test_layerin
 `tests/compiler/pipeline/test_strategies.py` checks that every op's knobs are decisions, and
 `tests/compiler/pipeline/search/db/test_db.py` pins the identities the tune DB's version was cut at.
 
+## Compiler Invariant: Measured Evidence Is Read From The DB
+
+`SearchDB` is the one representation of what was measured: kernels, the decisions that minted them, and their
+measurements, in one schema, whichever instance holds them (the tune DB, a dataset DB, an in-memory one). The join on
+a kernel's exact identity, its sizes, the card and the regime, the rule for which of two rows stands, and the price of
+a kernel-set decision are written once, there. A golden-shaped file (a golden, a candidate file, a freeze) is how rows
+are kept in the repository; it becomes evidence through the one importer.
+
+- **A reader that needs a file's measurements imports the file and queries the instance.** Never group a file's rows
+  by identity, sizes or regime in the reader.
+- **Never keep the rows in a second structure beside the tables.** A pick asks the DB per kernel; an in-memory copy of
+  every row is a second evidence index with its own staleness.
+- **A new question about measurements is a `SearchDB` method,** never a walk of golden documents.
+- **Read a file directly only for what it alone holds:** its traced programs, the row names, pins and notes a command
+  lists or replays by, and its own upkeep (check, restamp, realize, a record's write-back).
+
+The pipeline `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` pins the modules that read a
+measurement off a file's row and holds the compile path to the DB.
+
 ## Running Tests
 
 `make test` runs the whole suite. It takes many minutes, so **do not run it while developing** — run only the tests

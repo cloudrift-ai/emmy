@@ -263,10 +263,11 @@ Compiler version stays out; a pack keeps serving its frozen snapshot.
 
 The golden rows are validity per program, since a re-recorded golden exists to change what a compile deploys. Each
 entry keeps the exact identities of the kernels whose evidence its compile read (`policy.greedy.evidence_reads`;
-the plan template cache hands a hit its template's reads) and a digest of the golden rows in scope that those reach
-(`golden.rows_digests`). The manifest also keeps the card's scope digest (`golden.scope_digest`, file bytes only):
-while it holds, nothing is compared. When it moved, `load_pack` computes the digests again over the files in scope;
-an entry whose digest moved comes back with no plan, and so does every other twin of its wrapper (the plans binding
+the plan template cache hands a hit its template's reads) and a digest of the evidence those reach in the tune DB,
+the golden rows in scope imported among it (`SearchDB.evidence_digest`). The manifest also keeps the card's scope
+digest (`golden.scope_digest`, file bytes only): while it holds, nothing is compared. When it moved, `load_pack`
+imports the scope into the tune DB as a compile does and computes the digests again from its rows; an entry whose
+digest moved comes back with no plan, and so does every other twin of its wrapper (the plans binding
 the same checkpoint tensors), since the first twin built settles the layout of each weight for the rest. When no
 entry moved, the manifest takes the new scope digest. Cubins are **not** copied — plans
 reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and
