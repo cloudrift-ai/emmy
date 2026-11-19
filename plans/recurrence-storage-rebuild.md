@@ -8,7 +8,7 @@ the deleted code had to do, what was measured, and the design question that is o
 
 - Shared-memory storage is restored as it was. Reading it showed it is no second staging path.
 - Register storage is rebuilt in one module, `lowering/kernel/_resident.py`, 248 lines of code where the old
-  emitter and its schedule module had 408. Against the refactor PR the compiler is 189 lines smaller.
+  emitter and its schedule module had 408. Against the refactor PR the compiler is 194 lines smaller.
 - What is shared now: a lift is evaluated by the chunk tier's own `_residence`, and a direct operand load by the
   plain tier's `_direct_operand`. What is not shared yet: the product (pack, load, atom, promote) is written here
   and again in the chunk tier.
