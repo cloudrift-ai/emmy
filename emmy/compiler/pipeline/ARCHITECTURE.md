@@ -1278,7 +1278,7 @@ goldens (`repository_documents`) — names repeat across per-GPU golden files wi
 union can select another card's spelling — and every file on an uncovered card or off-GPU. `--golden PATH` instead
 names an explicit file, whose GPU header is checked against the live device.
 
-**The A/B carries three integrity gates:**
+**The A/B carries two integrity gates:**
 
 1. **Realized-vs-pinned knob check — a miss FAILS the row before it benches.** A structurally invalid pin silently
    falls back to the planner's own pick, so benching it would compare greedy against itself and report a fake 1.00×
@@ -1299,9 +1299,7 @@ names an explicit file, whose GPU header is checked against the live device.
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
    value (`coop` / `r<n>`) is decided by the piece on its own body and stays gated. The cost of the exemption is that a
    `g<n>` pin which genuinely never split cannot be told apart from one that did.
-2. **Arithmetic-intensity check.** A row whose FLOP/s, implied by its shape, exceeds the peak recorded in the live
-   GPU's `GpuSpec` is flagged as a bad measurement rather than a fast kernel.
-3. **Wrong-answer check.** Each pinned config is executed once on the greedy run's inputs and its outputs are
+2. **Wrong-answer check.** Each pinned config is executed once on the greedy run's inputs and its outputs are
    compared, which catches kernels that are silently wrong (a skipped finalize produces plausible-looking garbage).
 
 **Every `run --bench` row is measured in a bench worker process that can be SIGKILLed — the parent never launches a
@@ -1321,11 +1319,14 @@ fresh child — no escalation modes, no `os._exit`.
   `greedy.isolated` block in `--json`. Those are the baseline the pinned rows' speedups are measured against.
   **Record goldens from `--ab` / golden rows only, never from the greedy row's number.**
 - The greedy pick hanging, or blowing the bench budget, is itself a *finding* — precisely the hazard a golden exists
-  to prevent — so the pinned rows are still benched afterwards. Pinned rows that fail to compile or to bench are kept
-  as `bench_fail` rows, never dropped, and the run exits non-zero if any row failed.
+  to prevent — so the pinned rows are still benched afterwards: unverified where the target has a Torch twin (the flag
+  keeps them out of every record), refused where the greedy outputs were the only reference. The failed pick is not
+  benched again in isolation and is not tuned. Pinned rows that fail to compile or to bench are kept as `bench_fail`
+  rows, never dropped, and the run exits non-zero if any row failed.
 - The greedy job also carries the accuracy check: the emmy program runs on the rebuilt module's real inputs in-child,
   and a numeric failure aborts the run, because a latency table for a miscompiling program is meaningless. That run's
-  `(inputs, outputs)` become the pinned rows' wrong-answer reference.
+  `(inputs, outputs)` become the pinned rows' wrong-answer reference; under `--strict` the outputs handed on are
+  eager's, since a strict row is held to eager directly.
 - Only the no-`--bench` accuracy probe still runs in-process (it hosts the `--debug` per-launch dumps and the ncu
   child's profiled launches), so with `--bench` those two want a separate plain `run`.
 

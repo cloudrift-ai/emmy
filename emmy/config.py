@@ -450,7 +450,7 @@ def gen_decode_bucket(default: int = 16) -> int:
 def bench_backends_raw(cli_value: str | None, *, default: str = "eager,emmy") -> str:
     """Raw comma-separated bench-backend selection. Precedence: ``cli_value`` >
     ``EMMY_BENCH_BACKENDS`` > ``default`` (normally ``"eager,emmy"``). Backend-key
-    normalization stays at the call site (``run.py:_resolve_backends``)."""
+    normalization stays at the call site (``backend/cuda/compare.resolve_backends``)."""
     return cli_value or os.environ.get(BENCH_BACKENDS) or default
 
 

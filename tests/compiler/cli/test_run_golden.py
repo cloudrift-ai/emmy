@@ -9,8 +9,21 @@ from unittest import mock
 import pytest
 
 from emmy.commands import run as run_mod
+from emmy.commands.compile import CommandError, GoldenSelection, PinnedRow
+from emmy.compiler.backend import correctness as correctness_mod
+from emmy.compiler.backend.base import BenchmarkResult
 from emmy.compiler.pipeline.search.db import RoutingRow
 from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Row
+
+
+def _walked(calls):
+    """A stand-in for ``_handle_run_once`` that keeps each target's args, with what the walk told it under ``walk``."""
+
+    def run_once(args, **walk):
+        args.walk = walk
+        calls.append(args)
+
+    return run_once
 
 
 def _parser():
@@ -85,12 +98,12 @@ def _patch_document(monkeypatch, document: GoldenFile) -> None:
 def test_golden_runs_every_distinct_target_in_process(monkeypatch, tmp_path):
     _patch_document(monkeypatch, _document([("linear.layer0", "a", {}), ("linear.layer0", "a", {}), ("linear.layer1", "b", {})]))
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
 
     run_mod._run_golden_targets(_args(tmp_path))
 
     assert [args.realization for args in calls] == ["linear.layer0", "linear.layer1"]
-    assert all(args.golden.endswith("working.json") and args._explicit_realization is False for args in calls)
+    assert all(args.golden.endswith("working.json") and args.walk["explicit"] is False for args in calls)
 
 
 def test_golden_walk_benches_each_target_once_not_its_pieces(monkeypatch, tmp_path):
@@ -106,7 +119,7 @@ def test_golden_walk_benches_each_target_once_not_its_pieces(monkeypatch, tmp_pa
     ]
     _patch_document(monkeypatch, _document(rows, routing=[("mean", ("mean_piece",)), ("lin", ("lin_a", "lin_b"))]))
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
 
     run_mod._run_golden_targets(_args(tmp_path))
 
@@ -119,7 +132,7 @@ def test_golden_walk_names_a_target_by_its_own_row_before_a_shorter_piece_row(mo
     rows = [("k_layer_seed_long_name", "layer", {}), ("qk.t32", "layer_piece", {})]
     _patch_document(monkeypatch, _document(rows, routing=[("layer", ("layer_piece",))]))
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
 
     run_mod._run_golden_targets(_args(tmp_path))
 
@@ -137,7 +150,7 @@ def test_golden_walk_without_seeds_names_a_target_by_its_shortest_row(monkeypatc
     ]
     _patch_document(monkeypatch, _document(rows, routing=[("a", ("a_piece_a", "a_piece_b"))]))
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
 
     run_mod._run_golden_targets(_args(tmp_path))
 
@@ -157,7 +170,7 @@ def test_golden_walk_keeps_dotted_names_sizes_and_pin_regimes(monkeypatch, tmp_p
     ]
     _patch_document(monkeypatch, _document(rows))
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
 
     run_mod._run_golden_targets(_args(tmp_path))
 
@@ -169,16 +182,17 @@ def test_golden_walk_reports_every_target_before_failing(monkeypatch, tmp_path):
     _patch_document(monkeypatch, _document([(f"linear.layer{i}", f"k{i}", {}) for i in range(3)]))
     calls = []
 
-    def run_once(args):
+    def run_once(args, **_walk):
         calls.append(args.realization)
         if args.realization == "linear.layer0":
-            raise SystemExit(1)
+            return 1
         if args.realization == "linear.layer1":
             raise ValueError("Tile.aux_threads requires a cooperative block_threads")
+        return 0
 
     monkeypatch.setattr(run_mod, "_handle_run_once", run_once)
 
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(CommandError) as exc:
         run_mod._run_golden_targets(_args(tmp_path))
 
     assert exc.value.code == 1
@@ -197,7 +211,7 @@ def test_a_traced_program_skips_the_walk_and_is_never_recorded(monkeypatch, run_
     """``--program N`` benches the file's whole traced program as one run, not the walk over its target kernels; it
     names no row, so the record flags that write one are refused."""
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
     monkeypatch.setattr(run_mod, "_run_golden_targets", lambda _args: pytest.fail("walked the file's targets"))
 
     run_mod.handle_run(_parser().parse_args(["run", "--golden", "working.json", "--program", "3", "--bench"]))
@@ -211,7 +225,7 @@ def test_a_traced_program_skips_the_walk_and_is_never_recorded(monkeypatch, run_
 def test_multi_target_json_uses_one_readable_file_per_target(monkeypatch, tmp_path):
     _patch_document(monkeypatch, _document([("linear/layer0", "k0", {}), ("linear/layer1", "k1", {})]))
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
     output = tmp_path / "results"
 
     run_mod._run_golden_targets(_args(tmp_path, json=str(output)))
@@ -230,7 +244,7 @@ def test_strict_result_requires_backends_capture_and_correctness():
         "mean_abs_error": 0.0,
         "max_rel_error": 0.0,
     }
-    bench = SimpleNamespace(captured=True, num_launches=1, per_launch=[], e2e_min_ms=None)
+    bench = BenchmarkResult(time_ms=1.0, captured=True, num_launches=1, per_launch=[])
     args = SimpleNamespace(bench_backends="eager,tcompile,emmy", ab=None)
     results = {"Eager PyTorch": 20.0, "torch.compile": 15.0, "Emmy": 10.0}
 
@@ -268,7 +282,7 @@ def test_strict_result_accepts_same_input_greedy_only_for_reference_free_loop():
         "mean_abs_error": 0.0,
         "max_rel_error": 0.0,
     }
-    bench = SimpleNamespace(captured=True, num_launches=1, per_launch=[], e2e_min_ms=None)
+    bench = BenchmarkResult(time_ms=1.0, captured=True, num_launches=1, per_launch=[])
     results = {"Emmy": 10.0}
 
     runnable_errors = run_mod._strict_benchmark_errors(args, results, bench, True, proof, [])
@@ -312,15 +326,15 @@ def test_golden_walk_resolves_one_name_in_two_regimes_to_each_regimes_rows(monke
     monkeypatch.setattr(GoldenFile, "executable", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(GoldenFile, "reference_program", lambda *_args, **_kwargs: None)
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
 
     run_mod._run_golden_targets(_args(tmp_path))
 
-    assert [(args.realization, args._golden_pins) for args in calls] == [("matmul", {"FAST_MATH": False}), ("matmul", {"FAST_MATH": True})]
+    assert [(args.realization, args.walk["pins"]) for args in calls] == [("matmul", {"FAST_MATH": False}), ("matmul", {"FAST_MATH": True})]
     for args in calls:
         vars(args).update(input=None, code=None, ir=None, dynamic=None)
-        compile_mod.resolve_golden_arg(args)
-        assert [row.pins for row in args._golden_rows] == [args._golden_pins]
+        selection = compile_mod.resolve_golden_arg(args, pins=args.walk["pins"], explicit=False, document=args.walk["document"])
+        assert [row.pins for row in selection.rows] == [args.walk["pins"]]
 
 
 def test_golden_document_is_parsed_once_for_every_target(monkeypatch, tmp_path):
@@ -331,12 +345,12 @@ def test_golden_document_is_parsed_once_for_every_target(monkeypatch, tmp_path):
     document = _document([(name, name, {}) for name in ("a", "b", "c")])
     monkeypatch.setattr(golden.GoldenFile, "load", classmethod(lambda _cls, _path, **_: loads.append(_path) or document))
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
 
     run_mod._run_golden_targets(_args(tmp_path))
 
     assert len(loads) == 1
-    assert [args._golden_document for args in calls] == [document] * 3
+    assert [args.walk["document"] for args in calls] == [document] * 3
 
 
 def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, tmp_path):
@@ -352,16 +366,15 @@ def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, 
     args = SimpleNamespace(
         realization="missing",
         golden=str(tmp_path / "absent.json"),
-        _golden_document=_EMPTY,
         input=None,
         code=None,
         ir=None,
         dynamic=None,
     )
-    # No record matches "missing", so resolution exits 2 — reaching that exit proves it
+    # No record matches "missing", so resolution is refused — reaching that refusal proves it
     # resolved against the supplied document instead of reading the absent file.
-    with pytest.raises(SystemExit) as excinfo:
-        compile_mod.resolve_golden_arg(args)
+    with pytest.raises(CommandError) as excinfo:
+        compile_mod.resolve_golden_arg(args, document=_EMPTY)
     assert excinfo.value.code == 2
 
 
@@ -375,12 +388,12 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
     receipt = SimpleNamespace(
         status="ok",
         bench=object(),
-        sample=SimpleNamespace(name="linear.layer0.abcdef123456", knobs={"WORK": "w1x1"}, pins={"FAST_MATH": True}),
+        sample=PinnedRow(name="linear.layer0.abcdef123456", knobs={"WORK": "w1x1"}, pins={"FAST_MATH": True}),
     )
     args = SimpleNamespace(golden="working.json", realization="linear.layer0")
-    with mock.patch.object(run_mod, "_bench_total_us", side_effect=AssertionError("a receipt's timing is not the program's")):
-        with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
-            run_mod._record_golden_latency(args, {"Emmy": 12.5, "Eager PyTorch": 30.0}, [receipt])
+    # The receipt's bench is no benchmark result: reading a timing off it would raise.
+    with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
+        run_mod._record_golden_latency(args, {"Emmy": 12.5, "Eager PyTorch": 30.0}, [receipt])
 
     assert seen["emmy_us"] == 12.5
     assert seen["knobs"] is None and seen["pins"] is None
@@ -392,14 +405,14 @@ def test_record_latency_of_two_measured_schedules_lands_on_the_faster():
     seen = {}
 
     def row(knobs, us):
-        return SimpleNamespace(status="ok", bench=us, flags=[], sample=SimpleNamespace(name="mm", knobs=knobs, pins={"FAST_MATH": False}))
+        bench = BenchmarkResult(time_ms=us / 1000)
+        return SimpleNamespace(status="ok", bench=bench, flags=[], sample=PinnedRow(name="mm", knobs=knobs, pins={"FAST_MATH": False}))
 
     args = SimpleNamespace(golden="working.json", realization="mm")
-    with mock.patch.object(run_mod, "_bench_total_us", lambda us: (us, "e2e")):
-        with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
-            run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [row({"WORK": "w4x4"}, 12.0), row({"WORK": "w4x2"}, 10.0)])
+    with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
+        run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [row({"WORK": "w4x4"}, 12.0), row({"WORK": "w4x2"}, 10.0)])
 
-    assert seen["emmy_us"] == 10.0 and seen["knobs"] == {"WORK": "w4x2"} and seen["tcompile_us"] == 9.0
+    assert seen["emmy_us"] == pytest.approx(10.0) and seen["knobs"] == {"WORK": "w4x2"} and seen["tcompile_us"] == 9.0
 
 
 def test_record_greedy_is_a_golden_bench_flag(run_cli):
@@ -474,13 +487,13 @@ def test_record_requires_every_benched_row_to_be_unflagged(monkeypatch, caplog, 
     from emmy.compiler.graph import Graph
 
     args = _parser().parse_args(["run", "--golden", "working.json", "--realization", "target", "--bench", record])
-    args._golden_graph = Graph()
+    selection = GoldenSelection(graph=Graph())
     pinned = SimpleNamespace(status="ok", flags=flags if flagged_side == "pinned" else [])
     isolated = SimpleNamespace(status="ok", flags=flags if flagged_side == "isolated" else [])
 
     def session(coro):
         coro.close()
-        return None, {}, None, False, False, None, None, [pinned], isolated, None, {}, None, False
+        return run_mod._Session(results={}, rows=[pinned], isolated=isolated, sym_env={})
 
     monkeypatch.setattr(run_mod.asyncio, "run", session)
     monkeypatch.setattr(run_mod, "_replay_stage_and_passes", lambda *_args, **_kwargs: ("cuda", []))
@@ -492,14 +505,14 @@ def test_record_requires_every_benched_row_to_be_unflagged(monkeypatch, caplog, 
     dump = SimpleNamespace(resolve=lambda _path: None)
 
     if flags:
-        with pytest.raises(SystemExit) as exc:
-            run_mod._handle_run_ir(args, backend, dump)
+        with pytest.raises(CommandError) as exc:
+            run_mod._handle_run_ir(args, backend, dump, selection)
         assert exc.value.code != 0
-        assert all(flag in caplog.text for flag in flags)
+        assert all(flag in str(exc.value) for flag in flags)
         for writer in writes.values():
             writer.assert_not_called()
     else:
-        run_mod._handle_run_ir(args, backend, dump)
+        run_mod._handle_run_ir(args, backend, dump, selection)
         writes["_record_greedy_pick" if record == "--record-greedy" else "_record_golden_latency"].assert_called_once()
 
 
@@ -578,31 +591,31 @@ def test_a_reference_that_disagrees_with_itself_is_reported_unusable_not_per_row
 
     # The reference reproduces: a row that differs from it is genuinely suspect, and says so.
     verdict = "wrong-answer: rel err 2.177 vs greedy output"
-    assert run_mod.resolve_reference_disagreement([(other, verdict), (ref, None)], ref) == [verdict, None]
+    assert correctness_mod.resolve_reference_disagreement([(other, verdict), (ref, None)], ref) == [verdict, None]
 
     # The reference disagrees with a row that IS the reference: one statement, and nothing per row.
-    resolved = run_mod.resolve_reference_disagreement(
+    resolved = correctness_mod.resolve_reference_disagreement(
         [(ref, "wrong-answer: rel err 15.992 vs greedy output"), (other, "wrong-answer: rel err 15.859 vs greedy output")],
         ref,
     )
-    assert resolved == [run_mod.REFERENCE_SELF_DISAGREES, None]
-    assert "unusable" in run_mod.REFERENCE_SELF_DISAGREES
+    assert resolved == [correctness_mod.REFERENCE_SELF_DISAGREES, None]
+    assert "unusable" in correctness_mod.REFERENCE_SELF_DISAGREES
     # It is stated once, not once per row.
-    assert resolved.count(run_mod.REFERENCE_SELF_DISAGREES) == 1
+    assert resolved.count(correctness_mod.REFERENCE_SELF_DISAGREES) == 1
 
     # Order does not matter: the witness may be any row, and the others still lose their verdicts.
-    resolved = run_mod.resolve_reference_disagreement(
+    resolved = correctness_mod.resolve_reference_disagreement(
         [(other, "wrong-answer: rel err 15.859 vs greedy output"), (ref, "wrong-answer: rel err 15.992 vs greedy output")],
         ref,
     )
-    assert resolved == [None, run_mod.REFERENCE_SELF_DISAGREES]
+    assert resolved == [None, correctness_mod.REFERENCE_SELF_DISAGREES]
 
     # A reference row that AGREES is no witness -- the others keep their verdicts.
-    assert run_mod.resolve_reference_disagreement([(ref, None), (other, verdict)], ref) == [None, verdict]
+    assert correctness_mod.resolve_reference_disagreement([(ref, None), (other, verdict)], ref) == [None, verdict]
 
     # Without the greedy's realized knobs there is nothing to compare, so verdicts pass through.
-    assert run_mod.resolve_reference_disagreement([(other, verdict)], None) == [verdict]
-    assert run_mod.resolve_reference_disagreement([(other, verdict)], []) == [verdict]
+    assert correctness_mod.resolve_reference_disagreement([(other, verdict)], None) == [verdict]
+    assert correctness_mod.resolve_reference_disagreement([(other, verdict)], []) == [verdict]
 
 
 def test_the_correctness_oracle_runs_torch_gemms_at_full_precision_and_restores_the_defaults():
@@ -614,7 +627,7 @@ def test_the_correctness_oracle_runs_torch_gemms_at_full_precision_and_restores_
 
     matmul = torch.backends.cuda.matmul
     before = (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction)
-    with run_mod.correctness_oracle():
+    with correctness_mod.reference_precision():
         assert not matmul.allow_fp16_reduced_precision_reduction
         assert not matmul.allow_bf16_reduced_precision_reduction
     assert (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction) == before
@@ -626,7 +639,7 @@ def test_golden_walk_skips_the_targets_a_hand_pin_contradicts(monkeypatch, tmp_p
     rows = [("exact", "p", {"FAST_MATH": False}), ("fast", "p", {"FAST_MATH": True}), ("plain", "q", {})]
     _patch_document(monkeypatch, _document(rows))
     calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_handle_run_once", _walked(calls))
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
 
     run_mod._run_golden_targets(_args(tmp_path))
