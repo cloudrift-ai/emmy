@@ -600,8 +600,8 @@ def test_search_dataset_does_not_import_search_db() -> None:
 #: upkeep (the restamp, the candidate build's own and its golden's rows), and the commands that list rows or replay
 #: them by name.
 _GOLDEN_MEASUREMENT_READERS = {
-    "emmy/commands/compile.py",
     "emmy/commands/golden.py",
+    "emmy/commands/run.py",
     "emmy/compiler/pipeline/search/candidates/__init__.py",
     "emmy/compiler/pipeline/search/golden/evidence.py",
     "emmy/compiler/pipeline/search/golden/format.py",

@@ -1075,8 +1075,8 @@ data but nothing a restamp can lower again; a compiler change that re-keys a ker
 **Recording benches** is Part 5's subject: a `run --bench` that benched rows with hand-forced knob values (golden or
 `--ab` rows) records each clean measurement — plus the greedy pick, through its comparable `greedy (isolated)`
 re-bench — per kernel through `bench_record.persist_kernel_perf`, so a replayed golden and a hand-pinned row are
-indistinguishable to the evidence pick. Rows that were flagged (a pin that did not match, a wrong answer, an
-implausible arithmetic intensity) and anything from the `--ir` path are never recorded.
+indistinguishable to the evidence pick. Rows that were flagged (a pin that did not match, a wrong answer) and
+anything from the `--ir` path are never recorded.
 
 **A failure blames one kernel** (`bench_record.persist_bench_failure`, the one writer for a failed bench, which `run
 --bench`'s greedy row comes through). A kernel whose row is a `bench_fail` fails every graph it is in — its identity
