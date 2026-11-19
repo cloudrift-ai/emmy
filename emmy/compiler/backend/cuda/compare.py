@@ -92,7 +92,9 @@ def _random_source_values(rng, shape, dtype, *, name: str | None = None):
     the per-tensor scale then reproduces a weight of the 0.02 std the unquantized sources have, and an activation
     quantized with the drawn ``input_scale`` gets block scales well under 448. A block-FP8 weight's scale
     (``*_scale_inv``) is its block's amax over 448, an amax of one to four std, so that the weight it scales has
-    the same std; larger scales overflow an FP16 trunk's projections. Any other scale gets a
+    the same std; larger scales overflow an FP16 trunk's projections. A static FP8 activation scale
+    (``activation_scale``) is ``amax / 448`` for an activation of unit std: drawn smaller, a unit-std activation
+    divided by it passes 448, and torch's cast to e4m3, which has no infinity, gives NaN. Any other scale gets a
     log-uniform draw from 1e-4 to 1e-1. A scale drawn from a normal distribution can be negative or near zero, and its
     reciprocal then overflows the 8-bit block scales computed from it."""
     import numpy as np  # noqa: PLC0415
@@ -117,6 +119,8 @@ def _random_source_values(rng, shape, dtype, *, name: str | None = None):
         return bits
     if std is not None:
         return np.full(shape, _SYNTH_AMAX_STDS * std / (e2m1_max * e4m3_max), dtype=np.float32)
+    if leaf.endswith("activation_scale"):
+        return np.full(shape, _SYNTH_AMAX_STDS / e4m3_max, dtype=np.float32)
     if leaf.endswith("_scale_inv"):
         return (rng.uniform(1, 4, shape) * _SYNTH_WEIGHT_STD / e4m3_max).astype(np.float32)
     if "scale" in leaf:
@@ -153,20 +157,24 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
 def _weight_scale_inputs(dtypes: dict) -> dict[str, str]:
     """The inputs, among ``dtypes`` (each input's dtype by name), that scale a quantized weight, each with the
     checkpoint leaf it is drawn as (:func:`_random_source_values`): the f32 block scale ``<weight>_scale`` of an
-    8-bit float ``<weight>_bits`` (``weight_scale_inv``), and the f32 per-tensor scale ``<weight>_scale_2`` of an
-    NVFP4 ``<weight>`` or ``<weight>_bits`` (``weight_scale_2``). A stored kernel reads its constants as inputs, and
+    8-bit float ``<weight>`` or ``<weight>_bits`` (``weight_scale_inv``), and the f32 per-tensor scale
+    ``<weight>_scale_2`` of an NVFP4 one (``weight_scale_2``); and the static FP8 activation scale
+    ``<activation>_static_fp8_scale`` (``activation_scale``). A stored kernel reads its constants as inputs, and
     a program reads a routed expert's weights as inputs. Drawn at unit std the weight is thousands of times a real
     one: a gated MLP's product of two such projections is infinity or zero in FP16, and the eager
-    reference holds NaN, or two orders of the same FP32 sum disagree past any tolerance."""
+    reference holds NaN, or two orders of the same FP32 sum disagree past any tolerance. An activation scale drawn
+    at unit std is near zero or negative for some draws, and the cast to e4m3 of the activation over it gives NaN."""
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
 
     leaves = {}
     for name, dtype in dtypes.items():
         weight, canonical = name.removesuffix("_bits"), get_dtype(dtype).name
-        if canonical in {"f8e4m3", "f8e5m2"} and name.endswith("_bits"):
+        if canonical in {"f8e4m3", "f8e5m2"}:
             leaves[f"{weight}_scale"] = "weight_scale_inv"
         elif canonical == "f4e2m1x2":
             leaves[f"{weight}_scale_2"] = "weight_scale_2"
+        elif name.endswith("_static_fp8_scale"):
+            leaves[name] = "activation_scale"
     return {name: leaf for name, leaf in leaves.items() if name in dtypes}
 
 

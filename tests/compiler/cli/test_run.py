@@ -147,9 +147,17 @@ def test_weight_scale_inputs_are_drawn_as_a_checkpoint_scale():
         "w_gate_up": "f4e2m1x2",
         "w_gate_up_scale": "f8e4m3",
         "w_gate_up_scale_2": "f32",
+        "w_down": "f8e4m3",
+        "w_down_scale": "f32",
+        "attn_out_static_fp8_scale": "f32",
     }
     leaves = _weight_scale_inputs(dtypes)
-    assert leaves == {"p_gate_weight_scale": "weight_scale_inv", "w_gate_up_scale_2": "weight_scale_2"}
+    assert leaves == {
+        "p_gate_weight_scale": "weight_scale_inv",
+        "w_gate_up_scale_2": "weight_scale_2",
+        "w_down_scale": "weight_scale_inv",
+        "attn_out_static_fp8_scale": "activation_scale",
+    }
     scale = _random_source_values(np.random.default_rng(7), (136, 1, 40, 1), "f32", name=leaves["p_gate_weight_scale"])
     assert scale.dtype == np.float32
     assert 0.02 <= float(scale.min()) * 448 and float(scale.max()) * 448 <= 0.08
@@ -159,6 +167,18 @@ def test_weight_scale_inputs_are_drawn_as_a_checkpoint_scale():
     block = _random_source_values(np.random.default_rng(7), (64, 160), "f8e4m3", name="w_gate_up_scale")
     amax = 6 * decode_f8(block, "f8e4m3") * scale_2
     assert np.allclose([amax.min(), amax.max()], [0.02, 0.08])
+
+
+def test_static_fp8_activation_scale_keeps_a_unit_activation_in_e4m3_range():
+    """A static FP8 checkpoint stores ``activation_scale`` beside a linear, its calibrated ``amax / 448``. Drawn below
+    that, a unit-std activation divided by it passes 448, and torch's cast to e4m3 gives NaN."""
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.compare import _random_source_values
+
+    scale = _random_source_values(np.random.default_rng(7), (1, 1), "f32", name="activation_scale")
+    x = np.random.default_rng(8).standard_normal((32, 16384))
+    assert float(np.abs(x / scale).max()) < 448
 
 
 def test_run_no_code_errors(run_cli):
