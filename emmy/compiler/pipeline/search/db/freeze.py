@@ -128,7 +128,7 @@ def implausible_value_reason(row: PerfRow, f: Mapping) -> str | None:
     symbolic one with no sizes stored is read at the default hint. Ungateable rows also pass on:
     non-``ok`` status (a fail sentinel is not a measurement), no stamped shape, unknown card or
     unrecorded peak."""
-    if row.status != "ok" or row.stats.median <= 0:
+    if row.status != "ok" or row.us <= 0:
         return None
     free = float(f.get("S_ext_free_prod") or 0.0)
     red = float(f.get("S_ext_reduce_max") or 0.0)
@@ -152,7 +152,7 @@ def implausible_value_reason(row: PerfRow, f: Mapping) -> str | None:
     from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
 
     hint = math.prod(row.bindings.values()) if row.bindings else (DEFAULT_SEQ_HINT if n_sym > 0 else 1)
-    implied = 2.0 * free * red * hint / row.stats.median / 1e6  # FLOP / µs -> TFLOP/s
+    implied = 2.0 * free * red * hint / row.us / 1e6  # FLOP / µs -> TFLOP/s
     if implied > peak:
         return f"implies {implied:.0f} TFLOP/s > {peak:.0f} device peak"
     return None
@@ -264,7 +264,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
                 bindings=dict(row.bindings),
                 pins=dict(REGIME_PINS[regime_of(row.cold_cache, row.precision)]),
                 knobs={str(k): str(v) for k, v in row.knobs.items()},
-                measurements=Measurements(emmy_us=row.stats.median),
+                measurements=Measurements(emmy_us=row.us),
             )
             for n, row in enumerate(rows)
         )

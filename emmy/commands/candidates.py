@@ -63,27 +63,25 @@ def _over_candidates(handler):
 
 def handle_candidates_build(args) -> None:
     from emmy.compiler.pipeline.search.candidates import RECORDS, build  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db.freeze import REPOSITORY_FREEZE, is_lfs_pointer  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db.freeze import REPOSITORY_FREEZE  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile, file_source, import_file  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.repository import hardware_golden_paths  # noqa: PLC0415
 
-    goldens = [Path(path).expanduser() for path in args.goldens] or sorted(_RECORDS_DIR.glob("*.json"))
+    goldens = [Path(path).expanduser() for path in args.goldens] or hardware_golden_paths()
     out = Path(args.out).expanduser() if args.out else RECORDS
-    freezes = {}
-    for path in sorted(Path(args.freeze).expanduser().glob("*.json") if args.freeze else REPOSITORY_FREEZE.glob("*.json")):
-        if is_lfs_pointer(path):
-            logger.error("%s is a git-LFS pointer, not the data: run `git lfs install && git lfs pull`", path)
+    # The freeze as a DB instance, a file's rows read in name order so a later tune's row stands at one schedule.
+    db = SearchDB()
+    for path in sorted((Path(args.freeze).expanduser() if args.freeze else REPOSITORY_FREEZE).glob("*.json")):
+        try:
+            import_file(db, path, file_source("freeze", path))
+        except ValueError as exc:
+            logger.error("%s", exc)
             sys.exit(2)
-        document = GoldenFile.load(path)
-        freezes.setdefault((document.gpu_name, tuple(document.compute_cap)), []).append(document)
     for path in goldens:
         golden = GoldenFile.load(path)
         target = out / path.name
-        document, report = build(
-            golden,
-            freezes.get((golden.gpu_name, tuple(golden.compute_cap)), []),
-            GoldenFile.load(target) if target.is_file() else None,
-        )
+        document, report = build(golden, db, GoldenFile.load(target) if target.is_file() else None)
         logger.info(
             "%s: %d candidate rows over %d groups, %d groups under their target", target, report.rows, report.groups, len(report.short)
         )

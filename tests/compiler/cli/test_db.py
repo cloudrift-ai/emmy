@@ -13,7 +13,6 @@ from emmy.commands.db import db_path, handle_db_check, handle_db_export, handle_
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.db.freeze import write_freeze, write_run_freeze
 from emmy.compiler.pipeline.search.golden.evidence import file_source
-from emmy.compiler.structural import digest
 from tests.compiler.pipeline.search.helpers import tuned_db
 from tests.compiler.realization import helpers as corpus
 
@@ -40,7 +39,7 @@ def test_a_reader_refuses_a_missing_dataset_db_and_reads_a_filled_one(tmp_path):
     assert db_path(str(tmp_path / "dataset.db")) == tmp_path / "dataset.db"
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
     assert db.perf_sources() == dict.fromkeys(current, 1)
-    assert [row.stats.median for row in db.iter_perf_rows()] == [500.0]
+    assert [row.us for row in db.iter_perf_rows()] == [500.0]
     db.close()
 
 
@@ -108,12 +107,12 @@ def test_a_tune_db_is_frozen_on_import(tmp_path):
     tune = tuned_db(tmp_path / "autotune.db", (_CASE, "fused/linear-add-place-cut-sm70.json"))
     [plain] = [row for row in tune.iter_perf_rows() if row.cc == 120]
     tune.record_perf_row(dataclasses.replace(plain, knobs={**plain.knobs, "WORK": "t8"}, source="golden:abcdef012345"))
-    measured = sorted((row.kernel, knobs_json(row.bindings), row.stats.median) for row in tune.iter_perf_rows() if row.source == "measured")
+    measured = sorted((row.kernel, knobs_json(row.bindings), row.us) for row in tune.iter_perf_rows() if row.source == "measured")
     tune.close()
 
     handle_db_import(Namespace(sources=[str(tmp_path / "autotune.db")], db=str(tmp_path / "dataset.db"), fresh=False))
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert sorted((row.kernel, knobs_json(row.bindings), row.stats.median) for row in db.iter_perf_rows()) == measured
+    assert sorted((row.kernel, knobs_json(row.bindings), row.us) for row in db.iter_perf_rows()) == measured
     assert all(source.startswith("freeze:") for source in db.perf_sources()) and len(db.perf_sources()) == 2
     held = db.perf_sources()
     db.close()
@@ -125,11 +124,10 @@ def test_a_tune_db_is_frozen_on_import(tmp_path):
 
 
 def _instance(path):
-    """A DB as the tuner writes it: two real tile kernels with their measurements, one cut on the first that
+    """A DB as a tune writes it: two real tile kernels with their measurements, one cut on the first that
     minted the second, on a registry card."""
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.bench_record import kernel_row as tile_row
-    from emmy.compiler.pipeline.search.db import PerfStats
     from emmy.compiler.wire import kernel_bindings
     from tests.compiler.helpers import case_target_tile
     from tests.compiler.pipeline.search.helpers import GPU_5090
@@ -140,10 +138,9 @@ def _instance(path):
     db = SearchDB(path)
     for tile in (parent, piece):
         db.record_kernel(tile_row(tile))
-    stats = PerfStats(median=10.0, min=10.0, max=10.0, mean=10.0, variance=0.0, n_samples=3)
     for tile in (parent, piece):
         identity = tile.identity_key(structural=False, with_io=True)
-        db.record_perf(ctx, identity, bindings=kernel_bindings(tile), knobs={"WORK": "t16"}, status="ok", stats=stats)
+        db.record_perf(ctx, identity, bindings=kernel_bindings(tile), knobs={"WORK": "t16"}, status="ok", us=10.0)
     db.record_routing(
         RoutingRow(
             parent=parent.identity_key(structural=False, with_io=True),
@@ -155,19 +152,13 @@ def _instance(path):
 
 
 _TAMPERS = {
-    "schedule and placement digests match their knob rows": "UPDATE placement SET digest = 'moved'",
     "every row names the rows it references": "DELETE FROM kernel WHERE exact_identity = (SELECT child FROM routing LIMIT 1)",
     "every CUDA context names a registry card": "UPDATE context SET gpu_name = 'Mystery GPU'",
-    "schedule knobs and placement knobs stay apart": (
-        f"INSERT INTO schedule (id, digest) VALUES (99, '{digest(knobs_json({'PLACE': 'cut'}))}'); "
-        "INSERT INTO schedule_knob VALUES (99, 'PLACE', 'cut')"
-    ),
 }
 
 
 def test_a_fresh_instance_has_no_drift(tmp_path):
-    """What the tuner writes agrees with itself: every knob row's digest, every reference, the card, the two
-    knob vocabularies."""
+    """What a tune writes agrees with itself: every reference and the card."""
     db, _parent, _piece = _instance(tmp_path / "tune.db")
     assert db.drift() == dict.fromkeys(_TAMPERS, 0)
     db.close()
@@ -176,9 +167,8 @@ def test_a_fresh_instance_has_no_drift(tmp_path):
 
 @pytest.mark.parametrize("check", list(_TAMPERS))
 def test_each_kind_of_drift_is_counted_by_its_own_check(check):
-    """One tamper per check, each the shape a code change would leave behind: a knob row whose digest
-    moved, a kernel row deleted from under its rows, a card the registry dropped, a placement knob filed as
-    a schedule knob. The check names it; the others stay quiet."""
+    """One tamper per check, each the shape a code change would leave behind: a kernel row deleted from under its
+    rows, a card the registry dropped. The check names it; the others stay quiet."""
     db, _parent, _piece = _instance(None)
     db._conn.execute("PRAGMA foreign_keys = OFF")
     db._conn.executescript(_TAMPERS[check])
@@ -224,7 +214,7 @@ def test_the_freeze_grows_by_merging_a_tune_db_and_a_second_merge_changes_nothin
     _freeze(tmp_path, "freezes", 500.0)
     tune = tuned_db(tmp_path / "autotune.db", (_CASE,), us=700.0)
     [row] = list(tune.iter_perf_rows())
-    tune.record_perf_row(dataclasses.replace(row, knobs={**row.knobs, "WORK": "t8"}, stats=dataclasses.replace(row.stats, median=600.0)))
+    tune.record_perf_row(dataclasses.replace(row, knobs={**row.knobs, "WORK": "t8"}, us=600.0))
     tune.close()
 
     def merge():
@@ -235,7 +225,7 @@ def test_the_freeze_grows_by_merging_a_tune_db_and_a_second_merge_changes_nothin
     first = merge()
     handle_db_import(Namespace(sources=[str(tmp_path / "freezes")], db=str(tmp_path / "check.db"), fresh=True))
     db = SearchDB.open_readonly(tmp_path / "check.db")
-    assert sorted(row.stats.median for row in db.iter_perf_rows()) == [600.0, 700.0]
+    assert sorted(row.us for row in db.iter_perf_rows()) == [600.0, 700.0]
     db.close()
     assert merge() == first
 
@@ -252,7 +242,7 @@ def test_a_tunes_freeze_file_imports_after_the_cards_and_the_fold_leaves_one_fil
 
     handle_db_import(Namespace(sources=[str(tmp_path / "freezes")], db=str(tmp_path / "fold.db"), fresh=True))
     db = SearchDB.open_readonly(tmp_path / "fold.db")
-    assert [(row.stats.median, row.source) for row in db.iter_perf_rows()] == [(700.0, file_source("freeze", run))]
+    assert [(row.us, row.source) for row in db.iter_perf_rows()] == [(700.0, file_source("freeze", run))]
     db.close()
     first = write_freeze(tmp_path / "fold.db", tmp_path / "freezes")
     assert sorted(path.name for path in (tmp_path / "freezes").glob("*.json")) == sorted(first)
@@ -269,5 +259,5 @@ def test_a_freeze_row_never_replaces_a_golden_row(tmp_path):
     _freeze(tmp_path, "faster", 400.0)
     handle_db_import(Namespace(sources=[str(golden), str(tmp_path / "faster")], db=str(tmp_path / "dataset.db"), fresh=True))
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert [(row.source.split(":")[0], row.stats.median) for row in db.iter_perf_rows()] == [("golden", 500.0)]
+    assert [(row.source.split(":")[0], row.us) for row in db.iter_perf_rows()] == [("golden", 500.0)]
     db.close()

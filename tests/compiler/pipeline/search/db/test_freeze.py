@@ -70,7 +70,7 @@ def test_freeze_preserves_cold_and_hot_rows_of_the_same_kernel(tmp_path):
     source = tuned_db(path, CASES[:1], us=500.0)
     hot_rows = list(source.iter_perf_rows())
     for row in hot_rows:
-        source.record_perf_row(dataclasses.replace(row, cold_cache=True, stats=dataclasses.replace(row.stats, median=700.0)))
+        source.record_perf_row(dataclasses.replace(row, cold_cache=True, us=700.0))
     source.close()
     directory = tmp_path / "freeze"
     write_freeze(path, directory)
@@ -79,8 +79,8 @@ def test_freeze_preserves_cold_and_hot_rows_of_the_same_kernel(tmp_path):
         import_file(restored, file, source=f"freeze:{file.name}")
     rows = list(restored.iter_perf_rows())
     assert len(rows) == 2 * len(hot_rows)
-    assert {r.stats.median for r in rows if r.cold_cache} == {700.0}
-    assert {r.stats.median for r in rows if not r.cold_cache} == {500.0}
+    assert {r.us for r in rows if r.cold_cache} == {700.0}
+    assert {r.us for r in rows if not r.cold_cache} == {500.0}
 
 
 @pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
@@ -109,7 +109,7 @@ def test_freeze_and_offline_pools_preserve_independent_precision(tmp_path, monke
     for pool in pools:
         ctx = pool_context(pool)
         assert ctx.precision_pins() == precision_pins(pool.pins)
-        assert len(list(restored.iter_perf(ctx))) == len(original)
+        assert sum(row.precision == ctx.precision_pins() and row.cold_cache == ctx.cold_cache for row in rows) == len(original)
         assert pool.regime == regime_of(ctx.cold_cache, ctx.precision_pins())
 
 
@@ -150,7 +150,7 @@ def _measured(db: SearchDB) -> set[tuple]:
     """Every row as a freeze carries it: the kernel, its bindings, its schedule row, its median and its regime."""
 
     return {
-        (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.stats.median, regime_of(r.cold_cache, r.precision))
+        (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.us, regime_of(r.cold_cache, r.precision))
         for r in db.iter_perf_rows()
         if r.status == "ok"
     }
@@ -260,7 +260,7 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     [row] = list(db.iter_perf_rows())
     with pinned_knobs({"FAST_MATH": True}):
         ctx = Context.from_target((12, 0), gpu_name=CARDS[(12, 0)], precision={"FAST_MATH": True})
-        db.record_perf(ctx, row.kernel, bindings=row.bindings, knobs=row.knobs, status="ok", stats=row.stats)
+        db.record_perf(ctx, row.kernel, bindings=row.bindings, knobs=row.knobs, status="ok", us=row.us)
     assert {r.precision["FAST_MATH"] for r in db.iter_perf_rows()} == {False, True}
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
@@ -270,8 +270,8 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     db.close()
     again = SearchDB()
     import_file(again, (frozen := next((tmp_path / "freeze").glob("*.json"))), file_source("freeze", frozen))
-    lanes = sorted((r.precision["FAST_MATH"], r.stats.median) for r in again.iter_perf_rows())
-    assert lanes == [(False, row.stats.median), (True, row.stats.median)]
+    lanes = sorted((r.precision["FAST_MATH"], r.us) for r in again.iter_perf_rows())
+    assert lanes == [(False, row.us), (True, row.us)]
 
 
 def test_a_kernel_benched_at_two_sizes_freezes_as_two_rows_of_one_kernel(tmp_path) -> None:
@@ -286,7 +286,7 @@ def test_a_kernel_benched_at_two_sizes_freezes_as_two_rows_of_one_kernel(tmp_pat
     [row] = list(db.iter_perf_rows())
     assert row.bindings == {"seq_len": 512}
     ctx = Context.from_target((12, 0), gpu_name=CARDS[(12, 0)], precision=row.precision)
-    db.record_perf(ctx, row.kernel, bindings={"seq_len": 128}, knobs=row.knobs, status="ok", stats=row.stats)
+    db.record_perf(ctx, row.kernel, bindings={"seq_len": 128}, knobs=row.knobs, status="ok", us=row.us)
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
     assert sorted(row.bindings["seq_len"] for row in document.rows) == [128, 512]
@@ -303,13 +303,10 @@ def test_a_kernel_benched_at_two_sizes_freezes_as_two_rows_of_one_kernel(tmp_pat
 def test_a_golden_files_rows_and_failures_are_not_frozen(tmp_path) -> None:
     """A row a compile imported from a golden file is the file's, not this machine's; a failed bench is no
     measurement. Neither is written, and the freeze says why."""
-    from emmy.compiler.pipeline.search.db import PerfStats
-
     path = tmp_path / "autotune.db"
     db = tuned_db(path, CASES[:1], source="golden:abcdef012345")
     [row] = list(db.iter_perf_rows())
-    failed = PerfStats(median=2e6, min=2e6, max=2e6, mean=2e6, variance=0.0, n_samples=0)
-    hung = dataclasses.replace(row, source="measured", knobs={**row.knobs, "WORK": "t8"}, status="bench_fail", stats=failed, error="hung")
+    hung = dataclasses.replace(row, source="measured", knobs={**row.knobs, "WORK": "t8"}, status="bench_fail", us=2e6, error="hung")
     db.record_perf_row(hung)
     documents, dropped = freeze_documents(db)
     assert documents == {} and dropped == {"a golden file's row": 1, "bench_fail": 1}

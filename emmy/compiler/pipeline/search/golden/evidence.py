@@ -9,27 +9,27 @@ has one read (``policy.greedy``): a kernel's measured schedule rows, and the ker
 priced from the pieces' own rows.
 
 :func:`evidence_db` is the compile's seam: the golden files in scope (``repository.documents_for_card``) are imported
-once per scope digest into the tune DB the compile reads — a re-recorded file changes the digest, and the file's
-earlier rows are let go first — or into a fresh in-memory instance when the compile has no DB. Only the rows of the
-live precision regime are evidence there (:func:`regime_live`). :func:`rows_digests` is the part of that evidence one
-compile's picks can depend on, which keys its serving pack entry. :func:`import_file` is ``emmy db import``'s: every
-row under its own regime's context, and the constant inputs each target's program binds (:func:`import_constants`),
-which the placement export reads back without the file.
+once per scope digest and regime into the tune DB the compile reads — a re-recorded file changes the digest, and
+what the earlier scope imported is let go first — or into a fresh in-memory instance when the compile has no DB.
+Only the rows of the live precision regime are evidence there (:func:`regime_live`). :func:`import_file` is
+``emmy db import``'s: every row under its own regime's context, and the constant inputs each target's program binds
+(:func:`import_constants`), which the placement export reads back without the file.
+
+This module is the one reader of a golden-shaped file's rows as evidence. Whatever asks what was measured — a pick,
+a serving pack's key, the candidate build, the export — asks the DB instance the file was imported into.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from pathlib import Path
 
 from emmy import config
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.knob import KnobType, family_of, registry
-from emmy.compiler.pipeline.search.bench_record import point_stats
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
 from emmy.compiler.wire import symbolic_vars
@@ -82,7 +82,9 @@ def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable
             db.record_kernel(kernel)
     for route in document.routing:
         if all(ref in identity for ref in (route.parent, *route.children)):
-            db.record_routing(RoutingRow(identity[route.parent], route.arm, tuple(identity[child] for child in route.children)))
+            db.record_routing(
+                RoutingRow(identity[route.parent], route.arm, tuple(identity[child] for child in route.children)), source=source
+            )
     written = 0
     for row in rows:
         if row.kernel not in identity:
@@ -100,8 +102,7 @@ def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable
             bindings=row.bindings,
             knobs=row.knobs,
             status="ok",
-            stats=point_stats(row.measurements.emmy_us),
-            captured=True,
+            us=row.measurements.emmy_us,
             source=source,
         )
         written += 1
@@ -176,58 +177,26 @@ def import_file(db: SearchDB, path: Path, source: str) -> Counter:
 
 
 def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
-    """The DB a compile under ``ctx`` picks from, holding the golden rows in scope: ``db`` itself, the scope imported
-    into it once per scope digest (a scope the file does not hold yet lets the earlier golden rows of this card and
-    regime go first); with no ``db``, a fresh in-memory instance holding the scope."""
+    """The DB a compile under ``ctx`` picks from, holding the golden rows in scope: ``db`` — a fresh in-memory
+    instance when the compile has none — with the scope imported into it once per scope digest, card and regime. The
+    import itself is what the instance notes (``SearchDB.record_source``), so a scope none of whose rows is evidence
+    in this regime is read once too; a scope it does not hold yet lets what the earlier one imported go first."""
     gpu_name = getattr(ctx, "gpu_name", None) or ""
     documents = documents_for_card(gpu_name, tuple(ctx.compute_capability)) if gpu_name or scope_explicit() else []
-    if not documents:
-        return db if db is not None else SearchDB()
-    source = f"golden:{scope_digest(gpu_name)[:12]}"
     if db is None:
-        fresh = SearchDB()
-        _import(fresh, ctx, documents, source)
-        return fresh
+        db = SearchDB()
+    if not documents:
+        return db
+    source = f"golden:{scope_digest(gpu_name)[:12]}"
     # Every worker of a parallel boot imports into one file at its first compile: the check, the forget and the
     # import are one step, or two workers collide on the rows' unique keys and a third reads a half-written scope.
     with db.exclusive():
-        if source not in db.perf_sources(ctx):
+        if source not in db.sources(ctx):
             with db.transaction():
-                db.forget_perf(ctx, "golden:")
+                db.forget(ctx, "golden:")
                 _import(db, ctx, documents, source)
+                db.record_source(source, ctx)
     return db
-
-
-def rows_digests(documents: Iterable[GoldenFile], reads: Mapping[str, Iterable[str]]) -> dict[str, str]:
-    """For each compile of ``reads`` (a name, and the exact identities of the kernels whose evidence it read:
-    ``policy.greedy.evidence_reads``), a digest of the golden evidence in ``documents`` it picks from: the live
-    regime's measured rows and the routing rows of those kernels and of every piece the routing rows reach from them,
-    and whether any measured row of the live regime is in scope at all, since a compile with none prices no
-    kernel-set arm from its pieces and so looks none of them up. Nothing else of the files can move its picks."""
-    routes: dict[str, list] = {}
-    rows: dict[str, list] = {}
-    for document in documents:
-        identity = document.identities()
-        for route in document.routing:
-            if all(ref in identity for ref in (route.parent, *route.children)):
-                routes.setdefault(identity[route.parent], []).append([knobs_json(route.arm), [identity[c] for c in route.children]])
-        for row in document.rows:
-            if row.measured and row.knobs is not None and row.kernel in identity and regime_live(row.pins):
-                rows.setdefault(identity[row.kernel], []).append(
-                    [knobs_json(row.bindings), knobs_json(row.knobs), row.measurements.emmy_us]
-                )
-
-    def digest(kernels: Iterable[str]) -> str:
-        reached, frontier = set(kernels), list(kernels)
-        while frontier:  # the pieces of the routing rows on the kernels reached, and theirs
-            for _, children in routes.get(frontier.pop(), ()):
-                frontier.extend(child for child in children if child not in reached)
-                reached.update(children)
-        read = {kernel: [sorted(routes.get(kernel, ())), sorted(rows.get(kernel, ()))] for kernel in sorted(reached)}
-        wire = [bool(rows), {kernel: entry for kernel, entry in read.items() if entry != [[], []]}]
-        return hashlib.sha256(json.dumps(wire).encode()).hexdigest()[:16]
-
-    return {name: digest(list(kernels)) for name, kernels in reads.items()}
 
 
 def _import(db: SearchDB, ctx: Context, documents: list[GoldenFile], source: str) -> None:
@@ -237,7 +206,7 @@ def _import(db: SearchDB, ctx: Context, documents: list[GoldenFile], source: str
         measured += sum(row.measured for row in document.rows)
         wrong_regime += sum(row.measured for row in document.rows) - len(live)
         written += import_rows(db, ctx, document, live, source=source)
-    logger.info("golden evidence: %d perf row(s) imported into %s as %s", written, getattr(db, "_path", None) or "memory", source)
+    logger.info("golden evidence: %d perf row(s) imported into %s as %s", written, db.path or "memory", source)
     if measured and not written:
         # The deploy would fall through to the prior with the files apparently loaded: say so.
         regime = f", {wrong_regime} recorded in another measurement regime" if wrong_regime else ""

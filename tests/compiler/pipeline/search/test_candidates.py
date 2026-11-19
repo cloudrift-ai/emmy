@@ -22,7 +22,8 @@ from emmy.compiler.pipeline.search.candidates import (
     golden_groups,
     target,
 )
-from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Row, restamp
+from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Row, import_rows, regime_context, restamp
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, document_of
 
 
@@ -35,13 +36,17 @@ def test_a_group_is_filled_by_the_size_of_its_schedule_space() -> None:
     assert FEWEST < target(1287) < MOST
 
 
-def _measured(golden: GoldenFile, head: Row, times: list[float]) -> GoldenFile:
-    """A freeze of ``golden``'s card: ``head``'s kernel measured at one made-up schedule per time."""
+def _measured(golden: GoldenFile, head: Row, times: list[float], *, also: tuple[Row, ...] = ()) -> SearchDB:
+    """A DB instance holding a freeze of ``golden``'s card: ``head``'s kernel measured at one made-up schedule per
+    time, and the rows ``also``."""
     rows = [
         replace(head, name=f"freeze.{n}", knobs={**head.knobs, "WORK": f"w{n + 100}x1"}, measurements=Measurements(emmy_us=us))
         for n, us in enumerate(times)
     ]
-    return GoldenFile(gpu_name=golden.gpu_name, compute_cap=golden.compute_cap, kernels=list(golden.kernels), rows=rows)
+    freeze = GoldenFile(gpu_name=golden.gpu_name, compute_cap=golden.compute_cap, kernels=list(golden.kernels), rows=[*rows, *also])
+    db = SearchDB()
+    import_rows(db, regime_context(freeze, head.pins), freeze, freeze.rows, source="freeze:test")
+    return db
 
 
 def test_a_build_takes_a_spread_of_the_freeze_and_keeps_what_the_file_holds(monkeypatch) -> None:
@@ -51,10 +56,10 @@ def test_a_build_takes_a_spread_of_the_freeze_and_keeps_what_the_file_holds(monk
     monkeypatch.setattr(candidates, "space_size", lambda pool: 1287)
     wanted = target(1287)
     head = next(row for row in golden.rows if row.measured and row.knobs)
-    freeze = _measured(golden, head, [float(us) for us in range(10, 40)])
-    freeze.rows.append(replace(head, name="the golden's own schedule", measurements=Measurements(emmy_us=1.0)))
+    own = replace(head, name="the golden's own schedule", measurements=Measurements(emmy_us=1.0))
+    freeze = _measured(golden, head, [float(us) for us in range(10, 40)], also=(own,))
 
-    document, report = build(golden, [freeze])
+    document, report = build(golden, freeze)
     assert (document.programs, document.kernels, document.routing) == (golden.programs, golden.kernels, golden.routing)
     taken = [row.measurements.emmy_us for row in document.rows]
     assert len(taken) == wanted and taken[0] == 10.0 and taken[-1] == 39.0 and taken == sorted(taken)
@@ -63,12 +68,12 @@ def test_a_build_takes_a_spread_of_the_freeze_and_keeps_what_the_file_holds(monk
     assert report.rows == wanted and report.groups == len(report.short) + 1
     document.check()
 
-    again, _ = build(golden, [_measured(golden, head, [5.0, 6.0])], document)
+    again, _ = build(golden, _measured(golden, head, [5.0, 6.0]), document)
     assert again.rows == document.rows, "a full group takes nothing more"
 
     other = next(row for row in golden.rows if row.kernel != head.kernel and row.measured)
     without = replace(golden, rows=[row for row in golden.rows if row.kernel != head.kernel])
-    left, _ = build(without, [_measured(golden, other, [7.0])], document)
+    left, _ = build(without, _measured(golden, other, [7.0]), document)
     assert [row.measurements.emmy_us for row in left.rows] == [7.0]
 
 
@@ -77,7 +82,7 @@ def test_a_candidate_faster_than_its_golden_is_kept_and_reported(monkeypatch) ->
     monkeypatch.setattr(candidates, "space_size", lambda pool: 4)
     head = next(row for row in golden.rows if row.measured and row.knobs)
     best = min(row.measurements.emmy_us for row in golden.rows if row.measured and row.kernel == head.kernel)
-    document, report = build(golden, [_measured(golden, head, [best / 2])])
+    document, report = build(golden, _measured(golden, head, [best / 2]))
     assert [row.measurements.emmy_us for row in document.rows] == [best / 2]
     assert [(name, us) for name, us, _ in report.faster] == [(document.rows[0].name, best / 2)]
 
@@ -133,10 +138,10 @@ def test_a_group_is_asked_for_no_more_candidates_than_its_schedule_space_holds(m
     head = next(row for row in golden.rows if row.measured and row.knobs)
     monkeypatch.setattr(candidates, "space_size", lambda pool: 4)
     monkeypatch.setattr(candidates, "_others", lambda pool, taken: 1)
-    document, report = build(golden, [_measured(golden, head, [20.0, 30.0, 40.0])])
+    document, report = build(golden, _measured(golden, head, [20.0, 30.0, 40.0]))
     assert [row.measurements.emmy_us for row in document.rows] == [20.0]
     assert head.name not in [name for name, _held, _wanted in report.short]
 
     monkeypatch.setattr(candidates, "space_size", lambda pool: 0)
-    document, report = build(golden, [_measured(golden, head, [20.0])])
+    document, report = build(golden, _measured(golden, head, [20.0]))
     assert report.groups == 1 and report.rows == 1 and not report.short

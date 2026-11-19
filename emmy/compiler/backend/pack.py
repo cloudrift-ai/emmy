@@ -24,10 +24,11 @@ version is deliberately NOT part of validity (a pack keeps serving its frozen sn
 
 The golden rows are part of validity per program, because a re-recorded golden exists precisely to
 change what the compile deploys: each entry keeps the exact identities of the kernels whose evidence
-its compile read (``policy.greedy.evidence_reads``) and a digest of the golden rows in scope those
-reach (``golden.rows_digests``). After a golden edit (the card's scope digest moved) a load computes
-the digests again; an entry whose rows moved maps to no plan and compiles again, and so does every
-twin of its wrapper, which settled its weights' layouts with it. The rest load.
+its compile read (``policy.greedy.evidence_reads``) and a digest of the evidence those reach in the
+tune DB, the golden rows in scope imported among it (``SearchDB.evidence_digest``). After a golden edit
+(the card's scope digest moved) a load computes the digests again; an entry whose rows moved maps to no
+plan and compiles again, and so does every twin of its wrapper, which settled its weights' layouts with
+it. The rest load.
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ _MANIFEST = "manifest.json"
 
 
 class PackEntry(NamedTuple):
-    """One program of a loaded pack: its plan, or ``None`` when the golden rows its compile read moved since the
+    """One program of a loaded pack: its plan, or ``None`` when the evidence its compile read moved since the
     pack was written, and the exact identities of the kernels whose evidence that compile read."""
 
     plan: ExecutionPlan | None
@@ -81,7 +82,7 @@ def _environment() -> dict:
     key version): identities computed under two versions do not compare.
     Probes the live GPU."""
     from emmy.compiler.backend.cuda import ptxas  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import _VERSION  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import VERSION  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import live_gpu_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
     from emmy.compiler.target import compute_capability  # noqa: PLC0415
@@ -92,7 +93,7 @@ def _environment() -> dict:
         "ptxas": ptxas.version(),
         "precision": precision_pins(),
         "card": (live_gpu_key() or ("",))[0],
-        "kernel_key": _VERSION,
+        "kernel_key": VERSION,
     }
 
 
@@ -104,12 +105,19 @@ def _scope_digest() -> str:
 
 
 def _rows(reads: dict[str, frozenset[str]]) -> dict[str, str]:
-    """The digest of each program's golden rows in the live card's scope (``golden.rows_digests``, which lifts the
-    files)."""
-    from emmy.compiler.pipeline.search.golden import documents_for_card, live_gpu_key, rows_digests  # noqa: PLC0415
+    """Each program's digest of the evidence its compile picks from, on the live card and in the live regime
+    (``SearchDB.evidence_digest``): the tune DB's rows, the golden rows in scope imported among them — which lifts
+    the files where the DB does not hold the scope yet (``golden.evidence_db``)."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import evidence_db  # noqa: PLC0415
 
-    card = live_gpu_key()
-    return rows_digests(documents_for_card(*card) if card else [], reads)
+    ctx = Context.probe()
+    db = evidence_db(SearchDB.for_compile(config.tune_db_path()), ctx)
+    try:
+        return {program: db.evidence_digest(ctx, kernels) for program, kernels in reads.items()}
+    finally:
+        db.close()
 
 
 def _bound(plan: ExecutionPlan) -> frozenset[str]:

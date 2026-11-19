@@ -340,7 +340,7 @@ def _handle_run_cpu(args) -> None:
     from emmy.compiler.backend.cpu.codegen import Unsupported  # noqa: PLC0415
     from emmy.compiler.ir.schedule.cpu import CpuCodec, CpuContext, CpuProblem  # noqa: PLC0415
     from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, persist_kernel_perf  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import PerfStats, SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
     from emmy.compiler.target import CPU_TARGET  # noqa: PLC0415
 
     other = [
@@ -437,16 +437,15 @@ def _handle_run_cpu(args) -> None:
     db = SearchDB(backend.tune_db)
     try:
         for nid, us in samples.items():
-            tile = program.tiles[nid]
-            stats = PerfStats(
-                median=statistics.median(us),
-                min=min(us),
-                max=max(us),
-                mean=statistics.fmean(us),
-                variance=statistics.pvariance(us),
-                n_samples=len(us),
+            persist_kernel_perf(
+                db,
+                program.ctx,
+                program.tiles[nid],
+                us=statistics.median(us),
+                status="ok",
+                knobs=decisions[nid],
+                sizes=program.native.executor.env(),
             )
-            persist_kernel_perf(db, program.ctx, tile, stats=stats, status="ok", knobs=decisions[nid], sizes=program.native.executor.env())
     finally:
         db.close()
 

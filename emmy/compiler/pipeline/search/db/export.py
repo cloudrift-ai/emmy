@@ -60,7 +60,7 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
     pools = []
     for (gpu, cap, regime, identity, _bindings), rows in sorted(buckets.items()):
         rows.sort(key=lambda r: knobs_json(r.knobs))
-        golden = tuple(GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.stats.median, row.source) for row in rows)
+        golden = tuple(GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.us, row.source) for row in rows)
         pools.append(GoldenPool(gpu, cap, regime, kernels[identity], dict(rows[0].bindings), golden))
     return pools, dict(dropped)
 
@@ -156,7 +156,7 @@ def measured_groups(rows, kernel_op: Callable, *, jobs: int = 1) -> tuple[list[M
     groups = []
     for (gpu, sig, regime), group_feats in zip(keys, feats, strict=True):
         key = f"{gpu}/{sig}" + (f" {regime}" if regime else "")
-        groups.append(MeasuredGroup.from_measured(key, gpu, sig, [r.stats.median for r in buckets[gpu, sig, regime]], group_feats))
+        groups.append(MeasuredGroup.from_measured(key, gpu, sig, [r.us for r in buckets[gpu, sig, regime]], group_feats))
     return groups, dict(dropped)
 
 

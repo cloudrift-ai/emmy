@@ -274,7 +274,6 @@ def _measure(db, graph, layout, ctx, pipeline):
     """Record one perf row for the kernel ``graph`` forms under ``layout``, kept whole and unsplit: pinned, so the
     measured kernel is the one the layout arms leave, whatever a prior would pick at those forks."""
     from emmy.compiler.pipeline.search.bench_record import kernel_row
-    from emmy.compiler.pipeline.search.db import PerfStats
     from emmy.compiler.pipeline.search.golden import evidence_scope
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
@@ -283,8 +282,7 @@ def _measure(db, graph, layout, ctx, pipeline):
     node = next(node for node in formed.nodes.values() if isinstance(node.op, TileOp))
     kernel = kernel_row(node.op.with_io(formed, node))
     db.record_kernel(kernel)
-    stats = PerfStats(median=17, min=17, max=17, mean=17, variance=0, n_samples=1)
-    db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, status="ok", stats=stats)
+    db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, status="ok", us=17.0)
 
 
 def test_a_twin_whose_rows_cover_only_the_other_layout_fails_the_audit():
