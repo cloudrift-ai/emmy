@@ -102,29 +102,21 @@ def _erf(x: np.ndarray) -> np.ndarray:
 #: The rows one forked worker featurizes at a time.
 _FEATURIZED = 512
 
-#: What a forked featurizing worker reads: the featurizer, the kernel and its rows. Set by the parent before the
-#: fork, so they are inherited, never pickled.
-_FEATURIZING: tuple | None = None
 
-
-def _featurize(start: int) -> list:
-    featurizer, op, rows = _FEATURIZING
+def _featurize(kernel: tuple, start: int) -> list:
+    featurizer, op, rows = kernel
     return [featurizer.features(op, row) for row in rows[start : start + _FEATURIZED]]
 
 
 def prior_scores(op, rows: list[dict], ctx) -> list[float]:
     """The schedule prior's score of every row, lower is better. The rows are featurized on ``EMMY_WORKERS`` forked
     processes and scored here."""
-    global _FEATURIZING  # noqa: PLW0603 — the fork seam, set and cleared here
     from emmy.compiler.pipeline.fork import forked  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
     prior = load_prior()
-    _FEATURIZING = (Featurizer.of(ctx), op, rows)
-    try:
-        features = [f for chunk in forked(_featurize, range(0, len(rows), _FEATURIZED), config.workers()) for f in chunk]
-    finally:
-        _FEATURIZING = None
+    chunks = forked(_featurize, range(0, len(rows), _FEATURIZED), config.workers(), shared=(Featurizer.of(ctx), op, rows))
+    features = [f for chunk in chunks for f in chunk]
     scores: list[float] = []
     for i in range(0, len(rows), 4096):
         scores += prior.mean_scores_features(features[i : i + 4096])

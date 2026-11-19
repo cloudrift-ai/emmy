@@ -2001,15 +2001,11 @@ def _failed_bench_status(exc: BaseException) -> str:
     return "compile_timeout" if compile_budget_overrun(exc) else "bench_fail"
 
 
-#: What a forked compile worker lowers: the backend, and each row's fresh graph beside its pins. Set by the parent
-#: before the fork, so the graphs are inherited, never pickled.
-_COMPILING: tuple | None = None
-
-
-def _compile_pinned_row(index: int):
-    """Row ``index`` of :data:`_COMPILING` lowered under its own pins: the compiled graph, or the text of the
-    error that stopped its trace or its lowering. The pins are published to this process's environment for this one compile."""
-    backend, rows = _COMPILING
+def _compile_pinned_row(compiling: tuple, index: int):
+    """Row ``index`` of ``compiling`` (the backend, and each row's fresh graph beside its pins) lowered under its own
+    pins: the compiled graph, or the text of the error that stopped its trace or its lowering. The pins are published
+    to this process's environment for this one compile."""
+    backend, rows = compiling
     graph, knobs = rows[index]
     if isinstance(graph, str):
         return graph
@@ -2029,7 +2025,6 @@ def _compile_pinned_rows(backend, source, samples, quantize=None) -> list:
     benches at the same hint. The lowerings are the CPU work of a pinned bench, and no row's reads another's, so
     they run side by side on up to ``EMMY_WORKERS`` forked processes: a worker holds one row's pins in its own
     environment, and the rows are the same at any count."""
-    global _COMPILING  # noqa: PLW0603 — the fork seam, set and cleared here
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import forked  # noqa: PLC0415
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
@@ -2061,11 +2056,7 @@ def _compile_pinned_rows(backend, source, samples, quantize=None) -> list:
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
             graph = str(exc)
         rows.append((graph, replay_knobs))
-    _COMPILING = (backend, rows)
-    try:
-        return forked(_compile_pinned_row, range(len(rows)), config.workers())
-    finally:
-        _COMPILING = None
+    return forked(_compile_pinned_row, range(len(rows)), config.workers(), shared=(backend, rows))
 
 
 async def _bench_golden_variants(

@@ -83,13 +83,8 @@ class Kernel(KernelDef):
         return out.keyed(self.__dict__["exact_identity"]) if "exact_identity" in self.__dict__ else out
 
 
-#: The kernels a forked worker computes the identity of: set by the parent before the fork, so they are inherited,
-#: never pickled.
-_IDENTIFYING: list[Kernel] | None = None
-
-
-def _identity(index: int) -> str | None:
-    kernel = _IDENTIFYING[index]
+def _identity(kernels: list[Kernel], index: int) -> str | None:
+    kernel = kernels[index]
     try:
         return kernel.exact_identity
     except Exception as exc:  # noqa: BLE001 — whatever the lift raises, the kernel is stale, the file is not broken
@@ -332,16 +327,12 @@ class GoldenFile(Wire):
         kernel, once per loaded file, on ``EMMY_WORKERS`` forked processes), which is why only an import, a
         restamp or a record asks. A kernel whose stored body the compiler no longer takes back has none and is
         left out: a stale kernel, whose rows describe nothing a compile builds (``emmy golden check`` names it)."""
-        global _IDENTIFYING  # noqa: PLW0603 — the fork seam, set and cleared here
         from emmy.compiler.pipeline.fork import forked  # noqa: PLC0415
 
-        _IDENTIFYING = [kernel for kernel in self.kernels if "exact_identity" not in kernel.__dict__]
-        try:
-            for kernel, identity in zip(_IDENTIFYING, forked(_identity, range(len(_IDENTIFYING)), config.workers()), strict=True):
-                if identity is not None:
-                    kernel.keyed(identity)
-        finally:
-            _IDENTIFYING = None
+        unknown = [kernel for kernel in self.kernels if "exact_identity" not in kernel.__dict__]
+        for kernel, identity in zip(unknown, forked(_identity, range(len(unknown)), config.workers(), shared=unknown), strict=True):
+            if identity is not None:
+                kernel.keyed(identity)
         return {kernel.ref: kernel.exact_identity for kernel in self.kernels if "exact_identity" in kernel.__dict__}
 
     def targets(self) -> list[Kernel]:
