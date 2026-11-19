@@ -165,11 +165,12 @@ def import_file(db: SearchDB, path: Path, source: str) -> Counter:
     document = GoldenFile.load(path)
     counts: Counter[str] = Counter(kernels=len(document.kernels), routing=len(document.routing))
     regimes = {tuple(sorted(row.pins.items())) for row in document.rows}
-    for regime in sorted(regimes, key=repr):
-        rows = [row for row in document.rows if tuple(sorted(row.pins.items())) == regime]
-        counts["perf rows"] += import_rows(db, regime_context(document, dict(regime)), document, rows, source=source)
-    counts["constants"] = import_constants(db, document, document.rows, source=source)
-    db.record_source(source)
+    with db.transaction():
+        for regime in sorted(regimes, key=repr):
+            rows = [row for row in document.rows if tuple(sorted(row.pins.items())) == regime]
+            counts["perf rows"] += import_rows(db, regime_context(document, dict(regime)), document, rows, source=source)
+        counts["constants"] = import_constants(db, document, document.rows, source=source)
+        db.record_source(source)
     logger.info("imported %s as %s: %s", path.name, source, ", ".join(f"{n} {what}" for what, n in sorted(counts.items())))
     return counts
 
@@ -191,8 +192,9 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
     # import are one step, or two workers collide on the rows' unique keys and a third reads a half-written scope.
     with db.exclusive():
         if source not in db.perf_sources(ctx):
-            db.forget_perf(ctx, "golden:")
-            _import(db, ctx, documents, source)
+            with db.transaction():
+                db.forget_perf(ctx, "golden:")
+                _import(db, ctx, documents, source)
     return db
 
 
