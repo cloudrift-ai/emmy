@@ -1579,6 +1579,44 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     furthest per unit of work, and both cost what earlier twin and tune rounds cost. Round 3 is the largest decode
     lever but the most uncertain; its gate should run before any serving work.
   - Boot: Emmy 758-771 s, the fork 415-468 s.
+- **The 4,096-row pre and post programs, tuned on the card (2026-11-19).** Round 2 of the 2026-11-19 ranking, main
+  `793647dc9`, rows only: no compiler or runner change. Gate, stated before tuning: pre4096 plus post4096 cold at
+  4,096 rows at least 1.0 ms per layer faster, strict from the golden alone.
+  - Measured first, cold per layer: pre4096 1,957 us in four kernels, the 10,240-deep mixer product 941 us on 320
+    blocks and its 10,240-wide output product 635; post4096 3,744 us in fifteen kernels, none above 601.
+  - Rows: every kernel above 100 us tuned on the card with `--tune 40`, the six largest movers again with
+    `--tune 200`, each on a scratch tune DB; the pre mixer product, which no schedule moved below 920 us, takes a
+    cross-CTA split (`g4k`): its partial swept by hand over ten schedules, 510-575 us plus a 33 us finish. The split
+    did not pay for post's mixer product. The tune DBs merged into one and the greedy pick of each program recorded
+    with `--record-greedy`; rows of unchanged kernels keep their old numbers.
+  - Post serves the mixer product in the weight layout its narrower twins settle (kernel `k_82e6a5aca057`), not the
+    one a plain `--program` bench picks; a realization-scoped bench shows the served route. Tuned 513 to 358 us alone.
+  - Two faster schedules are recorded but not picked: an old row is stored faster than its own schedule measures
+    today (pre's output product 577 stored, 635 today, the new row 616; post's output product's old row 501 stored,
+    584 today, the new row 499 is picked by 1.5 us). No old row was re-recorded.
+  - Gate **passed**: strict cold per layer, pre4096 1,957 to 1,571 us, post4096 3,744 to 2,863 us, -1,267 us.
+  - A B B A on boots never profiled, two of main against two of the branch, one server working at a time:
+
+    | Point | Main | This round | Fork, 2026-11-19 |
+    | --- | ---: | ---: | ---: |
+    | One request, 1K / 512, per token | 16.05-16.06 ms | 16.07 ms | 9.59-9.60 ms |
+    | 8 requests, 4K / 1K, total output | 240.0-240.1 tok/s | 243.0-244.6 tok/s | 316.4-320.3 tok/s |
+    | First token, 1K (control) | 0.602-0.611 s | 0.612-0.639 s | 0.43 s |
+    | First token, 4K | 1.255-1.260 s | 1.185-1.196 s | 0.82-0.83 s |
+    | First token, 8K | 2.340 s | 2.210-2.213 s | 1.46-1.47 s |
+    | First token, 32K | 9.44-9.45 s | 8.93-8.95 s | 5.93-5.94 s |
+
+  - About 65 ms per 4K chunk (4K -65 ms, 32K -0.51 s over eight chunks), inside the expected 40-100. Against the
+    fork the first token is 1.44x slower at 4K (1.51x on main), 1.51x at 8K (1.59x) and 1.51x at 32K (1.59x).
+  - Checks: every one of the 19 programs compiles under strict evidence GPU-free, the other 17 to the same listing as
+    the 2026-11-19 round; `emmy golden check` says current; the release audit on the card passes. The prior gate does
+    not hold this recipe. GSM8K 0.977 (main rounds 0.969-0.984); acceptance 27, 26, 27, 27, 27, 27 of 28 over three
+    rounds, the same two known think-mode failures as main (an empty answer, and the reasoning-off case);
+    long-document lookups 141 of 141 without thinking and 137 of 138 with it, the miss an empty answer in think mode,
+    the same kind as the acceptance one. Greedy texts: none of 6 part across the four boots. Memory, same probe on
+    both sides: torch peaks equal to the byte (26.75 GB allocated, 28.94 GB reserved), 368-370 MiB spare on both.
+  - Regressions: none measured. The 1K control is within noise. The one cost is pre's output product, whose stale
+    old row keeps a 19 us faster schedule from being picked.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
