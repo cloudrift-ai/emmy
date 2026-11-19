@@ -43,6 +43,16 @@ fn nucleus(logits: &[f32], sampling: &Sampling) -> (Vec<(usize, f64)>, f64) {
         .iter()
         .map(|&value| ((f64::from(value) - f64::from(maximum)) / sampling.temperature).exp())
         .collect();
+    if sampling.top_p == 1.0 {
+        // Every positive weight is kept, in the id order the tokens already have.
+        let kept: Vec<(usize, f64)> = weights
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, weight)| weight > 0.0)
+            .collect();
+        let mass = kept.iter().map(|&(_, weight)| weight).sum();
+        return (kept, mass);
+    }
     let target_mass = sampling.top_p * weights.iter().sum::<f64>();
     // Signed zeros compare equal, and every logit is finite, so the order is total.
     let mut order: Vec<usize> = (0..logits.len()).collect();
