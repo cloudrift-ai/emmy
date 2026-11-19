@@ -64,6 +64,25 @@ succeeds on all of them. Measured by switching one rule off and compiling what i
 - Stage 5 is untested by this build: the chunk loop of the twisted carrier is the one emitter that holds a whole
   second tiling of its own.
 
+**Loops as the factored form, tried on the reduce emitters.** One rule for the names register copies share, one
+copy step, one interleaved loop, one merge tail, and one binder for a single fold and a chain: 79 lines fewer, code
+384 to 348, identical PTX. The emitters were already close to that shape. In the tensor-core emitters about 7% of
+the code touches loop coordinates or tile widths, so the same idea buys little there.
+
+**Where the emitter code is.** 3,273 lines of code in the atom and staging emitters: the chunk tier of the twisted
+carrier 28%, the mma leaves 18%, the transports 18%, the operand builders 13%, the K loop skeleton 10%, the staged
+driver 5%, the scalar leaves 4%, the shared frame and coordinates 5%. Staging already has one interface: a
+transport (declare, prologue, fill, commit, wait) over operand records.
+
+**There is little repeated code.** A search for windows of five or six equal lines, names and literals ignored,
+finds 56 of 2,525 lines in the atom emitters, 120 of 1,054 in staging, and under 5% in each schedule and tile
+module. The size is feature coverage, each feature written once.
+
+**Nearly every feature wins a measured row.** Over 4,827 measured rows in the hardware and model goldens the fastest
+row of some kernel uses each transport, each atom family, the chunk tier, the transposed band and the raster. The
+rarely used ones: the producer band (3 kernels, 99 lines mention it across 17 files), narrow output lanes (1 row),
+and the warp prefix scan (no golden row, corpus only).
+
 ## The idea
 
 A Fold in block form takes four steps. They are the same four for a product, a reduction, a map and a recurrence.
