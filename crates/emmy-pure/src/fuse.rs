@@ -191,6 +191,11 @@ impl Fold {
             if mine.extent != theirs.extent || mine.window != theirs.window {
                 continue;
             }
+            // The carrier walks one axis once: a fold that walks a range of it does not fuse yet with one that walks
+            // another, or all of it.
+            if self.range().is_some() || pivot.range().is_some() {
+                continue;
+            }
             if let Some(fused) = self.twisted(pivot, recipe, scope)? {
                 return Ok(Some(fused));
             }

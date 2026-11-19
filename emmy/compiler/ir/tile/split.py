@@ -46,7 +46,27 @@ def split_axis(fold: Fold, axis: Axis, blocks: int) -> tuple[Axis, Axis, Fold]:
 
     body = Body(tuple(stmt.substitute(Sigma({axis.name: position})) for stmt in fold.lift.body))
     lift = Lambda.closing(fold.lift.params, body, fold.lift.results)
-    return block, inner, _masked(fold.replace(operands=tuple(below(edge) for edge in fold.operands), lift=lift), axis, position)
+    return (
+        block,
+        inner,
+        _masked(
+            fold.replace(operands=tuple(below(edge) for edge in fold.operands), lift=lift, range=_in_block(fold, block, length)),
+            axis,
+            position,
+        ),
+    )
+
+
+def _in_block(fold: Fold, block: Axis, length) -> tuple | None:
+    """The range ``fold`` walks, stated of the position inside one block: a range bounds the position on the whole
+    axis, which a block reads as ``length * block + k``, so both bounds move back by the block's start and stay
+    inside the block."""
+    if fold.range is None:
+        return None
+    start, end = fold.range
+    origin = BinaryExpression("*", Var(block.name), length)
+    first = start if start == Literal(0, "int") else apply("maximum", Literal(0, "int"), BinaryExpression("-", start, origin))
+    return first, apply("minimum", length, BinaryExpression("-", end, origin))
 
 
 def merged(block: Axis, fold: Fold, loads: tuple[Load, ...]) -> Fold:

@@ -58,6 +58,9 @@ _INTRINSICS_CPP: dict[str, str] = {
     "pow": "powf",
     "sqrt": "sqrtf",
     "floor": "floorf",
+    # A bound of an index or of a range: both operands are coordinates.
+    "min": "std::min<int>",
+    "max": "std::max<int>",
 }
 
 
