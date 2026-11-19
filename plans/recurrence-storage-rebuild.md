@@ -12,31 +12,39 @@ the deleted code had to do, what was measured, and the design question that is o
 - What is shared now: a lift is evaluated by the chunk tier's own `_residence`, and a direct operand load by the
   plain tier's `_direct_operand`. What is not shared yet: the product (pack, load, atom, promote) is written here
   and again in the chunk tier.
-- What changed in the design: the state is seeded ahead of the loop, not selected in at the first step. Equal
-  products and equal memory reads are one, whatever their axes are called. A value that does not read the column
+- What changed in the design: equal products and equal memory reads are one, whatever their axes are called. A value that does not read the column
   axis is one block for every column. There is no second materialization type and no second row codec: the
   geometry is a field of the kernel schedule, and the materializer builds the carrying kernel's own term.
 - The offer is on the state's shape alone (`TileOp.resident_state`). A step the fragments cannot evaluate declines
   the row where it is lowered.
 - Not held yet: a ragged state (rows no multiple of sixteen, columns no multiple of the fragment's), which the
   old emitter masked; a select in the step. Neither appears in a recorded row.
-- No test covers the new module. The old register tests are deleted with the old code.
+- `tests/compiler/passes/test_resident_state.py` covers the module: the kernel's shape, the one product for a
+  value that reads no column, the refusal of a ragged state, and numerics on the card for two atoms and two sizes.
 - Corpus PTX is identical for all 258 cases: no corpus case keeps a state in registers.
 
-## Measured on the dev-box RTX 5090, old and new back to back
+## Measured on the dev-box RTX 5090, old and new
 
 | kernel | old | new |
 |---|---|---|
-| the walk of the 256-row layer, 4 steps, 128 x 128 | 26.8 µs | 27.1 µs |
-| delta rule, 4 steps, 128 x 128 | 6.3 | 6.4 |
-| delta rule, 8 steps, 64 x 64 | 4.8 | 4.8 |
-| delta rule, 2 steps, 256 x 256 | 12.2 | 12.2 |
-| delta rule, 16 steps, 128 x 128 | 21.5 | 22.4 |
-| dense recurrence, 16 steps, 128 x 128 | 150.4 | 161.1 |
+| the walk of the 256-row layer, 4 steps, 128 x 128 | 26.8 µs | 24.8 µs |
+| delta rule, 4 steps, 128 x 128 | 6.3 | 5.9 |
+| delta rule, 8 steps, 64 x 64 | 4.8 | 4.4 |
+| delta rule, 2 steps, 256 x 256 | 12.2 | 13.3 |
+| delta rule, 16 steps, 128 x 128 | 21.5 | 20.6 |
+| dense recurrence, 16 steps, 128 x 128 | 140.7 | 140.6 |
 
 All six rows realize from their golden under strict evidence and pass the strict accuracy check. All thirteen
-recorded register rows, on five cards, build; only the six above were run, on one card. The dense recurrence is 7%
-slower and is not explained yet.
+recorded register rows, on five cards, build; only the six above were run, on one card.
+
+Two things in the old kernel looked like waste and are faster with this assembler. Both are in the new module,
+each with a comment that says it is measured:
+
+- **The seed is selected in at the first step, inside the loop.** Seeding the fragments ahead of the loop does
+  less work and ran 5 to 8% slower on three rows.
+- **Every read from memory is a fragment, one that reads neither axis too.** Held as a scalar across the step, the
+  gate of the dense recurrence cost 8%, with fewer instructions in the kernel. The kernels sit at 250 of 255
+  registers. The 256-wide delta rule goes the other way: it ran 12.2 µs with the scalar and runs 13.3 without.
 
 ## What the two storages buy, measured on the dev-box RTX 5090
 
@@ -85,7 +93,7 @@ microsecond the refactor plan assumed.
 
 ## What is left
 
-- Find the 7% on the dense recurrence.
-- Tests for the new module, and a corpus case that keeps a state in registers.
+- The 256-wide delta rule is 9% slower than with the old emitter.
+- A corpus case that keeps a state in registers.
 - One product for the chunk tier and this module. It touches attention on every card.
 - The rows of the other four cards, on their cards.
