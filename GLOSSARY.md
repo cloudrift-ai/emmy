@@ -137,6 +137,17 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   is launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel reads its
   own output strictly behind the step it writes (`S[c − 1]` while writing `S[c]`). The state lives in the buffer,
   so the step is any `Fold`; the schedule's fork lifts the carrying kernel's Loop IR into this form (`lift_serial`).
+- **Range** — Where a loop's axis walks when that is not all of it: a start and an exclusive end over the coordinates
+  around the loop and the symbolic dims (`for a4 in 0..a0 + 2 of 62:`). The values lie inside `0..extent`, so the
+  extent stays the bound every index is analysed under. Loop IR's normal form moves a mask to a fold's neutral
+  element into the range of the reduce loop, and the simplifier then decides the comparisons the range implies. A
+  `Fold` keeps the range of the axis it binds. A kernel tier covers an axis from zero to a number of trips, so the
+  schedule and the kernel lowering read a range as the **masked form** of the kernel: the walk from zero with each
+  folded value selected against its seed past the end (`TileOp.masked`).
+- **Defined value** — A value a kernel defines once for itself and reads by index: a `Carry` without a seed stores one
+  cell per coordinate of the loops around it, and a `Pre` reads a cell wherever those loops have closed. It is neither
+  an input nor an output of the kernel. The lift spells each read as the computation it stands for, which is the same
+  kernel as the one that computes the value at each read.
 - **Carried state** — A recurrence's state. In Loop IR, `Carry` defines the next value of one cell and names the
   seed, a `Pre` read sees the previous step's value at any cell, and the loop that carries it sits outside the loops
   over its cells; its steps are ordered and its step is any computation, so it has no op. In Tile IR it is a `Fold`
@@ -392,7 +403,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   addresses moved is re-spelled at the seams that mint its stored pieces, or most of them where a piece was re-keyed
   too), a row whose kernel was re-keyed — the stored body and the fresh one compute different exact identities — keeps
   its schedule and loses its measurement, a kernel no fresh kernel writes is dropped with its rows. A golden the restamp
-  leaves unchanged is current; `emmy golden check` and the suite ask exactly that.
+  leaves unchanged is current; `emmy golden check` and the suite ask exactly that. Given a PTX baseline
+  (`--ptx-baseline`, written by `emmy golden realize --ptx` before the change), the restamp decides each time by the
+  code: a row keeps its measurement exactly when its kernel compiles to the same bytes.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
   `run --bench` writes its rows there, and a golden file's rows are imported there before a compile picks. A row is
   evidence for the kernel whose exact identity it is keyed by. All are read by one rule.

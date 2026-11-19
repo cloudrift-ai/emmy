@@ -41,7 +41,8 @@ and a view are values: they compare by what they hold.
   the canonical rewrites (a zero-axis term loses its shadowed operands, a bilinear term takes its A operand first)
   and the checks, which refuse and never repair (the positional binding, the monoid arity, the carrier reads, the
   observer, a lift that applies). Then the reads every pass asks: `exposes`, `bindings`, `applied`, `axis`,
-  `free_axes`, `carries`, `combine`, `canonical`.
+  `free_axes`, `carries`, `combine`, `canonical`. A reducing term may state the `range` its axis walks; the
+  coordinates the range reads join the lift's trailing params, so they are part of what the term is evaluated over.
 - `readings.rs` — the derived readings: `exposing`, `based`, `roles`, the bilinear channels and the contraction they
   read as, `tiles_whole`, `chunked`, `per_state`, the reduction, slab and affine readings, `merge`, `step`.
 - `rewrite.rs` — `Fold::rewrite`: a term renamed, substituted and axis-mapped the way a statement is, the
@@ -52,6 +53,11 @@ and a view are values: they compare by what they hold.
   unread-component prune and the cone sharing, to a fixpoint remembered on the result per stored set.
 - `lower.rs` — the one lowering to Loop IR (`Fold::lower`), whose result kernel identity digests, and the demand walk
   under it (`read_components`).
+- `range.rs` — `Fold::masked`: the tree with every range spelled as a kernel tier reads it. A term that walks a
+  range walks from zero, reads its axis as `start + axis`, clamps what it reads below it to the last position in
+  range, and folds each value selected against its seed past the end; a twisted carrier adds the pivot's seed to its
+  score through the `where` a program's own mask spells. An axis whose range fixes its trips takes them as its
+  extent in the axis table returned.
 
 ## Memos
 

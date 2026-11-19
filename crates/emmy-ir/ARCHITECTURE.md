@@ -98,7 +98,10 @@ file imports what it uses by name; no child module takes its parent's imports.
   stand-in `±1e30`. A string of any of these sets exists where the text is read or written, at the Python boundary,
   and nowhere else.
 - **Axes** (`axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window
-  is provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
+  is provenance. `Range` is where an axis walks, a start and an exclusive end, with the few questions every reader
+  asks of one: its trips where it fixes them, the comparisons it states of the axis, the interval the axis stays
+  in, and the simplification context inside the loop. A `Loop` holds its range as a field and a `Fold` as a stored
+  part; `StridedLoop` keeps its own `start`, `step` and `end`. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
   holds a name (or an axis's parts) and the extension makes the object on first read.
 
 ## Protocol and body
@@ -198,6 +201,10 @@ tile is held once (twice by Volta's operands).
 `input.rs` is the check a code generator's input passes (`check_input`): typed in full (`types.rs`), one flat index
 per access outside the accesses their dimensions define, no loop asking for unrolling, and every fragment statement
 naming a layout and a role the table has.
+
+`values.rs` is not a step of the normal form either. `inline_values` spells every read of a value the body defines
+for itself (a `Carry` without a seed) as the value's statements at the coordinate read and drops the definition: the
+form the lift asks for while the term has no place for such a value.
 
 `strength.rs` is not a step of the normal form. `reduce_strength` spells every index division and remainder by a power
 of two over a dividend the ranges prove non-negative as a shift and a mask, the target's spelling. The simplifier reads
