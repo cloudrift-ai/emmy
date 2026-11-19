@@ -57,6 +57,10 @@ def test_twins_bind_one_layers_tensors_and_build_narrowest_first():
         )
     )
     assert len({id(native[key]) for key in ("c", "c1-native", "e16-native")}) == 3 and native["c"] is native["a"]
+    # A record of one realization builds its own family alone, the same twins in the same order, and lowers no other.
+    lowered = []
+    family = list(twins_in_build_order(graphs, lambda graph: lowered.append(graph) or set(), of="e"))
+    assert [key for key, _ in family] == ["c", "e", "a"] and lowered == [graphs["a"], graphs["c"], graphs["e"]]
 
 
 def _constants(*names):

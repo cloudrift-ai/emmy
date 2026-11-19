@@ -362,6 +362,19 @@ class SearchDB:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """The writes inside as one transaction: they commit together, or none does when an error leaves the block.
+        A bulk import writes thousands of rows, and the connection otherwise commits each statement on its own
+        (``isolation_level=None``), each commit a sync of the write-ahead log."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
+
     def _create_tables(self) -> None:
         """The tables, created where missing; a file another emmy wrote is re-created empty."""
         self._conn.execute("PRAGMA foreign_keys = OFF")

@@ -5,6 +5,7 @@ non-zero, so ``rc == 0`` is the accuracy assertion.
 """
 
 import asyncio
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -2670,3 +2671,57 @@ def test_run_checks_a_bf16_output_by_its_values(run_cli, tmp_path, monkeypatch):
     monkeypatch.setenv("EMMY_TUNE_DB", str(tmp_path / "tune.db"))
     rc, _, stderr = run_cli("run", "--gpu-arch", "cpu", "--code", "x = torch.ones(8, 8, dtype=torch.bfloat16)\nx + x")
     assert rc == 0, stderr
+
+
+def test_pinned_rows_compile_the_same_on_forked_workers(monkeypatch):
+    """The rows of a pinned bench are compiled side by side on forked workers (``EMMY_WORKERS``): each row builds the
+    kernel its own pins name, the same code as when one process compiles them one after another, and no pin is
+    left in the environment."""
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _ab_samples, _compile_pinned_rows, _cuda_knob_dicts
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline.search.autotune import schedule_space
+    from tests.compiler.passes.test_fp8_coop_run import _graph
+
+    ctx = Context.from_target((7, 0))
+    _, space = schedule_space(_graph(), ctx)
+    picked = space[:: max(1, len(space) // 4)][:4]
+    assert len({tuple(sorted(row.items())) for row in picked}) > 1
+    samples = _ab_samples([",".join(f"{k}={v}" for k, v in row.items()) for row in picked])
+    backend = SimpleNamespace(compile=lambda graph: CudaBackend().compile(graph, ctx=ctx))
+
+    def compiled(workers):
+        monkeypatch.setenv("EMMY_WORKERS", str(workers))
+        before = dict(os.environ)
+        graphs = _compile_pinned_rows(backend, _graph(), samples)
+        assert dict(os.environ) == before
+        return [
+            (_cuda_knob_dicts(graph), [node.op.kernel_source for node in graph.nodes.values() if isinstance(node.op, CudaOp)])
+            for graph in graphs
+        ]
+
+    serial, parallel = compiled(1), compiled(3)
+    assert parallel == serial
+    for row, (knobs, _) in zip(picked, parallel, strict=True):
+        assert any(all(str(kernel.get(k)) == str(v) for k, v in row.items()) for kernel in knobs)
+
+
+def test_a_pinned_row_that_does_not_compile_keeps_its_place_on_forked_workers(monkeypatch):
+    """A row whose lowering raises on a worker comes back as the error's text, in its own position."""
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _compile_pinned_rows
+    from emmy.compiler.graph import Graph
+
+    def compile(graph):
+        if os.environ.get("EMMY_TILE") == "bad":
+            raise ValueError("no such tile")
+        return os.environ["EMMY_TILE"], os.environ["EMMY_WORKERS"]
+
+    monkeypatch.setenv("EMMY_WORKERS", "2")
+    samples = [SimpleNamespace(name=tile, knobs={"TILE": tile}, shape=None, dynamic=None) for tile in ("f2", "bad", "f4")]
+    assert _compile_pinned_rows(SimpleNamespace(compile=compile), Graph(), samples) == [("f2", "1"), "no such tile", ("f4", "1")]
+    assert "EMMY_TILE" not in os.environ

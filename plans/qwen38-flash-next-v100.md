@@ -11,18 +11,19 @@ Emmy serving the model correctly, step 5 closes the speed gap, and step 6 releas
 Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Each result is written
 under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
 
-**Where it stands (2026-11-13).** Steps 1 to 4 are done; step 5's done gate is not met. Step 4's gate (2026-11-02):
+**Where it stands (2026-11-19).** Steps 1 to 4 are done; step 5's done gate is not met. Step 4's gate (2026-11-02):
 two boots give the same text and the accuracy sets pass, but the correctness limits are not met, and the fork does
 not meet them against itself either. Since the done gate's first run (2026-11-03), step 5 brought Emmy under the
 3 GiB per card margin, sliced the shared expert across ranks, split pre8's down rows across blocks, measured where
 the first-token and eight-request gaps sit (2026-11-07), ran the eight requests' routed experts in one launch (15%
 more output), and found the host time of a decode step equal on both sides. On 2026-11-11 the owner turned async
 scheduling on, on both sides, and on 2026-11-12 a prefill step's wider experts began running 32 per launch, the
-rest on 2026-11-14. Against the async fork, Emmy is now 1.7-1.9x slower to the first token at 1K and 4K, 1.74x
-slower per token at one request, and gives 0.68x the fork's output at four requests and 0.73x at eight (2026-11-14).
-Async doubles the first token at the full context on both sides; the owner keeps the 2.5 GiB key/value pool, so that
-is a known limit (step 5). The next round comes from the 2026-11-13 ranking, for the owner to pick. The minimums in
-step 2 and Qwen's license are still open with the owner, who plans as if the license were granted.
+rest on 2026-11-14. Against the async fork, Emmy is now 1.41x slower to the first token at 1K and 1.51-1.59x at
+4K to 32K, 1.67x slower per token at one request, and gives 0.76x the fork's output at four requests and 0.75x at
+eight (2026-11-19). Async doubles the first token at the full context on both sides; the owner keeps the 2.5 GiB
+key/value pool, so that is a known limit (step 5). The next round comes from the 2026-11-19 ranking, for the owner to
+pick; its round 1 stopped at its gate the same day. The minimums in step 2 and Qwen's license are still open with
+the owner, who plans as if the license were granted.
 
 ## What we know
 
@@ -1424,6 +1425,201 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   - Where the gap is: Emmy's gathered down-and-sum kernel, 3-4x the fork's. A schedule that splits the picks across
     blocks and sums them after would be compiler work (the schedule space), like post8's small pieces.
   - Next: from the 2026-11-13 ranking, for the owner to pick; the down-and-sum schedule could join the post8 round.
+- **Measurement round (2026-11-19): every serving point against the async fork, and a new ranking.** Main
+  `5096d52a4` (every round since 2026-11-13 in, through #1441) against the step 3 fork image, both in step 2's shape
+  with async scheduling. All 19 programs of the recipe golden compile strict from the golden alone, GPU-free. Two
+  boots a side never profiled give the numbers, fork, Emmy, Emmy, fork per point, one server working at a time, a
+  fresh seed per run; one profiled boot a side gives the phase splits (rank 0's GPU time), and py-spy gives host time.
+
+  | Point | Fork | Emmy | Emmy against the fork | On 2026-11-13 |
+  | --- | ---: | ---: | --- | --- |
+  | One request, 1K / 512, per token | 9.59-9.60 ms | 16.05 ms | 1.67x slower | 1.74x |
+  | 2 requests, 4K / 1K, total output | 110.6 tok/s (16.5 ms) | 91.2-91.3 tok/s (19.5 ms) | 0.82x | not measured |
+  | 4 requests, 4K / 1K, total output | 203.2-203.5 tok/s (16.9 ms) | 154.6-155.5 tok/s (21.3 ms) | 0.76x | 0.67x |
+  | 8 requests, 4K / 1K, total output | 316.4-320.3 tok/s (19.8-20.0 ms) | 238.9-240.7 tok/s (24.8 ms) | 0.75x | 0.72x |
+  | First token, 1K | 0.43 s | 0.61 s | 1.41x slower | 2.2x |
+  | First token, 4K | 0.82-0.83 s | 1.25 s | 1.51x slower | 1.9x |
+  | First token, 8K | 1.46-1.47 s | 2.32-2.33 s | 1.59x slower | not measured |
+  | First token, 32K | 5.93-5.94 s | 9.44-9.49 s | 1.59x slower | not measured |
+
+  - In brackets: the median gap between tokens. Each side's two boots agree within 1.3%. Emmy repeats #1437's main at
+    every point. The fork repeats 2026-11-13 at one, four and eight requests. Its first tokens are 4-5% faster than
+    that day's (1K 0.45, 4K 0.86 s) and equal to its quiet runs of 2026-11-11 and 2026-11-18 (0.42-0.44 and 0.82 s).
+    The fork's short prefill steps wait on its host (profiled, three ranks wait 230-270 ms at the 175-token step's
+    all-reduces), so its first token moves with the host's load: 0.51 s at 1K on 2026-11-18, with four servers
+    working at once. Every ratio here is against today's fork.
+  - Correction to the 2026-11-13 step table. A prompt runs as whole cache blocks, then the rest less one token, then
+    one token, so a 2-token prompt is two 1-token steps. Before #1428 both ran eager, about 0.12 s each on Emmy, and
+    "3,921 less 2" took one of them too many off the 3,920-token step: that step was about 1.10 s, not 0.98, and
+    "1 token and the request" about 0.15 s, not 0.27. The profiled spans agree: 1,186 ms then, 1,072 now. This round
+    subtracts a 1-token prompt instead (fork 0.045-0.050 s, Emmy 0.029-0.031).
+
+    | Step of a first token | Fork | Emmy | Emmy, 2026-11-13 |
+    | --- | ---: | ---: | ---: |
+    | 3,920 tokens of 4K (3,921 less 1) | 0.59 s | 0.99 s | about 1.10 s |
+    | 175 tokens of 4K (4,096 less 3,921) | 0.18-0.19 s | 0.22-0.23 s | 0.36 s |
+    | 784 tokens of 1K (785 less 1) | 0.22 s | 0.36 s | |
+    | 239 tokens of 1K (1,024 less 785) | 0.21 s | 0.25 s | |
+    | 1 token and the request (a 1-token prompt) | 0.05 s | 0.03 s | about 0.15 s |
+
+    The 1K split comes from the profiled boots outside a capture, which read 5-9% above the others at 1K.
+  - Decode, GPU time per step by phase, profiled, rank 0, ms; Emmy's 2026-11-13 value in brackets; the fork moved by
+    0.25 ms or less in every row:
+
+    | Per decode step, ms | Fork, 1 | Emmy, 1 | Fork, 4 | Emmy, 4 | Fork, 8 | Emmy, 8 |
+    | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | Pre and post: hyper-connection mixers, norms, shared expert | 3.16 | 7.23 (7.02) | 5.47 | 7.35 (7.05) | 5.91 | 7.24 (7.35) |
+    | Router and its top-k | 0.78 | 0.97 (0.97) | 1.15 | 1.21 (1.20) | 1.19 | 1.20 (1.25) |
+    | Routed experts, with their dispatch | 1.14 | 2.12 (2.33) | 2.54 | 3.90 (6.37) | 4.23 | 6.27 (6.61) |
+    | Glue between programs | 0.61 | 1.16 (1.81) | 1.60 | 1.55 (2.28) | 1.69 | 1.58 (2.56) |
+    | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 3.33 | 3.68 (3.66) | 5.90 | 6.51 (6.43) | 7.02 | 7.34 (7.63) |
+    | All-reduces (of it, the wait at the step's first) | 0.50 (0.01) | 2.09 (1.50) | 0.69 (0.01) | 0.64 (0.01) | 0.65 (0.01) | 0.80 (0.01) |
+    | Embeddings and sampling | 0.04 | 0.04 | 0.15 | 0.16 | 0.19 | 0.20 |
+    | GPU busy | 9.55 | 17.29 (17.94) | 17.49 | 21.31 (24.19) | 20.87 | 24.63 (26.37) |
+    | Kernels | 1,434 | 2,485 (2,725) | 2,054 | 2,721 (2,961) | 2,054 | 2,721 (2,961) |
+    | Step, never profiled | 9.6 | 16.05 (16.7) | 16.9 | 21.3 (24.4) | 19.9 | 24.8 (25.5) |
+
+  - Both sides are still GPU-bound at every decode point (py-spy): per step a worker does 3.4-4.0 ms of host work on
+    the fork and 5.2-6.3 ms on Emmy (its graph launch call 1.5-2.6 ms), and rank 0's output thread waits on the GPU
+    for 99% of the step. The 1.5 ms wait at one request is the profiler again (three ranks wait for the fourth).
+  - What moved since 2026-11-13: the routed experts at four requests (6.37 to 3.90 ms, the slot programs at the
+    step's width) and the glue at every width (0.6-1.0 ms less, the norms and rope twin). What did not: pre and post,
+    7.2-7.35 ms, now the largest decode gap: 4.07 ms of one request's 6.45, 1.88 of four requests' 4.4 and 1.33 of
+    eight requests' 5.5 (profiled span gap at eight). Post8 is 101 us per layer in 18 kernels, as on 2026-11-13; 13 of
+    them are pieces of 2.2-5.5 us, 43.7 us per layer, 2.1 ms per step at every width.
+  - The routed experts per layer, profiled, at one, four and eight requests: the fork's gate and up 14.5, 35.4 and
+    58.4 us, its down projection with the weighted sum 9.2, 17.5 and 29.6; Emmy's gate and up 17.0, 41.5 and 73.2,
+    its down projection 9.9, 24.2 and 41.6, and its dispatch around the program (selector copy, row upload, cast and
+    shared add, weighted sum) 16.6, 16.3 and 16.5. From the router's top-k to the next all-reduce: fork 28.7, 57.8
+    and 93.1 us, Emmy 49.5, 88.8 and 138.0.
+  - The 3,920-token step, GPU time by phase, profiled, rank 0, ms; Emmy's 2026-11-13 value in brackets:
+
+    | Phase | Fork | Emmy |
+    | --- | ---: | ---: |
+    | Routed experts, with their row gather, weighting and sum | 152 | 361 (458) |
+    | of it, experts above eight rows | 130 on 2026-11-13, every expert in three grouped matmuls per layer | 234 (230), 8.75 launches of 32 per layer |
+    | of it, experts of up to eight rows | (above) | 33 (84), 12 launches of 32 per layer |
+    | of it, the row gather, sort, weighting and sum | 22 on 2026-11-13 | 94 (142): weighted sum 42, row gather 33, sorts 9 |
+    | Pre and post: hyper-connection mixers, norms, shared expert | 152 | 266 (264): post4096 180, pre4096 86 |
+    | Glue between programs | 18 | 101 (101): copies 43, adds 17 |
+    | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 154 | 170 (169) |
+    | Router, all-reduces, embeddings | 45 | 46 (56) |
+    | GPU busy | 521 | 944 (1,049) |
+    | Kernels | 3,087 | 9,643 (20,710) |
+    | Span | 614 | 1,072 (1,186) |
+
+  - The steps of a 1K prompt, GPU time, profiled, rank 0, ms. The fork's dense matmuls are split into mixers and
+    projections by their grids, which hold only at 3,920 tokens, so this table adds the two:
+
+    | Phase | Fork, 784 | Emmy, 784 | Fork, 239 | Emmy, 239 |
+    | --- | ---: | ---: | ---: | ---: |
+    | Routed experts, with their row gather, weighting and sum | 50 | 155 | 27 | 99 |
+    | Pre and post, and the hosted projections | 60 | 96 | 27 | 42 |
+    | Glue between programs | 6 | 23 | 4 | 11 |
+    | Hosted Gated DeltaNet and sparse attention | 17 | 18 | 13 | 14 |
+    | GPU busy, less the all-reduces | 134 | 295 | 72 | 167 |
+
+  - The wide group program costs the same per launch whatever the step: 0.56 ms per 32 experts at 3,920 tokens and
+    0.57 at 175, about 17.5 us per expert whatever its rows; the 8-row group program costs about 5.5 us per expert.
+    At 3,920 tokens the wide experts hold about 136 rows each in blocks of 256; at 175 and 239 tokens they hold 9 to
+    about 30, and the wide program still takes 43-50 ms of the step, against the fork's 25-27 ms for all its experts.
+    2026-11-13's "narrower blocks do not pay" held for splitting a large expert across more blocks, each decoding its
+    weights again; it does not hold for an expert whose rows fit a narrower block.
+  - The short prefill steps' host time, py-spy, rank 0, per 176-token prompt: Emmy's routed experts 51 ms (launch 30,
+    route 21), its pre and post calls 27, the hosted Gated DeltaNet 37 and the sparse attention 17, and 46 ms waiting
+    for the GPU's expert counts; the fork's model forward 60, Gated DeltaNet 26 and attention 16. The 175-token step
+    is 0.04 s slower than the fork's, so a host round can gain at most that much there.
+  - Sizes of the candidates, profiled GPU time unless stated, and what each would close if Emmy matched the fork:
+    - Post8's small pieces (compiler): 2.1 ms per decode step at every width; nothing in the first token but the
+      1-token step's 2 ms. Folded into their consumers they would close a third to a half of each decode gap (6.45 ms at
+      one request, 4.4 at four, 5.5 at eight), less unprofiled: the norms twin's 1.0-1.1 ms profiled gave 0.84.
+    - The gathered down-and-sum with its dispatch (compiler schedule, then runner): Emmy's down projection plus the
+      dispatch against the fork's down-and-sum, 17.3, 23.0 and 28.5 us per layer, 0.83, 1.10 and 1.37 ms per step at
+      one, four and eight requests: 13%, 25% and 25% of the decode gaps. Nothing in the first token. The gate and up
+      pieces at eight rows add 0.71 ms more (73.2 against 58.4 us); the slot programs' rows were recorded again on the
+      PTX compiler with one try each.
+    - The 3,920-token step's half-empty blocks: with every wide expert in a block that fits its rows, 40-80 ms per 4K
+      chunk; matching the fork's grouped matmuls, 137. The same fix takes 25-35 ms from the 175- and 239-token steps
+      and 25-40 ms from the 784-token step. Per first token: 4K about 0.07-0.11 s, 1K about 0.05-0.07, 32K
+      0.3-0.65 (eight chunks). Nothing in decode.
+    - The 3,920-token step's row gather, sort, weighting and sum: 94 ms against the fork's 22, 72 ms per chunk if
+      matched; the row gather alone is 33 (moved into the group program's row reads, if the twin takes the row index).
+    - The short step's host time: at most the 175-token step's 0.04 s at 4K and the 239-token step's 0.05 s at 1K.
+  - The next rounds, largest expected gain in the done gate per cost first:
+    1. **The expert group program at the expert's width** (twins and runner, no compiler, the shape of #1417). Twins
+       over 32- and 128-row blocks beside the 256-row one; an expert of 9 to 32 rows takes a 32-row block, of up to 128
+       a 128-row block. Expected: first token 1K 0.61 to about 0.55 s (1.41x to about 1.28x), 4K 1.25 to about 1.16,
+       32K 9.47 to about 8.9; decode unchanged. Cost: what #1388 cost. Gate, stated before serving: both new twins
+       traced and recorded cold on the card, and the 3,920-token step's expert programs at least 40 ms less and the
+       175-token step's at least 20 ms less, profiled. Unmeasured: how many wide experts fit 32 and 128 rows.
+    2. **Tune the 4,096-row pre and post programs** (rows only, no code, as #1435 did at 512 rows). Pre4096's rows
+       were recorded with one try each; post4096 had up to 39. Share: 114 ms per 4K chunk against the fork.
+       Expected: 40-100 ms per chunk if they fall as #1435's did (pre-sym 60%, post-sym 27%), the low end likelier
+       since post4096 was tuned once; 4K 0.04-0.1 s and 32K 0.3-0.8 s less. Cost: card time. Gate: pre4096 plus
+       post4096 cold at 4,096 rows at least 1.0 ms per layer faster before any boot. Unmeasured: whether faster
+       schedules exist at that width.
+    3. **Post8's small pieces and the gathered down-and-sum, one compiler round.** Both are a sum split across blocks
+       whose finish costs its own small kernels; the 2026-11-18 round found the fused down-and-sum at 34-36 us under
+       every schedule tried, so the schedule space has to change. Expected, if both reach the fork's shape: one
+       request 16.05 to about 14 ms (1.67x to about 1.45x), eight requests 240 to about 255-265 tok/s (0.75x to about
+       0.8x), first tokens unchanged. Cost: compiler work of unknown size, the largest of the five. Gate: post8 cold
+       at 8 rows at most 70 us per layer (101 now), and the one-row expert program with its down-and-sum at most
+       30 us per layer (29.0 plus 16.6 of dispatch now).
+    4. **The 3,920-token step's row gather and combine** (twin input and runner): the group programs read their rows
+       through an index instead of a gathered copy. Expected 25-35 ms per 4K chunk. Gate: the step's dispatch at most
+       60 ms profiled (94 now).
+    5. **The short step's host time** (runner): at most 0.04-0.05 s per first token, nothing in decode. Last, since
+       #1428 and #1435 took most of it: the 1-token step is now faster than the fork's.
+  - Where the 2026-11-13 ranking no longer holds: its rounds 1 to 4 are done and gained what they expected or more,
+    except round 4's 175-token step, now 0.04 s from the fork; its rounds 5 and 6 stand, but round 6's lever is the
+    down-and-sum kernel, not the dispatch, so they merge into round 3 above; its "narrower blocks do not pay" is wrong
+    for experts that fit a narrower block, which makes round 1 above a round at all; and its 3,920-token step was
+    about 0.1 s slower than it read.
+  - Recommended: round 1 first, then round 2. Both move every first-token length, which is where the done gate is
+    furthest per unit of work, and both cost what earlier twin and tune rounds cost. Round 3 is the largest decode
+    lever but the most uncertain; its gate should run before any serving work.
+  - Boot: Emmy 758-771 s, the fork 415-468 s.
+- **The expert group program at the expert's width (2026-11-19): stopped at its gate, nothing to ship.** Round 1 of
+  the 2026-11-19 ranking, measured before building, on main `793647dc9`. Its gate: the 3,920-token step's expert
+  programs at least 40 ms less and the 175-token step's at least 20 ms less, profiled. Neither can be met by narrower
+  blocks in launches of 32 experts, nor by any mix measured.
+  - Rows per expert, counted per layer on a serving boot of main (rank 0, every MoE layer). With random-token prompts,
+    as the first-token runs use, an expert of more than 8 rows holds: at 175 tokens 9-16 rows (14 per layer), 17-32
+    (10), 33-64 (6), 65-128 (4), 129-256 (3); at 3,920 tokens 31, 30, 25, 22, 17, and 29 experts past 256. Real text
+    spreads its rows wider: a 3,136-token step of a document has 39, 43, 47, 52, 53 and 29 per layer, and a 628- or
+    697-token step 41-60 experts of 9-32 rows, against 23-29 for a random 784-token step.
+  - Cold cost of one launch of 32 experts, each piece tuned or pinned by hand, us: 8 rows 191 (recorded), 16 rows 206,
+    32 rows 228, 64 rows 303, 128 rows 484, 256 rows 541 (recorded). Per expert: 6.0, 6.4, 7.1, 9.5, 15.1, 16.9 us. The
+    16- and 32-row programs take the 8-row program's route (two cuts, weights decoded inside the matmuls), the 64- and
+    128-row ones the same route with the gate and up weights decoded apart. A launch of 8 experts costs about twice
+    as much per expert: 102, 107, 113 and 185 us at 8, 32, 64 and 256 rows, its gate and up piece 76 us at 8 and 32
+    rows alike.
+  - Every launch runs its 32 blocks whatever experts it holds, so a width adds a part-empty launch. At 175 tokens a
+    layer has about 37 wide experts, which today fill one or two launches of 256 rows; split across widths, they fill
+    more. Expert program time per step estimated from the counts and the costs above, ms (main's estimate against the
+    profile: 262 against 267 at 3,920 tokens, its wide program 46 against 43-50 at 175):
+
+    | Step | Main | + 32 rows | + 32 and 128 rows (the ranking's design) | + 32 and 64 rows | + 32 and 64, last launch of each width in 8s |
+    | --- | ---: | ---: | ---: | ---: | ---: |
+    | 3,920 tokens, random | 262 | 240 | 244 | 240 | 227 |
+    | 175 tokens, random | 73 | 71 | 91 | 84 | 61 |
+    | 784 tokens, random | 128 | 112 | 118 | 122 | 101 |
+    | 239 tokens, random | 83 | 75 | 96 | 89 | 68 |
+    | 3,136 tokens, document | 298 | 264 | 265 | 254 | 243 |
+    | 628-697 tokens, document | 180-205 | 145-153 | 158-168 | 133-150 | 123-138 |
+
+  - So the ranking's design (32- and 128-row twins) makes the 175- and 239-token steps 13-18 ms slower, and the best
+    mix gains 35 ms at 3,920 tokens and 12 ms at 175: the gate is missed at both. The 2026-11-19 expectation assumed
+    a wide expert would cost about what the 8-row program costs per expert at every width; the padding of the last
+    launch of each width, and the cost of the down projection past 32 rows, take that back.
+  - What is still worth having, for the owner to weigh: the 32-row twin alone, no other change, takes about 23 ms from
+    a 4K first token and 24 ms from a 1K one on random prompts (2-4%), and 34-52 ms per step of real text. It costs a
+    twin, a recorded route and the runner's pick of the narrowest program; the change is about 20 lines. Not built.
+  - The tuner missed the mma schedules of the 16- and 32-row down projections: 40 tries found 203 and 369 us, all
+    scalar, while the 8-row program's mma schedule, pinned by hand, ran them in 55 and 71 us. A record of these pieces
+    has to try the mma rows by hand, or the prior's ranking of them has to change.
+  - The first-token runs use random token ids, which route far more unevenly than text: they understate what any
+    expert-width change gains on real prompts.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

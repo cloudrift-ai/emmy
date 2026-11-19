@@ -338,6 +338,8 @@ trees. `Fork` (`fork.py`) is an interface with four members:
   the pool identity and its index, on `EMMY_WORKERS` forked processes (`fork.parallel_descent_rows`; one per
   core by default, `1` in this process, which the test suite sets). A worker returns knob rows, since the lazy tree
   cannot be pickled, and the greedy builds only the leaf it picks; the rows are the same at any worker count.
+  Every forked pool (`fork.forked`) also takes no more workers than the available memory holds copies of the
+  parent's private resident memory, since over a long job a child writes most of the pages it shares.
   A kernel-set fork's arms are built the same way before the placement prior ranks them (`fork.parallel_expand`):
   each arm is a splice of the whole kernel, so a cut offering dozens of seams costs one arm per worker instead of
   their sum, and the parent memoizes what each worker built on the arm, where its own expansion would. The worker
@@ -656,9 +658,12 @@ At deploy a golden is tune DB rows, nothing more (`golden.evidence.import_rows`)
 row, each routing entry the `routing` row of the decision it records, each measured row the `perf` row of its
 kernel — captured, with the golden's digest as its source. A file stores no identity, so the import computes the key:
 each stored kernel's exact identity, from its Loop IR (`GoldenFile.identities` — a lift per formed kernel, once per
-loaded file), and the rows are filed under it. A stored kernel whose body no longer lowers is skipped with a warning,
-and its rows are no evidence. Whether a file still describes what the compiler builds is the restamp's question
-(Part 7): a stale file is one `emmy golden restamp` would change.
+loaded file, on `EMMY_WORKERS` forked processes), and the rows are filed under it. A record finds a kernel already
+stored through the same identities (`GoldenFile.add_kernel`). A stored kernel whose body no longer lowers is skipped
+with a warning, and its rows are no evidence. An import writes in one transaction (`SearchDB.transaction`): the tune
+DB otherwise commits each statement on its own, and a working golden is imported again whenever it changed. Whether
+a file still describes what the compiler builds is the restamp's question (Part 7): a stale file is one
+`emmy golden restamp` would change.
 
 **Goldens are the prior's training data.** `emmy fit` enumerates, for each kernel a golden row was measured on, the
 candidates that kernel offers, and trains the weights to rank the recorded row well inside that set (Part 8).
