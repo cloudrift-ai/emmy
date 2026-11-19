@@ -181,6 +181,29 @@ def test_static_fp8_activation_scale_keeps_a_unit_activation_in_e4m3_range():
     assert float(np.abs(x / scale).max()) < 448
 
 
+def test_scatter_row_inputs_are_drawn_distinct():
+    """A page table's update writes rows named by its inputs. Drawn at unit std the rows repeat, two writes of different
+    values land in one row in either order, and eager and Emmy disagree there."""
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.compare import _distinct_rows, _scatter_index_inputs
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import ScatterOp
+    from emmy.compiler.tensor import Tensor
+
+    graph = Graph()
+    for name, shape in (("table", (33,)), ("slot", (65,)), ("value", (65,))):
+        graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, shape, "i64"))
+    graph.add_node(op=ScatterOp(), inputs=["table", "slot", "value"], output=Tensor("out", (33,), "i64"))
+    assert _scatter_index_inputs([graph]) == {"slot": [33]}
+
+    rows = _distinct_rows(np.random.default_rng(7), 65, 33)
+    assert sorted(rows[:33]) == list(range(33))
+    assert (rows[33:] == 32).all()
+    assert len(set(_distinct_rows(np.random.default_rng(7), 8, 33))) == 8
+
+
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0
