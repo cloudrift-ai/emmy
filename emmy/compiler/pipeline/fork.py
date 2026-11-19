@@ -15,13 +15,16 @@ sequence; ``ForkPoint`` wraps them for an offer.
 
 from __future__ import annotations
 
+import os
 import random
+import re
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
 from multiprocessing import current_process, get_context
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -326,14 +329,28 @@ def forked(fn: Callable, jobs: Sequence, workers: int) -> list:
     is the point: the children read what the parent set up and send back only results. A child runs on one worker
     (``config.set_workers``), so a compile it runs draws in-process. One worker runs the jobs here, and so does a
     daemonic process, which may not start children (a vLLM worker compiling a kernel with no evidence draws its
-    cold pool in place)."""
-    if workers <= 1 or len(jobs) < 2 or current_process().daemon:
+    cold pool in place). The workers are also capped by memory (:func:`_copies_that_fit`)."""
+    workers = min(workers, len(jobs), _copies_that_fit())
+    if workers <= 1 or current_process().daemon:
         return [fn(job) for job in jobs]
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
         context = get_context("fork")
-        with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=context, initializer=config.set_workers, initargs=(1,)) as pool:
+        with ProcessPoolExecutor(workers, mp_context=context, initializer=config.set_workers, initargs=(1,)) as pool:
             return list(pool.map(fn, jobs))
+
+
+def _copies_that_fit() -> int:
+    """How many forked copies of this process the available memory holds. A child shares the parent's pages until
+    it writes one, and over a long job Python's reference counts write most of them, so each child is counted at
+    the parent's private resident memory (file-backed pages, the shared libraries, stay shared)."""
+    try:
+        meminfo = Path("/proc/meminfo").read_text()
+        available = int(re.search(r"^MemAvailable:\s+(\d+) kB", meminfo, re.MULTILINE)[1]) * 1024
+        _, resident, shared, *_ = (int(pages) * os.sysconf("SC_PAGE_SIZE") for pages in Path("/proc/self/statm").read_text().split())
+    except (OSError, TypeError, ValueError):  # no /proc: not Linux
+        return os.cpu_count() or 1
+    return max(1, available // max(resident - shared, 1))
 
 
 #: The arms a forked expansion worker builds: set by the parent before the fork, so each arm's builder is

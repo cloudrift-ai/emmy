@@ -268,9 +268,31 @@ def test_a_files_identities_are_the_same_on_forked_workers(monkeypatch) -> None:
     """A loaded file's kernel identities are computed on ``EMMY_WORKERS`` forked processes and kept on the kernels:
     the same identities one process computes, under the same refs."""
     path = _RECORDS_DIR / "rtx4080_sm89.json"
+    monkeypatch.setenv("EMMY_WORKERS", "1")
     serial = GoldenFile.load(path).identities()
     monkeypatch.setenv("EMMY_WORKERS", "3")
     document = GoldenFile.load(path)
     assert len(serial) > 1
     assert document.identities() == serial
     assert all(kernel.__dict__["exact_identity"] == serial[kernel.ref] for kernel in document.kernels)
+
+
+def test_a_record_stores_the_same_kernels_on_forked_workers(monkeypatch) -> None:
+    """``add_kernel`` finds a stored kernel through the file's identities, computed once on ``EMMY_WORKERS`` forked
+    processes: a kernel the file stores, added again from its wire alone, is the stored one under its ref; a kernel
+    the file no longer stores takes a new ref; the same at one worker and at several."""
+    from emmy.compiler.pipeline.search.golden.format import Kernel
+
+    def added(workers):
+        monkeypatch.setenv("EMMY_WORKERS", str(workers))
+        document = GoldenFile.load(_RECORDS_DIR / "rtx4080_sm89.json")
+        stored, gone = document.kernels[1:], document.kernels[0]
+        document.kernels[:] = stored
+        again = [document.add_kernel(Kernel(loop_ir=kernel.loop_ir, formed=kernel.formed)) for kernel in (*stored[::-1], gone)]
+        return [kernel.ref for kernel in stored], [kernel.ref for kernel in again], document.identities()
+
+    serial = added(1)
+    stored, again, identities = serial
+    assert again[:-1] == stored[::-1], "every stored kernel is found under its own ref"
+    assert again[-1] not in stored and identities[again[-1]] not in {identities[ref] for ref in stored}
+    assert added(3) == serial

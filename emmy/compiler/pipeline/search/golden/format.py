@@ -475,10 +475,10 @@ class GoldenFile(Wire):
     def add_kernel(self, kernel: Kernel) -> Kernel:
         """Store ``kernel`` unless a kernel of that identity is stored already; the stored one is returned, and
         takes ``kernel``'s provenance when it had none. A kernel stored here takes a ``ref`` no other kernel of the
-        file has."""
-        identity = kernel.exact_identity
+        file has. The stored kernels' identities are the file's :meth:`identities`, computed once per loaded file."""
+        identity, known = kernel.exact_identity, self.identities()
         for index, stored in enumerate(self.kernels):
-            if stored.exact_identity == identity:
+            if known.get(stored.ref) == identity:
                 if stored.traced is None and kernel.traced is not None:
                     stored = replace(stored, traced=kernel.traced, origins=kernel.origins, bindings=kernel.bindings).keyed(identity)
                     self.kernels[index] = stored
