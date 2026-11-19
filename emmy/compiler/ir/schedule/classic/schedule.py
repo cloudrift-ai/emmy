@@ -57,8 +57,8 @@ def _is_edge_site(edge: EdgeSite) -> bool:
 class KernelSchedule:
     """Kernel-scoped choices: the worker inventory, the raster, and where the state the kernel carries between
     steps is kept — direct (a buffer in global memory, one launch per step), shared memory (``d1/smem``: the
-    steps run inside one launch) or registers (``d1/reg``: the same, each warp owning sixteen rows of every stored
-    value in the fragments ``state_tile`` spells; the step's own sites then take no choice)."""
+    steps run inside one launch) or registers (``d1/reg``: the same, the state in the fragments ``state_tile``
+    spells, one warp to sixteen rows; the step's own sites then take no choice)."""
 
     work: Work
     raster: Raster
@@ -123,7 +123,7 @@ def classic_node_key(sites, family: str, site: NodeId) -> str:
         raise ValueError(f"{family} is not a classic node family")
     if site not in family_sites:
         raise ValueError(f"{sites.sites[site].path} is not a {family} site")
-    alone = len(family_sites) == 1 and not (family == "TILE" and sites.state_program is not None)
+    alone = len(family_sites) == 1 and not (family == "TILE" and sites.resident_state is not None)
     return family if alone else f"{family}@{sites.sites[site].path}"
 
 
@@ -164,9 +164,9 @@ def classic_state_keys(sites) -> tuple[str, ...]:
 
 
 def classic_state_tile_keys(sites) -> tuple[str, ...]:
-    """The key of the carried state's fragment geometry, on a kernel registers can hold the state of: ``TILE`` at
+    """The key of the fragment geometry of a state registers can hold (:attr:`TileOp.resident_state`): ``TILE`` at
     the route of the fold that carries it, bare when the step has no ``TILE`` site of its own."""
-    if sites.state_program is None:
+    if sites.resident_state is None:
         return ()
     return ("TILE",) if not sites.family_sites["TILE"] else (f"TILE@{sites.state_routes[0]}",)
 
