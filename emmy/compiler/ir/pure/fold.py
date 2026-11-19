@@ -37,6 +37,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 import emmy.emmy_ir as _ir
+from emmy.compiler.ir.expression import Expression
 from emmy.compiler.ir.pure._fields import MISSING, declare
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Twist
@@ -73,6 +74,7 @@ declare(
         ("base", Lambda | None, None),
         ("twist", Twist | None, None),
         ("observe", Lambda | None, None),
+        ("range", tuple[Expression, Expression] | None, None),
     ),
 )
 

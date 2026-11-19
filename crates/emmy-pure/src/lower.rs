@@ -312,6 +312,7 @@ impl Lowering<'_> {
                     unroll: false,
                     seed: true,
                     unrolled: false,
+                    range: None,
                 })));
             }
         }
@@ -468,6 +469,7 @@ impl Lowering<'_> {
             unroll: false,
             seed: true,
             unrolled: false,
+            range: term.range().cloned(),
         })));
         self.attach(term, Kind::State, target, &here, &scope, nest, None)
     }
@@ -642,6 +644,7 @@ impl Lowering<'_> {
                 unroll: false,
                 seed: true,
                 unrolled: false,
+                range: None,
             })));
         }
         Ok(())

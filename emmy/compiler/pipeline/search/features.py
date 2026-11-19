@@ -482,7 +482,7 @@ class Featurizer:
         kernel competes against tensor cores. ``False`` for a kernel no tile stands behind and for a featurizer
         given no context. Computed once per kernel."""
         from emmy.compiler.ir.schedule.classic import ClassicProblem  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.tile._fromloop import scheduled_form  # noqa: PLC0415
         from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
         tile = kernel_tile(kernel)
@@ -491,7 +491,7 @@ class Featurizer:
         if (known := self._warp_eligible.get(id(tile))) is not None:
             return known[1]
         problem = ClassicProblem(
-            serial_form(tile, tile.name) if tile.carries else tile,
+            scheduled_form(tile, tile.name),
             self.ctx,
             allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
             allow_fp8=precision_pin(FP8_MMA) is True,

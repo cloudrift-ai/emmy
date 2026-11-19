@@ -503,7 +503,9 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
         ctx.ssa_dtypes[name] = (carry.dtype or F32).name
     out.extend(_seeds(node, ctx))
     var = node.axis.name
-    out.append(f"{pad}for (int {var} = 0; {var} < {_extent_c(node, ctx)}; {var}++) {{")
+    # A loop that walks a range takes the values from its start to its end; any other walks its whole extent.
+    start, end = ("0", _extent_c(node, ctx)) if node.range is None else (f"({render_expression(bound, ctx)})" for bound in node.range)
+    out.append(f"{pad}for (int {var} = {start}; {var} < {end}; {var}++) {{")
     inner = ctx.child()
     out.extend(render_body(node.body, inner))
     out.extend(f"{_pad(inner.indent)}{name} = {name}{NEXT_STEP};" for name in node.carries)

@@ -810,6 +810,32 @@ impl PySimplifyCtx {
         })
     }
 
+    /// This context inside a loop that walks `name` from `start` to `end`, exclusive: the axis's interval, the
+    /// comparisons the range states of it, and the end as its symbolic bound (`axis::Range::extend`).
+    fn ranged(
+        &self,
+        name: &str,
+        start: &Bound<'_, PyAny>,
+        end: &Bound<'_, PyAny>,
+    ) -> PyResult<PySimplifyCtx> {
+        let range = emmy_ir::axis::Range {
+            start: expression_from_py(start)?,
+            end: expression_from_py(end)?,
+        };
+        Ok(PySimplifyCtx {
+            ctx: range.extend(&self.ctx, name.into()),
+        })
+    }
+
+    /// What the comparisons in scope decide of `comparison`, where the intervals alone do not: `True`, `False`, or
+    /// `None` when they decide nothing.
+    fn decides(&self, comparison: &Bound<'_, PyAny>) -> PyResult<Option<bool>> {
+        let comparison = expression_from_py(comparison)?;
+        Ok(comparison
+            .as_binary()
+            .and_then(|(op, left, right)| self.ctx.decides(op, left, right)))
+    }
+
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other
             .cast::<PySimplifyCtx>()

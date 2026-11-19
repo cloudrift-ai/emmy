@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use emmy_ir::elementwise::ElementwiseOp;
 use emmy_ir::expr::Expr;
+use emmy_ir::expr::Expression;
 use emmy_ir::statement::Statement;
 use emmy_ir::{Error, Name, Result};
 
@@ -86,6 +87,7 @@ pub struct Data {
     base: Option<Lambda>,
     twist: Option<Twist>,
     observe: Option<Lambda>,
+    range: Option<(Expression, Expression)>,
     hash: u64,
     exposes: OnceLock<Vec<Name>>,
     bindings: OnceLock<Vec<Binding>>,
@@ -109,6 +111,9 @@ pub struct Parts {
     pub base: Option<Lambda>,
     pub twist: Option<Twist>,
     pub observe: Option<Lambda>,
+    /// Where the axis this term binds walks, when that is not all of it: a start and an exclusive end over the
+    /// coordinates around the term and the symbolic dims (`emmy_ir::axis::Range`).
+    pub range: Option<(Expression, Expression)>,
 }
 
 impl PartialEq for Fold {
@@ -124,6 +129,7 @@ impl PartialEq for Fold {
             && a.base == b.base
             && a.twist == b.twist
             && a.observe == b.observe
+            && a.range == b.range
             && a.operands == b.operands
     }
 }
@@ -444,6 +450,47 @@ fn check_reduce(parts: &Parts, lift: &Lambda, base: &Lambda) -> Result<()> {
     Ok(())
 }
 
+/// `lift` with every coordinate the term's range reads among its trailing params, in sorted order after the ones it
+/// has: the range is evaluated where the term is, so what it reads is part of what the term is evaluated over. A
+/// range is a reduce axis's, and reads neither that axis nor a value the term binds.
+fn over_range(parts: &Parts, lift: Lambda) -> Result<Lambda> {
+    let Some((start, end)) = &parts.range else {
+        return Ok(lift);
+    };
+    if parts.base.is_none() {
+        return Err(Error::Value(
+            "a range is where a reduce axis walks: a zero-axis term has none".into(),
+        ));
+    }
+    let lead = 1 + bindings_of(&parts.operands, lift.params(), true).len();
+    let mut read: Vec<Name> = start.free_vars();
+    read.extend(end.free_vars());
+    read.sort();
+    read.dedup();
+    if let Some(bound) = read
+        .iter()
+        .find(|name| lift.params()[..lead.min(lift.params().len())].contains(name))
+    {
+        return Err(Error::Value(format!(
+            "a range reads the coordinates around its term, and '{bound}' is the term's own axis or a value it binds"
+        )));
+    }
+    let missing: Vec<Name> = read
+        .into_iter()
+        .filter(|name| !lift.params().contains(name))
+        .collect();
+    if missing.is_empty() {
+        return Ok(lift);
+    }
+    let mut params = lift.params().to_vec();
+    params.extend(missing);
+    Ok(Lambda::formed(
+        params,
+        lift.body().clone(),
+        lift.results().to_vec(),
+    ))
+}
+
 impl Fold {
     /// An observer binds the iteration var then the carried state, and defines fresh names.
     fn check_observer(&self, observe: &Lambda) -> Result<()> {
@@ -502,6 +549,7 @@ impl Fold {
         if parts.base.is_none() {
             check_zero_axis(&parts, &lift)?;
         }
+        let lift = over_range(&parts, lift)?;
         parts.lift = Some(lift);
         let fold = Fold::formed(parts);
         // What the term exposes is read off its applied lift: a lift that does not apply is refused here.
@@ -522,6 +570,7 @@ impl Fold {
             base,
             twist,
             observe,
+            range,
         } = parts;
         let lift = lift.expect("a formed Fold has a lift");
         let hash = {
@@ -535,6 +584,7 @@ impl Fold {
                 .map(|t| (t.recipe.name.clone(), t.channels.clone()))
                 .hash(&mut hasher);
             observe.hash(&mut hasher);
+            range.hash(&mut hasher);
             for edge in &operands {
                 edge.0.hash.hash(&mut hasher);
             }
@@ -548,6 +598,7 @@ impl Fold {
             base,
             twist,
             observe,
+            range,
             hash,
             exposes: OnceLock::new(),
             bindings: OnceLock::new(),
@@ -573,6 +624,7 @@ impl Fold {
             base: self.0.base.clone(),
             twist: self.0.twist.clone(),
             observe: self.0.observe.clone(),
+            range: self.0.range.clone(),
         }
     }
 
@@ -644,6 +696,11 @@ impl Fold {
 
     pub fn observe(&self) -> Option<&Lambda> {
         self.0.observe.as_ref()
+    }
+
+    /// Where the axis this term binds walks, when the term states it: `None` is the whole axis.
+    pub fn range(&self) -> Option<&(Expression, Expression)> {
+        self.0.range.as_ref()
     }
 
     fn structural_hash(&self) -> u64 {
@@ -854,6 +911,10 @@ impl Fold {
             .as_ref()
             .map(|o| o.rename(&mapping))
             .transpose()?;
+        let range = self.0.range.as_ref().map(|(start, end)| {
+            let rename = |e: &Expression| e.rename(&mut |name| mapping.get(&name).copied());
+            (rename(start), rename(end))
+        });
         let canonical = Fold::new(Parts {
             operands,
             lift: Some(lift.rename(&mapping)?),
@@ -862,6 +923,7 @@ impl Fold {
             base,
             twist: self.0.twist.clone(),
             observe,
+            range,
         })?;
         Ok(self.0.canonical.get_or_init(|| canonical).clone())
     }

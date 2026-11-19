@@ -45,7 +45,7 @@ from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.passes.tile._cut import joined_halves
-from emmy.compiler.pipeline.passes.tile._fromloop import serial_form
+from emmy.compiler.pipeline.passes.tile._fromloop import scheduled_form
 from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
@@ -463,9 +463,7 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         tile = tiles.get(identity or "")
         if tile is None:
             return None
-        if tile.carries:
-            tile = serial_form(tile, tile.name)
-        return frozenset(classic_keys(tile))
+        return frozenset(classic_keys(scheduled_form(tile, tile.name)))
 
     rows: list[Row] = []
     report.stored_as = stored_as

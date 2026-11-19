@@ -6,6 +6,7 @@ pub mod fold;
 pub mod fuse;
 pub mod lambda;
 pub mod lower;
+pub mod range;
 pub mod readings;
 pub mod rewrite;
 pub mod tree;

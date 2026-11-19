@@ -2,6 +2,7 @@
 //! sum's terms and its binary form, a select's mask, the literal a statement binds.
 
 use crate::Name;
+use crate::axis::Range;
 use crate::body::Body;
 use crate::elementwise::Operation;
 use crate::expr::Expression;
@@ -75,6 +76,32 @@ impl Loop {
     /// The carried states this loop carries.
     pub fn carries(&self) -> Vec<(Name, Vec<Option<AxisRef>>)> {
         carried_cells(&self.body)
+    }
+
+    /// Where the axis walks: its range, `0..extent` when the loop states none.
+    pub fn walk(&self) -> Range {
+        match &self.range {
+            Some((start, end)) => Range {
+                start: start.clone(),
+                end: end.clone(),
+            },
+            None => Range::whole(&self.axis),
+        }
+    }
+
+    /// The one value the axis takes when the loop is known to take exactly one trip: `0` for a loop of extent one
+    /// without a range, the start of a range whose end is one past it. `None` when a range may be empty.
+    pub fn one_trip(&self) -> Option<Expression> {
+        match &self.range {
+            None => Some(Expression::int(0)),
+            Some((start, end)) => Range {
+                start: start.clone(),
+                end: end.clone(),
+            }
+            .trips()
+            .filter(|trips| *trips == 1)
+            .map(|_| start.clone()),
+        }
     }
 
     /// A loop is a reduce loop iff it carries something: an `Accum` in its immediate body, or a state.

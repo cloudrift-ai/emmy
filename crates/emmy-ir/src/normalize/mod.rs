@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use crate::axis::Axis;
+use crate::axis::{Axis, SYMBOLIC_AXIS_HI};
 use crate::body::{Body, MemoKey};
 use crate::dtype::DType;
 use crate::expr::{Expression, Interval, SimplifyCtx};
@@ -14,8 +14,6 @@ use crate::numbering::{congruent_states, group_keys};
 use crate::order::topological_sort;
 use crate::statement::*;
 use crate::{Error, Name, Result};
-
-const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
 
 /// Push an iteration axis `[0, extent)` into a simplification context so index expressions over it fold.
 pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
@@ -46,8 +44,14 @@ pub fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<SimplifyCtx> {
     })
 }
 
-/// `ctx` inside `stmt`'s child bodies: under the ranges of the axes it binds for them.
+/// `ctx` inside `stmt`'s child bodies: under the ranges of the axes it binds for them. A loop that walks a range
+/// binds its axis to that range, with the comparisons it states.
 pub fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
+    if let Statement::Loop(l) = stmt
+        && l.range.is_some()
+    {
+        return l.walk().extend(ctx, l.axis.name);
+    }
     stmt.bound_axes()
         .iter()
         .fold(ctx.clone(), |inner, axis| extend_simplify_ctx(&inner, axis))
@@ -169,7 +173,7 @@ fn prepared(body: &Body, canonical_loops: bool) -> Result<Body> {
     let mut placed: Option<Body> = None;
     for _ in 0..8 {
         let merged = if canonical_loops {
-            merge_sibling_reduce_loops(&stmts)?
+            merge_sibling_reduce_loops(&range_masked_reductions(&stmts)?)?
         } else {
             stmts.clone()
         };
@@ -239,6 +243,7 @@ pub mod congruent;
 pub mod definitions;
 pub mod fold;
 pub mod place;
+pub mod ranges;
 pub mod siblings;
 pub mod simplify;
 pub mod ties;
@@ -249,6 +254,7 @@ pub use congruent::*;
 pub use definitions::*;
 pub use fold::*;
 pub use place::*;
+pub use ranges::*;
 pub use siblings::*;
 pub use simplify::*;
 
