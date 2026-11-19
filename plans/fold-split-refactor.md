@@ -96,6 +96,51 @@ at its best scalar tile, 7.4 µs with both operands cast to bf16 ahead of the pr
 The recorded walk already runs its f32 state through an f16 atom, so the layer tolerates the precision somewhere;
 whether it does here needs the model's accuracy check.
 
+## This PR, and the next milestone
+
+**This PR is the refactor.** It keeps what the build above proved and nothing else: the split of a Fold's axis as
+one function, and the tiled reduce axis through one binder and shared loop steps. It changes no decision and no
+PTX. The recurrence code is restored under it, so no golden and no served model moves. Stages 2, 3 and 5 below are
+not planned any more; the findings above say why.
+
+### Next milestone: a tensor-core atom for a product of two f32 operands
+
+**Why.** The recurrence of the 256-row Gated DeltaNet layer takes about 170 µs against FlashInfer's 87. Most of
+that is ordinary f32 kernels around the walk, and the largest group is four readout products that take 78 µs on
+scalar register tiles because an f32 operand has no atom. Cast to bf16, the largest runs in 7.4 µs against 25 to
+27 on the dev-box RTX 5090.
+
+**What to build.**
+
+- Offer the bf16 atom with an f32 accumulator on a contraction whose operands are both f32. Each operand is
+  converted where its slab is filled. A fill that converts one operand exists; this is the same fill on both.
+- Offer it under a precision pin of its own, off by default, beside the two the policy has. It is a precision
+  decision, like the f16 accumulator and FP8.
+- Nothing new in the emitters. The census counts 71 contraction sites refused for "no atom takes an f32
+  multiplicand"; each of them gains rows.
+
+**How to check it.**
+
+- The four readout products as standalone kernels of the model golden (`emmy run --golden ... --kernel ... --bench
+  --tune N`), f32 against the new rows, on the RTX 5090.
+- The layer's numerics against its reference with the pin on, and the model's accuracy check. The recorded walk
+  already runs the f32 state through an f16 atom, so the layer tolerates the precision in one place; that says
+  nothing yet about the readout.
+- Record the winners into the model golden. A hardware golden row that moves means a refit of both priors.
+
+**Open questions.**
+
+- Whether three of the four products behave like the one that was measured.
+- Whether f16 or bf16 is the better target, and whether the accumulator can narrow too.
+- Whether the other 67 refused sites want it, or whether the pin should name the readout alone.
+
+**After it, in this order.**
+
+1. The copy that stacks the chunk start states (18 µs). The walk could store them where they are read.
+2. The mask and decay build (15 µs).
+3. The walk and the solve (59 µs together). Stage 4 below is the design; build it only if the gap that is left
+   still matters.
+
 ## The idea
 
 A Fold in block form takes four steps. They are the same four for a product, a reduction, a map and a recurrence.
