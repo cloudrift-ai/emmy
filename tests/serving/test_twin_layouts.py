@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from emmy.commands.compile import GoldenSelection
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
@@ -165,15 +166,16 @@ def test_the_record_run_compiles_each_target_with_its_familys_settled_layouts(mo
     monkeypatch.setattr(run, "bench_lowered_vs_torch", no_bench)
     seen = []
 
-    def run_once(args):  # the golden branch of ``_handle_run_once``, past its GPU check and row resolution
-        args._golden_graph = programs[0 if args.realization.startswith("gdn16") else 1]
+    def run_once(args, *, on_compiled, **_walk):  # the golden branch of ``_handle_run_once``, past its GPU check and row resolution
+        selection = GoldenSelection(graph=programs[0 if args.realization.startswith("gdn16") else 1])
         settled = dict(_layout._SETTLED.get() or {})
-        run._handle_run_ir(args, CudaBackend, CompilerDump)
+        compiled = []
+        run._handle_run_ir(args, CudaBackend, CompilerDump, selection, lambda graph: (compiled.append(graph), on_compiled(graph)))
         seen.append(
             (
                 args.realization,
                 settled,
-                sorted(name for name, transposed in graph_layouts(args._compiled) if transposed or name.endswith("__source")),
+                sorted(name for name, transposed in graph_layouts(compiled[0]) if transposed or name.endswith("__source")),
             )
         )
 
@@ -223,28 +225,27 @@ def test_a_named_realization_compiles_with_the_layouts_its_narrower_twins_bound(
 
     def named(twin, **extra):
         args = SimpleNamespace(golden=str(path), realization=names[twin], code=None, input=None, ir=None, dynamic=None, **extra)
-        resolve_golden_arg(args)
-        return args
+        return args, resolve_golden_arg(args)
 
-    narrow = named("gdn1")
-    with run._family_layouts(narrow):
+    narrow, selection = named("gdn1")
+    with run._family_layouts(narrow, selection):
         assert not _layout._SETTLED.get()
-        graph = narrow._golden_graph.copy()
+        graph = selection.graph.copy()
         compiled = Pipeline.build(run._replay_stage_and_passes(graph, embedded_golden=True)[1]).run(graph)
     (weight,) = [name for name, transposed in graph_layouts(compiled) if transposed or name.endswith("__source")]
     bound = {weight.removesuffix("__source"): "source" if weight.endswith("__source") else "folded"}
-    with run._family_layouts(named("gdn16")):
+    with run._family_layouts(*named("gdn16")):
         assert _layout._SETTLED.get() == bound
     # A hand pin is for the twin under study; the narrower twins compile as serving builds them, with none.
     ((name, layout),) = bound.items()
-    with pinned_knobs({f"LAYOUT@{name}": "folded" if layout == "source" else "source"}), run._family_layouts(named("gdn16")):
+    with pinned_knobs({f"LAYOUT@{name}": "folded" if layout == "source" else "source"}), run._family_layouts(*named("gdn16")):
         assert _layout._SETTLED.get() == bound
-    with _layout.settled_layouts({"w": "source"}), run._family_layouts(named("gdn16", _explicit_realization=False)):
+    with _layout.settled_layouts({"w": "source"}), run._family_layouts(*named("gdn16"), explicit=False):
         assert _layout._SETTLED.get() == {"w": "source"}
     # A narrower twin whose rows spell every precision gate, as a record writes them, is still the same family.
     with GoldenFile.edit(path) as document:
         document.rows[:] = [replace(row, pins=regime_pins(row.pins)) if row.name == names["gdn1"] else row for row in document.rows]
-    with run._family_layouts(named("gdn16")):
+    with run._family_layouts(*named("gdn16")):
         assert _layout._SETTLED.get() == bound
 
 

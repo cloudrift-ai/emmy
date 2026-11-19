@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
+from emmy.commands.compile import PinnedRow
 from emmy.compiler.backend.base import BenchmarkResult
 from tests.compiler.helpers import requires_cuda, requires_sm
 
@@ -404,7 +405,7 @@ def test_ab_samples_parse_label_and_shape():
     """``_ab_samples`` parses each spec with the ``EMMY_KNOBS`` grammar, labels
     the row with the raw spec, and marks it shapeless (the ``_print_kernel_stats``
     cue to nest by kernel ``S_*`` signature instead of a golden matmul shape)."""
-    from emmy.commands.run import _ab_samples, _sample_replay_knobs
+    from emmy.commands.run import _ab_samples
 
     (s,) = _ab_samples(["tile=f2x4, STAGE=d2/smem-async"])
     assert s.knobs == {"TILE": "f2x4", "STAGE": "d2/smem-async"}  # names uppercased, whitespace tolerated
@@ -423,7 +424,7 @@ def test_ab_samples_parse_label_and_shape():
     assert p.pins == {"FAST_MATH": "False", "FAST_EXP": "0", "VECTORIZE_LOADS": "False"}
     assert p.knobs == {"TILE": "f2x4"}
 
-    assert _sample_replay_knobs(p) == {
+    assert p.replay_knobs() == {
         "FAST_MATH": "False",
         "FAST_EXP": "0",
         "VECTORIZE_LOADS": "False",
@@ -433,11 +434,11 @@ def test_ab_samples_parse_label_and_shape():
 
 def test_ab_replay_retains_scoped_off_exception_to_bare_pin():
     """A scoped OFF overrides a non-OFF bare pin at that exact site."""
-    from emmy.commands.run import _ab_samples, _sample_replay_knobs
+    from emmy.commands.run import _ab_samples
 
     (sample,) = _ab_samples(["REDUCE=coop,REDUCE@a.fold.a3=,REDUCE@a7="])
 
-    assert _sample_replay_knobs(sample) == {
+    assert sample.replay_knobs() == {
         "REDUCE": "coop",
         "REDUCE@a.fold.a3": "",
         "REDUCE@a7": "",
@@ -462,6 +463,8 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
             yield
 
     class Backend:
+        tune_db = None
+
         async def bench_pinned_async(self, _graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
             assert (warmup, num_iters) == (1, 2)
             assert precision_pin(FAST_MATH) is False
@@ -475,9 +478,10 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
     monkeypatch.setattr(run_mod, "_placement_knob_dicts", lambda _graph: [])
     monkeypatch.setattr(Graph, "from_dict", staticmethod(lambda _document: Graph()))
 
-    rows = asyncio.run(run_mod._bench_ab_variants_ir(Backend(), source, (), ["FAST_MATH=False,TILE=f2x4"], warmup=1, iters=2))
+    rows = run_mod._ab_samples(["FAST_MATH=False,TILE=f2x4"])
+    rows = asyncio.run(run_mod._bench_golden_variants(Backend(), Graph(), rows, passes=(), warmup=1, iters=2))
 
-    assert seen == [{"FAST_MATH": "False", "TILE": "f2x4"}] * 2
+    assert seen and all(knobs == {"FAST_MATH": "False", "TILE": "f2x4"} for knobs in seen)
     assert len(rows) == 1 and rows[0].status == "ok"
 
 
@@ -504,8 +508,8 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
         return BenchmarkResult(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda g: g, bench_pinned_async=fake_bench_pinned_async)
-    dyn = SimpleNamespace(name="g.dynM", knobs={"TILE": "f2x2"}, shape=None, dynamic=("seq_len@x0:0",))
-    static = SimpleNamespace(name="g", knobs={"TILE": "f2x2"}, shape=None, dynamic=None)
+    dyn = PinnedRow(name="g.dynM", knobs={"TILE": "f2x2"}, dynamic=("seq_len@x0:0",))
+    static = PinnedRow(name="g", knobs={"TILE": "f2x2"})
     benches = asyncio.run(
         _bench_golden_variants(backend, "torch.matmul(torch.randn(8,8), torch.randn(8,8))", [dyn, static], warmup=1, iters=1)
     )
@@ -550,7 +554,7 @@ def test_bench_golden_variants_quantizes_each_retraced_ab(monkeypatch):
         return BenchmarkResult(min_ms=0.1, time_ms=0.1, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda graph: compiled, bench_pinned_async=bench)
-    sample = SimpleNamespace(name="ab", knobs={"TILE": "nvfp4"}, pins={}, shape=None, dynamic=None, flops=None)
+    sample = PinnedRow(name="ab", knobs={"TILE": "nvfp4"}, pins={})
 
     rows = asyncio.run(_bench_golden_variants(backend, "torch linear", [sample], warmup=1, iters=2, quantize="nvfp4"))
 
@@ -1062,8 +1066,8 @@ def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypa
         return BenchmarkResult(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
-    dropped = SimpleNamespace(name="g.dropped", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None)
-    honored = SimpleNamespace(name="g.honored", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None)
+    dropped = PinnedRow(name="g.dropped", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"})
+    honored = PinnedRow(name="g.honored", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"})
     benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", [dropped, honored], warmup=1, iters=1))
     assert len(benches) == 2
     assert benches[0].status == "pin_unmatched" and benches[0].bench is None
@@ -1105,8 +1109,8 @@ def test_bench_golden_variants_unmatched_place_pin_fails_row_without_benching(mo
 
     backend = SimpleNamespace(compile=lambda graph: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     pin = {"PLACE@map.1/inner.2/map": "cut"}
-    missed = SimpleNamespace(name="g.missed", knobs=pin, shape=None, dynamic=None)
-    realized = SimpleNamespace(name="g.realized", knobs=pin, shape=None, dynamic=None)
+    missed = PinnedRow(name="g.missed", knobs=pin)
+    realized = PinnedRow(name="g.realized", knobs=pin)
 
     benches = asyncio.run(_bench_golden_variants(backend, "torch.exp(a)", [missed, realized], warmup=1, iters=1))
 
@@ -1138,7 +1142,7 @@ def test_bench_golden_variants_gates_the_live_env_route_too(monkeypatch):
         raise AssertionError("a row whose env route did not realize must not be benched")
 
     backend = SimpleNamespace(compile=lambda g: graph, bench_pinned_async=fake_bench_pinned_async)
-    row = SimpleNamespace(name="g.row", knobs={"WORK": "t128"}, shape=None, dynamic=None)
+    row = PinnedRow(name="g.row", knobs={"WORK": "t128"})
 
     (bench,) = asyncio.run(_bench_golden_variants(backend, "torch.exp(a)", [row], warmup=1, iters=1))
 
@@ -1185,8 +1189,8 @@ def test_bench_golden_variants_survives_row_bench_fail(monkeypatch, failure):
 
     backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     rows = [
-        SimpleNamespace(name="g.slow", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None),
-        SimpleNamespace(name="g.fine", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None),
+        PinnedRow(name="g.slow", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}),
+        PinnedRow(name="g.fine", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}),
     ]
     benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", rows, warmup=1, iters=1))
     assert len(benches) == 2
@@ -1228,8 +1232,8 @@ def test_bench_golden_variants_wrong_answer_gate_uses_worker_outputs(monkeypatch
 
     backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     rows = [
-        SimpleNamespace(name="g.good", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None),
-        SimpleNamespace(name="g.bad", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None),
+        PinnedRow(name="g.good", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}),
+        PinnedRow(name="g.bad", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}),
     ]
     ref = ({"x": np.zeros((4,))}, ref_outputs)
     benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", rows, warmup=1, iters=1, ref=ref))
@@ -1335,12 +1339,10 @@ def test_pinned_lane_uses_realized_boolean_policy(monkeypatch):
 )
 def test_failed_pinned_lane_uses_requested_precision_inputs(pins, lane):
     """A row without a compiled graph keeps the lane its Boolean pins requested."""
-    from types import SimpleNamespace
 
     from emmy.commands import run as run_mod
 
-    sample = SimpleNamespace(knobs={}, pins=pins)
-    row = run_mod._GoldenBench(sample, None, None, (), "bench_fail")
+    row = run_mod._GoldenBench(PinnedRow(name="row", pins=pins), None, None, (), "bench_fail")
 
     assert run_mod._pinned_lane(row) == lane
 
@@ -1369,20 +1371,11 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", _nodes)
     monkeypatch.setattr(run_mod, "_placement_knob_dicts", lambda _graph: [])
 
-    fm = SimpleNamespace(
-        knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"},
-        pins={"FAST_MATH": True},
-        latency_us=100.0,
-        name="mlp_gate_up",
-        shape=object(),
-    )
-    std = SimpleNamespace(
-        knobs={"TILE": "f2x8", "WORK": "t32x8"},
-        pins={"FAST_MATH": False},
-        latency_us=140.0,
-        name="mlp_gate_up",
-        shape=object(),
-    )
+    def recorded(us):
+        return SimpleNamespace(measurements=SimpleNamespace(emmy_us=us, reference_us=None))
+
+    fm = PinnedRow(name="mlp_gate_up", knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"}, pins={"FAST_MATH": True}, record=recorded(100.0))
+    std = PinnedRow(name="mlp_gate_up", knobs={"TILE": "f2x8", "WORK": "t32x8"}, pins={"FAST_MATH": False}, record=recorded(140.0))
     golden_benches = [
         run_mod._GoldenBench(fm, fm_graph, None, (), "ok"),
         run_mod._GoldenBench(std, std_graph, None, (), "ok"),
@@ -2242,9 +2235,7 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     greedy_knobs = _classic_row(tile="mma_m16n8k16_f16_f32/f1x1", reduce="g2k")
     greedy_graph = graph_with(greedy_knobs)
     unmatched = _GoldenBench(
-        SimpleNamespace(
-            name="g.unmatched", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None, latency_us=None, ref_us=None
-        ),
+        PinnedRow(name="g.unmatched", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}),
         graph_with(_classic_row(tile="mma_m16n8k16_f16_f32/f2x4")),
         None,
         ["unreproducible pin: TILE=mma_m16n8k16_f16_f32/f1x8 realized mma_m16n8k16_f16_f32/f2x4 — row NOT benched"],
@@ -2406,7 +2397,6 @@ def test_print_kernel_stats_greedy_bench_fail_row(capsys):
     with ``--`` timings, a ``bench_fail`` TOTAL, the failure reason as a ``!`` line, and the
     pinned rows still render — the exact view the golden workflow needs when the greedy pick
     hangs (previously the whole run aborted before any pinned row printed)."""
-    from types import SimpleNamespace
 
     from emmy.commands.run import _GoldenBench, _print_kernel_stats
     from emmy.compiler.graph import Graph, Tensor
@@ -2426,7 +2416,7 @@ def test_print_kernel_stats_greedy_bench_fail_row(capsys):
     )
     pinned_bench = BenchmarkResult(min_ms=0.5, time_ms=0.5, per_launch=[], e2e_min_ms=None)
     ok_row = _GoldenBench(
-        SimpleNamespace(name="ab TILE=mma_m16n8k16_f16_f32/f2x4", knobs={"TILE": "mma_m16n8k16_f16_f32/f2x4"}, shape=None, dynamic=None),
+        PinnedRow(name="ab TILE=mma_m16n8k16_f16_f32/f2x4", knobs={"TILE": "mma_m16n8k16_f16_f32/f2x4"}),
         graph_with({"TILE": "mma_m16n8k16_f16_f32/f2x4"}),
         pinned_bench,
         [],
@@ -2483,7 +2473,7 @@ def _iso_bench_fixtures():
     )
     bench = BenchmarkResult(min_ms=0.5, time_ms=0.5, per_launch=[SimpleNamespace(idx=0, samples=[0.5], time_ms=0.5)], e2e_min_ms=None)
     iso_bench = BenchmarkResult(min_ms=0.4, time_ms=0.4, per_launch=[SimpleNamespace(idx=0, samples=[0.4], time_ms=0.4)], e2e_min_ms=None)
-    iso_sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
+    iso_sample = PinnedRow(name="greedy (isolated)", knobs={})
     return greedy, bench, _GoldenBench(iso_sample, greedy, iso_bench, [])
 
 
@@ -2556,7 +2546,7 @@ def test_write_ab_json_uses_whole_program_time_for_multi_launch_pinned_row(tmp_p
         captured=True,
         e2e_min_ms=0.6,
     )
-    sample = SimpleNamespace(name="ab TILE=f2x4", knobs={"TILE": "f2x4"}, shape=None, dynamic=None)
+    sample = PinnedRow(name="ab TILE=f2x4", knobs={"TILE": "f2x4"})
     row = _GoldenBench(sample, greedy, multi_bench, [])
     args = SimpleNamespace(
         json=str(tmp_path / "ab.json"),
@@ -2697,6 +2687,6 @@ def test_a_pinned_row_that_does_not_compile_keeps_its_place_on_forked_workers(mo
         return os.environ["EMMY_TILE"], os.environ["EMMY_WORKERS"]
 
     monkeypatch.setenv("EMMY_WORKERS", "2")
-    samples = [SimpleNamespace(name=tile, knobs={"TILE": tile}, shape=None, dynamic=None) for tile in ("f2", "bad", "f4")]
+    samples = [PinnedRow(name=tile, knobs={"TILE": tile}) for tile in ("f2", "bad", "f4")]
     assert _compile_pinned_rows(SimpleNamespace(compile=compile), Graph(), samples) == [("f2", "1"), "no such tile", ("f4", "1")]
     assert "EMMY_TILE" not in os.environ

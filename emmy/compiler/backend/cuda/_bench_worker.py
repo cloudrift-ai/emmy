@@ -15,7 +15,8 @@ Protocol (length-prefixed pickle on stdin/stdout):
   ``accuracy`` (bind the rebuilt module's real inputs, run the emmy program on them, compare vs
   eager — the verdict rides back as ``accuracy_error``, and a numeric failure skips the bench)
   and ``want_ref`` (return that run's ``(input_data, outputs)`` as ``run_io`` — the reference
-  the parent feeds each pinned row's wrong-answer check).
+  the parent feeds each pinned row's wrong-answer check; under ``strict_accuracy`` the outputs are
+  eager's, which a strict pinned row is held to).
 - Response: ``{"ok": True, "result": BenchmarkResult, "results": dict|None, "torch_available": bool,
   "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None,
   "greedy_error": str|None, "reference_run_us": float|None}``
@@ -210,6 +211,7 @@ async def _run_job(req: dict) -> dict:
                     check_accuracy,
                     comparison_outputs,
                     eager_output,
+                    eager_outputs_by_name,
                     strict_correctness_proof,
                 )
                 from emmy.compiler.loader.binder import bind_inputs
@@ -217,11 +219,14 @@ async def _run_job(req: dict) -> dict:
                 input_data = bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
                 run_outputs = comparison_outputs(run_result.outputs, req["graph"])
+                reference_outputs = run_outputs
                 if req.get("accuracy") or req.get("strict_accuracy"):
                     with reference_precision():
                         eager_out = eager_output(module, args_t, kwargs)
                     if req.get("strict_accuracy"):
                         correctness = strict_correctness_proof(run_outputs, eager_out)
+                        # A strict pinned row is held to eager directly, as the greedy row is.
+                        reference_outputs = eager_outputs_by_name(run_outputs, eager_out, req["graph"])
                         if correctness["status"] != "pass":
                             accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
                     else:
@@ -236,7 +241,7 @@ async def _run_job(req: dict) -> dict:
                             "run_io": None,
                         }
                 if req.get("want_ref"):
-                    run_io = (input_data, run_outputs)
+                    run_io = (input_data, reference_outputs)
             results, bench, captured = await bench_full_model_real(
                 module,
                 args_t,
