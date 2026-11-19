@@ -196,11 +196,11 @@ impl Definition {
     }
 }
 
+/// What a rewrite makes of one statement: the statements that take its place, or `None` to keep it and go into it.
+type Replace<'a> = dyn FnMut(&Arc<Statement>) -> Result<Option<Vec<Arc<Statement>>>> + 'a;
+
 /// `body` with every statement mapped through `f`, at any depth, and every block left empty by it dropped.
-fn rewritten(
-    body: &Body,
-    f: &mut dyn FnMut(&Arc<Statement>) -> Result<Option<Vec<Arc<Statement>>>>,
-) -> Result<Body> {
+fn rewritten(body: &Body, f: &mut Replace<'_>) -> Result<Body> {
     let mut out = Vec::new();
     for stmt in body.stmts() {
         match f(stmt)? {

@@ -569,7 +569,9 @@ class _Fn:
                     from emmy.compiler.ir.expression import BinaryExpression, Var  # noqa: PLC0415
 
                     start, end = s.range
-                    inside = BinaryExpression("&&", BinaryExpression("<=", start, Var(s.axis.name)), BinaryExpression("<", Var(s.axis.name), end))
+                    inside = BinaryExpression(
+                        "&&", BinaryExpression("<=", start, Var(s.axis.name)), BinaryExpression("<", Var(s.axis.name), end)
+                    )
                     self.full(s, lambda s=s, inside=inside: self.branch(self.pred(inside), lambda: self.serial(s.body), None))
                 self.open_accs -= {a.name for a in opened}
             elif k == "Cond":
@@ -729,7 +731,8 @@ def _serial(loop, buffers, shapes, dtypes, size_names):
 def _ranged(stmts) -> bool:
     """Whether a loop of ``stmts`` walks a range in place of its whole extent."""
     return any(
-        (_kind(s) == "Loop" and s.range is not None) or any(_ranged(getattr(s, attr, None) or ()) for attr in ("body", "else_body")) for s in stmts
+        (_kind(s) == "Loop" and s.range is not None) or any(_ranged(getattr(s, attr, None) or ()) for attr in ("body", "else_body"))
+        for s in stmts
     )
 
 
