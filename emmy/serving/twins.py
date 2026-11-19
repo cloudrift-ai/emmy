@@ -89,7 +89,7 @@ def fork_less_weights(graph, ctx) -> set[str]:
     return fork_less_reads(Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(graph.copy(), ctx=ctx, db=None))
 
 
-def twins_in_build_order(graphs, fork_less):
+def twins_in_build_order(graphs, fork_less, *, of=None):
     """``(key, scope)`` for each traced program of ``graphs`` (key -> program), in the order the serving runner builds a
     wrapper's twins (it orders its builds explicitly; the serving audit, the golden target walk and a run of one named
     realization order through this).
@@ -100,12 +100,15 @@ def twins_in_build_order(graphs, fork_less):
     names; :func:`fork_less_weights`) finds a fork-less reader of in any of them. A program that binds no checkpoint
     tensor has a scope of its own, and so does each of native generation's twins (``-native``): native preparation
     compiles every program alone, under no settled layout. The grouping needs the exact same set: two twins of one
-    wrapper that differed by one bound tensor would get separate scopes here, though serving shares one per wrapper."""
+    wrapper that differed by one bound tensor would get separate scopes here, though serving shares one per wrapper.
+    With ``of``, only the family of program ``of`` is built: no other program is lowered for ``fork_less``."""
     families: dict[frozenset, list] = {}
     for key, graph in graphs.items():
         alone = "-native" in str(key) or not _bound_tensors(graph)
         families.setdefault(frozenset({("own", key)}) if alone else _bound_tensors(graph), []).append(key)
     for keys in families.values():
+        if of is not None and of not in keys:
+            continue
         scope = LayoutScope()
         for key in keys:
             scope.fix(str(key), fork_less(graphs[key]))

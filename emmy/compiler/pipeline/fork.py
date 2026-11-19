@@ -15,19 +15,24 @@ sequence; ``ForkPoint`` wraps them for an offer.
 
 from __future__ import annotations
 
+import os
 import random
+import re
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
+from functools import partial
 from multiprocessing import current_process, get_context
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import Op
 
+from emmy import config
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused, schedule
 from emmy.compiler.pipeline.knob import evidence_row_vouches, values_equal
 
@@ -291,14 +296,9 @@ def descent_sample(options: Sequence[Op | Graph | Fork], *, draw: int, seed: obj
 #: The seeded pieces a parallel draw is cut into — fixed, so the rows do not depend on the worker count.
 _DRAW_CHUNKS = 64
 
-#: The tree a forked draw worker reads: set by the parent before the fork, so the lazy tree is inherited, never
-#: pickled.
-_DRAWING: tuple | None = None
 
-
-def _draw_chunk(job: tuple[str, int]) -> list[dict]:
-    seed, draw = job
-    options, skip = _DRAWING
+def _draw_chunk(tree: tuple, job: tuple[str, int]) -> list[dict]:
+    (options, skip), (seed, draw) = tree, job
     return [leaf_knobs(leaf) for leaf in descent_sample(options, draw=draw, seed=seed, skip=skip)]
 
 
@@ -309,33 +309,53 @@ def parallel_descent_rows(
     its index and drawn on up to ``workers`` forked processes. The rows are a pure function of the tree, ``draw``
     and ``seed``, whatever ``workers`` is; ``1`` draws every piece in this process. A worker returns rows, not
     leaves: the lazy tree cannot cross a process boundary, so the caller builds only the leaf it picks."""
-    global _DRAWING
     jobs = [(f"{seed}/{i}", draw // _DRAW_CHUNKS + (i < draw % _DRAW_CHUNKS)) for i in range(_DRAW_CHUNKS)]
-    jobs = [job for job in jobs if job[1]]
-    _DRAWING = (options, skip)
-    try:
-        chunks = _forked(_draw_chunk, jobs, workers)
-    finally:
-        _DRAWING = None
+    chunks = forked(_draw_chunk, [job for job in jobs if job[1]], workers, shared=(options, skip))
     return [row for chunk in chunks for row in chunk]
 
 
-def _forked(fn: Callable, jobs: Sequence, workers: int) -> list:
-    """``fn`` over ``jobs``, on up to ``workers`` forked processes that inherit this process's memory — the fork
-    is the point: the children read what the parent set up and send back only results. One worker runs them here,
-    and so does a daemonic process, which may not start children (a vLLM worker compiling a kernel with no
-    evidence draws its cold pool in place)."""
-    if workers <= 1 or len(jobs) < 2 or current_process().daemon:
-        return [fn(job) for job in jobs]
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
-        with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=get_context("fork")) as pool:
-            return list(pool.map(fn, jobs))
+#: The ``shared`` value of the :func:`forked` call whose pool is running: set before the fork, so the children inherit
+#: it, never pickled.
+_SHARED: object = None
 
 
-#: The arms a forked expansion worker builds: set by the parent before the fork, so each arm's builder is
-#: inherited, never pickled.
-_EXPANDING: Sequence[DeferredFork] | None = None
+def _apply(fn: Callable, job: object) -> object:
+    return fn(_SHARED, job)
+
+
+def forked(fn: Callable, jobs: Sequence, workers: int, *, shared: object = None) -> list:
+    """``fn(shared, job)`` for each of ``jobs``, on up to ``workers`` forked processes that inherit this process's
+    memory — the fork is the point: the children read ``shared`` (a lazy tree, the kernels of a file) as the parent
+    holds it, never pickled, and send back only results. A child runs on one worker
+    (``config.set_workers``), so a compile it runs draws in-process. One worker runs the jobs here, and so does a
+    daemonic process, which may not start children (a vLLM worker compiling a kernel with no evidence draws its
+    cold pool in place). The workers are also capped by memory (:func:`_copies_that_fit`)."""
+    global _SHARED  # noqa: PLW0603 — the fork seam, set and restored here
+    workers = min(workers, len(jobs), _copies_that_fit())
+    if workers <= 1 or current_process().daemon:
+        return [fn(shared, job) for job in jobs]
+    previous, _SHARED = _SHARED, shared
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
+            context = get_context("fork")
+            with ProcessPoolExecutor(workers, mp_context=context, initializer=config.set_workers, initargs=(1,)) as pool:
+                return list(pool.map(partial(_apply, fn), jobs))
+    finally:
+        _SHARED = previous
+
+
+def _copies_that_fit() -> int:
+    """How many forked copies of this process the available memory holds. A child shares the parent's pages until
+    it writes one, and over a long job Python's reference counts write most of them, so each child is counted at
+    the parent's private resident memory (file-backed pages, the shared libraries, stay shared)."""
+    try:
+        meminfo = Path("/proc/meminfo").read_text()
+        available = int(re.search(r"^MemAvailable:\s+(\d+) kB", meminfo, re.MULTILINE)[1]) * 1024
+        _, resident, shared, *_ = (int(pages) * os.sysconf("SC_PAGE_SIZE") for pages in Path("/proc/self/statm").read_text().split())
+    except (OSError, TypeError, ValueError):  # no /proc: not Linux
+        return os.cpu_count() or 1
+    return max(1, available // max(resident - shared, 1))
 
 
 #: The facts of a kernel an arm leaves that the pick reads of every arm — its derived body, its exact identity and
@@ -369,8 +389,8 @@ def _piece_facts(built: object) -> dict[str, dict]:
     return facts
 
 
-def _expand_arm(index: int) -> tuple[Op | Graph | Fork, dict[str, dict]]:
-    built = _EXPANDING[index].expand()[0]
+def _expand_arm(arms: Sequence[DeferredFork], index: int) -> tuple[Op | Graph | Fork, dict[str, dict]]:
+    built = arms[index].expand()[0]
     return built, _piece_facts(built)
 
 
@@ -381,13 +401,8 @@ def parallel_expand(arms: Sequence[DeferredFork], *, workers: int = 1) -> None:
     (:func:`_piece_facts`), and the parent memoizes both exactly where :meth:`DeferredFork.expand` and the kernels'
     own computations would, so every later reader finds them. Nothing else crosses back: what the arm's splice
     needs besides the fragment rides the arm (:attr:`DeferredFork.output`)."""
-    global _EXPANDING
     pending = [index for index, arm in enumerate(arms) if "_built" not in arm.__dict__]
-    _EXPANDING = arms
-    try:
-        built = _forked(_expand_arm, pending, workers)
-    finally:
-        _EXPANDING = None
+    built = forked(_expand_arm, pending, workers, shared=arms)
     for index, (value, facts) in zip(pending, built, strict=True):
         object.__setattr__(arms[index], "_built", value)
         for node_id, known in facts.items():
@@ -407,6 +422,27 @@ def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | F
             stack.append(iter(option.expand()))
         else:
             yield option
+
+
+#: The pieces a parallel walk is cut into before it forks: enough that uneven subtrees still fill every worker.
+_WALK_PIECES = 256
+
+
+def _walk_piece(trees: Sequence[Op | Graph | Fork], piece: range) -> list[dict]:
+    return [leaf_knobs(leaf) for leaf in iter_leaves(trees[piece.start : piece.stop])]
+
+
+def parallel_leaf_rows(options: Iterable[Op | Graph | Fork], *, workers: int = 1) -> list[dict]:
+    """The knob rows of every leaf, in :func:`iter_leaves` order, walked on up to ``workers`` forked processes. The
+    tree is expanded level by level here, each fork replaced in place by its children so the order holds, until
+    it is at least :data:`_WALK_PIECES` subtrees wide; they are cut into that many runs, each walked whole by one
+    worker. A worker returns rows, not leaves, as a draw does (:func:`parallel_descent_rows`)."""
+    trees = list(options)
+    while len(trees) < _WALK_PIECES and any(isinstance(o, Fork) and not o.is_leaf for o in trees):
+        trees = [child for o in trees for child in (o.expand() if isinstance(o, Fork) and not o.is_leaf else [o])]
+    run = -(-len(trees) // _WALK_PIECES) or 1
+    chunks = forked(_walk_piece, [range(i, min(i + run, len(trees))) for i in range(0, len(trees), run)], workers, shared=trees)
+    return [row for chunk in chunks for row in chunk]
 
 
 def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callable[[dict], bool] | None = None):

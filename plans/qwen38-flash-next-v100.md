@@ -22,8 +22,8 @@ rest on 2026-11-14. Against the async fork, Emmy is now 1.41x slower to the firs
 4K to 32K, 1.67x slower per token at one request, and gives 0.76x the fork's output at four requests and 0.75x at
 eight (2026-11-19). Async doubles the first token at the full context on both sides; the owner keeps the 2.5 GiB
 key/value pool, so that is a known limit (step 5). The next round comes from the 2026-11-19 ranking, for the owner to
-pick. The minimums in step 2 and Qwen's license are still open with the owner, who plans as if the license were
-granted.
+pick; its round 1 stopped at its gate the same day. The minimums in step 2 and Qwen's license are still open with
+the owner, who plans as if the license were granted.
 
 ## What we know
 
@@ -1579,6 +1579,47 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     furthest per unit of work, and both cost what earlier twin and tune rounds cost. Round 3 is the largest decode
     lever but the most uncertain; its gate should run before any serving work.
   - Boot: Emmy 758-771 s, the fork 415-468 s.
+- **The expert group program at the expert's width (2026-11-19): stopped at its gate, nothing to ship.** Round 1 of
+  the 2026-11-19 ranking, measured before building, on main `793647dc9`. Its gate: the 3,920-token step's expert
+  programs at least 40 ms less and the 175-token step's at least 20 ms less, profiled. Neither can be met by narrower
+  blocks in launches of 32 experts, nor by any mix measured.
+  - Rows per expert, counted per layer on a serving boot of main (rank 0, every MoE layer). With random-token prompts,
+    as the first-token runs use, an expert of more than 8 rows holds: at 175 tokens 9-16 rows (14 per layer), 17-32
+    (10), 33-64 (6), 65-128 (4), 129-256 (3); at 3,920 tokens 31, 30, 25, 22, 17, and 29 experts past 256. Real text
+    spreads its rows wider: a 3,136-token step of a document has 39, 43, 47, 52, 53 and 29 per layer, and a 628- or
+    697-token step 41-60 experts of 9-32 rows, against 23-29 for a random 784-token step.
+  - Cold cost of one launch of 32 experts, each piece tuned or pinned by hand, us: 8 rows 191 (recorded), 16 rows 206,
+    32 rows 228, 64 rows 303, 128 rows 484, 256 rows 541 (recorded). Per expert: 6.0, 6.4, 7.1, 9.5, 15.1, 16.9 us. The
+    16- and 32-row programs take the 8-row program's route (two cuts, weights decoded inside the matmuls), the 64- and
+    128-row ones the same route with the gate and up weights decoded apart. A launch of 8 experts costs about twice
+    as much per expert: 102, 107, 113 and 185 us at 8, 32, 64 and 256 rows, its gate and up piece 76 us at 8 and 32
+    rows alike.
+  - Every launch runs its 32 blocks whatever experts it holds, so a width adds a part-empty launch. At 175 tokens a
+    layer has about 37 wide experts, which today fill one or two launches of 256 rows; split across widths, they fill
+    more. Expert program time per step estimated from the counts and the costs above, ms (main's estimate against the
+    profile: 262 against 267 at 3,920 tokens, its wide program 46 against 43-50 at 175):
+
+    | Step | Main | + 32 rows | + 32 and 128 rows (the ranking's design) | + 32 and 64 rows | + 32 and 64, last launch of each width in 8s |
+    | --- | ---: | ---: | ---: | ---: | ---: |
+    | 3,920 tokens, random | 262 | 240 | 244 | 240 | 227 |
+    | 175 tokens, random | 73 | 71 | 91 | 84 | 61 |
+    | 784 tokens, random | 128 | 112 | 118 | 122 | 101 |
+    | 239 tokens, random | 83 | 75 | 96 | 89 | 68 |
+    | 3,136 tokens, document | 298 | 264 | 265 | 254 | 243 |
+    | 628-697 tokens, document | 180-205 | 145-153 | 158-168 | 133-150 | 123-138 |
+
+  - So the ranking's design (32- and 128-row twins) makes the 175- and 239-token steps 13-18 ms slower, and the best
+    mix gains 35 ms at 3,920 tokens and 12 ms at 175: the gate is missed at both. The 2026-11-19 expectation assumed
+    a wide expert would cost about what the 8-row program costs per expert at every width; the padding of the last
+    launch of each width, and the cost of the down projection past 32 rows, take that back.
+  - What is still worth having, for the owner to weigh: the 32-row twin alone, no other change, takes about 23 ms from
+    a 4K first token and 24 ms from a 1K one on random prompts (2-4%), and 34-52 ms per step of real text. It costs a
+    twin, a recorded route and the runner's pick of the narrowest program; the change is about 20 lines. Not built.
+  - The tuner missed the mma schedules of the 16- and 32-row down projections: 40 tries found 203 and 369 us, all
+    scalar, while the 8-row program's mma schedule, pinned by hand, ran them in 55 and 71 us. A record of these pieces
+    has to try the mma rows by hand, or the prior's ranking of them has to change.
+  - The first-token runs use random token ids, which route far more unevenly than text: they understate what any
+    expert-width change gains on real prompts.
 - **The 4,096-row pre and post programs, tuned on the card (2026-11-19).** Round 2 of the 2026-11-19 ranking, main
   `793647dc9`, rows only: no compiler or runner change. Gate, stated before tuning: pre4096 plus post4096 cold at
   4,096 rows at least 1.0 ms per layer faster, strict from the golden alone.

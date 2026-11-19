@@ -56,15 +56,16 @@ def record_bench_perf(db_path: Path | str, ctx: Context, compiled, bench) -> int
     db = SearchDB(Path(db_path))
     written = 0
     try:
-        for node, launch in zip(nodes, per_launch, strict=True):
-            written += persist_kernel_perf(
-                db,
-                ctx,
-                node.op,
-                stats=stats_from_launch(launch),
-                status="ok",
-                captured=bool(getattr(bench, "captured", False)),
-            )
+        with db.transaction():
+            for node, launch in zip(nodes, per_launch, strict=True):
+                written += persist_kernel_perf(
+                    db,
+                    ctx,
+                    node.op,
+                    stats=stats_from_launch(launch),
+                    status="ok",
+                    captured=bool(getattr(bench, "captured", False)),
+                )
     finally:
         db.close()
     return written

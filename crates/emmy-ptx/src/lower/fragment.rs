@@ -1113,9 +1113,8 @@ impl Lowerer {
                 None => None,
             };
             let mut values = Vec::with_capacity(group);
-            for element in at..at + group {
-                let val =
-                    self.stored_value(node, &frags, element, &lanes.registers[element][0], ctx)?;
+            for (element, registers) in lanes.registers.iter().enumerate().skip(at).take(group) {
+                let val = self.stored_value(node, &frags, element, &registers[0], ctx)?;
                 values.push(self.stored_element(val, elem)?);
             }
             let store = Opcode::St(buffer.space);

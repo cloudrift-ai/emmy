@@ -421,3 +421,16 @@ def test_processes_opening_one_fresh_file_at_once_all_succeed(tmp_path):
     assert [proc.exitcode for proc in procs] == [0] * 6
     tables = {row[0] for row in sqlite3.connect(path).execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"kernel", "perf"} <= tables
+
+
+def test_a_transaction_commits_its_writes_together_or_none(tmp_path) -> None:
+    """A bulk import writes inside one transaction: what it wrote commits at the end, and an error leaves nothing."""
+    db = SearchDB(tmp_path / "tune.db")
+    with db.transaction():
+        db.record_source("golden:a")
+        db.record_source("golden:b")
+    with pytest.raises(RuntimeError), db.transaction():
+        db.record_source("golden:c")
+        raise RuntimeError("the import failed")
+    assert db.sources() == {"golden:a", "golden:b"}
+    assert SearchDB(tmp_path / "tune.db").sources() == {"golden:a", "golden:b"}

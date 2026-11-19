@@ -33,3 +33,20 @@ def test_the_featurizer_tells_a_run_from_its_plain_band():
     assert all(
         {k: v for k, v in feats.items() if k != "D_reduce_run"} == {k: v for k, v in plain.items() if k != "D_reduce_run"} for feats in runs
     )
+
+
+def test_the_schedule_space_and_its_scores_are_the_same_on_forked_workers(monkeypatch):
+    """A tune walks the schedule space and featurizes its rows on ``EMMY_WORKERS`` forked processes: the rows, their
+    order and the prior's scores are the ones a single process gives."""
+    from emmy.compiler.pipeline.search.autotune import prior_scores
+
+    ctx = Context.from_target((7, 0))
+
+    def space(workers):
+        monkeypatch.setenv("EMMY_WORKERS", str(workers))
+        op, rows = schedule_space(_graph(), ctx)
+        return rows, prior_scores(op, rows, ctx)
+
+    serial, forked = space(1), space(3)
+    assert len(serial[0]) > 1
+    assert forked == serial
