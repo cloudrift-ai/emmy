@@ -7,15 +7,13 @@ points. Read the code again before building on a number.
 
 ## What the first build showed (2026-11-18)
 
-Built on this branch with the recurrence code removed, so that only the plain cases shape the design. Read this
-before the rest: it changes stages 2 and 3.
+Read this before the rest: it changes stages 2 and 3.
 
-**State of the branch.** A kernel carries no state. The roll, the lift of a carrying loop, the split across the
-sequence, the serial launch axis and both storages of a state are deleted: 2,557 lines under `emmy/`, 10 files, and
-the tests that covered them. The Rust statement kinds and Fold fields stay, and so does the `g<n>k<p>` spelling, so
-stored files load. A program with a recurrence fails at the splice bound. The hardware goldens and the Qwen3.8
-goldens still store kernels with a carried state and are not restamped. Restoring is a revert of the removal commit
-plus whatever the new design asks of it.
+**How it was built.** The recurrence code was removed first, so that only the plain cases shaped the design: the
+roll, the lift of a carrying loop, the split across the sequence, the serial launch axis and both storages of a
+state, 2,557 lines under `emmy/`. The stages were tried on that tree. The removal is reverted again, and the
+refactor that held sits on the full compiler: against the branch's start it is three files and 144 lines smaller.
+The measurements below were taken on the tree without the recurrence code.
 
 **The gate.** The PTX of every kernel of all 258 corpus cases, taken before any change, with a scratch tool. It is
 not a flag yet, and it does not cover the golden rows. Every step below compiles to that PTX byte for byte.
