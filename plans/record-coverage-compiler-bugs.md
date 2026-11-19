@@ -13,13 +13,19 @@ No row is measured, so a strict record of those programs fails. Kernels: `k_979e
 
 **Reproducer.**
 
-Export program 8 of `recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json` as a traced-IR file (the record run did
-this with `emmy compile --golden PATH --program 8`), trace it into a scratch golden for the card, then:
+The same error shows on two paths, on two cards. On the PRO 6000 Server Edition every tune of the 8 kernels raises
+it. On the A100 the walks tune fine as one kernel, but a strict record of the whole program raises it while the
+greedy expands its `030_cut` route candidates (`kernel_set` → `_route_candidates` → `parallel_expand`), on all four
+programs and on every retry. So the failing body is one a cut route writes, not the stored kernel.
 
 ```bash
-emmy trace _data/p8.ir.json --target sm_120 -o _data/p8.json
-emmy run --golden _data/p8.json --kernel k_979e61c3fcbf --bench --tune 40
+emmy compile --golden recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json --program 8 --ir torch -o _data/p8.json
+emmy trace _data/p8.json -o _data/W.json --append        # into a scratch copy of the card's hardware golden
+emmy run --golden _data/W.json --realization <program 8's seed row> --bench --record-greedy --strict-evidence
+emmy run --golden _data/W.json --kernel k_979e61c3fcbf --bench --tune 40
 ```
+
+On the A100 the seed kernel is `k_386084c79684` and the loop the error names is `a8`.
 
 The error is CPU-side (it fires while lifting the loop), so the tune is not needed to see it: the first schedule of
 `--tune` reaches it. Check whether a plain compile of the kernel under the failing schedule reproduces it without a
