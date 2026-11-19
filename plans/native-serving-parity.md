@@ -617,6 +617,16 @@ What the session changes for the milestones:
     its term. Gate: every 27B bar cell green, or each miss named with its measured kernel-level floor — the owner
     decides the cell's fate here, not at the switch. Needs 2-9.
 
+    Met on 2026-11-19, one rented RTX 5090, native, plugin and stock vLLM 0.32.0 in one session (the 27B
+    DISCOVERY's section of that date has the tables). Every bar cell is green: TPOT 1.07x / 1.12x / 1.14x stock at
+    256 / 7,680 / 197,632 tokens (1.19x on the worst 7,680-token pair), first token 0.23x / 1.83x / 1.22x. Native
+    beats the plugin in every cell. The full window serves (261,632 tokens, 141 s, 9.8 ms), memory at rest is 28.2
+    GiB against stock's 30.5, GSM8K is 0.580 / 0.645 against the plugin's 0.545 / 0.570, and every probe difference
+    is at a top-two near tie. Two things are open. By estimate the chunk term at 197,632 tokens is about 36 s,
+    above the 20 s above, while attention is about 54 s; the cell is inside 2x stock all the same. And both Emmy
+    lanes score about 0.15 lower on GSM8K than on 2026-11-12, level with stock, which did not move: likely the W8A8
+    projections (#1411), not separated. The concurrency cells are milestones 19-25's.
+
 11. **Qwen3.6: the paging programs' cost out of the decode step.** Milestone 1's split sizes it; the dev-box
     figure is 7.8 ms a step of pager table programs, the decision kernel on one CTA times ~160 paging runs (40
     layers x four paged buffers: gate-up and down codes and their scales). By measurement, in order of least

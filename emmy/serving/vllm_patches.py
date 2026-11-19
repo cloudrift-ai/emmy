@@ -77,7 +77,8 @@ def one_token_prompt_rows_replay_decode_graphs() -> None:
     except ImportError:  # a vLLM without Model Runner V2
         return
 
-    if getattr(GPUModelRunner, "_emmy_one_token_prompt_rows", False):
+    # vLLM 0.25.1, the RTX 5090 recipes' plugin lane, has Model Runner V2 but not this method.
+    if getattr(GPUModelRunner, "_emmy_one_token_prompt_rows", False) or not hasattr(GPUModelRunner, "_get_uniform_decode_token_count"):
         return
     orig = GPUModelRunner._get_uniform_decode_token_count
 
