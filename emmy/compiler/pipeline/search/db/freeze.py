@@ -47,8 +47,8 @@ logger = logging.getLogger(__name__)
 
 _LFS_POINTER = "version https://git-lfs.github.com/spec/v1"
 #: The measurement freeze kept with the repository: one golden file per card, exactly what :func:`write_freeze`
-#: writes. ``emmy db import --repository`` reads it beside the repository goldens; nothing else does — not a compile,
-#: not the reproduction gate, which iterate the golden paths. Left out of the wheel, so a plain path.
+#: writes. ``emmy db import --repository`` reads it beside the repository goldens, and ``emmy candidates build``
+#: imports it; no compile and no reproduction gate does. Left out of the wheel, so a plain path.
 REPOSITORY_FREEZE = Path(__file__).parent.parent / "freezes"
 
 
@@ -202,8 +202,7 @@ def impossible_kernel_reason(row: PerfRow) -> str | None:
 
 
 def _gpu_filename(gpu_name: str, cap: tuple[int, int]) -> str:
-    """The per-GPU golden file name, mirroring the ``golden/`` convention —
-    e.g. ``nvidia_geforce_rtx_4090_sm89.json``."""
+    """A card's freeze file name: its product name and capability, e.g. ``nvidia_geforce_rtx_4090_sm89.json``."""
     slug = re.sub(r"[^a-z0-9]+", "_", gpu_name.lower()).strip("_") or "unknown_gpu"
     return f"{slug}_sm{cap[0]}{cap[1]}.json"
 

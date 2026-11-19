@@ -127,26 +127,27 @@ def handle_db_import(args) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     db = SearchDB(path)
     try:
-        for src in sources:
-            # A file is a golden file; a directory is a freeze; a tune DB is frozen first, so what reaches the
-            # dataset is what a freeze of it would hold.
-            if src.suffix == ".json":
-                files = [(src, file_source("golden", src))]
-            else:
-                frozen = src
-                if not src.is_dir():
-                    frozen = Path(tempfile.mkdtemp()) / "freeze"
-                    write_freeze(src, frozen)
-                files = [(file, file_source("freeze", file)) for file in sorted(frozen.glob("*.json"))]
-                if not files:
-                    logger.error("no golden files in %s", src)
-                    sys.exit(2)
-            for file, source in files:
-                try:
-                    import_file(db, file, source)
-                except ValueError as exc:
-                    logger.error("%s", exc)
-                    sys.exit(2)
+        with tempfile.TemporaryDirectory() as scratch:
+            for n, src in enumerate(sources):
+                # A file is a golden file; a directory is a freeze; a tune DB is frozen first, so what reaches the
+                # dataset is what a freeze of it would hold.
+                if src.suffix == ".json":
+                    files = [(src, file_source("golden", src))]
+                else:
+                    frozen = src
+                    if not src.is_dir():
+                        frozen = Path(scratch) / str(n)
+                        write_freeze(src, frozen)
+                    files = [(file, file_source("freeze", file)) for file in sorted(frozen.glob("*.json"))]
+                    if not files:
+                        logger.error("no golden files in %s", src)
+                        sys.exit(2)
+                for file, source in files:
+                    try:
+                        import_file(db, file, source)
+                    except ValueError as exc:
+                        logger.error("%s", exc)
+                        sys.exit(2)
     finally:
         db.close()
     logger.info("DB: %s", path)
