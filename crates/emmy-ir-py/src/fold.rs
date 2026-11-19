@@ -782,6 +782,7 @@ impl PyFold {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn parts(
         operands: Option<&Bound<'_, PyAny>>,
         lift: &Bound<'_, PyAny>,
