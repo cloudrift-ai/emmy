@@ -562,7 +562,7 @@ def _pieces_price(splice: object, ctx: Context, db) -> float | None:
     fragment = _leaf_graph(splice)
     total = 0.0
     for node in fragment.nodes.values():
-        if node.op.identity_key(with_io=True, with_knobs=True) is None:
+        if node.op.identity_key(structural=False, with_io=True) is None:  # no body: no kernel (an arm's worker computed this one)
             continue
         piece = node.op.with_io(fragment, node)
         kernel = _read(piece.identity_key(structural=False, with_io=True))

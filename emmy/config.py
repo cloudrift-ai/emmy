@@ -489,7 +489,8 @@ def set_workers(count: int) -> None:
 
 def workers() -> int:
     """``EMMY_WORKERS`` — the processes Emmy's CPU-parallel work runs on: a greedy compile's cold-pool draw,
-    ``emmy db export``'s pools and ``emmy eval prior``'s reproduction (default: one per CPU this process may use;
+    the row compiles of a pinned bench (``run --bench --ab`` / ``--tune``), ``emmy db export``'s pools and
+    ``emmy eval prior``'s reproduction (default: one per CPU this process may use;
     ``1`` runs in this process).
     Their results are the same at any count."""
     default = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1

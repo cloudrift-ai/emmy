@@ -341,6 +341,7 @@ replay. Only this read-only replay path shares a document; a record write-back l
 lock. The walk compiles a family's twins narrowest first, each with the weight layouts the twins before it bound, as
 serving builds them; `--realization NAME` gets the same scope by compiling its narrower twins first, from the file's
 evidence and with no hand-pinned decision, so a record or tune of one wide twin measures the kernels serving deploys.
+It lowers its own family's programs only, so its cost does not grow with the other programs of the file.
 
 The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
 attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).
@@ -365,7 +366,10 @@ decisions retain their buffer scope. The whole-file walk pins only measured
 rows of the complete target. Every pinned row (a golden row and an
 `--ab` hand row alike) is MEASURED under a hand pin published to the
 environment for that one compile, then recorded (see `--record` and the bench-to-DB recording below); deploying it
-is the evidence pick's business, never the pin's. The selected target's records are also the compile's golden
+is the evidence pick's business, never the pin's. The rows of one pinned bench (a tune's batch among them) are all
+compiled before the first is timed, side by side on forked worker processes (`EMMY_WORKERS`, one per core), each
+holding one row's pins in its own environment; the GPU then times them one after another, in the rows' order. The
+compiled rows are the same at any worker count. The selected target's records are also the compile's golden
 evidence for the greedy row. The selected realization's input regime is published even when it supplies no automatic
 pin, so its rows read as live measurements. A schedule or routing row deploys only where it is the fastest measured
 row for its kernel.
@@ -439,7 +443,9 @@ or an `--ab` row) still benches.
 afterwards, the carried-state storage among them: the schedule prior's ten best first, then batches of eight Bayesian
 optimization proposes from the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its clean rows land in the tune DB
 through the same recording and the next compile picks the fastest; a row that fails, does not realize, or is flagged
-counts as a failure, never as a time. A program with several scheduled kernels is refused, because a bare pin reaches
+counts as a failure, never as a time. The CPU work of a tune runs on `EMMY_WORKERS` forked processes — the walk of
+the schedule rows, their featurizing for the prior, each batch's compiles — and the rows, their scores and their
+kernels are the same at any count. A program with several scheduled kernels is refused, because a bare pin reaches
 them all. `--kernel NAME` (with `--golden PATH`) selects a file-local kernel reference (`Kernel.ref`, which
 can distinguish kernels sharing one C name) and runs that kernel alone. A formed kernel uses its stored body
 (`GoldenFile.executable`). A derived cut piece replays its recorded parent decisions through the shared golden

@@ -974,11 +974,12 @@ def _run_golden_targets(args) -> None:
         sys.exit(1)
 
 
-def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str, object]]:
+def _targets_in_build_order(document, target_rows, *, of=None) -> list[tuple[str, dict, str, object]]:
     """The targets of ``target_rows`` (:meth:`GoldenFile.target_rows`) as ``(name, pins, target, scope)``, in the order
     serving builds twins (``serving.twins.twins_in_build_order``, which reads the checkpoint tensors each target's
     traced program binds and its input and output sizes): per input regime, a family's programs narrowest first, each
-    with its family's layout scope. A target is named by the shortest row name on it or, with none, on its pieces."""
+    with its family's layout scope — with ``of``, a traced program's index, its family's alone. A target is named by
+    the shortest row name on it or, with none, on its pieces."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.serving.twins import fork_less_weights, twins_in_build_order  # noqa: PLC0415
 
@@ -1004,7 +1005,7 @@ def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str,
     for pin_set in dict.fromkeys(_regime(pins) for _, pins, _ in targets):
         same_pins = [(name, pins, target) for name, pins, target in targets if _regime(pins) == pin_set]
         reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
-        for index, scope in twins_in_build_order(reached, fork_less):
+        for index, scope in twins_in_build_order(reached, fork_less, of=of):
             ordered += [(name, pins, target, scope) for name, pins, target in same_pins if traced[target] == index]
     return ordered
 
@@ -1040,7 +1041,7 @@ def _family_layouts(args):
     path = document.path_to(rows[0].kernel)
     target = path[0].parent if path else rows[0].kernel
     regime = {key: group for key, group in document.target_rows().items() if _regime(dict(key[1])) == _regime(rows[0].pins)}
-    ordered = _targets_in_build_order(document, regime)
+    ordered = _targets_in_build_order(document, regime, of=document.kernel(target).traced)
     scope = next((scope for _, _, ref, scope in ordered if ref == target), None)
     if scope is None:
         return contextlib.nullcontext()
@@ -2000,6 +2001,64 @@ def _failed_bench_status(exc: BaseException) -> str:
     return "compile_timeout" if compile_budget_overrun(exc) else "bench_fail"
 
 
+def _compile_pinned_row(compiling: tuple, index: int):
+    """Row ``index`` of ``compiling`` (the backend, and each row's fresh graph beside its pins) lowered under its own
+    pins: the compiled graph, or the text of the error that stopped its trace or its lowering. The pins are published
+    to this process's environment for this one compile."""
+    backend, rows = compiling
+    graph, knobs = rows[index]
+    if isinstance(graph, str):
+        return graph
+    try:
+        with pinned_knobs(knobs):
+            return backend.compile(graph)
+    except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
+        return str(exc)
+
+
+def _compile_pinned_rows(backend, source, samples, quantize=None) -> list:
+    """Each sample compiled under its own pins, in order: the compiled graph, or the text of the error that stopped
+    its trace or its lowering. Each row gets a **fresh** graph, traced here, in this process — a frontend graph
+    can't be re-compiled (the first lowering mutates it in place, so a reused graph would yield the first config's
+    kernel every time). A sample carrying ``dynamic`` specs (a dynamic golden, or an ``--ab`` row of a ``--dynamic``
+    run) re-traces symbolically, so the pinned kernel is the same masked-tile artifact the greedy run deployed and
+    benches at the same hint. The lowerings are the CPU work of a pinned bench, and no row's reads another's, so
+    they run side by side on up to ``EMMY_WORKERS`` forked processes: a worker holds one row's pins in its own
+    environment, and the rows are the same at any count."""
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import forked  # noqa: PLC0415
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
+
+    rows = []
+    for sample in samples:
+        replay_knobs = _sample_replay_knobs(sample)
+        # String sources must be retraced at the recorded symbolic shape. An
+        # embedded stable program already carries its symbolic dimensions.
+        dyn = getattr(sample, "dynamic", None) if isinstance(source, str) else None
+        try:
+            dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dyn))) if dyn else None
+            with pinned_knobs(replay_knobs):
+                if isinstance(source, str):
+                    graph, _, bundle = graph_from_code(source, dynamic_shapes=dynamic_shapes)
+                    if quantize:
+                        # ``--ab`` must re-lower the same quantized program as the primary
+                        # compile. The old path re-traced only the unquantized module, so its
+                        # rows silently benchmarked ordinary float linear kernels under NVFP4
+                        # knob names. Keep the temporary checkpoint private to this variant;
+                        # pinned timing has no eager correctness reference for quantized code.
+                        import tempfile
+
+                        from emmy.compiler.loader.synthesize import quantize_and_spell
+
+                        quantize_and_spell(graph, bundle, tempfile.mkdtemp(prefix="emmy-ab-"), scheme=quantize)
+                else:
+                    graph = source.copy()
+        except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
+            graph = str(exc)
+        rows.append((graph, replay_knobs))
+    return forked(_compile_pinned_row, range(len(rows)), config.workers(), shared=(backend, rows))
+
+
 async def _bench_golden_variants(
     backend,
     source,
@@ -2024,16 +2083,13 @@ async def _bench_golden_variants(
     or the shapeless ``--ab`` pseudo-samples from :func:`_ab_samples` (same duck type). Both are
     MEASURED under a hand pin published to the environment for that one compile: the pin forces
     the row so its latency can be taken; deploying it is the evidence pick's business once the
-    measurement is a row in the tune DB (:func:`_record_bench_evidence`). Each config re-traces a
-    **fresh** graph from ``code`` — a frontend graph can't be re-compiled (the first lowering
-    mutates it in place, so a reused graph would yield the first config's kernel every time). A sample carrying ``dynamic``
-    specs (a dynamic golden, or an ``--ab`` row of a ``--dynamic`` run) re-traces
-    symbolically, so the pinned kernel is the same masked-tile artifact the greedy
-    run deployed and benches at the same hint. A config that fails to compile / bench
-    is kept as a ``bench_fail`` row (never dropped — the table / ``--json`` show why).
+    measurement is a row in the tune DB (:func:`_record_bench_evidence`). A config that fails to
+    compile / bench is kept as a ``bench_fail`` row (never dropped — the table / ``--json`` show why).
 
-    Compiling (trace + lowering) is parent CPU work; every GPU touch is one job on the
-    backend's persistent SIGKILL-able worker (``bench_pinned_async``) — the same path the
+    Compiling (trace + lowering) is CPU work, done for every row before the first bench
+    (:func:`_compile_pinned_rows`); every GPU touch is one job on the
+    backend's persistent SIGKILL-able worker (``bench_pinned_async``), one row after another in the
+    rows' order — the same path the
     greedy row measured through, so all rows share one timing semantics, and a pinned
     config that hangs dies with the child: the row records ``bench_fail``, the parent's
     CUDA context stays clean, and the next row's job respawns a fresh child.
@@ -2052,9 +2108,6 @@ async def _bench_golden_variants(
     ``computed_from`` (``_computed_from_formats`` of the frontend program) sets each float output's
     rounding step there, since the compiled ``source`` no longer holds the values it is computed from.
     Flags render as a ``!`` marker in the table and ride the ``--json`` record."""
-    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
-    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
-
     out = []
     ref_inputs, ref_outputs, *ref_exact = ref if ref is not None else (None, None)
     if strict_correctness and (ref_inputs is None or ref_outputs is None):
@@ -2065,37 +2118,15 @@ async def _bench_golden_variants(
     # Row index -> its deferred wrong-answer verdict and the knobs it actually realized.
     wrong_answer: dict[int, str | None] = {}
     realized: dict[int, list] = {}
-    for sample in golden_configs or []:
+    samples = list(golden_configs or [])
+    for sample, g_compiled in zip(samples, _compile_pinned_rows(backend, source, samples, quantize), strict=True):
         replay_knobs = _sample_replay_knobs(sample)
-        # String sources must be retraced at the recorded symbolic shape. An
-        # embedded stable program already carries its symbolic dimensions.
-        dyn = getattr(sample, "dynamic", None) if isinstance(source, str) else None
         # ``unverified`` rides every row of a session with no reference outputs, so a measurement
         # taken without an output check is never mistaken for a checked one.
         flags = [unverified] if unverified else []
-        try:
-            dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dyn))) if dyn else None
-            with pinned_knobs(replay_knobs):
-                # Fresh graph; lowering mutates it and bakes the pins into the kernel.
-                if isinstance(source, str):
-                    graph, _, bundle = graph_from_code(source, dynamic_shapes=dynamic_shapes)
-                    if quantize:
-                        # ``--ab`` must re-lower the same quantized program as the primary
-                        # compile. The old path re-traced only the unquantized module, so its
-                        # rows silently benchmarked ordinary float linear kernels under NVFP4
-                        # knob names. Keep the temporary checkpoint private to this variant;
-                        # pinned timing has no eager correctness reference for quantized code.
-                        import tempfile
-
-                        from emmy.compiler.loader.synthesize import quantize_and_spell
-
-                        quantize_and_spell(graph, bundle, tempfile.mkdtemp(prefix="emmy-ab-"), scheme=quantize)
-                else:
-                    graph = source.copy()
-                g_compiled = backend.compile(graph)
-        except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
-            logger.warning("[golden] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
-            out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
+        if isinstance(g_compiled, str):
+            logger.warning("[golden] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, g_compiled)
+            out.append(_GoldenBench(sample, None, None, [f"compile failed: {g_compiled}"], "bench_fail"))
             continue
         # The row's own pins AND the live env pins: a sweep publishes its route through
         # ``EMMY_KNOBS`` and varies schedules per row, so a row whose compile dropped that route
