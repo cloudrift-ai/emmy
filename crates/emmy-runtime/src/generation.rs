@@ -34,17 +34,10 @@ const LOGIT_BYTES: usize = size_of::<f32>();
 /// greedy pick, which its program puts in place of this.
 const CHUNK_PICK: i64 = -1;
 
-/// The token one decode step selects from its FP32 logits at positive temperature: the tokens in
-/// descending logit order, ties by ascending id, the smallest prefix of that order reaching top-p,
-/// and a draw over it in id order with f64 weights against a SplitMix64 counter of the request
-/// seed and the generated-token `index`, so captured and uncaptured steps select the same token
-/// for the same logits. Greedy selection is the decode program's own output. A nonfinite logit
-/// fails the request.
-fn sample(logits: &[f32], sampling: &Sampling, index: u64) -> Result<i64> {
-    ensure!(
-        logits.iter().all(|value| value.is_finite()),
-        "nonfinite logit"
-    );
+/// The nucleus of `logits`: the tokens of the smallest prefix of the descending-logit order (ties
+/// by ascending id) reaching top-p, each with its positive f64 weight at the sampling temperature,
+/// in id order, and their weights' sum.
+fn nucleus(logits: &[f32], sampling: &Sampling) -> (Vec<(usize, f64)>, f64) {
     let maximum = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let weights: Vec<f64> = logits
         .iter()
@@ -59,29 +52,47 @@ fn sample(logits: &[f32], sampling: &Sampling, index: u64) -> Result<i64> {
             .expect("finite logits")
             .then(a.cmp(&b))
     });
-    let mut kept = vec![false; logits.len()];
+    let mut kept = Vec::with_capacity(logits.len());
     let mut mass = 0.0;
     for &token in &order {
-        kept[token] = true;
+        // Weights descend with the logits, so the first underflow ends the positive ones.
+        if weights[token] == 0.0 {
+            break;
+        }
+        kept.push((token, weights[token]));
         mass += weights[token];
         if mass >= target_mass {
             break;
         }
     }
-    let mut random = sampling
-        .seed
-        .wrapping_add(0x9e37_79b9_7f4a_7c15u64.wrapping_mul(index));
+    kept.sort_unstable_by_key(|&(token, _)| token);
+    (kept, mass)
+}
+
+/// A uniform draw in [0, 1) from the SplitMix64 counter of `seed` and `index`.
+fn uniform(seed: u64, index: u64) -> f64 {
+    let mut random = seed.wrapping_add(0x9e37_79b9_7f4a_7c15u64.wrapping_mul(index));
     random = (random ^ (random >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     random = (random ^ (random >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     random ^= random >> 31;
-    let target = (random >> 11) as f64 * 2f64.powi(-53) * mass;
+    (random >> 11) as f64 * 2f64.powi(-53)
+}
+
+/// The token one decode step selects from its FP32 logits at positive temperature: a draw over
+/// the nucleus in id order against the request seed and the generated-token `index`, so captured
+/// and uncaptured steps select the same token for the same logits. Greedy selection is the decode
+/// program's own output. A nonfinite logit fails the request.
+fn sample(logits: &[f32], sampling: &Sampling, index: u64) -> Result<i64> {
+    ensure!(
+        logits.iter().all(|value| value.is_finite()),
+        "nonfinite logit"
+    );
+    let (kept, mass) = nucleus(logits, sampling);
+    let target = uniform(sampling.seed, index) * mass;
     let (mut cumulative, mut last) = (0.0, None);
-    for token in 0..logits.len() {
-        if !kept[token] || weights[token] == 0.0 {
-            continue;
-        }
+    for (token, weight) in kept {
         last = Some(token as i64);
-        cumulative += weights[token];
+        cumulative += weight;
         if target < cumulative {
             return Ok(token as i64);
         }
@@ -922,7 +933,7 @@ mod tests {
 
     /// The independent nucleus distribution of `values`: a stable sort by value, the smallest
     /// prefix reaching top-p, renormalized.
-    fn nucleus(values: &[f32], temperature: f64, top_p: f64) -> Vec<f64> {
+    fn reference_nucleus(values: &[f32], temperature: f64, top_p: f64) -> Vec<f64> {
         let n = values.len();
         let mut probabilities = vec![0.0; n];
         let maximum = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -969,7 +980,7 @@ mod tests {
         for logits in [random, zeros, edges, close] {
             let values = logits.clone();
             for (temperature, top_p) in [(0.7, 0.8), (2.0, 1.0), (1e-300, 0.01), (1e300, 0.5)] {
-                let expected = nucleus(&values, temperature, top_p);
+                let expected = reference_nucleus(&values, temperature, top_p);
                 let draws = 1024;
                 let mut counts = vec![0usize; n];
                 for seed in 0..draws {
