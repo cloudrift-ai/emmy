@@ -1,5 +1,73 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## The gate of milestone 10: native, plugin and stock in one session (2026-11-19)
+
+The protocol of the 2026-10-25 section, all three lanes, one session on one rented RTX 5090 (vast.ai; PCIe Gen4 x16,
+a 46-CPU quota on an EPYC 7642 host, driver 615.78.08, CUDA 13.0 toolkit), main at `5096d52a4`. The host caps the
+card at 450 W against the default 575 W; every lane ran under the same cap. A first host was given back before any
+cell: its card sat at 100% use and 575 W with nothing of ours on it, and ran native decode at 67 ms a token.
+
+- **native**: `emmy serve --native` over the 256-row pack, exported under strict evidence from the golden alone
+  (2,149 s). The strict serving audit passes with the 256-row chunk (80 of 80 twins); `emmy golden check` says
+  current (775 kernels).
+- **plugin**: the recipe's engine block in a pip environment of vLLM 0.25.1 with this tree installed, at 0.93 memory
+  utilization, as on 2026-11-01. Main's plugin did not import on vLLM 0.25.1: #1428 patches a vLLM method that 0.25.1
+  does not have. This branch skips the patch when the method is missing.
+- **stock**: vLLM 0.32.0 from pip (FlashInfer 0.7.0.post1, torch 2.13.0) with the settings of the 2026-10-25 section.
+
+Prompts are cut again from this tree's Markdown, 256 output tokens, one request at a time, through vLLM 0.25.1's
+client. Each lane took two warm-up requests at 256 tokens and one at 7,680 before its cells. The 7,680-token cell ran
+three times on native and twice on stock and the plugin, the lanes alternating; the table gives the first run and the
+others in brackets.
+
+| | native | plugin | stock vLLM 0.32.0 |
+|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 8.02 ms / 0.044 s | 14.52 ms / 0.157 s | 7.53 ms / 0.192 s |
+| TPOT, 7,680-token prompt | 8.78 (8.87, 8.86) ms | 15.04 (15.44) ms | 7.82 (7.48) ms |
+| TTFT, 7,680-token prompt | 1.421 (1.418, 1.419) s | 3.578 (3.566) s | 0.783 (0.771) s |
+| TPOT / TTFT, 197,632-token prompt | 9.14 ms / 89.8 s | 11.56 ms / 143.7 s | 8.04 ms / 73.9 s |
+| TPOT / TTFT, 261,632-token prompt | 9.77 ms / 140.8 s | 13.09 ms / 213.8 s | does not fit |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 76 / 64 / 87 / 87% | 67 / 63 / 93 / 79% | 72 / 69 / 86% / - |
+| device memory at rest | 28.2 GiB | 29.9 GiB | 30.5 GiB |
+| host memory of the server at rest | 3.5 GiB | 13.4 GiB | 6.4 GiB |
+| GSM8K strict / flexible match | 0.580 / 0.645 | 0.545 / 0.570 | 0.550 / 0.605 |
+| ready after | 54 s from its pack | 2,184 s cold, 1,993 s again | 928 s at its first compile, 147 s again |
+
+Native's acceptance is read from its stream (a gap of more than 1 ms starts a step), the vLLM lanes' from their spec
+decode counters. GSM8K is `scripts/run_lmeval_gate.py` with lm-eval 0.4.13, standard error 0.035.
+
+Against the bar, every cell is green:
+
+| cell | native / stock | bar | native against the plugin |
+|---|---|---|---|
+| TPOT at 256 tokens | 1.07x | 1.2x | faster (8.0 against 14.5 ms) |
+| TPOT at 7,680 tokens | 1.12x, 1.19x across the pairs | 1.2x | faster (8.9 against 15.2 ms) |
+| TPOT at 197,632 tokens | 1.14x | 1.5x | faster (9.1 against 11.6 ms) |
+| first token at 256 tokens | 0.23x | 2x | faster (0.044 against 0.157 s) |
+| first token at 7,680 tokens | 1.83x (1.42 s, the bar 1.55 s) | 2x | faster (1.42 against 3.57 s) |
+| first token at 197,632 tokens | 1.22x | 2x | faster (90 against 144 s) |
+
+- **The standing conditions hold.** Native serves the whole window at concurrency one (261,632 prompt tokens, 141 s,
+  9.8 ms a token). It holds 2.3 GiB less of the device than stock. Its GSM8K is above the plugin's on both filters.
+  The probe tokens differ from both vLLM lanes' after 2 to 63 tokens, and at every first difference native's token
+  is the reference's second choice, at a top-two margin of 0.001 to 0.21 nats against the plugin (0.59 on one probe)
+  and 0.13 to 0.50 against stock.
+- **The 7,680-token TPOT is the closest cell.** It changes with how many drafts each lane accepts on these prompts
+  (native 64%, stock 68-69%), and stock's two runs differ by 4%.
+- **The 197,632-token first token, by term.** No profile was taken, since the cell is green. From the 7,680-token
+  cell a 256-row chunk costs about 47 ms with a short window, so the 772 chunks are about 36 s and attention the
+  remaining about 54 s. Attention is well inside its 117 s, and the chunk term is above milestone 9's 20 s. That
+  budget assumed stock's 68 s; the cell is inside 2x stock all the same.
+- **This card is slower than the card of 2026-11-18.** Native's first token is 1.42 against 1.32 s at 7,680 tokens and
+  90 against 77 s at 197,632. Stock moved the same way at 7,680 tokens (0.78 against 0.67 s on 2026-11-17), so the
+  ratio stays inside the bar.
+- **GSM8K fell on both Emmy lanes since 2026-11-12, and stock did not move.** Native scored 0.725 / 0.755 then and the
+  plugin 0.720 / 0.770 on 2026-11-01; both now score with stock (0.55 / 0.605 here, 0.585 / 0.640 on 2026-11-01). The
+  FP8 projections became W8A8 in between (#1411), which quantizes their activations as stock's FP8 kernels do; that
+  change was not separated from the others, so this is a likely cause, not a measured one.
+- **The plugin decodes slower than on 2026-11-01**: 14.5 against 10.3 ms a token at 256 tokens, 15.0 against 10.4 at
+  7,680; its first token is faster (3.6 against 5.1 s at 7,680). Not investigated; native beats it in every cell.
+
 ## The two 6144-wide FP8 products split across blocks: milestone 9 met (2026-11-18)
 
 One rented RTX 5090 (vast.ai; 128 vCPUs, driver 595.71, CUDA 13.0 toolkit), this branch on main at `45e539c6a`.
