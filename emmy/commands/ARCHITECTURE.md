@@ -341,6 +341,7 @@ replay. Only this read-only replay path shares a document; a record write-back l
 lock. The walk compiles a family's twins narrowest first, each with the weight layouts the twins before it bound, as
 serving builds them; `--realization NAME` gets the same scope by compiling its narrower twins first, from the file's
 evidence and with no hand-pinned decision, so a record or tune of one wide twin measures the kernels serving deploys.
+It lowers its own family's programs only, so its cost does not grow with the other programs of the file.
 
 The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
 attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).
