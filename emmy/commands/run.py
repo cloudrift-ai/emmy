@@ -974,11 +974,12 @@ def _run_golden_targets(args) -> None:
         sys.exit(1)
 
 
-def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str, object]]:
+def _targets_in_build_order(document, target_rows, *, of=None) -> list[tuple[str, dict, str, object]]:
     """The targets of ``target_rows`` (:meth:`GoldenFile.target_rows`) as ``(name, pins, target, scope)``, in the order
     serving builds twins (``serving.twins.twins_in_build_order``, which reads the checkpoint tensors each target's
     traced program binds and its input and output sizes): per input regime, a family's programs narrowest first, each
-    with its family's layout scope. A target is named by the shortest row name on it or, with none, on its pieces."""
+    with its family's layout scope — with ``of``, a traced program's index, its family's alone. A target is named by
+    the shortest row name on it or, with none, on its pieces."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.serving.twins import fork_less_weights, twins_in_build_order  # noqa: PLC0415
 
@@ -1004,7 +1005,7 @@ def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str,
     for pin_set in dict.fromkeys(_regime(pins) for _, pins, _ in targets):
         same_pins = [(name, pins, target) for name, pins, target in targets if _regime(pins) == pin_set]
         reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
-        for index, scope in twins_in_build_order(reached, fork_less):
+        for index, scope in twins_in_build_order(reached, fork_less, of=of):
             ordered += [(name, pins, target, scope) for name, pins, target in same_pins if traced[target] == index]
     return ordered
 
@@ -1040,7 +1041,7 @@ def _family_layouts(args):
     path = document.path_to(rows[0].kernel)
     target = path[0].parent if path else rows[0].kernel
     regime = {key: group for key, group in document.target_rows().items() if _regime(dict(key[1])) == _regime(rows[0].pins)}
-    ordered = _targets_in_build_order(document, regime)
+    ordered = _targets_in_build_order(document, regime, of=document.kernel(target).traced)
     scope = next((scope for _, _, ref, scope in ordered if ref == target), None)
     if scope is None:
         return contextlib.nullcontext()
