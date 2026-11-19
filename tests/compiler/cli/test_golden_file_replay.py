@@ -1931,7 +1931,6 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     from emmy.compiler import target as target_mod
     from emmy.compiler.backend.cuda.program import BenchWorkerJobError
     from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.wire import kernel_bindings
 
     db_path = tmp_path / "autotune.db"
     monkeypatch.setenv("EMMY_TUNE_DB", str(db_path))
@@ -1964,7 +1963,6 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     try:
         with pytest.raises(SystemExit):
             run_module._handle_run_ir(args, FakeBackend, _FakeDump)
-        probed = Context.probe()
     finally:
         target_mod.set_target(None)
 
@@ -1972,16 +1970,13 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     assert len(nodes) >= 2, "the route must hold an innocent kernel beside the culprit"
     db = SearchDB(db_path)
     try:
-        tiles = {n.op.kernel_name: (kernel_tile(n.op), dict(n.op.knobs or {})) for n in nodes}
-        rows = {
-            name: db.lookup_perf(probed, tile.identity_key(structural=False, with_io=True), bindings=kernel_bindings(tile), knobs=knobs)
-            for name, (tile, knobs) in tiles.items()
-        }
+        held = {row.kernel: row for row in db.iter_perf_rows()}
+        rows = {n.op.kernel_name: held.get(kernel_tile(n.op).identity_key(structural=False, with_io=True)) for n in nodes}
     finally:
         db.close()
     filed = {name: row.status for name, row in rows.items() if row is not None}
     assert filed == {nodes[-1].op.kernel_name: "bench_fail"}, "only the kernel the watchdog named is evidence"
-    assert rows[nodes[-1].op.kernel_name].stats.median == pytest.approx(2.0e6), "priced at the run budget's fail sentinel"
+    assert rows[nodes[-1].op.kernel_name].us == pytest.approx(2.0e6), "priced at the run budget's fail sentinel"
 
 
 def test_run_skips_pinned_rebench_of_the_same_election_after_a_greedy_hang(monkeypatch, tmp_path):
