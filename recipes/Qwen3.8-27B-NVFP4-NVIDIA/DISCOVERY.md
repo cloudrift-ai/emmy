@@ -15,7 +15,7 @@ projection (`[256, 5120] x [5120, 10240]`) runs at about 515.
 - **The K split fills the card, and no card had measured it.** `030_cut` offers the split (`REDUCE=g2k`, `g4k`,
   `g2a` and wider) on both products. A tune by name measures only the schedule rows of the kernel set the greedy
   compile takes, so no tune had tried a split, and the golden held no split row for any matrix product.
-- **Measured hot, the split pieces under the qkv block** (a partial and a combine kernel):
+- **Measured hot, the split pieces under the qkv block** (a partial kernel and its finalize):
 
 | | unsplit (recorded) | 2-way split | 4-way split | 2-way, atomic adds |
 |---|---|---|---|---|
