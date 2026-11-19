@@ -69,6 +69,7 @@ from .schedule import (
     classic_node_key,
     classic_stage_key,
     classic_state_keys,
+    classic_state_tile_keys,
     holds_state,
     node_id_spelling,
     output_sweep_works,
@@ -159,7 +160,8 @@ class _LocalSupport:
 
 
 #: Every non-direct storage a carried state has a spelling for.
-_STATE_STAGES = (Stage(transport="smem"),)
+_RESIDENT = Stage(transport="reg")
+_STATE_STAGES = (Stage(transport="smem"), _RESIDENT)
 
 
 def _producers(tile_op) -> frozenset[NodeId]:
@@ -698,16 +700,37 @@ class ClassicKernelSite(Site[ClassicSchedule]):
     @cached_property
     def keys(self) -> tuple[str, ...]:
         tile = self.problem.tile
-        return ("WORK", "RASTER", *classic_state_keys(tile))
+        return ("WORK", "RASTER", *classic_state_tile_keys(tile), *classic_state_keys(tile))
 
     @cached_property
     def kernels(self) -> tuple[KernelSchedule, ...]:
+        states = self._states()
+        return (
+            *(
+                KernelSchedule(work, raster, state)
+                for work in self._works()
+                for raster in self._rasters()
+                for state in states
+                if state.is_direct or (state.transport == "smem" and holds_state(work, raster))
+            ),
+            *(self._resident() if _RESIDENT in states else ()),
+        )
+
+    def _resident(self) -> tuple[KernelSchedule, ...]:
+        """The kernel choices that keep the state in registers: warps to a CTA and the fragment geometry the
+        pipeline found a kernel for (:attr:`ClassicProblem.state_tiles`). A narrow accumulator is offered under the
+        f16-accumulate policy; a row that names a geometry gets it whatever the policy."""
+        problem = self.problem
+        (key,) = classic_state_tile_keys(problem.tile)
+        named = problem.row.get(key) or (problem.bare_pins.get("TILE") if self._states() == (_RESIDENT,) else None)
+        pinned = problem.row.get("WORK")
         return tuple(
-            KernelSchedule(work, raster, state)
-            for work in self._works()
-            for raster in self._rasters()
-            for state in self._states()
-            if state.is_direct or holds_state(work, raster)
+            KernelSchedule(work, Raster.parse(""), _RESIDENT, tile)
+            for work in (Work.parse(f"w{warps}x1") for warps in (1, 2, 4, 8))
+            if pinned is None or work.spell() == pinned
+            for tile in problem.state_tiles
+            if tile.spell() == named
+            or (not named and _atom_policy_ok(tile.atom, allow_f16_accumulate=problem.allow_f16_accumulate, allow_fp8=False))
         )
 
     def _states(self) -> tuple[Stage, ...]:
@@ -720,7 +743,10 @@ class ClassicKernelSite(Site[ClassicSchedule]):
         named = self.problem.row.get(keys[0])
         if named is None and keys[0] != "STAGE" and (bare := self.problem.bare_pins.get("STAGE")) is not None:
             # A bare pin names one site of the kernel: the state offers its value beside direct, and
-            # ``unrealized_bare_pin`` asks the completed schedule which site carried it.
+            # ``unrealized_bare_pin`` asks the completed schedule which site carried it. Registers hold no
+            # operand, so that value names the state alone.
+            if bare == _RESIDENT.spell():
+                return (_RESIDENT,) if _RESIDENT in catalog else ()
             return tuple(dict.fromkeys((Stage.direct(), spelled.get(bare, Stage.direct()))))
         if named in spelled:
             return (spelled[named],)
@@ -828,6 +854,9 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: such an operand, so the stage catalog keeps the transports that need one off it
     #: (:func:`~.refusals._stage_candidates`).
     paged: Mapping[str, tuple[int, int]] = field(default_factory=frozendict)
+    #: The fragment geometries a state in registers may take: the pipeline builds the kernel for each and keeps
+    #: those that build. Empty where :attr:`state_stages` holds no register storage.
+    state_tiles: tuple[Tile, ...] = ()
     #: The storage, beside direct, the kernel's one carried state may take: shared memory where one CTA owns
     #: each state whole, registers where the kernel has a register program. Empty for a kernel that carries no
     #: state, or whose state stays global.
@@ -976,6 +1005,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
         if family == "TILE":
             return {
                 **{classic_node_key(tile, "TILE", site): schedule.nodes[site].tile.spell() for site in tile.family_sites["TILE"]},
+                **dict.fromkeys(classic_state_tile_keys(tile), schedule.kernel.state_tile.spell()),
             }
         if family == "REDUCE":
             return {

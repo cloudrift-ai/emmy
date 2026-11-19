@@ -57,15 +57,19 @@ def _is_edge_site(edge: EdgeSite) -> bool:
 class KernelSchedule:
     """Kernel-scoped choices: the worker inventory, the raster, and where the state the kernel carries between
     steps is kept — direct (a buffer in global memory, one launch per step), shared memory (``d1/smem``: the
-    steps run inside one launch)."""
+    steps run inside one launch) or registers (``d1/reg``: the same, the state in the fragments ``state_tile``
+    spells, one warp to sixteen rows; the step's own sites then take no choice)."""
 
     work: Work
     raster: Raster
     state: Stage = field(default_factory=Stage.direct)
+    state_tile: Tile = field(default_factory=Tile)
 
     def __post_init__(self) -> None:
         if not isinstance(self.work, Work) or not isinstance(self.raster, Raster) or not isinstance(self.state, Stage):
             raise TypeError("classic kernel choices must be Work, Raster and Stage values")
+        if not isinstance(self.state_tile, Tile) or (self.state.transport == "reg") != self.state_tile.is_tiled:
+            raise TypeError("a carried state has fragment geometry exactly when registers hold it")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +123,8 @@ def classic_node_key(sites, family: str, site: NodeId) -> str:
         raise ValueError(f"{family} is not a classic node family")
     if site not in family_sites:
         raise ValueError(f"{sites.sites[site].path} is not a {family} site")
-    return family if len(family_sites) == 1 else f"{family}@{sites.sites[site].path}"
+    alone = len(family_sites) == 1 and not (family == "TILE" and sites.resident_state is not None)
+    return family if alone else f"{family}@{sites.sites[site].path}"
 
 
 def classic_keys(tile_op) -> tuple[str, ...]:
@@ -133,6 +138,7 @@ def classic_keys(tile_op) -> tuple[str, ...]:
         *(classic_node_key(tile_op, "TILE", site) for site in tile_op.family_sites["TILE"]),
         *(classic_node_key(tile_op, "REDUCE", site) for site in tile_op.family_sites["REDUCE"]),
         *(classic_stage_key(tile_op, next(edge for edge in tile_op.stage_edges if edge[0] == site)) for site in stage_consumers),
+        *classic_state_tile_keys(tile_op),
         *classic_state_keys(tile_op),
     )
 
@@ -155,6 +161,14 @@ def classic_state_keys(sites) -> tuple[str, ...]:
     if taken := {f"STAGE@{sites.sites[edge[0]].path}" for edge in sites.stage_edges} & set(keys):
         raise ValueError(f"a carried state and a staged consumer share the key {sorted(taken)[0]}")
     return keys
+
+
+def classic_state_tile_keys(sites) -> tuple[str, ...]:
+    """The key of the fragment geometry of a state registers can hold (:attr:`TileOp.resident_state`): ``TILE`` at
+    the route of the fold that carries it, bare when the step has no ``TILE`` site of its own."""
+    if sites.resident_state is None:
+        return ()
+    return ("TILE",) if not sites.family_sites["TILE"] else (f"TILE@{sites.state_routes[0]}",)
 
 
 def holds_state(work: Work, raster: Raster) -> bool:

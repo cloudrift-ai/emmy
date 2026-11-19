@@ -76,11 +76,10 @@ class _Blocks:
 
     def gmem(self, buffer: str, index: tuple, row: str, col: str, cb: int) -> str:
         """The fragment of ``buffer`` at ``index``, the block's rows and columns standing for ``row`` and ``col``."""
-        at = {row: Var(FRAG_ROW), col: Var(FRAG_COL)}
-        key = (buffer, tuple(str(e) for e in index), row, col, cb)
+        index = tuple(e.substitute({row: Var(FRAG_ROW), col: Var(FRAG_COL)}) for e in index)
+        key = (buffer, tuple(str(e) for e in index), cb)
         if key not in self.memo:
             name = self.fresh("g")
-            index = tuple(e.substitute(at) for e in index)
             args = fragment_args(((buffer, index),), (GMEM,))
             self.out.append(
                 FragmentApply(
@@ -157,52 +156,59 @@ class _Blocks:
         trans, ldm = _direct_operand(slab.load, self.tile.inputs, k_name=axis, own=col, legacy=(False, 0))
         if not ldm or self.extents[axis] % atom.atom_k:
             raise Unresident("a product whose column-side operand has no direct fragment load")
+        steps = range(0, self.extents[axis], atom.atom_k)
+        # Each step's operands are computed and packed beside the atom that reads them, so no step's fragments
+        # are held across the others.
+        begin, sources, prepared = len(self.out), [], []
+        for k in steps:
+            start = len(self.out)
+            sources.append(tuple(self.value(left, left_name, row, axis, k + d) for d in range(0, atom.atom_k, atom.atom_n)))
+            prepared.append(self.out[start:])
+        del self.out[begin:]
+        loads = [tuple(e.substitute({axis: Literal(k, "int"), col: Literal(cb, "int")}) for e in slab.load.index) for k in steps]
+        # Two products over the same fragments and the same memory are one product, whatever their axes are called.
+        key = ("product", tuple(sources), slab.load.input, tuple(tuple(str(e) for e in index) for index in loads))
+        if key in self.memo:
+            self.out += [stmt for prepare in prepared for stmt in prepare]
+            return self.memo[key]
         total = self.fresh("c")
         narrow = atom.operand_dtype("c").nbytes == 2
         partial = self.fresh("p") if narrow else total
         self.out.append(RegFragment(name=total, role="c", dtype=F32, fragment_layout=self.layout))
         if narrow:
             self.out.append(RegFragment(name=partial, role="c", dtype=atom.operand_dtype("c"), fragment_layout=self.layout))
-        steps = range(0, self.extents[axis], atom.atom_k)
-        for step, k in enumerate(steps, 1):
-            sources = tuple(self.value(left, left_name, row, axis, k + d) for d in range(0, atom.atom_k, atom.atom_n))
+        for step, (packed, index, prepare) in enumerate(zip(sources, loads, prepared, strict=True), 1):
             a, b = self.fresh("a"), self.fresh("b")
-            at = {axis: Literal(k, "int"), col: Literal(cb, "int")}
             self.out += [
+                *prepare,
                 RegFragment(name=a, role="a", dtype=atom.operand_dtype("a"), fragment_layout=self.layout),
-                FragmentRepack(frag=a, srcs=sources, role="a", fragment_layout=self.layout, part=0),
+                FragmentRepack(frag=a, srcs=packed, role="a", fragment_layout=self.layout, part=0),
                 RegFragment(name=b, role="b", dtype=atom.operand_dtype("b"), fragment_layout=self.layout),
                 FragmentLoad(
-                    frag=b,
-                    src_buffer=slab.load.input,
-                    src_index=tuple(e.substitute(at) for e in slab.load.index),
-                    role="b",
-                    b_trans=trans,
-                    ldm=ldm,
-                    fragment_layout=self.layout,
+                    frag=b, src_buffer=slab.load.input, src_index=index, role="b", b_trans=trans, ldm=ldm, fragment_layout=self.layout
                 ),
                 MmaSyncPtx(
-                    c_frag=partial, a_frag=a, b_frag=b, shape=atom.ptx_shape, ab_dtype=atom.ab_dtype, c_dtype=atom.operand_dtype("c").name
+                    c_frag=partial,
+                    a_frag=a,
+                    b_frag=b,
+                    shape=atom.ptx_shape,
+                    ab_dtype=atom.ab_dtype,
+                    c_dtype=atom.operand_dtype("c").name,
                 ),
             ]
             if narrow and (step % self.period == 0 or step == len(steps)):
                 self.out.append(FragmentPromote(dst=total, src=partial, fragment_layout=self.layout))
+        self.memo[key] = total
         return total
 
 
 def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     """The kernel of ``tile``, whose one fold carries a state, with that state in the fragments of ``atom``:
     ``warps`` warps a CTA, a narrow accumulator promoted every ``period`` atom steps."""
-    carrying = [site.node for site in tile.sites if site.node.carries]
-    if len(carrying) != 1 or tile.place.free or any(not axis.extent.is_static for axis in tile.axes):
-        raise Unresident("one state of static shape under no free axis")
-    (fold,) = carrying
-    if len(fold.base.results) != 1 or len(fold.cells) < 2:
-        raise Unresident("one state with a row and a column")
-    *batch, col, row = fold.cells
+    if tile.resident_state is None:
+        raise Unresident("one state of static shape, its rows and columns whole fragments")
+    fold, batch, col, row = tile.resident_state
     extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
-    if extents[row] % atom.atom_m or extents[col] % atom.atom_n:
-        raise Unresident("a state the fragments do not tile exactly")
     time = tile.axis_of(fold.axis)
     row_base = Literal(atom.atom_m, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
     state = tuple(f"_state{j}" for j in range(extents[col] // atom.atom_n))
@@ -233,8 +239,6 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     for spec in tile.output_specs:
         (value,) = spec.write.values
         out_col, out_row = (e.name for e in spec.write.index[-2:])
-        if extents[out_row] != extents[row] or extents[out_col] % atom.atom_n:
-            raise Unresident("an output whose rows are not the state's")
         for cb in range(0, extents[out_col], atom.atom_n):
             frag = blocks.value(fold, value, out_row, out_col, cb)
             index = (*spec.write.index[:-2], Literal(cb, "int"), row_base)

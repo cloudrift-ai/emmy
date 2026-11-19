@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from emmy.compiler.dim import paged_declarations
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule.choices import Stage
+from emmy.compiler.ir.schedule.choices import Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (
     ClassicProblem,
     ClassicScheduleCodec,
@@ -105,6 +105,30 @@ def _shared_state_fits(tile: TileOp, ctx) -> bool:
     return shared_state_bytes(shape, tile.outputs[port].dtype) <= ctx.max_dynamic_smem
 
 
+def _resident_tiles(tile: TileOp, ctx) -> tuple[Tile, ...]:
+    """The fragment geometries registers can hold ``tile``'s state in on this card: per 16-bit atom whose C
+    fragments repack into its A, the geometry the state's columns give, where the kernel builds."""
+    from emmy.compiler.dtype import BF16, F16, F32  # noqa: PLC0415
+    from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.kernel._resident import Unresident, resident_walk  # noqa: PLC0415
+
+    if tile.resident_state is None:
+        return ()
+    _, _, col, _ = tile.resident_state
+    names = dict.fromkeys(name for dtype in (F16, BF16) for acc in (F32, dtype) for name in atoms_for(dtype, acc=acc, ctx=ctx))
+    tiles: list[Tile] = []
+    for atom in (ATOM_REGISTRY[name] for name in names):
+        if not atom.c_to_a_repack:
+            continue
+        try:
+            resident_walk(tile, atom, 1, 1)
+        except Unresident:
+            continue
+        columns = tile.axis_of(col).extent.as_static() // atom.atom_n
+        tiles += [Tile.parse(f"{atom.name}/f1x{columns}/k{period}", Work.parse("w1x1")) for period in (2, 4, 8)]
+    return tuple(tiles)
+
+
 def classic_forks(
     tile: TileOp,
     knobs: dict,
@@ -128,12 +152,16 @@ def classic_forks(
     row = pin_row(tile.name, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
     catalog = () if published else ("catalog",)  # a pool without the published pins is another pool
     # A kernel that carries a state has a ``STAGE`` site for it. Direct is the serial form: a buffer in global
-    # memory, one launch per step. ``d1/smem`` runs the steps of that form inside one launch.
-    state_stages = ()
+    # memory, one launch per step. ``d1/smem`` runs the steps of that form inside one launch; ``d1/reg`` keeps the
+    # state in register fragments, and the carrying kernel itself is what the lowering then reads.
+    state_stages, state_tiles = (), ()
     if tile.carries:
+        state_tiles = _resident_tiles(tile, ctx)
         tile = serial_form(tile, node)
         if _shared_state_fits(tile, ctx):
             state_stages += (Stage(transport="smem"),)
+        if state_tiles:
+            state_stages += (Stage(transport="reg"),)
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band). A finalize that cannot take that row keeps its own
@@ -159,6 +187,7 @@ def classic_forks(
         tolerate_kernel_pins=peer,
         paged=paged or {},
         state_stages=state_stages,
+        state_tiles=state_tiles,
         _strict_row_keys=named,
     )
     context = ClassicScheduleContext(tile, ctx, problem)

@@ -469,6 +469,33 @@ class TileOp(Op):
         return tuple(site.path for site in carrying.sites if site.node.carries) if carrying is not None else ()
 
     @cached_property
+    def resident_state(self) -> tuple | None:
+        """``(fold, batch cells, column cell, row cell)`` of the one state this kernel keeps between steps, where
+        register fragments can hold it, else ``None``. One warp owns sixteen positions of the state's last cell and
+        every position of the one before it, so: one state of static shape under no free axis, a row count the
+        fragment's sixteen rows divide and column counts its eight divide, and every output a matrix over the
+        state's rows. What the step computes is the lowering's to accept or decline."""
+        carrying = self._carrying
+        folds = [site.node for site in carrying.sites if site.node.carries] if carrying is not None else []
+        if len(folds) != 1 or carrying.place.free or any(not axis.extent.is_static for axis in carrying.axes):
+            return None
+        (fold,) = folds
+        if len(fold.base.results) != 1 or len(fold.cells) < 2:
+            return None
+        *batch, col, row = fold.cells
+        extent = {axis.name: axis.extent.as_static() for axis in carrying.axes}
+        matrices = [spec.write.index[-2:] for spec in carrying.output_specs]
+        if any(len(spec.write.values) != 1 for spec in carrying.output_specs) or any(
+            len(index) != 2 or not all(isinstance(e, Var) for e in index) for index in matrices
+        ):
+            return None
+        if extent[row] % 16 or any(extent[r.name] != extent[row] for _, r in matrices):
+            return None
+        if any(extent[name] % 8 for name in (col, *(c.name for c, _ in matrices))):
+            return None
+        return fold, tuple(batch), col, row
+
+    @cached_property
     def _carrying(self) -> TileOp | None:
         if self.carries:
             return self

@@ -45,6 +45,8 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     # structural ``tile/030_cut`` fork's, decided BEFORE scheduling (the walk's catalog
     # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
+    if tile.schedule is not None and tile.schedule.kernel.state.transport == "reg":
+        return _resident(match, root, tile)
     if tile.carries:
         from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
 
@@ -69,6 +71,19 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         # realization corpus pins that — and the compile declines it here: the skip is recorded,
         # the node stays a TileOp, and the greedy blocklist retry resolves onto the next row.
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
+
+
+def _resident(match: Match, root: Node, tile: TileOp):
+    """The kernel of a row that keeps the state in registers: the carrying kernel's own term in fragments, and
+    the port of the state gone from the node where nothing reads it."""
+    from emmy.compiler.pipeline.passes.lowering.kernel._resident import Unresident, resident_walk  # noqa: PLC0415
+
+    choice = tile.schedule.kernel
+    try:
+        body = resident_walk(tile._carrying, choice.state_tile.atom, choice.work.units[0], choice.state_tile.bk)
+    except Unresident as exc:
+        raise RuleSkipped(f"registers do not hold this kernel's state: {exc}", reject=True) from exc
+    return _drop_private_ports(match, root, KernelOp(body=Body((body,)), source=tile, knobs=tile.knobs), "resident")
 
 
 def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str):
