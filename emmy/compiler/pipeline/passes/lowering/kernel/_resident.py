@@ -157,8 +157,9 @@ class _Blocks:
             return self.value(edge, name, row, col, rb, cb)
         cone = node.lift.body.backward_cone((result,))
         frags: dict[str, str] = {}
-        for param in cone.external_reads:
-            if param in bound:
+        # In the order the lift binds them: the cone's reads are a set, and its order is another one every run.
+        for param in node.lift.params:
+            if param in cone.external_reads and param in bound:
                 edge, name = bound[param]
                 operand = self.value(edge, name, row, col, rb, cb)
                 if operand not in self.uniform:
