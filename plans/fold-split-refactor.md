@@ -319,6 +319,8 @@ walk had anyway. Whether that pays is the measurement stage 4 ends on.
 - A Fold that carries on and does not seed (cases 5 and 6): "levels of steps" in stage 4.
 - Cases 4 and 6 at one block have an outer Fold that carries nothing. The split should return the term without
   it, so the kernel takes cuts and splits like any other.
+- Cases 4 to 6 are each one term. Which operands become kernels of their own is the cut pass's question, not the
+  rewrite's (stage 4).
 
 ## Three rules for the work
 
@@ -368,6 +370,9 @@ remove about a thousand more and is the riskiest.
   new values and touch no stored row.
 - **Pieces of a kernel-set decision are kernels with identities.** A split across CTAs mints pieces whose bodies the
   goldens store. Stage 1 has to produce the same Loop IR for them, to the statement, or those rows are re-keyed.
+- **A cut is not a split.** The split says which blocks exist. A cut says where a value is stored so that its
+  readers share it, and no split of an axis answers that. The cut pass stays as it is. What must not grow is cut
+  code that knows one kind of kernel.
 - **Fusion stays maximal, and normalization carries no knob.** The split is a schedule's meaning, never a gate on a
   merge and never a canonical form.
 
@@ -463,12 +468,24 @@ FlashInfer's 87. Its parts, in the order to build them:
   a loop that does not seed is already in the statement; who counts as carrying the state, the Loop IR rendering, the
   lift and the lowering have to learn it. Declare the term's new field last with its default left out, so no stored
   form and no identity moves.
-- **Running two levels.** One kernel's launches are one level of steps, so the cut pass takes an outer level apart:
-  per outer step a kernel that carries the state through the inner steps, and between two of them a kernel that
-  carries nothing. Running both levels inside one kernel, or a symbolic number of outer steps, needs the runner to
-  loop over a group of kernels. That is out of scope.
-- **The split at the carrying site.** Offered as a new value of that site's `REDUCE`. No stored row spells it, so
-  none moves.
+- **The rewrite returns one term.** Steps 3 and 4 take the carrying Fold and give back one Fold tree: the product
+  for the reads, the system, the solve and the product for the writes as operands of one root, as cases 4 to 6
+  draw them. It mints no piece. The split across the sequence builds its own probe, prefix, fill-in and walk
+  kernels; this rewrite must not repeat that.
+- **The cut pass does the rest, unchanged.** The rewritten term's seams are offered like any kernel's, with no arm
+  that knows a recurrence. Its pieces are ordinary products and each takes the split of stages 1 to 3. The uncut
+  arm stays in the fork: for a state whose intermediates are per cell (case 4) it can win, and for one whose
+  system many cells read (case 6) it recomputes the system per reader and is expected to lose.
+- **It is a kernel-set decision, taken at the cut pass.** The cut pass runs before scheduling, on the unscheduled
+  term. A block form that existed only under a schedule row would show the cut pass no seam. So this rewrite is
+  unlike the plain split, which is a row's meaning and never stored: it is decided where the split across the
+  sequence is decided today, as a new value of the carrying site's `REDUCE`, with the plain walk as the other arm.
+  No stored row spells the new value, so none moves. The rewritten term is a kernel of its own with an identity
+  of its own, and the kernel the fork is on keeps the one its golden rows name.
+- **Running two levels.** One kernel's launches are one level of steps. Where a walk stays after the rewrite (the
+  small solve, or more than one block), the work between two of its steps is another kernel, which the cut pass
+  gives. Running both levels inside one kernel, or a symbolic number of outer steps, needs the runner to loop over
+  a group of kernels. That is out of scope.
 - **Step 3 on the term.** Which reads see what the block started from. The dependence test answers it.
 - **Step 4 on the term.** A linear cycle becomes the product for the reads, the small system, its solve, and the
   product for the writes. The delta rule and the solve are the two cases to pass first.
