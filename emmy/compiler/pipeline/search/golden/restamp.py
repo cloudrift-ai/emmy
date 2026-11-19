@@ -239,6 +239,10 @@ class Report:
     dropped_rows: list[str] = field(default_factory=list)
     respelled_rows: list[str] = field(default_factory=list)
     dropped_keys: list[str] = field(default_factory=list)
+    #: For each row of the restamped file, the position of the row of the file it was restamped from.
+    sources: list[int] = field(default_factory=list)
+    #: Every surviving kernel's ref in the file restamped from, to the ref it is stored under.
+    stored_as: dict[int, int] = field(default_factory=dict)
 
     @property
     def changed(self) -> bool:
@@ -464,7 +468,8 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         return frozenset(classic_keys(tile))
 
     rows: list[Row] = []
-    for row in document.rows:
+    report.stored_as = stored_as
+    for source, row in enumerate(document.rows):
         if row.kernel not in stored_as:
             report.dropped_rows.append(f"{row.name}: its kernel is gone")
             continue
@@ -492,6 +497,7 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
                 continue
             latencies[card] = replace(latency, kernels=tuple(dict.fromkeys(stored_as[ref] for ref in latency.kernels)))
         rows.append(replace(fresh_row, latency=latencies or None))
+        report.sources.append(source)
     out = replace(document, kernels=kernels, routing=kept, rows=rows)
     return out, report
 

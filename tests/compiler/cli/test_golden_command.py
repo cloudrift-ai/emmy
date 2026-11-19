@@ -154,6 +154,35 @@ def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
     assert "already the fresh lowering" in caplog.text
 
 
+def test_a_row_keeps_its_time_exactly_when_its_code_is_the_baselines(golden, tmp_path, caplog, monkeypatch):
+    """A row's time was measured on its kernel's PTX. ``realize --ptx`` writes that code per row, the same bytes on
+    every run and under a name that does not follow the kernel's identity; a restamp given that baseline keeps the
+    time of a row the restamp demoted (its kernel re-keyed) when the code is the baseline's, and takes the time of a
+    row whose code is not."""
+    import emmy.compiler.pipeline.search.golden as package
+    from emmy.compiler.pipeline.search.golden.restamp import Report
+
+    baseline, again = tmp_path / "ptx", tmp_path / "again"
+    for out in (baseline, again):
+        handle_golden_realize(Namespace(paths=[str(golden)], jobs=1, json_out=None, drop=False, ptx=str(out)))
+    written = sorted(path.relative_to(baseline) for path in baseline.rglob("*.ptx"))
+    assert [path.as_posix() for path in written] == [f"golden/{index}.ptx" for index in range(9)]
+    assert all((baseline / path).read_bytes() == (again / path).read_bytes() for path in written)
+    assert ".entry kernel(" in (baseline / written[0]).read_text()
+
+    document = GoldenFile.load(golden)
+    demoted = replace(document, rows=[replace(row, measurements=None) for row in document.rows])
+    report = Report(kernels=8, sources=list(range(9)), stored_as={kernel.ref: kernel.ref for kernel in document.kernels})
+    monkeypatch.setattr(package, "restamp", lambda _document: (demoted, report))
+    with (baseline / "golden" / "3.ptx").open("a") as changed:
+        changed.write("// another instruction\n")
+    with caplog.at_level("INFO"):
+        handle_golden_restamp(Namespace(paths=[str(golden)], ptx_baseline=str(baseline), jobs=1))
+    fresh = GoldenFile.load(golden)
+    assert [row.measurements for row in fresh.rows] == [None if index == 3 else row.measurements for index, row in enumerate(document.rows)]
+    assert f"the code changed under {document.rows[3].name}" in caplog.text and "8 rows keep a measurement, 1 lost" in caplog.text
+
+
 def test_restamp_takes_a_decision_again_on_the_re_keyed_parent(tmp_path, caplog):
     """A routing row's parent re-keyed by a program change: the decision is taken again on the fresh parent, the
     pieces take the identities the fresh splice mints, and their rows follow — each row keeps its measurement only
