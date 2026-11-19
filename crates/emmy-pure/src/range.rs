@@ -232,9 +232,22 @@ impl Fold {
                 sigma: HashMap::from([(axis, walk.read())]),
                 ..TermRewrite::default()
             };
+            // An operand that does not read the axis is the term it was, and one reached twice is rewritten once:
+            // which term stands at an operand position is how a tree says a value is shared.
+            let mut moved: HashMap<usize, Fold> = HashMap::new();
             operands = operands
                 .iter()
-                .map(|edge| edge.rewrite(&reads))
+                .map(|edge| {
+                    if !edge.free_axes().contains(&axis) {
+                        return Ok(edge.clone());
+                    }
+                    if let Some(found) = moved.get(&edge.address()) {
+                        return Ok(found.clone());
+                    }
+                    let rewritten = edge.rewrite(&reads)?;
+                    moved.insert(edge.address(), rewritten.clone());
+                    Ok(rewritten)
+                })
                 .collect::<Result<_>>()?;
             let sigma = HashMap::from([(axis, walk.position.clone())]);
             body = body
