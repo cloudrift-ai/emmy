@@ -1391,6 +1391,39 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     and the memory outside torch about 4,795 MiB; main left 362-364 MiB spare there. The number moves with when the
     allocator reaches the cap and frees its cache, which the #1428 and #1435 rounds also saw.
   - Next: from the 2026-11-13 ranking, for the owner to pick.
+- **The one-row expert dispatch (2026-11-18): stopped at its gate.** Round 6 of the 2026-11-13 ranking, main
+  `8256c51ce`. Measured first, on #1437's profiled boot (main's code) against the async fork's, rank 0, per decode
+  step at one request, from the router's top-k to the next all-reduce, 48 layers:
+
+  | Per layer, profiled | Fork | Emmy |
+  | --- | ---: | ---: |
+  | Routed expert kernels | 2 kernels, 23.7 us (the down projection weights and sums the picks) | 3 kernels, 29.4 us |
+  | Dispatch around them | none | 5 kernels, 17.0 us |
+  | Top-k to all-reduce | 28.8 us | 50.3 us |
+
+  - The five kernels: the selector copy (int32 to int64, 3.9 us), the row upload (2.0), the scores' cast to fp16 and
+    the shared expert's add (6.9 together), and the weighted sum (4.2). Per step 0.82 ms busy, and the span from top-k
+    to all-reduce is 1.03 ms longer than the fork's. The fork adds its shared expert inside the all-reduce.
+  - The same five kernels run at four and eight requests: 15.9 and 16.4 us per layer, 0.76 and 0.79 ms per step. The
+    ranking's "nothing at two to eight requests" was wrong for the dispatch; it holds for the program swap below.
+  - The two-row slot program with one row filled does not pay: cold per layer 54.3 us (28.7, 8.2, 17.4) against the
+    one-row program's 36.9 (18.4, 6.1, 12.3), with the same dispatch around it.
+  - Gate, stated before the build: one request's step at least 0.3 ms shorter on boots never profiled. With the row
+    upload and the shared expert's output lent to the program without a copy and the scores uploaded, a program that
+    weights, sums and adds the shared expert removes at most 9 us of dispatch per layer, so its cold time may grow by
+    at most about 3 us: 39.8 us per layer.
+  - Tried: the one-row twin traced with the router's scores and the shared expert's output as inputs, its output the
+    layer's routed sum, cold on the card, the prior's cuts and about forty hand-pinned cut and schedule variants. Best
+    59.4 us per layer (gate and up 17.4, the down projection fused with the weighted sum 35.8, the activation 6.1).
+    The fused down-and-sum runs 34-36 us under every schedule tried, cross-CTA splits included, where the program's
+    own down projection takes 12.3 and the fork's down-and-sum 9.2. Kept as four pieces (the program's three and a
+    sum-and-add piece, 6.1 us measured) it would be about 42.9 us. Both miss the 39.8 us bar, so nothing was built.
+  - Without a program change, the runner could lend the row upload (2.0 us) and fold the shared add into the
+    weighted sum's matmul (3.6): at most 5.6 us per layer, 0.27 ms per step profiled, at every width up to eight
+    rows, and less unprofiled, since the profiler adds about 1.6 us to each small kernel. Under the bar.
+  - Where the gap is: Emmy's gathered down-and-sum kernel, 3-4x the fork's. A schedule that splits the picks across
+    blocks and sums them after would be compiler work (the schedule space), like post8's small pieces.
+  - Next: from the 2026-11-13 ranking, for the owner to pick; the down-and-sum schedule could join the post8 round.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
