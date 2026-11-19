@@ -16,6 +16,7 @@ event windows measure dense GPU work instead of per-launch dispatch gaps. These 
 
 import asyncio
 
+from emmy.compiler.backend.base import BenchmarkResult
 from emmy.compiler.backend.cuda import compare as compare_mod
 from emmy.compiler.backend.cuda.program import GraphCaptureError, benchmark_program
 from emmy.compiler.graph import Graph, Tensor
@@ -166,7 +167,7 @@ def test_reference_free_benchmark_respects_iteration_budget():
 
     async def benchmark(graph, **kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(time_ms=1.0, captured=True)
+        return BenchmarkResult(time_ms=1.0, captured=True)
 
     backend = SimpleNamespace(run=lambda graph, **kwargs: (SimpleNamespace(outputs={}, time_ms=1.0), None), benchmark_async=benchmark)
     asyncio.run(bench_lowered_vs_torch(None, Graph(), backend, seed=0, do_bench=True, warmup=0, iters=1, bench_backends="emmy"))

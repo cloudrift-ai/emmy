@@ -178,8 +178,7 @@ async def bench_lowered_vs_torch(
     return_reference=False,
 ):
     """Run + (optionally) benchmark a lowered graph against its torch reference on
-    shared random inputs. The common bench primitive behind ``run --ir`` and
-    ``tune --bench``.
+    shared random inputs. The bench primitive behind ``run --ir`` and a golden target's ``run --bench``.
 
     ``frontend`` is the pristine frontend-dialect snapshot (must be
     ``torch_ref``-runnable); pass ``None`` for a non-frontend / unsupported graph to
@@ -542,11 +541,8 @@ class BackendFailure(str):
 
 def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str], check: bool = True):
     """Pre-build the per-backend ``torch_fns`` dict, including the
-    ``torch.compile`` JIT step when requested. The JIT (mostly
-    Inductor CPU work plus a few warmup launches) sits *outside* the
-    GPU lock in ``handle_run`` so parallel workers can compile
-    concurrently — the lock then only wraps the actual measurement
-    iters.
+    ``torch.compile`` JIT step when requested: the JIT (mostly Inductor CPU work plus a few warmup launches)
+    runs here, before the measurement iterations.
 
     ``check`` holds the compiled output to eager on the dtype-scaled verdict; a quantized twin
     (:func:`quantized_twin`) is timed without it, as Emmy's row is.
@@ -677,9 +673,7 @@ async def _bench_interleaved(
     (``CompiledProgram.on_stream``), so events see all preceding work.
 
     ``torch_fns`` is the pre-built backend closure dict from
-    :func:`_build_torch_fns` (``handle_run`` builds it outside the
-    GPU lock so the slow ``torch.compile`` JIT runs concurrently with
-    peer workers; the lock then wraps only this measurement loop).
+    :func:`_build_torch_fns`, built before this measurement loop so the ``torch.compile`` JIT stays out of it.
 
     ``capture_graphs`` captures each calibrated batch before its first event window on both
     sides. :func:`_bench_interleaved_captured` owns the all-or-nothing fallback.
@@ -739,7 +733,6 @@ async def _bench_interleaved(
     # all-launches CUDA graph, the same semantics the captured torch closures
     # above get. The fallback sums per-launch solo windows, which is not an
     # end-to-end number (no cross-kernel cache effects).
-    dep_ms = bench.e2e_min_ms if bench.e2e_min_ms is not None else (bench.min_ms if bench.min_ms is not None else bench.time_ms)
-    results["Emmy"] = dep_ms * 1000
+    results["Emmy"] = bench.total_us
     results.update(failed)
     return results, bench

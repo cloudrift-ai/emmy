@@ -6,11 +6,11 @@ Protocol (length-prefixed pickle on stdin/stdout):
 
 - Parent writes ``<8-byte little-endian length><pickled request>``.
 - One request shape, handled by :func:`_run_job`: ``{"graph": Graph, "torch_spec": None | (...), ...}``.
-  ``torch_spec`` selects the work — ``None`` is a pure emmy bench (the autotune sweep and ``run --bench``'s
-  pinned golden / ``--ab`` rows; ``kwargs`` carries warmup / num_iters / timeouts, an optional ``run_inputs`` ndarray dict adds one
+  ``torch_spec`` selects the work — ``None`` is a pure emmy bench (``run --bench``'s pinned golden / ``--ab`` /
+  ``--tune`` rows; ``kwargs`` carries warmup / num_iters / timeouts, an optional ``run_inputs`` ndarray dict adds one
   pre-bench execution on those inputs with the outputs returned — the wrong-answer gate's
   measurement side), otherwise the deployable eager / torch.compile / emmy comparison
-  (``tune --bench`` / ``run --bench``'s greedy row), rebuilt and run *here* so a hung kernel
+  (``run --bench``'s greedy row), rebuilt and run *here* so a hung kernel
   hangs this child (SIGKILL-recoverable). A ``trace_args`` comparison honors two extra flags:
   ``accuracy`` (bind the rebuilt module's real inputs, run the emmy program on them, compare vs
   eager — the verdict rides back as ``accuracy_error``, and a numeric failure skips the bench)
@@ -24,7 +24,6 @@ Protocol (length-prefixed pickle on stdin/stdout):
   kinds a pickled string loses; ``_retire_worker`` is the child's own verdict that its context is
   done for (both response shapes carry it).
 - Worker imports the runtime / torch lazily on first request, writes ``<8-byte length><pickled response>``.
-- A ``worker_warmup`` request creates the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
 
 Errors raised inside ``benchmark_program`` (bench_compile_timeout_s,
@@ -106,12 +105,6 @@ async def _run_job(req: dict) -> dict:
 
     Rebuilding the torch side **here** (not pickling a live module) means a hung emmy kernel
     hangs *this* child, which the parent SIGKILLs — recovering the device."""
-    if req.get("worker_warmup"):
-        from emmy.compiler.backend.cuda.device import device
-
-        device().synchronize()
-        return {"warmed": True}
-
     from emmy.compiler.backend.correctness import reference_precision
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
@@ -290,7 +283,7 @@ def main() -> None:
     # A bench worker never dumps compiler artifacts — but a child-built ``CudaBackend()``
     # defaults its dump to ``CompilerDump.from_env()``, whose ``__post_init__`` rmtrees the
     # directory. With ``EMMY_DUMP_DIR`` inherited from the parent that would wipe the
-    # parent's dump while ``tune --bench`` consumes its in-memory frontend slices.
+    # parent's dump while the run still reads it.
     from emmy import config
 
     os.environ.pop(config.DUMP_DIR, None)

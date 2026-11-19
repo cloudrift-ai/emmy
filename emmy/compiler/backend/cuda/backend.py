@@ -94,10 +94,6 @@ class CudaBackend(Backend):
             await self._async_worker_obj.aclose()
             self._async_worker_obj = None
 
-    async def warm_async_worker(self, *, wall_timeout_s: float = 60.0) -> None:
-        """Initialize the isolated worker before candidate timing begins."""
-        await self._async_worker().warmup(wall_timeout_s=wall_timeout_s)
-
     def compile(self, graph: Graph, *, ctx: Context | None = None) -> Graph:
         """Lower ``Graph`` → ``Graph[LoopOp]`` → ``Graph[TileOp]`` → ``Graph[CudaOp]``."""
         db = None
@@ -169,7 +165,7 @@ class CudaBackend(Backend):
         torch state with this process and can't cross the subprocess boundary. The blocking
         bench runs directly on the event loop (it is the only work in flight), so ``async``
         here is just the uniform call shape."""
-        result = benchmark_program(
+        return benchmark_program(
             compiled,
             input_data=input_data,
             warmup=warmup,
@@ -178,15 +174,6 @@ class CudaBackend(Backend):
             compile_timeout_s=self.bench_compile_timeout_s,
             run_timeout_s=self.bench_run_timeout_s,
             capture_graphs=capture_graphs,
-        )
-        return BenchmarkResult(
-            time_ms=result.time_ms,
-            min_ms=result.min_ms,
-            num_launches=result.num_launches,
-            per_launch=result.per_launch,
-            captured=result.captured,
-            e2e_ms=result.e2e_ms,
-            e2e_min_ms=result.e2e_min_ms,
         )
 
     async def bench_pinned_async(

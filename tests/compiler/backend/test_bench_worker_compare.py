@@ -20,44 +20,30 @@ import time
 
 import pytest
 
+from emmy.compiler.backend.base import BenchmarkResult
 from tests.compiler.helpers import requires_cuda
 
 
-def test_oneshot_compare_wrapper_returns_accuracy_error(monkeypatch) -> None:
-    from emmy.compiler.backend.cuda import program
+def _compare_in_worker(lowered, frontend, backends: str) -> dict:
+    """The greedy-row comparison of ``lowered`` against the Torch twin of ``frontend``, as one job on a bench worker."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    async def _fake_oneshot(request, *, wall_timeout_s):
-        assert request["torch_spec"] == ("frontend_graph", "FE")
-        assert wall_timeout_s == 5.0
-        return {
-            "results": {"Emmy": 2.0},
-            "result": "BENCH",
-            "torch_available": True,
-            "captured": True,
-            "accuracy_error": "wrong-answer: rel err 1.000",
-        }
+    async def job():
+        backend = CudaBackend()
+        try:
+            return await backend.benchmark_compare_async(
+                lowered, torch_spec=("frontend_graph", frontend), bench_backends=backends, wall_timeout_s=180.0, warmup=2, iters=5
+            )
+        finally:
+            await backend.aclose_async_worker()
 
-    monkeypatch.setattr(program, "_run_job_oneshot", _fake_oneshot)
-    result = asyncio.run(
-        program.benchmark_compare_isolated_async(
-            lowered="LOWERED",
-            torch_spec=("frontend_graph", "FE"),
-            bench_backends="emmy",
-            wall_timeout_s=5.0,
-            warmup=1,
-            iters=1,
-            seed=0,
-        )
-    )
-
-    assert result == ({"Emmy": 2.0}, "BENCH", True, True, "wrong-answer: rel err 1.000")
+    return asyncio.run(job())
 
 
 @requires_cuda
 def test_compare_in_worker_returns_torch_and_emmy() -> None:
     from emmy.commands.run import _detect_stage, _passes_after_stage
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.backend.cuda.program import benchmark_compare_isolated_async
     from emmy.compiler.pipeline import Pipeline
 
     # A small torch_ref-runnable op; lowered in-parent (as the per-kernel sweep does), then the
@@ -67,22 +53,13 @@ def test_compare_in_worker_returns_torch_and_emmy() -> None:
     tail = _passes_after_stage(_detect_stage(g))
     lowered = Pipeline.build(tail).run(g) if tail else g
 
-    results, bench, torch_available, _captured, accuracy_error = asyncio.run(
-        benchmark_compare_isolated_async(
-            lowered=lowered,
-            torch_spec=("frontend_graph", fe),
-            bench_backends="eager,emmy",
-            wall_timeout_s=180.0,
-            warmup=2,
-            iters=5,
-            seed=0,
-        )
-    )
-    assert torch_available, "the worker should have rebuilt the torch reference from the frontend graph"
+    response = _compare_in_worker(lowered, fe, "eager,emmy")
+    results = response["results"]
+    assert response["torch_available"], "the worker should have rebuilt the torch reference from the frontend graph"
     assert results.get("Emmy", 0) > 0, f"missing emmy number: {results}"
     assert results.get("Eager PyTorch", 0) > 0, f"missing eager torch number: {results}"
-    assert bench is not None
-    assert accuracy_error is None
+    assert response["result"] is not None
+    assert response["accuracy_error"] is None
 
 
 def _scripted_worker(child_src: str):
@@ -600,7 +577,7 @@ def test_worker_returns_a_throwing_torch_reference_error(monkeypatch, strict) ->
             return SimpleNamespace(outputs={"out": np.ones(3)}, time_ms=1.0), None
 
         async def benchmark_async(self, _graph, **_kwargs):
-            return SimpleNamespace(time_ms=1.0, captured=True)
+            return BenchmarkResult(time_ms=1.0, captured=True)
 
     monkeypatch.setattr(backend_mod, "CudaBackend", FakeBackend)
     to_cuda = "emmy.compiler.backend.cuda.compare.to_cuda_tensor"
@@ -813,7 +790,6 @@ def test_compare_times_torch_compile_on_a_quantized_twin_after_emmy() -> None:
     timed in a window of its own after Emmy's, so a failure there costs the record only that column."""
     from emmy.commands.run import _detect_stage, _passes_after_stage
     from emmy.compiler.backend.correctness import quantized_twin
-    from emmy.compiler.backend.cuda.program import benchmark_compare_isolated_async
     from emmy.compiler.dtype import F8E4M3, F16
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
@@ -830,17 +806,8 @@ def test_compare_times_torch_compile_on_a_quantized_twin_after_emmy() -> None:
     tail = _passes_after_stage(_detect_stage(g))
     lowered = Pipeline.build(tail).run(g) if tail else g
 
-    results, bench, torch_available, _captured, accuracy_error = asyncio.run(
-        benchmark_compare_isolated_async(
-            lowered=lowered,
-            torch_spec=("frontend_graph", fe),
-            bench_backends="eager,tcompile,emmy",
-            wall_timeout_s=180.0,
-            warmup=2,
-            iters=5,
-            seed=0,
-        )
-    )
-    assert torch_available and bench is not None and accuracy_error is None
+    response = _compare_in_worker(lowered, fe, "eager,tcompile,emmy")
+    results = response["results"]
+    assert response["torch_available"] and response["result"] is not None and response["accuracy_error"] is None
     assert results.get("Emmy", 0) > 0 and results.get("Eager PyTorch", 0) > 0, results
     assert results.get("torch.compile", 0) > 0, results

@@ -10,6 +10,7 @@ import pytest
 
 from emmy.commands import run as run_mod
 from emmy.compiler.backend import correctness as correctness_mod
+from emmy.compiler.backend.base import BenchmarkResult
 from emmy.compiler.pipeline.search.db import RoutingRow
 from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Row
 
@@ -231,7 +232,7 @@ def test_strict_result_requires_backends_capture_and_correctness():
         "mean_abs_error": 0.0,
         "max_rel_error": 0.0,
     }
-    bench = SimpleNamespace(captured=True, num_launches=1, per_launch=[], e2e_min_ms=None)
+    bench = BenchmarkResult(time_ms=1.0, captured=True, num_launches=1, per_launch=[])
     args = SimpleNamespace(bench_backends="eager,tcompile,emmy", ab=None)
     results = {"Eager PyTorch": 20.0, "torch.compile": 15.0, "Emmy": 10.0}
 
@@ -269,7 +270,7 @@ def test_strict_result_accepts_same_input_greedy_only_for_reference_free_loop():
         "mean_abs_error": 0.0,
         "max_rel_error": 0.0,
     }
-    bench = SimpleNamespace(captured=True, num_launches=1, per_launch=[], e2e_min_ms=None)
+    bench = BenchmarkResult(time_ms=1.0, captured=True, num_launches=1, per_launch=[])
     results = {"Emmy": 10.0}
 
     runnable_errors = run_mod._strict_benchmark_errors(args, results, bench, True, proof, [])
@@ -379,9 +380,9 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
         sample=SimpleNamespace(name="linear.layer0.abcdef123456", knobs={"WORK": "w1x1"}, pins={"FAST_MATH": True}),
     )
     args = SimpleNamespace(golden="working.json", realization="linear.layer0")
-    with mock.patch.object(run_mod, "_bench_total_us", side_effect=AssertionError("a receipt's timing is not the program's")):
-        with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
-            run_mod._record_golden_latency(args, {"Emmy": 12.5, "Eager PyTorch": 30.0}, [receipt])
+    # The receipt's bench is no benchmark result: reading a timing off it would raise.
+    with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
+        run_mod._record_golden_latency(args, {"Emmy": 12.5, "Eager PyTorch": 30.0}, [receipt])
 
     assert seen["emmy_us"] == 12.5
     assert seen["knobs"] is None and seen["pins"] is None
@@ -393,14 +394,16 @@ def test_record_latency_of_two_measured_schedules_lands_on_the_faster():
     seen = {}
 
     def row(knobs, us):
-        return SimpleNamespace(status="ok", bench=us, flags=[], sample=SimpleNamespace(name="mm", knobs=knobs, pins={"FAST_MATH": False}))
+        bench = BenchmarkResult(time_ms=us / 1000)
+        return SimpleNamespace(
+            status="ok", bench=bench, flags=[], sample=SimpleNamespace(name="mm", knobs=knobs, pins={"FAST_MATH": False})
+        )
 
     args = SimpleNamespace(golden="working.json", realization="mm")
-    with mock.patch.object(run_mod, "_bench_total_us", lambda us: (us, "e2e")):
-        with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
-            run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [row({"WORK": "w4x4"}, 12.0), row({"WORK": "w4x2"}, 10.0)])
+    with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
+        run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [row({"WORK": "w4x4"}, 12.0), row({"WORK": "w4x2"}, 10.0)])
 
-    assert seen["emmy_us"] == 10.0 and seen["knobs"] == {"WORK": "w4x2"} and seen["tcompile_us"] == 9.0
+    assert seen["emmy_us"] == pytest.approx(10.0) and seen["knobs"] == {"WORK": "w4x2"} and seen["tcompile_us"] == 9.0
 
 
 def test_record_greedy_is_a_golden_bench_flag(run_cli):

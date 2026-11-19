@@ -54,12 +54,8 @@ _PASS_SHORTCUTS = {short: full for full, short in PASS_SHORTHAND.items()}
 def resolve_tune_db() -> Path:
     """Resolve the autotune SQLite cache path: ``EMMY_TUNE_DB``
     env var → ``~/.cache/emmy/autotune.db``. Same resolution used
-    by every CLI command (``compile`` / ``run`` / ``tune``) and by
-    :class:`CudaBackend` when constructed with ``tune_db="auto"``.
-
-    Callers should treat the path as advisory — the engine only opens
-    it when the file actually exists; otherwise the compile falls back
-    to rule defaults (single-shot option-0)."""
+    by every CLI command and by :class:`CudaBackend` when constructed with ``tune_db="auto"``. A compile
+    creates the file on first use and imports the golden rows in scope into it."""
     return config.tune_db_path()
 
 
@@ -138,8 +134,8 @@ def add_input_args(parser, *, include_dump_dir: bool = True) -> None:
 
 
 def add_golden_arg(parser) -> None:
-    """Register the golden flags every replaying command shares (``run`` / ``compile`` / ``tune`` /
-    ``serve`` spell them the same way): ``--golden PATH`` names the golden file whose measured rows
+    """Register the golden flags every replaying command shares (``run`` / ``compile`` / ``serve`` spell them
+    the same way): ``--golden PATH`` names the golden file whose measured rows
     feed the evidence index INSTEAD of the repository goldens, ``--realization NAME`` selects one
     realization inside it (or, without ``--golden``, inside the live card's repository corpus),
     ``--program N`` takes the file's traced program N as the input instead, ``--strict-evidence`` refuses any
@@ -864,7 +860,7 @@ def _trace_model(
 ) -> tuple[Graph, tuple]:
     """Trace an HF model and return ``(graph, (module, args, kwargs))``. The bundle
     is the runnable torch module + its trace-time example inputs — kept around so
-    ``tune --bench`` / ``run --bench`` can time eager / ``torch.compile`` end-to-end
+    ``run --bench`` can time eager / ``torch.compile`` end-to-end
     against the lowered graph."""
     try:
         import torch

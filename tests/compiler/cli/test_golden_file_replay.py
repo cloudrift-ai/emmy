@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from emmy.compiler.backend.base import BenchmarkResult
 from emmy.compiler.backend.cuda import compare as compare_mod
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
@@ -935,7 +936,7 @@ def test_emmy_only_benchmark_returns_same_input_reference():
             return SimpleNamespace(outputs=outputs), None
 
         async def benchmark_async(self, *_args, **_kwargs):
-            return SimpleNamespace(time_ms=0.001, captured=True)
+            return BenchmarkResult(time_ms=0.001, captured=True)
 
     refs = []
     asyncio.run(
@@ -973,8 +974,6 @@ def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
     """A reference-free Loop target owns one device input allocation, not a redundant Torch copy."""
     import numpy as np
 
-    from emmy.commands import run as run_module
-
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (8,), "f16"), node_id="x")
     graph.outputs = ["x"]
@@ -985,7 +984,7 @@ def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
             return SimpleNamespace(outputs={"x": np.ones(8, dtype=np.float16)}, time_ms=0.001), None
 
         async def benchmark_async(self, *_args, **_kwargs):
-            return SimpleNamespace(time_ms=0.001, captured=True)
+            return BenchmarkResult(time_ms=0.001, captured=True)
 
     monkeypatch.setattr(
         "emmy.compiler.backend.cuda.compare.to_cuda_tensor",
@@ -1438,7 +1437,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
             for i in range(n)
         ]
         total = sum(launch.time_ms for launch in per_launch)
-        return SimpleNamespace(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=n, per_launch=per_launch)
+        return BenchmarkResult(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=n, per_launch=per_launch)
 
     class FakeBackend:
         name = "cuda"
@@ -1498,7 +1497,7 @@ def _timed(graph, ms_per_launch=0.001):
     """A bench of ``graph`` with one per-kernel launch window per CUDA kernel, in launch order."""
     per_launch = [SimpleNamespace(idx=i, time_ms=ms_per_launch * (i + 1), samples=[]) for i in range(len(_cuda_nodes(graph)))]
     total = sum(launch.time_ms for launch in per_launch)
-    return SimpleNamespace(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=len(per_launch), per_launch=per_launch)
+    return BenchmarkResult(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=len(per_launch), per_launch=per_launch)
 
 
 def test_bench_routing_rows_let_strict_evidence_take_a_nested_cut(monkeypatch, tmp_path):

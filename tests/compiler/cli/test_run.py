@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
+from emmy.compiler.backend.base import BenchmarkResult
 from tests.compiler.helpers import requires_cuda, requires_sm
 
 
@@ -446,7 +447,6 @@ def test_ab_replay_retains_scoped_off_exception_to_bare_pin():
 def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
     """The re-lowered IR path must use the same merged input-and-schedule pin map."""
     import contextlib
-    from types import SimpleNamespace
 
     from emmy.commands import run as run_mod
     from emmy.compiler.graph import Graph
@@ -465,7 +465,7 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
         async def bench_pinned_async(self, _graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
             assert (warmup, num_iters) == (1, 2)
             assert precision_pin(FAST_MATH) is False
-            return SimpleNamespace(min_ms=0.1, time_ms=0.1), None
+            return BenchmarkResult(min_ms=0.1, time_ms=0.1), None
 
     source = tmp_path / "loop.json"
     source.write_text("{}")
@@ -501,7 +501,7 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
     monkeypatch.setattr(tmod, "graph_from_code", fake_graph_from_code)
 
     async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
-        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+        return BenchmarkResult(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda g: g, bench_pinned_async=fake_bench_pinned_async)
     dyn = SimpleNamespace(name="g.dynM", knobs={"TILE": "f2x2"}, shape=None, dynamic=("seq_len@x0:0",))
@@ -547,7 +547,7 @@ def test_bench_golden_variants_quantizes_each_retraced_ab(monkeypatch):
     )
 
     async def bench(_graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
-        return SimpleNamespace(min_ms=0.1, time_ms=0.1, per_launch=[]), None
+        return BenchmarkResult(min_ms=0.1, time_ms=0.1, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda graph: compiled, bench_pinned_async=bench)
     sample = SimpleNamespace(name="ab", knobs={"TILE": "nvfp4"}, pins={}, shape=None, dynamic=None, flops=None)
@@ -558,33 +558,6 @@ def test_bench_golden_variants_quantizes_each_retraced_ab(monkeypatch):
     assert len(calls) == 1
     assert calls[0][:3] == (traced, bundle, "nvfp4")
     assert Path(calls[0][3]).name.startswith("emmy-ab-")
-
-
-def test_intensity_floor_flags_impossible_row(monkeypatch):
-    """The finding-4 gate: a benched row whose CONFIG-implied FLOP/s exceeds the device's
-    recorded peak is flagged (the sixth sweep's 8.2 µs "2 PFLOP/s" 2048³ golden row); a
-    plausible latency passes, and an unregistered device degrades to no gate. The gate reads
-    ``Sample.flops`` (an exact measured-work count, never a ``ShapeKey`` estimate) rather than
-    reconstructing from the ShapeKey: the join key excludes symbolic axes on the matmul side
-    but includes them on the reduce-tier side, so the old hint-multiplier reconstruction
-    flagged every reduce-tier ``.dynM`` replay 512× over (the golden-audit false positive)."""
-    from types import SimpleNamespace
-
-    from emmy import gpu
-    from emmy.commands.run import _intensity_floor_flag
-
-    monkeypatch.setattr(gpu, "live_name", lambda: "NVIDIA GeForce RTX 5090")
-    s = SimpleNamespace(flops=2.0 * 2048**3, dtype="fp32")
-    assert "impossible" in _intensity_floor_flag(s, 8.2)  # 2 PFLOP/s on a 104.8 TFLOP/s card
-    assert _intensity_floor_flag(s, 300.0) is None  # ~57 TFLOP/s — plausible
-    # A dynamic golden's flops() already sizes the symbolic axis at its benched hint.
-    d = SimpleNamespace(flops=2.0 * 512**3, dtype="fp32")
-    assert "impossible" in _intensity_floor_flag(d, 0.5)
-    assert _intensity_floor_flag(d, 9.0) is None
-    # Flopless (--ab) rows and unknown devices are ungateable.
-    assert _intensity_floor_flag(SimpleNamespace(flops=None, dtype="fp32"), 1.0) is None
-    monkeypatch.setattr(gpu, "live_name", lambda: "Some Unknown GPU")
-    assert _intensity_floor_flag(s, 8.2) is None
 
 
 def test_wrong_answer_flag_catches_bad_pinned_output():
@@ -1086,7 +1059,7 @@ def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypa
 
     async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         benched.append(g)
-        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+        return BenchmarkResult(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     dropped = SimpleNamespace(name="g.dropped", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None)
@@ -1128,7 +1101,7 @@ def test_bench_golden_variants_unmatched_place_pin_fails_row_without_benching(mo
 
     async def fake_bench_pinned_async(graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         benched.append(graph)
-        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+        return BenchmarkResult(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda graph: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     pin = {"PLACE@map.1/inner.2/map": "cut"}
@@ -1208,7 +1181,7 @@ def test_bench_golden_variants_survives_row_bench_fail(monkeypatch, failure):
         exc = next(calls)
         if exc is not None:
             raise exc
-        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+        return BenchmarkResult(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     rows = [
@@ -1251,7 +1224,7 @@ def test_bench_golden_variants_wrong_answer_gate_uses_worker_outputs(monkeypatch
     async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         seen_inputs.append(run_inputs)
         outs = next(row_outputs) if run_inputs is not None else None
-        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), outs
+        return BenchmarkResult(min_ms=1.0, time_ms=1.0, per_launch=[]), outs
 
     backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     rows = [
@@ -1280,7 +1253,7 @@ def test_bench_greedy_isolated_ok_and_bench_fail():
 
     async def ok_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         benched.append(g)
-        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+        return BenchmarkResult(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     gb = asyncio.run(_bench_greedy_isolated(SimpleNamespace(bench_pinned_async=ok_bench), compiled, warmup=1, iters=1))
     assert benched == [compiled]  # the deployed graph itself rode the worker job
@@ -1292,7 +1265,7 @@ def test_bench_greedy_isolated_ok_and_bench_fail():
 
     async def ref_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         timed_on.append((run_inputs, run_inputs_key))
-        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+        return BenchmarkResult(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     inputs = {"x": [1.0]}
     asyncio.run(
@@ -2451,7 +2424,7 @@ def test_print_kernel_stats_greedy_bench_fail_row(capsys):
         output=Tensor("o", (4,)),
         node_id="n0",
     )
-    pinned_bench = SimpleNamespace(min_ms=0.5, time_ms=0.5, per_launch=[], e2e_min_ms=None)
+    pinned_bench = BenchmarkResult(min_ms=0.5, time_ms=0.5, per_launch=[], e2e_min_ms=None)
     ok_row = _GoldenBench(
         SimpleNamespace(name="ab TILE=mma_m16n8k16_f16_f32/f2x4", knobs={"TILE": "mma_m16n8k16_f16_f32/f2x4"}, shape=None, dynamic=None),
         graph_with({"TILE": "mma_m16n8k16_f16_f32/f2x4"}),
@@ -2480,7 +2453,7 @@ def test_print_kernel_stats_uses_execution_symbolic_environment(capsys):
         node_id="out",
     )
     graph.outputs = ["out"]
-    bench = SimpleNamespace(
+    bench = BenchmarkResult(
         min_ms=0.5,
         time_ms=0.5,
         per_launch=[SimpleNamespace(idx=0, samples=[0.5], time_ms=0.5)],
@@ -2508,8 +2481,8 @@ def _iso_bench_fixtures():
         output=Tensor("o", (4,)),
         node_id="n0",
     )
-    bench = SimpleNamespace(min_ms=0.5, time_ms=0.5, per_launch=[SimpleNamespace(idx=0, samples=[0.5], time_ms=0.5)], e2e_min_ms=None)
-    iso_bench = SimpleNamespace(min_ms=0.4, time_ms=0.4, per_launch=[SimpleNamespace(idx=0, samples=[0.4], time_ms=0.4)], e2e_min_ms=None)
+    bench = BenchmarkResult(min_ms=0.5, time_ms=0.5, per_launch=[SimpleNamespace(idx=0, samples=[0.5], time_ms=0.5)], e2e_min_ms=None)
+    iso_bench = BenchmarkResult(min_ms=0.4, time_ms=0.4, per_launch=[SimpleNamespace(idx=0, samples=[0.4], time_ms=0.4)], e2e_min_ms=None)
     iso_sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
     return greedy, bench, _GoldenBench(iso_sample, greedy, iso_bench, [])
 
@@ -2572,7 +2545,7 @@ def test_write_ab_json_uses_whole_program_time_for_multi_launch_pinned_row(tmp_p
     from emmy.commands.run import _GoldenBench, _write_ab_json
 
     greedy, bench, _iso = _iso_bench_fixtures()
-    multi_bench = SimpleNamespace(
+    multi_bench = BenchmarkResult(
         min_ms=0.8,
         time_ms=0.9,
         per_launch=[
