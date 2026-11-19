@@ -1287,11 +1287,14 @@ fresh child — no escalation modes, no `os._exit`.
   `greedy.isolated` block in `--json`. Those are the baseline the pinned rows' speedups are measured against.
   **Record goldens from `--ab` / golden rows only, never from the greedy row's number.**
 - The greedy pick hanging, or blowing the bench budget, is itself a *finding* — precisely the hazard a golden exists
-  to prevent — so the pinned rows are still benched afterwards. Pinned rows that fail to compile or to bench are kept
-  as `bench_fail` rows, never dropped, and the run exits non-zero if any row failed.
+  to prevent — so the pinned rows are still benched afterwards: unverified where the target has a Torch twin (the flag
+  keeps them out of every record), refused where the greedy outputs were the only reference. The failed pick is not
+  benched again in isolation and is not tuned. Pinned rows that fail to compile or to bench are kept as `bench_fail`
+  rows, never dropped, and the run exits non-zero if any row failed.
 - The greedy job also carries the accuracy check: the emmy program runs on the rebuilt module's real inputs in-child,
   and a numeric failure aborts the run, because a latency table for a miscompiling program is meaningless. That run's
-  `(inputs, outputs)` become the pinned rows' wrong-answer reference.
+  `(inputs, outputs)` become the pinned rows' wrong-answer reference; under `--strict` the outputs handed on are
+  eager's, since a strict row is held to eager directly.
 - Only the no-`--bench` accuracy probe still runs in-process (it hosts the `--debug` per-launch dumps and the ncu
   child's profiled launches), so with `--bench` those two want a separate plain `run`.
 

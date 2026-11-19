@@ -4,19 +4,29 @@ Accuracy failures (``max_diff >= 1.0``) make ``emmy run`` exit
 non-zero, so ``rc == 0`` is the accuracy assertion.
 """
 
+import argparse
 import asyncio
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
-from emmy.commands.compile import PinnedRow
+from emmy.commands.compile import CommandError, PinnedRow
 from emmy.compiler.backend.base import BenchmarkResult
 from tests.compiler.helpers import requires_cuda, requires_sm
+
+
+def _run_parser():
+    from emmy.commands.run import register_run_command
+
+    parser = argparse.ArgumentParser()
+    register_run_command(parser.add_subparsers())
+    return parser
 
 
 def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
@@ -483,6 +493,99 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
 
     assert seen and all(knobs == {"FAST_MATH": "False", "TILE": "f2x4"} for knobs in seen)
     assert len(rows) == 1 and rows[0].status == "ok"
+
+
+def test_a_strict_code_bench_holds_its_ab_rows_to_eager(monkeypatch):
+    """``--code --ab --strict``: each pinned row is compared with eager directly, as the greedy row is, so the strict
+    verdict can pass. The traced path asked no strict check of its rows and then failed every one for lacking it."""
+    from emmy.commands import run as run_mod
+    from emmy.compiler.graph import Graph
+
+    seen = {}
+
+    class Backend:
+        bench_compile_timeout_s = bench_run_timeout_s = 1.0
+
+        async def benchmark_compare_async(self, _graph, **kwargs):
+            seen["compare"] = kwargs
+            bench = BenchmarkResult(time_ms=0.001, captured=True)
+            reference = ({"x": 1.0}, {"out": 2.0})
+            return {
+                "results": {"Emmy": 1.0},
+                "result": bench,
+                "captured": True,
+                "torch_available": True,
+                "accuracy_error": None,
+                "run_io": reference,
+            }
+
+        async def aclose_async_worker(self):
+            pass
+
+    async def pinned(_backend, _source, rows, **kwargs):
+        seen["rows"] = kwargs
+        return [run_mod._GoldenBench(row, None, None) for row in rows]
+
+    async def isolated(*_args, **_kwargs):
+        return run_mod._GoldenBench(PinnedRow(name="greedy (isolated)"), None, None)
+
+    monkeypatch.setattr(run_mod, "_bench_golden_variants", pinned)
+    monkeypatch.setattr(run_mod, "_bench_greedy_isolated", isolated)
+    args = SimpleNamespace(strict_correctness=True, tune=None, bench_backends="emmy", warmup=5, iters=20, seed=0)
+    session = asyncio.run(
+        run_mod._bench_session(
+            args,
+            Backend(),
+            Graph(),
+            torch_spec=("trace_args", {}),
+            base_s=1.0,
+            twin=None,
+            source="torch.relu(torch.randn(4))",
+            rows=run_mod._ab_samples(["TILE=f2x4"]),
+            accuracy=True,
+            accuracy_fatal=True,
+        )
+    )
+
+    assert seen["compare"]["strict_accuracy"] and seen["compare"]["want_ref"]
+    assert seen["rows"]["strict_correctness"] is True and seen["rows"]["strict_reference"] == "eager"
+    assert [row.sample.name for row in session.rows] == ["ab TILE=f2x4"]
+
+
+def test_a_tune_of_an_ir_file_is_refused(tmp_path, monkeypatch):
+    """``--tune`` enumerates the schedules of a program it lowers itself; an IR file holds none, so the run is refused
+    before anything compiles instead of benching the greedy pick and tuning nothing."""
+    import torch
+
+    from emmy.commands import run as run_mod
+
+    ir = tmp_path / "loop.json"
+    ir.write_text("{}")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    args = _run_parser().parse_args(["run", "--ir", str(ir), "--bench", "--tune", "8"])
+    with pytest.raises(CommandError, match="--tune requires --code, --realization or --kernel") as refused:
+        run_mod._handle_run_once(args)
+    assert refused.value.code == 2
+
+
+def test_the_ncu_child_compiles_the_program_the_parent_benched(monkeypatch):
+    """``--profile`` runs the same input again under ncu: a traced program of a golden stays that program (alone,
+    ``--golden PATH`` would walk every target of the file), and a quantized or paged compile stays one."""
+    from emmy.commands import ncu
+
+    commands = []
+    monkeypatch.setattr(ncu.config, "ncu_child", lambda: False)
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/ncu")
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **_kwargs: commands.append(cmd) or SimpleNamespace(stdout="", stderr="", returncode=0)
+    )
+
+    ncu.run_ncu_profile(_run_parser().parse_args(["run", "--golden", "g.json", "--program", "3", "--pin-route", "--paged", "w", "--bench"]))
+    ncu.run_ncu_profile(_run_parser().parse_args(["run", "--code", "torch.relu(x)", "--quantize", "nvfp4", "--bench"]))
+
+    golden, code = (cmd[cmd.index("run") + 1 :] for cmd in commands)
+    assert golden[:4] == ["--golden", "g.json", "--program", "3"] and "--pin-route" in golden and golden[golden.index("--paged") + 1] == "w"
+    assert code[:4] == ["--code", "torch.relu(x)", "--quantize", "nvfp4"]
 
 
 def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):

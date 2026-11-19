@@ -493,7 +493,8 @@ def test_run_job_trace_args_want_ref_without_eager_accuracy(monkeypatch) -> None
 
 
 def test_run_job_trace_args_strict_accuracy_records_direct_proof(monkeypatch) -> None:
-    """Model-ID runs use the same strict eager proof as runnable frontend IR."""
+    """Model-ID runs use the same strict eager proof as runnable frontend IR, and hand the pinned rows eager's outputs
+    as their reference: a strict row is held to eager directly, not to the greedy pick."""
     from types import SimpleNamespace
 
     from emmy.compiler.backend.cuda import _bench_worker
@@ -504,7 +505,7 @@ def test_run_job_trace_args_strict_accuracy_records_direct_proof(monkeypatch) ->
         lambda _args: (object(), "slug", (module, (), {})),
     )
     monkeypatch.setattr("emmy.compiler.loader.binder.bind_inputs", lambda *_args, **_kwargs: {"x": [0.0]})
-    monkeypatch.setattr("emmy.compiler.backend.correctness.eager_output", lambda *_args, **_kwargs: {"n0": [2.0]})
+    monkeypatch.setattr("emmy.compiler.backend.correctness.eager_output", lambda *_args, **_kwargs: ([9.0],))
     monkeypatch.setattr(
         "emmy.compiler.backend.correctness.strict_correctness_proof",
         lambda outputs, eager: {
@@ -531,23 +532,23 @@ def test_run_job_trace_args_strict_accuracy_records_direct_proof(monkeypatch) ->
         return {"Eager PyTorch": 2.0, "Emmy": 3.0}, SimpleNamespace(captured=True), True
 
     monkeypatch.setattr("emmy.compiler.backend.cuda.compare.bench_full_model_real", fake_bench)
-    resp = asyncio.run(
-        _bench_worker._run_job(
-            {
-                "graph": object(),
-                "torch_spec": ("trace_args", {"input": "org/model"}),
-                "strict_accuracy": True,
-                "accuracy": False,
-                "want_ref": False,
-                "warmup": 0,
-                "iters": 1,
-                "bench_backends": "eager,emmy",
-            }
-        )
-    )
+    request = {
+        "graph": object(),
+        "torch_spec": ("trace_args", {"input": "org/model"}),
+        "strict_accuracy": True,
+        "accuracy": False,
+        "want_ref": False,
+        "warmup": 0,
+        "iters": 1,
+        "bench_backends": "eager,emmy",
+    }
+    resp = asyncio.run(_bench_worker._run_job(request))
     assert resp["accuracy_error"] is None
     assert resp["correctness"]["status"] == "pass"
     assert resp["results"] == {"Eager PyTorch": 2.0, "Emmy": 3.0}
+    assert resp["run_io"] is None
+    resp = asyncio.run(_bench_worker._run_job({**request, "want_ref": True}))
+    assert resp["run_io"] == ({"x": [0.0]}, {"n0": [9.0]})
 
 
 @pytest.mark.parametrize("strict", [False, True])

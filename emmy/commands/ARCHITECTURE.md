@@ -167,7 +167,8 @@ deploy-side strictness: a fork no measured row decides raises `EvidenceError` na
 a prediction. BF16 inputs and constants bind through the compiler's raw `uint16` carrier. BF16, packed FP4 and FP8
 output carriers are decoded to numeric values on both sides of every command-layer correctness check, including
 the FP64 reference; different encodings of signed zero therefore compare equal. The eager forward
-that serves as the correctness reference runs inside `correctness_oracle`, which turns torch's reduced-precision GEMM
+that serves as the correctness reference runs inside `backend/correctness.reference_precision`, which turns torch's
+reduced-precision GEMM
 reductions off: with them on, the FP16 GEMM at K = 15360 leaves one element in ten of its own output outside
 `rtol=atol=1e-3` of an FP64 product, and a kernel nearer the truth than eager failed `--strict` for eager's error.
 Eager still rounds every intermediate to FP16, so a different summation order can land one element an FP16 step away
@@ -437,6 +438,20 @@ compiles — including when an embedded Loop's same-input reference completed bu
 the watchdog — and a pinned row that pins no knobs beyond the greedy compile's own input regime is then skipped
 rather than re-elected and re-failed identically; a pinned row carrying its own knobs (a genuinely different config,
 or an `--ab` row) still benches.
+
+**One bench session.** A traced model, a `--code` expression, an IR file and a golden target all bench through one
+session and one report (`_bench_session`, `_report` in `commands/run.py`): the greedy comparison, the greedy graph's
+isolated re-bench, the pinned rows, the tune rows, then the tables, the `--json` record, the golden write-back and
+the tune DB evidence. The paths differ only in what they hand the session: how the child rebuilds the torch side, what
+a pinned row lowers again (the `--code` string, the golden's embedded program, or the IR file's graph with its tail
+of passes), and whether a wrong answer is fatal (a traced module on its own inputs) or reported (an IR reproducer on
+random inputs). So the rules above hold on every path: a greedy pick that failed to bench is not benched again and
+is not tuned, and its pinned rows bench unverified where a Torch twin exists. `--tune` needs a program it can lower
+itself, so an IR file is refused. The command module holds the session, the report and the recording; what a worker
+job runs lives with the backend (`backend/cuda/compare.py`, the comparison; `backend/correctness.py`, the checks;
+`loader/binder.py`, the input binding), and `commands/ncu.py` is `--profile`. A helper refuses a run by raising
+`CommandError` with the message and the exit code; the handler logs it and exits, and the whole-file walk moves on
+to its next target.
 
 **Autotuning one kernel.** `run --bench --tune N` measures N rows of the program's one scheduled kernel
 (`search/autotune.py`) — every schedule row crossed with the arms of each fork the kernel lowering opens on it
