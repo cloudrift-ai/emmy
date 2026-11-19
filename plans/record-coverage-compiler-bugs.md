@@ -65,7 +65,7 @@ EMMY_KNOBS="PLACE=fuse,REDUCE=" emmy run --golden emmy/compiler/pipeline/search/
   --kernel k_6d8ebf7490dd --bench
 ```
 
-Run each on an sm_120 card (an RTX 5090 or a PRO 6000), and on another card to see whether it is sm_120-only. Run
+It is not sm_120-only. On the V100 (sm_70) both programs fault in their **unpinned** greedy on every bench, with the error naming no kernel, so nothing gets disqualified and neither program ever benches clean. The V100 reproducer: the same commands on a scratch copy of the program traced into the V100 working golden. Run
 under `compute-sanitizer --tool memcheck` to get the faulting instruction and address; `EMMY_DUMP_DIR` gives the
 kernel's PTX to match it against.
 
