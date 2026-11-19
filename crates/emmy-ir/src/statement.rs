@@ -169,11 +169,17 @@ macro_rules! with_statement_types {
                 /// the loops over the cells, which is what lets a step read OTHER cells of its own state (a delta rule's `k @ S`)
                 /// through `Pre`; a scalar `Accum` lives inside the cell loops and cannot. One statement defines a state;
                 /// a cell it skips keeps its value.
+                ///
+                /// Without a seed the statement is the DEFINITION of a value the kernel keeps for itself: one
+                /// cell of it per coordinate of `index`, which lists every loop around the statement. No loop
+                /// carries it, nothing reads it one step back, and a `Pre` reads it by index wherever the
+                /// definition's loops have closed, the way a `Load` reads a buffer. A value two or more places
+                /// read is defined once this way and read by each, where it would be computed again at each.
                 shared Carry {} {
                     name: Name [DEFINES],
                     value: Name [READS],
                     index: Exprs [EXPRESSION] : Index,
-                    seed: NumOr<Name> [BUFFER_READ],
+                    seed: Option<NumOr<Name>> [BUFFER_READ] = None,
                     dtype: Option<DType> [] = None,
                 }
                 /// A read of one cell of a carried state: `name = carrier[index]`.
@@ -297,9 +303,9 @@ macro_rules! with_statement_types {
                 ///
                 /// `range` is where the axis walks when that is not `0..extent`: a start and an exclusive end
                 /// (`axis::Range`), each over the coordinates around the loop and the symbolic dims. The axis then takes
-                /// the values `start..end`, and its extent is the most trips the loop takes, which is what a schedule
-                /// sizes against. A reduce loop with a range folds the values of that range alone, where a select of
-                /// the fold's neutral element would mask the rest.
+                /// the values `start..end`, which lie inside `0..extent`: the extent stays the bound every index is
+                /// analysed under, and the range says how many trips the loop takes. A reduce loop with a range folds
+                /// the values of that range alone, where a select of the fold's neutral element would mask the rest.
                 shared Loop {} {
                     axis: AxisRef [AXIS],
                     body: Body [BODY],

@@ -157,7 +157,11 @@ fn masked_bounds(
         }) {
             return None;
         }
-        let neutral = accum.op.known()?.info().neutral?;
+        // A kernel seeds the accumulator with the operation's seed (a maximum's is the bounded stand-in of its
+        // neutral element), so folding either leaves the accumulator as the trip found it.
+        let op = accum.op.known()?;
+        let neutral = op.info().neutral?;
+        let seed = op.seed();
         let select = selects.get(accum.value.as_var()?)?;
         let [first, last] = &select.branches[..] else {
             return None;
@@ -165,7 +169,11 @@ fn masked_bounds(
         if !last.select.is_truthy() {
             return None;
         }
-        let is_neutral = |name: &Name| literals.get(name).is_some_and(|value| *value == neutral);
+        let is_neutral = |name: &Name| {
+            literals
+                .get(name)
+                .is_some_and(|value| *value == neutral || Some(*value) == seed)
+        };
         let mut bounds = Bounds::default();
         if is_neutral(&last.value) && !is_neutral(&first.value) {
             bounds_of(&first.select, axis, outer, &mut bounds);
@@ -193,31 +201,29 @@ fn masked_bounds(
 }
 
 /// `l` over the canonical spelling of `range` under `ctx`: no range when it is the whole axis, and the extent the
-/// most trips the analysis proves, where that is fewer than the extent states.
+/// least bound the analysis proves of the end, where that is below what the extent states.
 fn over(l: &Loop, range: Range, ctx: &SimplifyCtx) -> Result<Loop> {
-    let start = range.start.simplify(ctx)?;
-    let end = range.end.simplify(ctx)?;
-    let whole = start.int_literal() == Some(0) && end == l.axis.extent.expression;
+    let range = Range {
+        start: range.start.simplify(ctx)?,
+        end: range.end.simplify(ctx)?,
+    };
+    let whole = range.start.int_literal() == Some(0) && range.end == l.axis.extent.expression;
     let mut axis = l.axis.clone();
-    if !whole && let Some(stated) = l.axis.extent.as_static() {
-        let trips = Expression::binary(Operation::Subtract, end.clone(), start.clone())
-            .simplify(ctx)?
-            .range(ctx)
-            .map(|span| span.hi);
-        if let Some(most) = trips
-            && most >= 1
-            && most < i128::from(stated)
-        {
-            axis = Arc::new(Axis {
-                name: l.axis.name,
-                extent: Dim::static_(most as i64),
-                window: l.axis.window.clone(),
-            });
-        }
+    let reached = range.interval(ctx).hi + 1;
+    if !whole
+        && let Some(stated) = l.axis.extent.as_static()
+        && reached >= 1
+        && reached < i128::from(stated)
+    {
+        axis = Arc::new(Axis {
+            name: l.axis.name,
+            extent: Dim::static_(reached as i64),
+            window: l.axis.window.clone(),
+        });
     }
     Ok(Loop {
         axis,
-        range: (!whole).then_some((start, end)),
+        range: (!whole).then_some((range.start, range.end)),
         ..l.clone()
     })
 }
@@ -341,7 +347,7 @@ mod tests {
         O[i] = s
             ";
         assert!(
-            normal(given).contains("for a1 in 2..6 of 4:"),
+            normal(given).contains("for a1 in 2..6 of 6:"),
             "{}",
             normal(given)
         );

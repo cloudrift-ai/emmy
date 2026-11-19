@@ -870,6 +870,20 @@ pub fn prepare_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody
     )
 }
 
+/// `body` with every value it defines for itself spelled at each read as the statements that compute it there,
+/// in normal form (`values::inline_values`); `body` itself when it defines none.
+#[pyfunction]
+pub fn inline_values<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    let given = PyBody::from_iterable(body)?;
+    let inlined = emmy_ir::values::inline_values(&given).py()?;
+    let out = if inlined.ptr_eq(&given) {
+        given
+    } else {
+        emmy_ir::normalize::normalize_body(&inlined).py()?
+    };
+    PyBody::wrap(body.py(), &out)
+}
+
 #[pyfunction]
 pub fn simplify_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
     PyBody::wrap(
@@ -1012,6 +1026,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(check_input, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
+    m.add_function(wrap_pyfunction!(inline_values, m)?)?;
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_lambda_body, m)?)?;
     m.add_function(wrap_pyfunction!(reduce_strength, m)?)?;

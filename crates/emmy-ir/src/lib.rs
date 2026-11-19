@@ -21,6 +21,7 @@ pub mod statement;
 pub mod strength;
 pub mod text;
 pub mod types;
+pub mod values;
 
 pub use name::Name;
 

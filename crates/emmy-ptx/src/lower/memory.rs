@@ -10,7 +10,7 @@ use emmy_ir::elementwise::Operation;
 use emmy_ir::expr::{Builtin, Expr, Expression, Interval, Num, SimplifyCtx};
 use emmy_ir::field::NumOr;
 use emmy_ir::statement::{Carry, CpAsyncCopy, Load, Pre, Smem, Statement, Write, ZeroPrologue};
-use emmy_ir::{Name, Result};
+use emmy_ir::{Error, Name, Result};
 
 use emmy_ir::fragment::volta_slab_index;
 
@@ -863,9 +863,15 @@ impl Lowerer {
                 _ => None,
             });
             let Some(carry) = defined else { continue };
+            // A register-held cell starts from its seed: a definition without one is no state of a kernel loop.
+            let seed = carry.seed.clone().ok_or_else(|| {
+                Error::Value(format!(
+                    "the kernel loop carries '{name}', which states no seed to start from"
+                ))
+            })?;
             let state = Carried {
                 ty: self.vty(carry.dtype)?,
-                seed: carry.seed.clone(),
+                seed,
                 cells: BTreeMap::new(),
             };
             self.carried.insert(*name, state);
