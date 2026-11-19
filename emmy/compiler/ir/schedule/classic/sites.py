@@ -69,6 +69,7 @@ from .schedule import (
     classic_node_key,
     classic_stage_key,
     classic_state_keys,
+    holds_state,
     node_id_spelling,
     output_sweep_works,
     packed_works,
@@ -155,6 +156,10 @@ class _LocalSupport:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "edges", frozendict(self.edges))
+
+
+#: Every non-direct storage a carried state has a spelling for.
+_STATE_STAGES = (Stage(transport="smem"),)
 
 
 def _producers(tile_op) -> frozenset[NodeId]:
@@ -698,12 +703,30 @@ class ClassicKernelSite(Site[ClassicSchedule]):
     @cached_property
     def kernels(self) -> tuple[KernelSchedule, ...]:
         return tuple(
-            KernelSchedule(work, raster, state) for work in self._works() for raster in self._rasters() for state in self._states()
+            KernelSchedule(work, raster, state)
+            for work in self._works()
+            for raster in self._rasters()
+            for state in self._states()
+            if state.is_direct or holds_state(work, raster)
         )
 
     def _states(self) -> tuple[Stage, ...]:
-        """Where the carried state may be kept: direct alone."""
-        return (Stage.direct(),)
+        """Where the carried state may be kept: direct, and the storage its ownership proof admits."""
+        keys = classic_state_keys(self.problem.tile)
+        catalog = (Stage.direct(), *self.problem.state_stages) if len(keys) == 1 else (Stage.direct(),)
+        if not keys:
+            return catalog
+        spelled = {stage.spell(): stage for stage in catalog}
+        named = self.problem.row.get(keys[0])
+        if named is None and keys[0] != "STAGE" and (bare := self.problem.bare_pins.get("STAGE")) is not None:
+            # A bare pin names one site of the kernel: the state offers its value beside direct, and
+            # ``unrealized_bare_pin`` asks the completed schedule which site carried it.
+            return tuple(dict.fromkeys((Stage.direct(), spelled.get(bare, Stage.direct()))))
+        if named in spelled:
+            return (spelled[named],)
+        # A value no state takes (an operand transport published to every kernel) names another site.
+        addressed = named in {stage.spell() for stage in _STATE_STAGES}
+        return () if addressed and self.problem.strict(keys[0]) else catalog
 
     def _inventories(self) -> Iterator[Work]:
         for site in self.problem.node_sites:
@@ -805,6 +828,10 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: such an operand, so the stage catalog keeps the transports that need one off it
     #: (:func:`~.refusals._stage_candidates`).
     paged: Mapping[str, tuple[int, int]] = field(default_factory=frozendict)
+    #: The storage, beside direct, the kernel's one carried state may take: shared memory where one CTA owns
+    #: each state whole, registers where the kernel has a register program. Empty for a kernel that carries no
+    #: state, or whose state stays global.
+    state_stages: tuple[Stage, ...] = ()
     #: Row keys whose values must be accepted exactly. Strict replay adds only the keys it supplies,
     #: leaving unrelated inherited pins under their original published-row reading.
     _strict_row_keys: frozenset[str] = frozenset()

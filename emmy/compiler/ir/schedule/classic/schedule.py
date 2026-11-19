@@ -56,7 +56,8 @@ def _is_edge_site(edge: EdgeSite) -> bool:
 @dataclass(frozen=True, slots=True)
 class KernelSchedule:
     """Kernel-scoped choices: the worker inventory, the raster, and where the state the kernel carries between
-    steps is kept. Direct is the one storage: a buffer in global memory, one launch per step."""
+    steps is kept — direct (a buffer in global memory, one launch per step), shared memory (``d1/smem``: the
+    steps run inside one launch)."""
 
     work: Work
     raster: Raster
@@ -154,6 +155,12 @@ def classic_state_keys(sites) -> tuple[str, ...]:
     if taken := {f"STAGE@{sites.sites[edge[0]].path}" for edge in sites.stage_edges} & set(keys):
         raise ValueError(f"a carried state and a staged consumer share the key {sorted(taken)[0]}")
     return keys
+
+
+def holds_state(work: Work, raster: Raster) -> bool:
+    """Whether a kernel under this inventory can keep its carried state in shared memory: one CTA owns a state
+    whole and its threads stripe every cell copy, which the one-dimensional cooperative thread tile is."""
+    return work.kind == "thread" and work.units[1] == 1 and work.units[0] > 1 and raster.is_direct
 
 
 def binds_root(choice: ProjectionSchedule | ReductionSchedule) -> bool:

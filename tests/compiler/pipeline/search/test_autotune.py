@@ -6,7 +6,10 @@ import math
 import numpy as np
 import pytest
 
-from emmy.compiler.pipeline.search.autotune import START, Autotuner, _encode
+from emmy.compiler.context import Context
+from emmy.compiler.pipeline.search.autotune import START, Autotuner, _encode, schedule_space
+from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.passes.test_shared_carry import _graph as _carried_state_graph
 
 
 def _space():
@@ -83,6 +86,20 @@ def test_featureless_candidates_survive_the_bayesian_phase_without_repeats():
     tuner.observe([(START, math.inf), (START + 1, 0.5)])
     assert tuner.best() == START + 1
     assert tuner.propose(8) == []
+
+
+def test_candidates_spell_the_carried_states_storage_on_every_row_that_can_hold_it():
+    """A kernel that carries a state has a ``STAGE`` site for it. Every schedule row offers the state in global
+    memory; the rows a one-dimensional cooperative thread tile runs offer it in shared memory too, and no other."""
+    with pinned_knobs({"FAST_MATH": True}):
+        _, rows = schedule_space(_carried_state_graph(), Context.from_target((7, 0)))
+    arms: dict[tuple, set] = {}
+    for row in rows:
+        arms.setdefault(tuple(sorted((k, v) for k, v in row.items() if k != "STAGE")), set()).add(row["STAGE"])
+    assert arms and all("WORK" in dict(schedule) for schedule in arms)
+    shared = {dict(schedule)["WORK"] for schedule, offered in arms.items() if offered == {"", "d1/smem"}}
+    assert shared and all(work.startswith("t") and "x" not in work for work in shared)
+    assert all(offered == {""} for schedule, offered in arms.items() if dict(schedule)["WORK"] not in shared)
 
 
 def test_a_two_valued_knob_keeps_its_arms_apart_and_the_other_arm_is_proposed_next():

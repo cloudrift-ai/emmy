@@ -27,6 +27,7 @@ from .schedule import (
     classic_node_key,
     classic_stage_key,
     edge_site_spelling,
+    holds_state,
     node_id_spelling,
     output_sweep_works,
     packed_works,
@@ -336,6 +337,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._refuse("RASTER requires a tiled contraction site")
         if pick.kernel.work.producer and not self._producer_eligible:
             self._refuse("producer band is incompatible with the selected transport")
+        shared = pick.kernel.state.transport == "smem"
+        if shared and not (self.tile_op.state_routes and holds_state(pick.kernel.work, pick.kernel.raster)):
+            self._refuse("a carried state is kept in shared memory by a one-dimensional cooperative thread tile only")
         schedule = Schedule(pick.kernel, self.schedule.nodes, self.schedule.edges)
         self._require_kernel_prefix(schedule)
         if self.problem is not None and (why := self.problem.unrealized_bare_pin(schedule)):

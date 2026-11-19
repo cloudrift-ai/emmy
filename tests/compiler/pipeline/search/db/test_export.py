@@ -88,6 +88,42 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
     assert dataset.provenance["sources"] == {"golden:case": 1} and back.provenance == dataset.provenance
 
 
+def test_a_carried_kernels_pool_offers_both_storages_and_a_golden_lands_on_its_own():
+    """A kernel whose carried state fits shared memory offers its schedule rows in both storages, so the fit can
+    learn either, and a golden row recorded in shared storage lands on that row, not on the global one of its
+    schedule; one that spells no storage was measured in global storage and lands there."""
+    from emmy.compiler.pipeline.search.dataset import GoldenRow, KernelDef, regime_of
+    from tests.compiler.passes.test_shared_carry import _PINS
+    from tests.compiler.passes.test_shared_carry import _graph as carried_state_graph
+
+    graph = carried_state_graph()
+    kernel = KernelDef(loop_ir=graph.to_wire(), formed=True)
+    ctx = Context.from_target((7, 0), gpu_name=CARDS[(7, 0)], precision={})
+    schedule = {k: v for k, v in _PINS.items() if k in ("WORK", "REDUCE")}
+    with pinned_knobs({"FAST_MATH": True}):
+        file_side = enumerate_graph(graph, ctx, prefer=schedule)
+    arms = {str(row["STAGE"]) for row in file_side.rows if all(str(row.get(k)) == v for k, v in schedule.items())}
+    assert arms == {"", "d1/smem"}
+    shared, legacy = GoldenRow({**schedule, "STAGE": "d1/smem"}, 1.0, "golden:a"), GoldenRow(dict(schedule), 1.05, "golden:b")
+    pool = GoldenPool(CARDS[(7, 0)], (7, 0), regime_of(False, {"FAST_MATH": True}), kernel, {}, (shared, legacy))
+    db_side = enumerate_pool(pool, pool_context(pool))
+    assert [tile_signature(r) for r in db_side.rows] == [tile_signature(r) for r in file_side.rows]
+    assert db_side.total == len(db_side.rows) == len(file_side.rows)
+    [group], skipped = build_golden_groups([pool])
+    column = group.feat_names.index("D_state_shared")
+    assert skipped == [] and len(set(group.golden_ids)) == 2
+    assert sorted(group.feats[i, column] for i in group.golden_ids) == [0.0, 1.0]
+    assert {str(db_side.rows[i]["WORK"]) for i in group.golden_ids} == {schedule["WORK"]}
+    [sampled], skipped = build_golden_groups([pool], sample=4, seed=0)
+    column = sampled.feat_names.index("D_state_shared")
+    assert skipped == [] and sorted(sampled.feats[i, column] for i in sampled.golden_ids) == [0.0, 1.0]
+    # A verified row the pool's fastest beats by more than measurement noise is no positive: it measured slower.
+    slow = GoldenPool(CARDS[(7, 0)], (7, 0), regime_of(False, {"FAST_MATH": True}), kernel, {}, (shared, replace(legacy, us=2.0)))
+    [group], skipped = build_golden_groups([slow])
+    column = group.feat_names.index("D_state_shared")
+    assert skipped == [] and [group.feats[i, column] for i in group.golden_ids] == [1.0]
+
+
 def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp_path):
     """A golden that cut its kernel is, in the placement space, the parent's placement fork: the arms the cut
     pass offers unpinned — keep fused, one kernel; the cut, two — featurized from the kernels each leaves, the

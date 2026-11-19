@@ -71,6 +71,29 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
 
 
+def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str):
+    """Remove unused global state allocations after a resident materialization."""
+    written = {name for stmt in kernel.body.iter() for name in stmt.external_writes()}
+    ports = {t.name for t in root.outputs if t.name not in written and t.name not in match.graph.outputs}
+    ports = {name for name in ports if not match.graph.buffer_users(name)}
+    if not ports:
+        return kernel
+    from emmy.compiler.pipeline.passes.tile._cut import _input_fragment  # noqa: PLC0415
+
+    outputs = tuple(t for t in root.outputs if t.name not in ports)
+    names = {t.name: t.name + "__" + suffix for t in outputs}
+    fragment = _input_fragment(match, root)
+    fragment.add_node(
+        replace(kernel, body=kernel.body.rename_buffers(names), outputs={}),
+        list(root.inputs),
+        outputs=(outputs[0], *(replace(t, name=names[t.name]) for t in outputs[1:])),
+        node_id=names[outputs[0].name],
+    )
+    fragment.outputs = list(names.values())
+    match.output = names
+    return fragment
+
+
 #: Names a statement may read with no binding in the tile's body: a thread's lane and warp, which the grid decode
 #: binds (``THREAD_COORDS``), and names the PTX compiler supplies — the reserved coordinates a
 #: :class:`~emmy.compiler.ir.kernel.ir.FragmentApply` COORD / GMEM template is written over, which it
