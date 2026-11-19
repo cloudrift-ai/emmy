@@ -32,6 +32,294 @@ The refactor makes the split a term, computed from the kernel and its row. Legal
 split succeed, and is its leaf the atom's product), and the lowering reads levels instead of building axes inside
 atom code.
 
+## The cases, in block form
+
+Six cases, each as the term the compiler stores today and the term after the split. The "today" trees are the
+structural dump (`emmy compile --ir tile`, or the lift alone for a carried state). The "after" trees are written by
+hand in the same notation: no code produces them yet, and the reference model of stage 4 has to confirm the three
+with a carried state before any of them is built.
+
+Notation. `a2c in 0..2 ⊂ a2` is an axis cut from `a2`, as the dump prints a window today. The text after `·` says
+where a level runs, which is what stage 2 adds to each level. A free axis has no Fold, so its split shows in the
+`axes` lines above the tree and in the index of every load. A `lift` or `combine` the split leaves alone is not
+repeated.
+
+The sizes are chosen so that every level has more than one trip. The three carried states were traced at small
+sizes and are written here at the real ones, with the step count rounded and the first rolled row moved (the roll
+of the solve starts two rows in, and a walk whose last state nothing reads is one step shorter). The reading of each row's numbers (`w1x4` as one
+warp along M and four along N, `k8` as eight atom steps a chunk) is the one "The idea" states; check it against the
+codec before stage 2 builds on it.
+
+### 1. A map
+
+`y[a0, a1] = f(x[a0, a1])`. Free axes only, so step 1 is a substitution and the tree does not change.
+
+```
+today   place  free=(a0, a1)
+        Fold  free  ‹pointwise›
+        └─ lift: λ(a0, a1) -> (v0)
+
+after   axes   a0 = 128 * a0c + a0t      a0c · CTA grid      a0t · thread
+        place  free=(a0c, a0t, a1)  grid=(a0c, a1)
+        Fold  free  ‹pointwise›
+        └─ lift: λ(a0c, a0t, a1) -> (v0)                 every load reads x[128 * a0c + a0t, a1]
+```
+
+### 2. A reduction
+
+`sum(x, dim=-1)` over 64 rows of 4096, under `WORK=t128 REDUCE=coop`.
+
+```
+today   place  free=(a0)  grid=(a0)
+        Fold[a1 in 0..4096] reduce   ⟨REDUCE=coop⟩
+        ├─ operand[in0]: load x[a0, a1]
+        ├─ init: (0)
+        ├─ lift: λ(a1, in0) -> (in0)
+        └─ combine: λ(acc0, acc0__o) -> (acc0)
+             acc0 = acc0 + acc0__o
+
+after   axes   a1 = 128 * a1s + a1l
+        place  free=(a0)  grid=(a0)
+        Fold[a1l in 0..128 ⊂ a1] reduce                  · the CTA's threads, one lane each, merged across lanes
+        ├─ operand[acc0]: Fold[a1s in 0..32 ⊂ a1] reduce · a serial loop in each thread
+        │  ├─ operand[in0]: load x[a0, 128 * a1s + a1l]
+        │  ├─ init: (0)
+        │  ├─ lift: λ(a1s, in0) -> (in0)
+        │  └─ combine: acc0 = acc0 + acc0__o
+        ├─ init: (0)
+        ├─ lift: λ(a1l, acc0) -> (acc0)
+        └─ combine: acc0 = acc0 + acc0__o
+```
+
+Two things this case fixes for stage 1. The in-block coordinate is the outer Fold here, and the block coordinate
+the inner one: a sum commutes, so the two levels swap, and the split has to return either order. And the outer
+combine is the same ⊕ used as a merge (`Fold.merge`), so a twisted combine splits the same way with its recipe's
+merge. `/v<n>` is a third cut of `a1`, the adjacent elements a lane reads in one step.
+
+### 3. A product
+
+`C[a0, a1] += A[a0, a2] * B[a2, a1]` with M = 64, N = 96, K = 256 in bf16, under
+`WORK=w1x4 TILE=mma_m16n8k16_bf16_f32/f1x1/k8`.
+
+```
+today   place  free=(a0, a1)  grid=(a0, a1)
+        Fold[a2 in 0..256] contraction
+        ├─ operand[in0]: load x0[a0, a2]
+        ├─ operand[in1]: load x1[a2, a1]
+        ├─ init: (0)
+        ├─ lift: λ(a2, in0, in1) -> (v0)
+        │    v0 = in0 * in1
+        └─ combine: λ(acc0, acc0__o) -> (acc0)
+             acc0 = acc0 + acc0__o
+
+after   axes   a0 = 16 * a0c + a0m                 a0c in 0..4 · CTA grid     a0m in 0..16 · atom rows
+               a1 = 32 * a1c + 8 * a1w + a1n       a1c in 0..3 · CTA grid     a1w in 0..4 · warp
+                                                   a1n in 0..8 · atom columns
+               a2 = 128 * a2c + 16 * a2s + a2k
+        place  free=(a0c, a1c, a1w, a0m, a1n)  grid=(a0c, a1c)
+        Fold[a2c in 0..2 ⊂ a2] contraction               · a serial loop, one staged chunk a trip (k8)
+        └─ operand[acc0]: Fold[a2s in 0..8 ⊂ a2] contraction    · a serial loop of atom steps
+           └─ operand[acc0]: Fold[a2k in 0..16 ⊂ a2] contraction   · the leaf
+              ├─ operand[in0]: load x0[16 * a0c + a0m, 128 * a2c + 16 * a2s + a2k]
+              ├─ operand[in1]: load x1[128 * a2c + 16 * a2s + a2k, 32 * a1c + 8 * a1w + a1n]
+              ├─ init: (0)
+              ├─ lift: λ(a2k, in0, in1) -> (v0)
+              │    v0 = in0 * in1
+              └─ combine: acc0 = acc0 + acc0__o
+```
+
+The leaf and its two free axes `a0m`, `a1n` are a 16 x 8 x 16 product under a sum: the atom. That one test is
+stage 3's legality. `f1x1` is a level one trip wide between the warp and the atom (a warp holds one fragment); a
+wider `f` cuts `a0` or `a1` once more. A split across CTAs (`REDUCE=g<n>k`) is one more cut of `a2` above `a2c`,
+whose level is another kernel: the pieces and the merge of stage 1.
+
+### 4. A carried state read at its own cell: the delta rule
+
+`S = S * exp(sum g) + Kᵀ V` per chunk of 64 tokens, the inter-chunk half of a delta rule. Each cell reads the
+state at its own cell alone.
+
+```
+today   Fold  free
+        ├─ operand[acc0, v4__obs]: Fold[a0 in 0..4] reduce        (carries)
+        │  ├─ operand[acc1]: Fold[a2 in 0..64] reduce
+        │  │  └─ operand[in0]: load g[a1, 64 * a0 + a2]
+        │  ├─ operand[acc2]: Fold[a5 in 0..64] contraction
+        │  │  ├─ operand[in1]: load k[a1, 64 * a0 + a5, a3]
+        │  │  └─ operand[in2]: load v[a1, 64 * a0 + a5, a4]
+        │  ├─ operand[v2]: Fold  free  ‹pointwise›
+        │  │  └─ lift: v2 = pre acc0[a1, a3, a4]
+        │  ├─ init: (0)
+        │  ├─ cells: (a1, a3, a4)
+        │  ├─ lift: λ(a0, acc1, acc2, v2) -> (v4, v4__obs)
+        │  │    v0 = exp(acc1)
+        │  │    v3 = v0 * v2
+        │  │    v4 = acc2 + v3
+        │  └─ combine: acc0 = next(acc0, acc0__o)
+        └─ lift: λ(v4__obs) -> (v4__obs)
+        outputs
+        └─ add__steps0[a0, a1, a3, a4] = v4__obs
+
+after   axes   a0 = 2 * a0b + a0i        a0j: a second in-block coordinate, the step a term came from
+        Fold  free
+        ├─ operand[acc0, v4__obs]: Fold[a0b in 0..2 ⊂ a0] reduce  (carries)   · ordered launches, one a block
+        │  ├─ operand[acc1]: Fold[a2 in 0..64] reduce       · isolated: free over a0i, the block's steps at once
+        │  ├─ operand[acc2]: Fold[a5 in 0..64] contraction  · isolated: free over a0i, the block's steps at once
+        │  ├─ operand[v2]: Fold  free  ‹pointwise›          · the state the block started from
+        │  │  └─ lift: v2 = pre acc0[a1, a3, a4]
+        │  ├─ operand[w]: Fold[a0j in 0..2 ⊂ a0] reduce     · the cycle, broken: the decay from step a0j to a0i
+        │  │  ├─ lift: exp(acc1 at a0j) when a0j <= a0i, 1 otherwise
+        │  │  └─ combine: w = w * w__o
+        │  ├─ operand[acc3]: Fold[a0j in 0..2 ⊂ a0] contraction   · the product for the writes
+        │  │  └─ lift: (decay from a0j + 1 to a0i) * (acc2 at a0j) when a0j <= a0i, 0 otherwise
+        │  ├─ init: (0)
+        │  ├─ cells: (a1, a3, a4)
+        │  ├─ lift: λ(a0b, w, acc3, v2) -> (v4, v4__obs)
+        │  │    v3 = w * v2
+        │  │    v4 = acc3 + v3                              the state the next block starts from is v4 at a0i = 1
+        │  └─ combine: acc0 = next(acc0, acc0__o)
+        └─ lift: λ(v4__obs) -> (v4__obs)
+        outputs
+        └─ add__steps0[2 * a0b + a0i, a1, a3, a4] = v4__obs
+```
+
+Step 3 finds that the gate and `Kᵀ V` read no state, so they leave the cycle and run for every step of the block
+at once. Step 4 finds a cycle of one scalar per cell, `s ← w s + p`: its system is bidiagonal and its solution is
+a weighted prefix sum, with no walk left inside the block. With one block covering every step the outer Fold
+carries nothing.
+
+### 5. A carried state read at earlier rows: the solve
+
+Forward substitution, a row a step: `X[r, c] = A[r, c] + Σ_{m < r} A[r, m] * X[m, c]`. It is the intra-chunk
+system of the gated delta rule (64 rows, 59 µs as one walk).
+
+```
+today   Fold  free
+        ├─ operand[acc0, v10__obs]: Fold[a0 in 0..63] reduce      (carries)
+        │  ├─ operand[acc1]: Fold[a4 in 0..64] reduce
+        │  │  ├─ operand[v1]: pre acc0[a1, a0 + 1, a4]          row r of the seed: no step wrote it yet
+        │  │  ├─ operand[v2]: pre acc0[a1, a4, a3]              row m < r: an earlier step wrote it
+        │  │  └─ lift: v1 * v2 when a4 < a0 + 1, 0 otherwise
+        │  ├─ operand[v5]: pre acc0[a1, a0 + 1, a3]             the cell's own seed
+        │  ├─ operand[v8]: pre acc0[a1, a2, a3]                 a row this step does not write
+        │  ├─ init: (select_scatter)
+        │  ├─ cells: (a1, a2, a3)
+        │  ├─ lift: acc1 + v5 when a2 == a0 + 1 and a3 < a0 + 1, v8 otherwise
+        │  └─ combine: acc0 = next(acc0, acc0__o)
+        └─ lift: λ(v10__obs) -> (v10__obs)
+
+after   axes   a0 = 16 * a0b + a0i       a4 = 16 * a4b + a4i       a4j: the in-block row a term came from
+        Fold  free
+        ├─ operand[acc0, v10__obs]: Fold[a0b in 0..4 ⊂ a0] reduce (carries)   · ordered launches, one a block
+        │  ├─ operand[rhs]: Fold  free                      · isolated: free over a0i, the block's rows at once
+        │  │  ├─ operand[acc1]: Fold[a4b in 0..a0b ⊂ a4] contraction   · whole blocks, lifted from a4 < a0 + 1
+        │  │  │  └─ operand[acc1]: Fold[a4i in 0..16 ⊂ a4] contraction · the leaf: 16 wide, a product
+        │  │  │     ├─ operand[v1]: pre acc0[a1, 16 * a0b + a0i + 1, 16 * a4b + a4i]
+        │  │  │     └─ operand[v2]: pre acc0[a1, 16 * a4b + a4i, a3]
+        │  │  ├─ operand[v5]: pre acc0[a1, 16 * a0b + a0i + 1, a3]
+        │  │  └─ lift: rhs = acc1 + v5
+        │  ├─ operand[inv]: Fold[a0i in 0..16 ⊂ a0] reduce  (carries on, does not seed)
+        │  │  └─ the small system: the walk above on the 16 x 16 block of A alone, its state in registers
+        │  ├─ operand[acc2]: Fold[a4j in 0..16 ⊂ a4] contraction   · the product for the writes
+        │  │  └─ lift: inv[a0i, a4j] * rhs[a4j, a3]
+        │  ├─ init: (select_scatter)
+        │  ├─ cells: (a1, a2, a3)
+        │  ├─ lift: acc2 when a2 is a row of this block and a3 is left of it, v8 otherwise
+        │  └─ combine: acc0 = next(acc0, acc0__o)
+        └─ lift: λ(v10__obs) -> (v10__obs)
+```
+
+Step 2 does the work here: `a4 < a0 + 1` is settled by the block coordinates for every earlier block, so the sum
+over earlier rows becomes whole blocks with an unmasked 16-wide leaf, and only the rows of the block itself stay
+in the cycle. Step 3 sends the reads of row `r` to the seed. Step 4 leaves a unit lower triangular system 16
+wide. Its walk is the one walk that stays, and it is where "levels of steps" is needed: a Fold under the carrying
+one that carries on.
+
+The dump spells the "today" conditions as nested selects on the index (`a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0`).
+The tree above writes them plainly. Reading them back to that plain form is part of the dependence test's input,
+and the second measured fact of stage 4 applies to every one.
+
+### 6. The Gated DeltaNet recurrence
+
+Qwen3.8's own chunk rule, `S = g S + K̃ᵀ (V − W S)`: per chunk a contraction of the previous state (`W S`), the
+correction `U = V − W S`, a second output of the step, and the write `K̃ᵀ U`. Every step writes every cell.
+
+```
+today   Fold  free
+        ├─ operand[acc0, v6__obs, v9]: Fold[a0 in 0..4] reduce    (carries)
+        │  ├─ operand[acc1]: Fold[a4 in 0..64] contraction        K̃ᵀ U
+        │  │  ├─ operand[v2]: Fold  free                          U = V − W S
+        │  │  │  ├─ operand[acc2]: Fold[a5 in 0..128] contraction W S
+        │  │  │  │  ├─ operand[v0]: pre acc0[a1, a5, a3]
+        │  │  │  │  └─ operand[in1]: load matmul_3[0, a1, a0, a4, a5]
+        │  │  │  ├─ operand[in2]: load matmul_2[0, a1, a0, a4, a3]
+        │  │  │  └─ lift: v2 = in2 - acc2
+        │  │  ├─ operand[in3]: load mul_14[0, a1, a0, a4, a2]
+        │  │  └─ lift: v3 = in3 * v2
+        │  ├─ operand[v9]: Fold  free                             U again, for the output
+        │  │  └─ operand[acc3]: Fold[a8 in 0..128] contraction
+        │  ├─ operand[in0]: load unsqueeze_11[0, a1, a0, 0, 0]    the gate
+        │  ├─ operand[v4]: pre acc0[a1, a2, a3]
+        │  ├─ init: (0)
+        │  ├─ cells: (a1, a2, a3)
+        │  ├─ lift: v6 = acc1 + in0 * v4
+        │  └─ combine: acc0 = next(acc0, acc0__o)
+        └─ lift: λ(v6__obs, v9) -> (v6__obs, v9)
+        outputs
+        ├─ add_7__steps0[a0, 0, a1, a2, a3] = v6__obs
+        └─ sweep(a6.a7) add_7__steps1[a0, 0, a1, a6, a7] = v9
+
+after   axes   a0 = 4 * a0b + a0i        a0j, a4j: the step and the row of the block a term came from
+        Fold  free
+        ├─ operand[acc0, v6__obs, u]: Fold[a0b in 0..1 ⊂ a0] reduce   (carries)   · one block: nothing to launch in order
+        │  ├─ operand[rhs]: Fold  free                      · free over (a0i, a4): 256 rows at once
+        │  │  ├─ operand[acc2]: Fold[a5 in 0..128] contraction    · the product for the reads
+        │  │  │  ├─ operand[v0]: pre acc0[a1, a5, a3]             the state the block started from
+        │  │  │  └─ operand[in1]: load matmul_3[0, a1, 4 * a0b + a0i, a4, a5], times the gates before a0i
+        │  │  └─ lift: rhs = in2 - acc2
+        │  ├─ operand[sys]: Fold[a5 in 0..128] contraction  · the small system, free over (a0i, a4, a0j, a4j)
+        │  │  ├─ operand[in1]: load matmul_3[0, a1, 4 * a0b + a0i, a4, a5]
+        │  │  ├─ operand[in3]: load mul_14[0, a1, 4 * a0b + a0j, a4j, a5]
+        │  │  └─ lift: in1 * in3 times the gates from a0j to a0i when a0j < a0i, 0 otherwise
+        │  ├─ operand[u]: Fold[a0i in 0..4 ⊂ a0] reduce     (carries on, does not seed)   · the solve
+        │  │  └─ lift: u = rhs − Σ_{a0j < a0i, a4j} sys * u       a product a step, 64 x (64 a0i) x 128
+        │  ├─ operand[acc1]: Fold[a0j in 0..4 ⊂ a0] contraction   · the product for the writes
+        │  │  └─ operand[acc1]: Fold[a4j in 0..64] contraction
+        │  │     └─ lift: in3 * u times the gates after a0j when a0j <= a0i, 0 otherwise
+        │  ├─ init: (0)
+        │  ├─ cells: (a1, a2, a3)
+        │  ├─ lift: v6 = acc1 + (gates up to a0i) * v4
+        │  └─ combine: acc0 = next(acc0, acc0__o)
+        └─ lift: λ(v6__obs, u) -> (v6__obs, u)
+        outputs
+        ├─ add_7__steps0[4 * a0b + a0i, 0, a1, a2, a3] = v6__obs
+        └─ sweep(a6.a7) add_7__steps1[4 * a0b + a0i, 0, a1, a6, a7] = u
+```
+
+Step 3 isolates nothing but the loads: every cell is written every step, so every read of the state is in the
+cycle. Step 4 does all of it. The unknowns are the corrections `U`, 256 rows of them; the state enters once, in
+the product for the reads; and the system is strictly lower triangular in blocks of 64, because a chunk's
+correction reads only the writes of the chunks before it. This is the chunk rule's own shape one level up: the
+token rule split at 64 gives the rule traced here, and the same split at 4 chunks gives one block of 256 rows.
+
+What it buys at 256 rows: four ordered steps of two products each become three products over 256 rows and a
+solve of three steps. Every product has an unmasked leaf an atom can take, including the two the old reading
+never offered (stage 6). What it costs: the system is a 256 x 256 product per head that the walk never forms, and
+the per-step states the first output stores are four partial sums of the last product in place of four states the
+walk had anyway. Whether that pays is the measurement stage 4 ends on.
+
+### What the cases ask of the split
+
+- Cases 1 to 3 need step 1 and nothing else, and case 3's leaf test is the contraction reading as it is.
+- Either order of the two Folds a split returns (case 2), and a cut of one axis at several widths in one row
+  (case 3).
+- An extent that depends on a block coordinate (`a4b in 0..a0b`, case 5). The kernel's axis table holds a number
+  or a symbolic count today.
+- A second in-block coordinate over the same axis (`a0j`, `a4j`): the system and the product for the writes relate
+  two steps of one block.
+- A Fold that carries on and does not seed (cases 5 and 6): "levels of steps" in stage 4.
+- Cases 4 and 6 at one block have an outer Fold that carries nothing. The split should return the term without
+  it, so the kernel takes cuts and splits like any other.
+
 ## Three rules for the work
 
 - **On the term.** The split is an operation on a Fold, where the axes are explicit. Loop IR hides a kernel's
