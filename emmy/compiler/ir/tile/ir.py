@@ -469,12 +469,6 @@ class TileOp(Op):
         return tuple(site.path for site in carrying.sites if site.node.carries) if carrying is not None else ()
 
     @cached_property
-    def state_program(self):
-        """The register program of the state this kernel keeps between steps (:attr:`register_program` of the
-        carrying kernel), or ``None``: what makes register storage one of the values its ``STAGE`` site offers."""
-        return self._carrying.register_program if self._carrying is not None else None
-
-    @cached_property
     def _carrying(self) -> TileOp | None:
         if self.carries:
             return self
@@ -511,13 +505,6 @@ class TileOp(Op):
         if not callable(validate):
             raise TypeError("schedule materialization must provide validate(schedule, source, place=..., workers=...)")
         validate(self.schedule, self, place=self.place, workers=self.workers)
-
-    @cached_property
-    def register_program(self):
-        """The rectangular loop whose state can be owned by independent register rows."""
-        from emmy.compiler.ir.schedule.register import RegisterProgram  # noqa: PLC0415
-
-        return RegisterProgram.from_tile(self)
 
     @cached_property
     def grid_sched(self):

@@ -29,7 +29,6 @@ from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, THREAD_COORDS
 from emmy.compiler.ir.pure.fold import EXTENTS
-from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write, exposed_defines, free_names
 from emmy.compiler.ir.tile import TileOp
@@ -46,26 +45,18 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     # structural ``tile/030_cut`` fork's, decided BEFORE scheduling (the walk's catalog
     # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
-    resident = isinstance(tile.materialization, RegisterMaterialization)
-    if tile.carries and not resident:
+    if tile.carries:
         from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
 
         tile = serial_form(tile, root.id)
-    rplan = reduce_plan(tile) if tile.op is not None and not resident else None
+    rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
-        materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0))
-        if not resident:
-            materialized = _pointwise_strip(tile, materialized)
+        materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
         body = Body((materialized,))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
-        kernel = KernelOp(body=body, serial=() if resident else tuple(tile.place.serial))
-        if resident:
-            # The state's port — the buffer the lift added for the classic realization, which no
-            # store of the term writes. Register storage has no global state allocation, so the
-            # port goes: a graph splice; snapshots with external readers remain ordinary outputs.
-            return _drop_private_ports(match, root, replace(kernel, source=tile, knobs=tile.knobs), "register")
+        kernel = KernelOp(body=body, serial=tuple(tile.place.serial))
         # An output no statement writes is a store the emission lost: the kernel would compile and
         # leave the buffer unwritten. Decline the row, so the retry moves on or the compile fails loudly.
         written = {name for stmt in body.iter() for name in stmt.external_writes()}
@@ -78,29 +69,6 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         # realization corpus pins that — and the compile declines it here: the skip is recorded,
         # the node stays a TileOp, and the greedy blocklist retry resolves onto the next row.
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
-
-
-def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str):
-    """Remove unused global state allocations after a resident materialization."""
-    written = {name for stmt in kernel.body.iter() for name in stmt.external_writes()}
-    ports = {t.name for t in root.outputs if t.name not in written and t.name not in match.graph.outputs}
-    ports = {name for name in ports if not match.graph.buffer_users(name)}
-    if not ports:
-        return kernel
-    from emmy.compiler.pipeline.passes.tile._cut import _input_fragment  # noqa: PLC0415
-
-    outputs = tuple(t for t in root.outputs if t.name not in ports)
-    names = {t.name: t.name + "__" + suffix for t in outputs}
-    fragment = _input_fragment(match, root)
-    fragment.add_node(
-        replace(kernel, body=kernel.body.rename_buffers(names), outputs={}),
-        list(root.inputs),
-        outputs=(outputs[0], *(replace(t, name=names[t.name]) for t in outputs[1:])),
-        node_id=names[outputs[0].name],
-    )
-    fragment.outputs = list(names.values())
-    match.output = names
-    return fragment
 
 
 #: Names a statement may read with no binding in the tile's body: a thread's lane and warp, which the grid decode
