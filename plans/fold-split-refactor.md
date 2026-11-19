@@ -83,6 +83,19 @@ row of some kernel uses each transport, each atom family, the chunk tier, the tr
 rarely used ones: the producer band (3 kernels, 99 lines mention it across 17 files), narrow output lanes (1 row),
 and the warp prefix scan (no golden row, corpus only).
 
+**Where the recurrence's 170 µs is.** Read off the recorded rows of the 256-row layer (Qwen3.8-27B-NVFP4-NVIDIA,
+RTX 5090). The walk across the four chunks is 24 µs and the solve 35 µs. The rest is ordinary kernels around them,
+all in f32: four readout products on scalar register tiles (35.7, 16.9, 16.2 and 9.1 µs), the copy that stacks the
+chunk start states (18.1), the mask and decay build (14.6), and smaller pieces. So stage 4 as written aims at 59 of
+about 170 µs, and stage 6 at more than that.
+
+**An f32 product has no atom, and that is most of the gap.** No tensor-core atom takes an f32 multiplicand, so a
+product of two f32 operands is offered scalar tiles alone. The largest readout product (64 x 128 x 128 per chunk
+and head, 4 chunks, 48 heads), written as a program and tuned 24 rows on the dev-box RTX 5090: 25 to 27 µs in f32
+at its best scalar tile, 7.4 µs with both operands cast to bf16 ahead of the product, the cast fused into the fill.
+The recorded walk already runs its f32 state through an f16 atom, so the layer tolerates the precision somewhere;
+whether it does here needs the model's accuracy check.
+
 ## The idea
 
 A Fold in block form takes four steps. They are the same four for a product, a reduction, a map and a recurrence.
