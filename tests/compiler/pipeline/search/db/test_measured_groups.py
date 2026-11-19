@@ -43,7 +43,7 @@ def test_configs_that_competed_land_in_one_group():
 
 def test_cold_and_hot_measurements_form_separate_groups():
     hot = _row("a", us=200.0, knobs=_feats())
-    cold = replace(hot, cold_cache=True, stats=replace(hot.stats, median=400.0))
+    cold = replace(hot, cold_cache=True, us=400.0)
     groups, dropped = measured_groups([hot, cold], _stamped)
     assert not dropped
     assert len(groups) == 2
