@@ -33,6 +33,9 @@ const LOGIT_BYTES: usize = size_of::<f32>();
 /// The token after a chunk's row past the prompt, which its drafter pass embeds: the chunk's own
 /// greedy pick, which its program puts in place of this.
 const CHUNK_PICK: i64 = -1;
+/// Where a paged buffer's pages live: the resident ones in device memory, the rest in pinned host
+/// memory.
+type Homes = (DeviceMemory, HostMemory);
 
 /// The nucleus of `logits`: the tokens of the smallest prefix of the descending-logit order (ties
 /// by ascending id) reaching top-p, each with its positive f64 weight at the sampling temperature,
@@ -282,7 +285,7 @@ pub struct Generator {
     verify: Option<Executor>,
     executor: Executor,
     _pager: Pager,
-    _homes: Vec<(DeviceMemory, HostMemory)>,
+    _homes: Vec<Homes>,
     config: Config,
     sampling: Sampling,
     position: usize,
@@ -337,11 +340,177 @@ fn check_buffer(
     Ok(())
 }
 
+/// Check that `artifact` is a token-step program over `inputs` of `rows` rows writing the logits
+/// and greedy token of `logit_rows` rows, then the single-token outputs `extra`, and nothing else.
+fn check_interface(
+    artifact: &Artifact,
+    inputs: &[&str],
+    rows: i64,
+    logit_rows: i64,
+    vocab: i64,
+    extra: &[String],
+) -> Result<()> {
+    for name in inputs {
+        check_buffer(artifact, name, "i64", "input", &input_shape(name, rows))?;
+    }
+    check_buffer(artifact, "logits", "f32", "output", &[logit_rows, vocab])?;
+    check_buffer(artifact, "token", "i64", "output", &[logit_rows])?;
+    for name in extra {
+        check_buffer(artifact, name, "i64", "output", &[1])?;
+    }
+    let outputs = ["logits", "token"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(extra.iter().cloned());
+    ensure!(
+        artifact.program.inputs == inputs && artifact.program.outputs.iter().cloned().eq(outputs),
+        "invalid generation interface"
+    );
+    Ok(())
+}
+
+/// Read the pages of `owner`'s paged buffer `name` from the pack where the manifest `entry` puts
+/// them, the resident ones into device memory and the rest into pinned host memory, and declare
+/// them with `pager`. The two homes live as long as the pager.
+fn declare_pages(
+    device: &Device,
+    root: &Path,
+    name: &str,
+    entry: &serde_json::Value,
+    owner: &Artifact,
+    pager: &mut Pager,
+) -> Result<Homes> {
+    let (buffer, paging) = (owner.program.buffer(name)?, &owner.program.paged[name]);
+    let env = owner.program.default_env();
+    ensure!(
+        paging.geometry(buffer, &env)?.0 == 1,
+        "{name} is not paged along its leading axis, so its bytes are not page after page"
+    );
+    let (pages, page_bytes) = (
+        paging.page_count(buffer, &env)?,
+        paging.page_bytes(buffer, &env)?,
+    );
+    let slots = paging
+        .slots
+        .with_context(|| format!("{name} has pages but no device slots"))?;
+    let resident = entry["resident"]
+        .as_u64()
+        .with_context(|| format!("{name} has no resident page count"))? as usize;
+    ensure!(
+        resident <= pages,
+        "{name} has {resident} resident pages of {pages}"
+    );
+    let path = member(root, entry["path"].as_str().context("invalid page path")?)?;
+    let mut file = std::fs::File::open(&path)?;
+    ensure!(
+        file.metadata()?.len() == (pages * page_bytes) as u64,
+        "{} does not hold {pages} pages of {page_bytes} bytes",
+        path.display()
+    );
+    let on_device = DeviceMemory::read(device, &mut file, resident * page_bytes)?;
+    let home = HostMemory::read(device, &mut file, (pages - resident) * page_bytes)?;
+    pager.declare(
+        device,
+        name,
+        (on_device.ptr(), home.device_ptr()?),
+        (pages, page_bytes, slots, resident),
+    )?;
+    Ok((on_device, home))
+}
+
+/// Load the pack's prefill programs, widest first as `config` lists them, and check each one's
+/// interface: a step over a chunk of that many prompt rows writing the logits and greedy token of
+/// its last row.
+fn load_prefill(root: &Path, config: &Config, vocab: i64) -> Result<Vec<(usize, Artifact)>> {
+    let inputs = config.inputs();
+    config
+        .prefill_sizes
+        .iter()
+        .map(|&size| {
+            let prefill = Artifact::load(root, &format!("prefill{size}"))?;
+            check_interface(&prefill, &inputs, size as i64, 1, vocab, &[])?;
+            Ok((size, prefill))
+        })
+        .collect()
+}
+
+/// Check that each of decode's `state` buffers is a flat output the step writes in place.
+fn check_state(decode: &Artifact, state: &[String]) -> Result<()> {
+    for name in state {
+        let buffer = decode
+            .program
+            .buffer(name)
+            .context("missing state buffer")?;
+        ensure!(
+            buffer.role == "output" && !decode.program.paged.contains_key(name),
+            "state buffer {name} is not a flat output the step writes in place"
+        );
+    }
+    Ok(())
+}
+
+/// Declare every paged buffer the pack's `manifest` holds pages for with `pager`, each owned by
+/// the first of `owners` that pages it. Returns the homes of the pages and the names declared.
+fn declare_pack(
+    device: &Device,
+    root: &Path,
+    manifest: &serde_json::Value,
+    owners: &[&Artifact],
+    pager: &mut Pager,
+) -> Result<(Vec<Homes>, BTreeSet<String>)> {
+    let (mut homes, mut held) = (Vec::new(), BTreeSet::new());
+    for (name, entry) in manifest["pages"].as_object().into_iter().flatten() {
+        let owner = owners
+            .iter()
+            .find(|a| a.program.paged.contains_key(name))
+            .with_context(|| format!("{name} has pages but is not paged"))?;
+        homes.push(declare_pages(device, root, name, entry, owner, pager)?);
+        held.insert(name.clone());
+    }
+    Ok((homes, held))
+}
+
+/// Check that every paged buffer with device slots in `programs` has its pages `held` by the pack.
+fn check_held<'a>(
+    programs: impl IntoIterator<Item = &'a Artifact>,
+    held: &BTreeSet<String>,
+) -> Result<()> {
+    for program in programs {
+        for (name, paging) in &program.program.paged {
+            let owner = name.strip_suffix("__view").unwrap_or(name);
+            ensure!(
+                paging.slots.is_none() || held.contains(owner),
+                "paged buffer {name} has no pages in the pack"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Load the pack's verify program and check its interface: a step over the token it continues
+/// from and `config`'s drafts, writing their logits and greedy tokens, the count of drafts the
+/// target confirmed, then each draft for the next step.
+fn load_verify(root: &Path, config: &Config, vocab: i64) -> Result<Artifact> {
+    let verify = Artifact::load(root, "verify")?;
+    let rows = config.drafts as i64 + 1;
+    // Its rows are past the prompt: with a tower it takes their M-RoPE positions alone.
+    let inputs: Vec<&str> = ["position", "tokens"]
+        .into_iter()
+        .chain(config.vision.iter().map(|_| STEP_INPUTS[0]))
+        .collect();
+    let outputs: Vec<String> = std::iter::once("accepted".to_owned())
+        .chain((1..=config.drafts).map(|j| format!("draft{j}")))
+        .collect();
+    check_interface(&verify, &inputs, rows, rows, vocab, &outputs)?;
+    Ok(verify)
+}
+
 /// The buffers `borrower` takes from decode's `owner` as it loads: every output decode carries
 /// (the cache, the state), constant whose binding is decode's file, and pager table, split into
 /// the flat ones it lends as regions and the paged ones whose page tables it lends. A program's
-/// step inputs and outputs are its own: the host binds and reads them every step.
-fn shared(owner: &Artifact, borrower: &Artifact) -> Result<(Vec<String>, Vec<String>)> {
+/// step inputs and outputs are its own: the host binds and reads them every step. The borrower
+/// reads none of the files it shares: decode uploads them and lends them.
+fn shared(owner: &Artifact, borrower: &mut Artifact) -> Result<(Vec<String>, Vec<String>)> {
     let (mut flat, mut paged) = (Vec::new(), Vec::new());
     for buffer in &borrower.program.buffers {
         let own = &borrower.program;
@@ -381,6 +550,7 @@ fn shared(owner: &Artifact, borrower: &Artifact) -> Result<(Vec<String>, Vec<Str
             flat.push(buffer.name.clone());
         }
     }
+    borrower.files.retain(|name, _| !flat.contains(name));
     Ok((flat, paged))
 }
 
@@ -441,175 +611,55 @@ impl Generator {
             serde_json::from_slice(&std::fs::read(root.join("manifest.json"))?)?;
         let config: Config = serde_json::from_value(manifest["key"]["generation"].clone())?;
         config.validate()?;
+
         let artifact = Artifact::load(root, PROGRAM)?;
         let (vocab, inputs) = (config.vocab_size as i64, config.inputs());
+
         // Fixed interface names and geometry are part of the generation contract. Check before GPU allocation.
-        for name in &inputs {
-            check_buffer(&artifact, name, "i64", "input", &input_shape(name, 1))?;
-        }
-        check_buffer(&artifact, "logits", "f32", "output", &[1, vocab])?;
-        check_buffer(&artifact, "token", "i64", "output", &[1])?;
-        ensure!(
-            artifact.program.inputs == inputs,
-            "invalid generation inputs"
-        );
-        ensure!(
-            artifact.program.outputs == ["logits", "token"],
-            "invalid generation outputs"
-        );
-        let mut prefill_artifacts = config
-            .prefill_sizes
-            .iter()
-            .map(|&size| {
-                let prefill = Artifact::load(root, &format!("prefill{size}"))?;
-                for name in &inputs {
-                    let shape = input_shape(name, size as i64);
-                    check_buffer(&prefill, name, "i64", "input", &shape)?;
-                }
-                // The logits and greedy token of the chunk's last row.
-                check_buffer(&prefill, "logits", "f32", "output", &[1, vocab])?;
-                check_buffer(&prefill, "token", "i64", "output", &[1])?;
-                ensure!(
-                    prefill.program.inputs == inputs
-                        && prefill.program.outputs == ["logits", "token"],
-                    "invalid prefill interface"
-                );
-                Ok((size, prefill))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        // A verify step's rows: the token it continues from and the drafts.
-        let rows = config.drafts as i64 + 1;
-        let mut verify_artifact = if draft && config.drafts > 0 {
-            let verify = Artifact::load(root, "verify")?;
-            let drafted: Vec<String> = (1..=config.drafts).map(|j| format!("draft{j}")).collect();
-            // Its rows are past the prompt: with a tower it takes their M-RoPE positions alone.
-            let inputs: Vec<&str> = ["position", "tokens"]
-                .into_iter()
-                .chain(config.vision.iter().map(|_| STEP_INPUTS[0]))
-                .collect();
-            for name in &inputs {
-                check_buffer(&verify, name, "i64", "input", &input_shape(name, rows))?;
-            }
-            check_buffer(&verify, "logits", "f32", "output", &[rows, vocab])?;
-            check_buffer(&verify, "token", "i64", "output", &[rows])?;
-            for name in std::iter::once("accepted").chain(drafted.iter().map(String::as_str)) {
-                check_buffer(&verify, name, "i64", "output", &[1])?;
-            }
-            let outputs = ["logits", "token", "accepted"]
-                .into_iter()
-                .map(str::to_owned)
-                .chain(drafted);
-            ensure!(
-                verify.program.inputs == inputs
-                    && verify.program.outputs.iter().cloned().eq(outputs),
-                "invalid verify interface"
-            );
-            Some(verify)
-        } else {
-            None
-        };
+        check_interface(&artifact, &inputs, 1, 1, vocab, &[])?;
+
+        let mut prefill_artifacts = load_prefill(root, &config, vocab)?;
+        let mut verify_artifact = (draft && config.drafts > 0)
+            .then(|| load_verify(root, &config, vocab))
+            .transpose()?;
         let prefill_shared = prefill_artifacts
-            .iter()
+            .iter_mut()
             .map(|(_, p)| shared(&artifact, p))
             .collect::<Result<Vec<_>>>()?;
         let verify_shared = verify_artifact
-            .as_ref()
+            .as_mut()
             .map(|v| shared(&artifact, v))
             .transpose()?;
-        // A borrower reads none of the files it shares with decode: decode uploads them and lends them.
-        for (borrower, (flat, _)) in prefill_artifacts
-            .iter_mut()
-            .map(|(_, p)| p)
-            .zip(&prefill_shared)
-            .chain(verify_artifact.iter_mut().zip(&verify_shared))
-        {
-            borrower.files.retain(|name, _| !flat.contains(name));
-        }
-        for name in &config.state {
-            let buffer = artifact
-                .program
-                .buffer(name)
-                .context("missing state buffer")?;
-            ensure!(
-                buffer.role == "output" && !artifact.program.paged.contains_key(name),
-                "state buffer {name} is not a flat output the step writes in place"
-            );
-        }
+        check_state(&artifact, &config.state)?;
+
         // The buffers the pager holds keep every page at its home, read straight from the pack: the
         // resident pages in device memory, the rest in pinned host memory, and the device slots
         // their paging declares. One pager serves every program: decode loads with its tables
         // lent, and the others share them with decode's other buffers.
-        let (mut pager, mut homes, mut lent) = (Pager::default(), Vec::new(), BTreeMap::new());
+        let mut pager = Pager::default();
         let towers = match &config.vision {
             Some(vision) => Tower::artifacts(root, vision, &artifact)?,
             None => Vec::new(),
         };
-        let mut held = BTreeSet::new();
-        for (name, entry) in manifest["pages"].as_object().into_iter().flatten() {
-            // The tower's pools are buffers of its programs; every other paged buffer is decode's.
-            let owner = std::iter::once(&artifact)
-                .chain(towers.iter().map(|(_, tower)| tower))
-                .find(|a| a.program.paged.contains_key(name))
-                .with_context(|| format!("{name} has pages but is not paged"))?;
-            let (buffer, paging) = (owner.program.buffer(name)?, &owner.program.paged[name]);
-            let env = owner.program.default_env();
-            ensure!(
-                paging.geometry(buffer, &env)?.0 == 1,
-                "{name} is not paged along its leading axis, so its bytes are not page after page"
-            );
-            let (pages, page_bytes) = (
-                paging.page_count(buffer, &env)?,
-                paging.page_bytes(buffer, &env)?,
-            );
-            let slots = paging
-                .slots
-                .with_context(|| format!("{name} has pages but no device slots"))?;
-            let resident = entry["resident"]
-                .as_u64()
-                .with_context(|| format!("{name} has no resident page count"))?
-                as usize;
-            ensure!(
-                resident <= pages,
-                "{name} has {resident} resident pages of {pages}"
-            );
-            let path = member(root, entry["path"].as_str().context("invalid page path")?)?;
-            let mut file = std::fs::File::open(&path)?;
-            ensure!(
-                file.metadata()?.len() == (pages * page_bytes) as u64,
-                "{} does not hold {pages} pages of {page_bytes} bytes",
-                path.display()
-            );
-            let on_device = DeviceMemory::read(device, &mut file, resident * page_bytes)?;
-            let home = HostMemory::read(device, &mut file, (pages - resident) * page_bytes)?;
-            pager.declare(
-                device,
-                name,
-                (on_device.ptr(), home.device_ptr()?),
-                (pages, page_bytes, slots, resident),
-            )?;
-            if std::ptr::eq(owner, &artifact) {
-                lent.extend(pager.regions(name)?);
-            }
-            homes.push((on_device, home));
-            held.insert(name.clone());
-        }
-        for program in std::iter::once(&artifact)
-            .chain(prefill_artifacts.iter().map(|(_, p)| p))
-            .chain(&verify_artifact)
-        {
-            for (name, paging) in &program.program.paged {
-                let owner = name.strip_suffix("__view").unwrap_or(name);
-                ensure!(
-                    paging.slots.is_none() || held.contains(owner),
-                    "paged buffer {name} has no pages in the pack"
-                );
-            }
-        }
-        let decoded: BTreeSet<String> = held
-            .iter()
-            .filter(|name| artifact.program.paged.contains_key(*name))
-            .cloned()
+        // The tower's pools are buffers of its programs; every other paged buffer is decode's.
+        let owners: Vec<&Artifact> = std::iter::once(&artifact)
+            .chain(towers.iter().map(|(_, tower)| tower))
             .collect();
+        let (homes, held) = declare_pack(device, root, &manifest, &owners, &mut pager)?;
+        check_held(
+            std::iter::once(&artifact)
+                .chain(prefill_artifacts.iter().map(|(_, p)| p))
+                .chain(&verify_artifact),
+            &held,
+        )?;
+        let decoded: BTreeSet<String> = held
+            .into_iter()
+            .filter(|name| artifact.program.paged.contains_key(name))
+            .collect();
+        let mut lent = BTreeMap::new();
+        for name in &decoded {
+            lent.extend(pager.regions(name)?);
+        }
         let mut executor = Executor::load_with(device, artifact, None, Some(lent))?;
         for name in &decoded {
             pager.bind(&mut executor, name)?;
@@ -618,6 +668,7 @@ impl Generator {
             Some(vision) => Some(Tower::load(device, vision, towers, &executor, &pager)?),
             None => None,
         };
+
         let prefill = prefill_artifacts
             .into_iter()
             .zip(prefill_shared)
@@ -625,10 +676,12 @@ impl Generator {
                 Ok((size, borrow(device, &executor, artifact, shared)?))
             })
             .collect::<Result<Vec<_>>>()?;
+
         let verify = verify_artifact
             .zip(verify_shared)
             .map(|(artifact, shared)| borrow(device, &executor, artifact, shared))
             .transpose()?;
+
         Ok(Self {
             tower,
             prefill,
