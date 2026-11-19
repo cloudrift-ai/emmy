@@ -78,6 +78,7 @@ def cpu_forks(tile: TileOp, knobs: dict, ctx) -> list[Fork]:
     from emmy.compiler.ir.schedule.cpu import CpuCodec, CpuContext, CpuProblem, materialize_cpu  # noqa: PLC0415
 
     row = pin_row(tile.name, split_consumed=False, families=CpuCodec.keys())
+    tile = tile.masked()
     context = CpuContext(CpuProblem(tile, ctx, row=row))
     if row and not context.problem.bound:
         # A pin published to every kernel takes where it fits; a kernel it does not fit keeps its catalog.
@@ -157,6 +158,8 @@ def classic_forks(
             state_stages += (Stage(transport="smem"),)
         if state_tiles:
             state_stages += (Stage(transport="reg"),)
+    # The tiers cover an axis from zero to its extent: a range reaches them as the mask it stands for.
+    tile = tile.masked()
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band). A finalize that cannot take that row keeps its own

@@ -51,6 +51,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
 
         tile = serial_form(tile, root.id)
+    tile = tile.masked()
     rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:

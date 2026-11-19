@@ -294,12 +294,19 @@ macro_rules! with_statement_types {
                 /// The loop carries NO algebra — the fold's ⊕ lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node's
                 /// stored `combine`, and the dissolved fold `Accum`\ s in the body are the loop-level spelling; a loop folds iff
                 /// its body carries one.
+                ///
+                /// `range` is where the axis walks when that is not `0..extent`: a start and an exclusive end
+                /// (`axis::Range`), each over the coordinates around the loop and the symbolic dims. The axis then takes
+                /// the values `start..end`, and its extent is the most trips the loop takes, which is what a schedule
+                /// sizes against. A reduce loop with a range folds the values of that range alone, where a select of
+                /// the fold's neutral element would mask the rest.
                 shared Loop {} {
                     axis: AxisRef [AXIS],
                     body: Body [BODY],
                     unroll: bool [] = false,
                     seed: bool [] = true,
                     unrolled: bool [] = false,
+                    range: Option<(Expression, Expression)> [EXPRESSION | READS] : Index = None,
                 }
                 /// Strided iteration: `for (axis = start; axis < axis.extent; axis += step)`.
                 ///
@@ -1440,7 +1447,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "eed8f32e87a0b1055192dd4e04c657b0bd527f33dd8d6808dac1840a43b78c6e",
+            "8f690fbf110d998b104e5784e60c15004904293a1e48baed5f707f9b45c0d2e3",
             "{listing}"
         );
     }

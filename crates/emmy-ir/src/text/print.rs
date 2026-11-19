@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::INDENT;
 use crate::axis::spell_stmt_name;
-use crate::axis::{Axis, spell_axis, spell_window};
+use crate::axis::{Axis, spell_axis, spell_ranged_axis, spell_window};
 use crate::body::{Body, Subroutine};
 use crate::dtype::DType;
 use crate::expr::Expression;
@@ -157,9 +157,12 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             format!("zero {} words={}", spell_stmt_name(&s.dst)?, s.words)
         }
         Statement::Loop(s) => {
+            let axis = match &s.range {
+                None => spell_axis(&s.axis, None)?,
+                Some(_) => spell_ranged_axis(&s.axis, &s.walk())?,
+            };
             out.push(format!(
-                "{indent}for {}{}",
-                spell_axis(&s.axis, None)?,
+                "{indent}for {axis}{}",
                 flags(s.unroll, s.seed, s.unrolled)
             ));
             return body_lines(&s.body, &inner, out);

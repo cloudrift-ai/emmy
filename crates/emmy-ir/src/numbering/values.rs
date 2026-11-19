@@ -167,6 +167,18 @@ fn depths(key: &Key, out: &mut Vec<usize>) {
 }
 
 impl Context<'_> {
+    /// [`descriptor`], and for a loop that walks a range the range too, every coordinate around the loop spelled by
+    /// its binding depth. A loop without a range keys as it always did.
+    fn descriptor(&self, axis: &crate::axis::Axis, stmt: &Statement) -> Key {
+        let plain = descriptor(axis, stmt);
+        match stmt {
+            Statement::Loop(l) if let Some((start, end)) = &l.range => {
+                Key::tuple([plain, self.by_depth(start), self.by_depth(end)])
+            }
+            _ => plain,
+        }
+    }
+
     fn depth_of(&self, name: Name) -> Option<usize> {
         self.binding.iter().rposition(|bound| *bound == name)
     }
@@ -828,7 +840,7 @@ impl Context<'_> {
                 _ if !stmt.nested().is_empty() => {
                     let header = match &*stmt {
                         Statement::Loop(l) => {
-                            Key::tuple([Key::tag(Tag::Loop), descriptor(&l.axis, &stmt)])
+                            Key::tuple([Key::tag(Tag::Loop), self.descriptor(&l.axis, &stmt)])
                         }
                         Statement::Cond(c) => {
                             let cond = self.abstract_(&c.cond, &mut params, &mut ops, &mut touched);
@@ -864,7 +876,8 @@ impl Context<'_> {
                         .map(|axis| (axis.name, self.axes.get(&axis.name).cloned()))
                         .collect();
                     for axis in &bound {
-                        self.axes.insert(axis.name, descriptor(axis, &stmt));
+                        let key = self.descriptor(axis, &stmt);
+                        self.axes.insert(axis.name, key);
                         self.binding.push(axis.name);
                     }
                     let is_loop = matches!(&*stmt, Statement::Loop(_) | Statement::StridedLoop(_));

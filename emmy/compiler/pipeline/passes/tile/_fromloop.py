@@ -577,7 +577,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
         raise ValueError(f"reduce loop {loop.axis.name!r}: an Accum op without an identity is not a monoid ⊕")
     init, combine = tuple(op.identity for op in ops), Lambda.componentwise(ops, names)
     if not writes:
-        fold = Fold(operands=edges, lift=lift, init=init, base=combine)
+        fold = Fold(operands=edges, lift=lift, init=init, base=combine, range=loop.range)
         return (_hoisted(fold, names, hoists, axes, levels) if hoists else fold), ()
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
     observe = Lambda(
@@ -585,7 +585,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
         body=Body((*observed, *(Assign(f"{value}__obs", Var(value)) for value in stored))),
         results=tuple(f"{value}__obs" for value in stored),
     )
-    fold = Fold(operands=edges, lift=lift, init=init, base=combine, observe=observe)
+    fold = Fold(operands=edges, lift=lift, init=init, base=combine, observe=observe, range=loop.range)
     renamed = tuple(stmt.replace(values=tuple(f"{value}__obs" for value in stmt.values)) for stmt in writes)
     return fold, renamed
 
@@ -1059,6 +1059,13 @@ def serial_form(tile: TileOp, prefix: str) -> TileOp:
     return replace(formed, knobs=tile.knobs, inputs=tile.inputs, outputs=tile.outputs, source=tile)
 
 
+def scheduled_form(tile: TileOp, prefix: str) -> TileOp:
+    """The term the classic schedule addresses and the kernel lowering reads: the serial form of a kernel that
+    carries a state (:func:`serial_form`, its buffers named under ``prefix``), with no range left in its tree
+    (``TileOp.masked``). Every reader of a kernel's schedule sites takes the kernel through here."""
+    return (serial_form(tile, prefix) if tile.carries else tile).masked()
+
+
 __all__ = [
     "carried_program",
     "carrying_loops",
@@ -1068,6 +1075,7 @@ __all__ = [
     "lift_loop_op",
     "lift_serial",
     "owned_cells",
+    "scheduled_form",
     "seed_index",
     "serial_form",
     "states_as_buffers",

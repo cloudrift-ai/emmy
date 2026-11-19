@@ -812,6 +812,17 @@ class TileOp(Op):
         )
         return frozenset(name for dim in dims for name in dim.expression.free_vars())
 
+    def masked(self) -> TileOp:
+        """This kernel as a kernel tier reads it: no range left in its tree (``Fold.masked``). A term that walks a
+        range walks its whole extent from zero, reads its axis as ``start + axis``, and selects each value it folds
+        against the fold's neutral element past the end. The kernel itself when its tree states no range. Loop IR's
+        normal form reads the mask back as the range, so this is another spelling of one kernel, and a schedule
+        that realizes the kernel through it does not change which kernel that is (``wire.kernel_tile``)."""
+        if self.op is None:
+            return self
+        op = self.op.masked(self.axes)
+        return self if op is self.op else replace(self, op=op)
+
     def axis_of(self, name: str) -> Axis:
         """The axis table's entry for ``name`` — a reduce axis's extent and window, a free axis's extent."""
         try:

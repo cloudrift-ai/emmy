@@ -675,6 +675,13 @@ impl Line {
 
     fn loop_(&mut self, body: Body) -> Result<Arc<Statement>> {
         let (name, start, extent) = self.axis()?;
+        // `start..end of extent`: the loop walks a range, and what follows `of` is the most trips it takes.
+        let (range, start, extent) = if self.word("of") {
+            let range = (start, extent.expression);
+            (Some(range), Expression::int(0), self.dim()?)
+        } else {
+            (None, start, extent)
+        };
         let step = if self.word("step") {
             Some(self.parser.expression()?)
         } else {
@@ -696,6 +703,9 @@ impl Line {
         let unrolled = self.flag("unrolled")?.unwrap_or(false);
         self.parser.require(":")?;
         if let Some(step) = step {
+            if range.is_some() {
+                return Err(self.parser.error("a loop over a range takes no step"));
+            }
             let loop_ = StridedLoop {
                 axis,
                 start,
@@ -719,6 +729,7 @@ impl Line {
             unroll,
             seed,
             unrolled,
+            range,
         })))
     }
 }

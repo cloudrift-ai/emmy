@@ -21,12 +21,13 @@ pub fn drop_size_one_free_axes(body: &Body) -> Body {
         if let Statement::Loop(l) = &**stmt
             && l.axis.extent.as_static() == Some(1)
             && !l.is_reduce()
+            && let Some(only) = l.one_trip()
         {
             return Some(
                 l.body
                     .stmts()
                     .iter()
-                    .map(|c| substituted(c, &l.axis.name, Expression::int(0)))
+                    .map(|c| substituted(c, &l.axis.name, only.clone()))
                     .collect(),
             );
         }
@@ -46,6 +47,9 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
         if !(l.is_reduce() && l.axis.extent.as_static() == Some(1)) {
             return Some(vec![stmt.clone()]);
         }
+        let Some(only) = l.one_trip() else {
+            return Some(vec![stmt.clone()]);
+        };
         let accums: Vec<&Accum> = l
             .body
             .stmts()
@@ -96,7 +100,7 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
             })));
         }
         for member in l.body.stmts() {
-            let member = substituted(member, &l.axis.name, Expression::int(0));
+            let member = substituted(member, &l.axis.name, only.clone());
             let seed = match &*member {
                 Statement::Accum(a) => seeds.remove(&a.name),
                 _ => None,
@@ -178,6 +182,7 @@ pub(crate) fn loop_over(axis: AxisRef, body: Body, l: &Loop) -> Body {
         unroll: l.unroll,
         seed: l.seed,
         unrolled: l.unrolled,
+        range: l.range.clone(),
     }))])
 }
 
