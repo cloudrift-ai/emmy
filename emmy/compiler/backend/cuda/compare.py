@@ -178,6 +178,33 @@ def _weight_scale_inputs(dtypes: dict) -> dict[str, str]:
     return {name: leaf for name, leaf in leaves.items() if name in dtypes}
 
 
+def _scatter_index_inputs(graphs) -> dict[str, list]:
+    """The inputs a scatter reads as its rows (``index_copy`` / ``x[idx] = v``: a 1-D index), each with the extents of
+    the destination axes it names. Rows are distinct in a real program, as a KV-cache slot mapping or a page table
+    is; drawn at unit std they repeat, and two writes of different values to one row land in either order."""
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ScatterOp  # noqa: PLC0415
+
+    extents: dict[str, list] = {}
+    for graph in graphs:
+        for node in graph.nodes.values():
+            index = graph.nodes.get(node.inputs[1]) if isinstance(node.op, ScatterOp) else None
+            if index is not None and isinstance(index.op, InputOp) and len(index.output.shape) == 1:
+                dest = graph.buffer(node.inputs[0])
+                extents.setdefault(index.id, []).append(dest.shape[int(node.op.axis) % len(dest.shape)])
+    return extents
+
+
+def _distinct_rows(rng, length: int, extent: int):
+    """``length`` distinct rows of an axis of ``extent`` rows, in random order. An index longer than the axis repeats
+    its last row past ``extent`` entries, as a page table or slot map sends every entry with no slot to its one
+    spare row, where they all write the same value."""
+    import numpy as np  # noqa: PLC0415
+
+    rows = rng.permutation(extent)[:length]
+    return np.concatenate([rows, np.full(length - rows.size, extent - 1)]).astype(np.int64)
+
+
 def _chunk_position(graph, static) -> int | None:
     """The ``position`` a bench gives a native step's program, whose rows start there in its cache (``q``, ``keys``):
     the window's last chunk, the one its attention is priced for. Drawn at random the rows sit at the cache's start,
@@ -285,11 +312,16 @@ async def bench_lowered_vs_torch(
     input_tensors: dict[str, object] = {}
     position = _chunk_position(lowered, _static)
     weight_scales = _weight_scale_inputs({nid: node.output.dtype for nid, node in lowered.nodes.items() if isinstance(node.op, InputOp)})
+    scatter_rows = _scatter_index_inputs(([frontend] if frontend is not None else []) + [lowered])
     for nid, node in lowered.nodes.items():
         if isinstance(node.op, InputOp):
             # The checkpoint key's leaf is what names a weight's scale to the draw of a source.
             draw, name = (_random_source_values, weight_scales[nid]) if nid in weight_scales else (_random_input_values, nid)
-            arr = draw(rng, _static(node.output.shape), node.output.dtype, name=name)
+            shape = _static(node.output.shape)
+            if nid in scatter_rows:
+                arr = _distinct_rows(rng, shape[0], min(_static(scatter_rows[nid])))
+            else:
+                arr = draw(rng, shape, node.output.dtype, name=name)
             if nid == "position" and position is not None:
                 arr = np.full(arr.shape, position)
             # Keep the ndarray shape (no flatten) — a symbolic graph's launch
