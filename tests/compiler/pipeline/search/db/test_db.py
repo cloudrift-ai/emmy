@@ -438,7 +438,7 @@ def test_a_kernel_is_read_at_the_sizes_a_compile_binds_it_at() -> None:
     _record(db, ctx, "k", 2e6, bindings={"seq_len": 512}, knobs={"WORK": "t2"}, status="bench_fail")
     assert db.measured(ctx, "k", bindings={"seq_len": 512}) == [(_ROW, 100.0), ({"WORK": "t8"}, 300.0)]
     assert db.measured(ctx, "k", bindings={"seq_len": 4096}) == [({"WORK": "t32"}, 800.0), ({"WORK": "t8"}, 300.0)]
-    assert sorted(us for _, us in db.measured(ctx, "k", bindings=None)) == [100.0, 300.0, 800.0]
+    assert db.sizes(ctx, "k") == [{"seq_len": 4096}, {"seq_len": 512}, {}], "the sizes it ran clean at, by their text"
     assert db.measured(_ctx(_PRO_6000), "k", bindings={"seq_len": 512}) == []
 
 

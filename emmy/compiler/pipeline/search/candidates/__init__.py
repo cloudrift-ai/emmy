@@ -143,10 +143,10 @@ def _others(pool: GoldenPool, taken: set[tuple]) -> int:
     return len({_key(row) for row in enumerate_pool(pool, pool_context(pool)).rows} - taken)
 
 
-def _spread(rows: list[tuple[dict, float]], count: int) -> list[tuple[dict, float]]:
-    """``count`` of ``rows`` (a schedule row and its µs) at evenly spaced ranks of their latency, the fastest and the
-    slowest among them."""
-    rows = sorted(rows, key=lambda row: (row[1], _key(row[0])))
+def _spread(rows: list[tuple[dict, dict, float]], count: int) -> list[tuple[dict, dict, float]]:
+    """``count`` of ``rows`` (the sizes, the schedule row and the µs of a measurement) at evenly spaced ranks of
+    their latency, the fastest and the slowest among them."""
+    rows = sorted(rows, key=lambda row: (row[2], _key(row[1])))
     if count >= len(rows):
         return rows
     if count == 1:
@@ -195,23 +195,25 @@ def build(golden: GoldenFile, db: SearchDB, existing: GoldenFile | None = None) 
             wanted = min(wanted, _others(pool, taken))
         kept = [row for row in _of_group(held, key) if _schedule(row) not in taken]
         taken.update(_schedule(row) for row in kept)
-        fresh = {}  # one measurement per schedule the group does not hold yet; a golden row that records no sizes
-        # counts at every size of its kernel
-        for knobs, us in db.measured(regime_context(golden, head.pins), identity, bindings=head.bindings or None):
-            if _key(knobs) not in taken:
-                fresh.setdefault(_key(knobs), (knobs, us))
+        # One measurement per schedule the group does not hold yet. A golden row that records no sizes counts at every
+        # size of its kernel, and a candidate taken for it names the sizes it was measured at.
+        ctx, fresh = regime_context(golden, head.pins), {}
+        for sizes in [head.bindings] if head.bindings else db.sizes(ctx, identity):
+            for knobs, us in db.measured(ctx, identity, bindings=sizes):
+                if _key(knobs) not in taken:
+                    fresh.setdefault(_key(knobs), (sizes, knobs, us))
         names = {row.name for row in kept}
         numbers = (f"{head.name}.c{n}" for n in range(len(kept) + len(fresh) + 1))
         added = [
             Row(
                 name=next(name for name in numbers if name not in names),
                 kernel=head.kernel,
-                bindings=dict(head.bindings),
+                bindings=dict(sizes),
                 pins=dict(head.pins),
                 knobs=knobs,
                 measurements=Measurements(emmy_us=us),
             )
-            for knobs, us in _spread(list(fresh.values()), max(0, wanted - len(kept)))
+            for sizes, knobs, us in _spread(list(fresh.values()), max(0, wanted - len(kept)))
         ]
         # A restamp of the golden can re-key a kernel; a kept row names it as the golden's file does now.
         group = [replace(row, kernel=head.kernel) for row in kept] + added

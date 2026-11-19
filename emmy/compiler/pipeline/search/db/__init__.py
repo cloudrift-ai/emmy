@@ -613,21 +613,27 @@ class SearchDB:
         """How many ``perf`` rows each source contributed — what a report over this instance names as its data."""
         return dict(self._conn.execute("SELECT source, COUNT(*) FROM perf GROUP BY 1 ORDER BY 1"))
 
-    def measured(self, ctx: Context, kernel: str, *, bindings: dict | None) -> list[tuple[dict, float]]:
+    def measured(self, ctx: Context, kernel: str, *, bindings: dict) -> list[tuple[dict, float]]:
         """The clean measurements of ``kernel`` a compile under ``ctx`` may deploy at ``bindings``, the sizes it binds
         the kernel's symbolic dims to, as ``(schedule row, µs)`` — this instance's own rows and the golden rows
-        imported among them; with ``None``, its measurements at every size. A row measured at other sizes timed
-        another run of the kernel: native's attention, priced per range of windows, is one kernel measured at two
-        windows, and its unsplit fold at 131,072 must not rank at its 4,096 time. A row that names no size (a dynamic
-        kernel's, recorded before rows named one) stays evidence at every size. Rows another card, regime or backend
-        measured are of another context."""
-        sized, sizes = ("", ()) if bindings is None else (" AND bindings IN (?, '{}')", (knobs_json(bindings),))
+        imported among them. A row measured at other sizes timed another run of the kernel: native's attention,
+        priced per range of windows, is one kernel measured at two windows, and its unsplit fold at 131,072 must
+        not rank at its 4,096 time. A row that names no size (a dynamic kernel's, recorded before rows named one)
+        stays evidence at every size. Rows another card, regime or backend measured are of another context."""
         rows = self._conn.execute(
-            f"SELECT schedule, us FROM perf WHERE context = ? AND kernel = ?{sized} AND status = 'ok' AND us > 0 "  # noqa: S608
-            "ORDER BY bindings = '{}', bindings, schedule",
-            (self._context_of(ctx), kernel, *sizes),
+            "SELECT schedule, us FROM perf WHERE context = ? AND kernel = ? AND bindings IN (?, '{}') AND status = 'ok' AND us > 0 "
+            "ORDER BY bindings = '{}', schedule",
+            (self._context_of(ctx), kernel, knobs_json(bindings)),
         )
         return [(json.loads(schedule), us) for schedule, us in rows]
+
+    def sizes(self, ctx: Context, kernel: str) -> list[dict]:
+        """Every set of sizes ``kernel`` has a clean measurement at under ``ctx``, in content order."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT bindings FROM perf WHERE context = ? AND kernel = ? AND status = 'ok' ORDER BY bindings",
+            (self._context_of(ctx), kernel),
+        )
+        return [json.loads(bindings) for [bindings] in rows]
 
     def failed(self, ctx: Context) -> set[str]:
         """The kernels whose every measured variant under ``ctx`` failed. A failed row is evidence a ranker cannot
