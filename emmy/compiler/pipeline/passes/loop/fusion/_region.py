@@ -10,8 +10,9 @@ from emmy.compiler.ir.loop import LoopOp, splice_graph
 
 
 def carries_state(op: LoopOp) -> bool:
-    """Whether ``op`` holds a carried state — a recurrence rolled into one kernel."""
-    return bool(op.body.carries)
+    """Whether ``op`` holds a carried state — a recurrence rolled into one kernel. A value the kernel defines once
+    and reads by index (a ``Carry`` without a seed) is no state: nothing carries it from one step to the next."""
+    return any(carry.seed is not None for carry in op.body.carries)
 
 
 def writes_in_place(node: Node) -> bool:
