@@ -1,31 +1,45 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
-## Why the two 6144-wide FP8 products run at 390 TFLOP/s (2026-11-18, off the card)
+## The two 6144-wide FP8 products split across blocks: milestone 9 met (2026-11-18)
 
+One rented RTX 5090 (vast.ai; 128 vCPUs, driver 595.71, CUDA 13.0 toolkit), this branch on main at `45e539c6a`.
 The 256-row Gated DeltaNet layer's two 6144-wide FP8 products are the in-z projection (`[256, 5120] x [5120,
-6144]`) and the out projection (`[256, 6144] x [6144, 5120]`), about 42 us each. The qkv projection (`[256, 5120] x
-[5120, 10240]`) runs at about 515 TFLOP/s, these two at about 390. The cause is how many blocks the output gives, not
-how the product is lowered.
+6144]`) and the out projection (`[256, 6144] x [6144, 5120]`), about 42 us each, about 390 TFLOP/s. The qkv
+projection (`[256, 5120] x [5120, 10240]`) runs at about 515.
 
-- **The same block runs at the same rate.** The qkv pick is a 128 x 128 block (`w2x2`, `f4x8/k2`, `d2/smem-tma`):
-  160 blocks on the RTX 5090's 170 SMs. The 150-schedule tune of the out projection measured that same schedule:
-  it gives only 80 blocks, one SM in two, and takes 56.3 us. Per block that is 3.6 TFLOP/s against the qkv
-  block's 3.3. The in-z projection gives 96 blocks at that schedule (47.7 us).
-- **A smaller block fills the card and runs slower.** The tune's best picks are 64 x 128 blocks, 160 and 144 of
-  them (41.5 and 42.2 us). Below 64 x 128 every tried schedule is slower. Neither the loop, the staging nor the
-  PTX differs from the qkv kernel's: same atom, same TMA stage, no local memory.
-- **The schedule that fills the card is a K split, and no card has measured it.** `030_cut` offers the split
-  (`REDUCE=g2k`, `g2a`, `g4k` and wider) on both products; it builds at sm_120 under the qkv block, the partial's
-  inner loop the unsplit one's. A tune by name measures only the schedule rows of the kernel set the greedy compile
-  takes, so the 150 schedules never included a split, and the golden holds no split row for any matrix product.
-  At the qkv block a 2-way split is 160 blocks of half the depth: about 30 us for the partial plus a few for the
-  combine, against 42.
-- **A hint from the RTX 4080 (sm_89, not the target).** The out projection under the qkv block: 172.7 us unsplit,
-  129.7 + 4.4 us split two ways with a separate combine, 145.4 us with atomic adds. Unpinned, the split's pieces
-  take untuned picks, and the qkv product (already 160 blocks) gets slower split.
-- **What a card needs to do.** Bench each product with `--ab` rows on its split arms, so the pieces' rows land in
-  the tune DB; tune the partial pieces by name; record the root that holds both (the readout) alone so its kernel-set
-  pick sees the split; then export strictly and time the first token. No compiler change is needed.
+- **The gap is how many blocks the output gives, not how the product is lowered.** The qkv pick is a 128 x 128
+  block (`w2x2`, `f4x8/k2`, `d2/smem-tma`): 160 blocks on the card's 170 SMs. The out projection under that
+  schedule gives 80 blocks and took 56.3 us in the 150-schedule tune of 2026-11-18. Per block that is 3.6
+  TFLOP/s against the qkv block's 3.3. Smaller blocks fill the card and run slower; the best was 64 x 128. The
+  loop, the staging and the PTX are the qkv kernel's: same atom, same TMA stage, no local memory.
+- **The K split fills the card, and no card had measured it.** `030_cut` offers the split (`REDUCE=g2k`, `g4k`,
+  `g2a` and wider) on both products. A tune by name measures only the schedule rows of the kernel set the greedy
+  compile takes, so no tune had tried a split, and the golden held no split row for any matrix product.
+- **Measured hot, the split pieces under the qkv block** (a partial and a combine kernel):
+
+| | unsplit (recorded) | 2-way split | 4-way split | 2-way, atomic adds |
+|---|---|---|---|---|
+| out projection, K = 6144 | 43.4 us | 33.9 + 3.0 | 30.3 + 3.8 | 39.9 |
+| in-z projection, K = 5120 | 43.5 | 41.9 + 3.5 | 36.3 + 4.4 | 47.2 |
+
+- **Recorded.** The `--ab` rows put the pieces' rows in the tune DB; the readout root (`k_372b36c38762`) was then
+  recorded alone and took the 4-way split for both products: 152.6 us against 158.8. A 120-schedule tune of each
+  partial found nothing faster than the qkv block.
+- **Served, the 256-row pack exported strictly from this golden, against main's golden exported on the same card,
+  timed alternately twice.** The strict serving audit passes with the 256-row chunk (80 of 80 twins).
+
+| first token | 256 tokens | 7,680 tokens | 197,632 tokens |
+|---|---|---|---|
+| main's golden | 0.047 / 0.047 s | 1.363 / 1.362 s | 78.0 / 78.2 s |
+| the split | 0.047 / 0.046 s | 1.319 / 1.322 s | 76.8 / 77.2 s |
+
+  The 7,680-token first token is under the 1.34 s bar by about 20 ms, 1.97x stock's 0.670 s. This card ran main's
+  pack 18 ms slower than the card of 2026-11-18 did (1.363 against 1.345 s). The products' rows fell 12 us a layer
+  and the root's 6 us, about 9 to 17 ms over the prefill; the first token fell 42 ms. Unlike the MLP tune of
+  2026-11-18, these rows understate what the chunk got; why was not measured.
+- **TPOT moved with the tokens, not the speed.** 8.5 against 8.0 ms at 7,680 tokens, 9.0 against 10.3 ms at
+  197,632, the same at 256. The decode programs are unchanged; the split sums in another order, so greedy decoding
+  takes other tokens and the draft is accepted at another rate. Every cell is inside the TPOT bar.
 
 ## The 256-row Gated DeltaNet layer tuned (2026-11-18)
 

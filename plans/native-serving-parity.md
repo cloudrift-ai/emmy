@@ -597,12 +597,17 @@ What the session changes for the milestones:
    a served chunk, as the decode matmul rows are), the two 6144-wide FP8 products (about 390 TFLOP/s against 515
    for the qkv one, no faster schedule in 150), and the 24 us recurrence across chunks.
 
-   The two FP8 products, read off the card the same day (the recipe's DISCOVERY has the evidence): their gap to
-   the qkv product is the grid. At 256 rows a 5120- or 6144-wide output gives the qkv product's 128 x 128 block
-   only 80 or 96 blocks on 170 SMs; per block it runs as fast as the qkv one. The fix is the K split `030_cut`
-   already offers (`REDUCE=g2k`): a tune by name never measures a kernel-set arm, so no card has timed it. Next
-   on a card: bench both products with `--ab` rows on their split arms, tune the partials by name, record the
-   readout root that holds both alone, export strictly and time the first token twice.
+   Fifth rental, the same day: the 7,680-token first token is under the bar (the recipe's DISCOVERY has the
+   tables). The two 6144-wide FP8 products lost to the qkv one on the grid: at 256 rows a 5120- or 6144-wide
+   output gives the qkv product's 128 x 128 block only 80 or 96 blocks on 170 SMs, and per block it runs as fast
+   as the qkv one. The K split `030_cut` already offers fills the card, but a tune by name never measures a
+   kernel-set arm, so no card had timed it. `--ab` rows on the split arms, then a record of the readout root
+   alone: both products take a 4-way split (43.4 -> 34.1 and 43.5 -> 40.7 us), the root 158.8 -> 152.6 us.
+   Served from a strict export, audit 80 of 80, timed alternately with main's pack on one card: first token
+   0.047 / 1.32 / 77.0 s against 0.047 / 1.36 / 78.1 s at 256 / 7,680 / 197,632 tokens. 1.32 s is 1.97x stock,
+   inside 2x. TPOT 8.6 / 8.5 / 9.0 ms, inside the bar; it moves with the tokens greedy decoding takes. GSM8K and
+   draft acceptance were not read on this pack. The gate below (10) re-runs the protocol in one session with
+   stock.
 
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
