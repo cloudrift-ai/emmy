@@ -90,10 +90,10 @@ impl Loop {
     }
 
     /// The one value the axis takes when the loop is known to take exactly one trip: `0` for a loop of extent one
-    /// without a range, the start of a range whose end is one past it. `None` when a range may be empty.
+    /// without a range, the start of a range whose end is one past it. `None` for any other loop.
     pub fn one_trip(&self) -> Option<Expression> {
         match &self.range {
-            None => Some(Expression::int(0)),
+            None => (self.axis.extent.as_static() == Some(1)).then(|| Expression::int(0)),
             Some((start, end)) => Range {
                 start: start.clone(),
                 end: end.clone(),

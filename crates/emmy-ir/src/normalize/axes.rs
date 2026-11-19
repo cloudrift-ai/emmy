@@ -19,7 +19,6 @@ use crate::{Name, Result};
 pub fn drop_size_one_free_axes(body: &Body) -> Body {
     body.map(&mut |stmt| {
         if let Statement::Loop(l) = &**stmt
-            && l.axis.extent.as_static() == Some(1)
             && !l.is_reduce()
             && let Some(only) = l.one_trip()
         {
@@ -44,7 +43,7 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
         let Statement::Loop(l) = &**stmt else {
             return Some(vec![stmt.clone()]);
         };
-        if !(l.is_reduce() && l.axis.extent.as_static() == Some(1)) {
+        if !l.is_reduce() {
             return Some(vec![stmt.clone()]);
         }
         let Some(only) = l.one_trip() else {

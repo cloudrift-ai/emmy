@@ -81,7 +81,7 @@ def _resident(match: Match, root: Node, tile: TileOp):
 
     choice = tile.schedule.kernel
     try:
-        body = resident_walk(tile._carrying, choice.state_tile.atom, choice.work.units[0], choice.state_tile.bk)
+        body = resident_walk(tile._carrying.masked(), choice.state_tile.atom, choice.work.units[0], choice.state_tile.bk)
     except Unresident as exc:
         raise RuleSkipped(f"registers do not hold this kernel's state: {exc}", reject=True) from exc
     return _drop_private_ports(match, root, KernelOp(body=Body((body,)), source=tile, knobs=tile.knobs), "resident")

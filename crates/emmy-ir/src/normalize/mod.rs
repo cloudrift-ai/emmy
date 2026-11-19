@@ -50,7 +50,9 @@ pub fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
     if let Statement::Loop(l) = stmt
         && l.range.is_some()
     {
-        return l.walk().extend(ctx, l.axis.name);
+        return l
+            .walk()
+            .extend_within(ctx, l.axis.name, Some(&l.axis.extent));
     }
     stmt.bound_axes()
         .iter()
@@ -311,6 +313,42 @@ for k in 0..3:
             "the normal form is final"
         );
         body_text(&normal).unwrap()
+    }
+
+    #[test]
+    fn a_value_defined_once_is_read_by_index_and_stands_ahead_of_its_readers() {
+        // The normalized key of a delta rule: read at the cell, and again inside the sum over `m`.
+        let text = normal(
+            "for h in 0..4:
+  for n in 0..8:
+    for m in 0..8:
+      b = pre kn[h, m]
+      c = pre kn[h, n]
+      p = multiply(b, c)
+      s <- add(s, p) over m
+    out[h, n] = s
+  for a in 0..8:
+    k = load K[h, a]
+    w = load W[h]
+    v = multiply(k, w)
+    kn[h, a] <- v",
+        );
+        assert_eq!(
+            text,
+            "for a0 in 0..4:
+  in0 = load W[a0]
+  for a1 in 0..8:
+    in1 = load K[a0, a1]
+    v0 = in1 * in0
+    acc0[a0, a1] <- v0
+  for a2 in 0..8:
+    v1 = pre acc0[a0, a2]
+    for a3 in 0..8:
+      v2 = pre acc0[a0, a3]
+      v3 = v1 * v2
+      acc1 <- add(acc1, v3) over a3
+    out[a0, a2] = acc1"
+        );
     }
 
     #[test]

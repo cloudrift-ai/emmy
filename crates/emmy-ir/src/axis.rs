@@ -222,9 +222,9 @@ impl Axis {
 pub const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
 
 /// Where an axis walks: from `start` up to `end`, exclusive, by one. Each is an index over the coordinates around
-/// the loop and the symbolic dims, affine or a `min` / `max` of affine forms. It bounds one variable and is no
-/// polyhedron: every IR that says "from where to where" says it with this type, and reads it through the few
-/// questions below.
+/// the loop and the symbolic dims, affine or a `min` / `max` of affine forms, and the values lie inside the axis's
+/// `0..extent`. It bounds one variable and is no polyhedron: every IR that says "from where to where" says it with
+/// this type, and reads it through the few questions below.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Range {
     pub start: Expression,
@@ -307,15 +307,29 @@ impl Range {
     /// `ctx` inside a loop that walks `axis` over this range: the axis's interval, the comparisons the range
     /// states, and the end as the axis's symbolic bound where it is one expression.
     pub fn extend(&self, ctx: &SimplifyCtx, axis: Name) -> SimplifyCtx {
+        self.extend_within(ctx, axis, None)
+    }
+
+    /// [`Range::extend`] for an axis whose values also lie inside `0..extent`: the interval is the range's, cut to
+    /// the extent's where that is static, and never below zero.
+    pub fn extend_within(
+        &self,
+        ctx: &SimplifyCtx,
+        axis: Name,
+        extent: Option<&Dim>,
+    ) -> SimplifyCtx {
         let clamps = matches!(
             self.end.operation(),
             Some((Operation::Minimum | Operation::Maximum, _))
         );
-        let mut out = ctx.extend(
-            &axis,
-            self.interval(ctx),
-            (!clamps).then(|| self.end.clone()),
-        );
+        let mut interval = self.interval(ctx);
+        if let Some(extent) = extent {
+            interval.lo = interval.lo.max(0);
+            if let Some(bound) = extent.as_static() {
+                interval.hi = interval.hi.min(i128::from(bound) - 1);
+            }
+        }
+        let mut out = ctx.extend(&axis, interval, (!clamps).then(|| self.end.clone()));
         if clamps {
             out.bounds.remove(&axis);
         }
@@ -347,7 +361,7 @@ pub fn spell_axis(axis: &Axis, start: Option<&str>) -> Result<String> {
     Ok(out)
 }
 
-/// `name in start..end of extent`, the header of a loop that walks a range: the extent is the most trips it takes.
+/// `name in start..end of extent`, the header of a loop that walks a range inside its extent.
 pub fn spell_ranged_axis(axis: &Axis, range: &Range) -> Result<String> {
     Ok(format!(
         "{} in {}..{} of {}{}",

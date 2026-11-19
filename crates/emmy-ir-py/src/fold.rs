@@ -1380,16 +1380,21 @@ impl PyFold {
         PyFold::wrap(py, &self.fold.rewrite(&rewrite).py()?)
     }
 
-    /// This tree with no range left, as a kernel tier reads it: a term that walks a range walks its whole extent
-    /// from zero and selects each value it folds against the fold's neutral element past the end (`Fold::masked`).
-    /// `axes` is the kernel's axis table.
+    /// This tree with no range left, as a kernel tier reads it, and the axis table it then reads: a term that
+    /// walks a range walks from zero and selects each value it folds against its seed past the end
+    /// (`Fold::masked`). `axes` is the kernel's axis table.
     fn masked<'py>(
         &self,
         py: Python<'py>,
         axes: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyFold>> {
+    ) -> PyResult<(Bound<'py, PyFold>, Bound<'py, PyTuple>)> {
         let axes = axes_from_py(Some(axes))?;
-        PyFold::wrap(py, &self.fold.masked(&axes).py()?)
+        let (masked, table) = self.fold.masked(&axes).py()?;
+        let table = table
+            .iter()
+            .map(|axis| crate::convert::axis_to_py(py, axis))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok((PyFold::wrap(py, &masked)?, PyTuple::new(py, table)?))
     }
 
     /// This term with some of its parts replaced, formed and checked like any other.

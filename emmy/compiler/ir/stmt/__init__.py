@@ -46,6 +46,7 @@ reduce_strength = _ir.reduce_strength
 one_operation_per_definition = _ir.one_operation_per_definition
 normalize_lambda_body = _ir.normalize_lambda_body
 simplify_body = _ir.simplify_body
+inline_values = _ir.inline_values
 prepare_body = _ir.prepare_body
 free_names = _ir.free_names
 exposed_defines = _ir.exposed_defines
@@ -87,6 +88,7 @@ __all__ = [
     "fields_of",
     "one_operation_per_definition",
     "free_names",
+    "inline_values",
     "mask_select_predicate",
     "normalize_body",
     "normalize_lambda_body",
