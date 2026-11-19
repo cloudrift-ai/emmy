@@ -27,6 +27,12 @@ emmy run --golden _data/W.json --kernel k_979e61c3fcbf --bench --tune 40
 
 On the A100 the seed kernel is `k_386084c79684` and the loop the error names is `a8`.
 
+On the RTX 4090 it shows a third way: an unpinned whole-target compile of `k_073f8b9d560e` (recorded under the source golden's arm) raises it in `_route_candidates` → `parallel_expand` → `_cut.realize` → `_join_pieces` → `_splice_pieces` → `lift_kernel`, while building a joined cut splice, with `EMMY_FAST_MATH=1` and no pins. A CPU scan of the 4090 working golden's 770 kernels raised it for 5 kernels lowered on their own: `k_2f65af085a5c`, `k_7f47a8a301f7`, `k_f20a172513b9`, `k_d8c5f1cd17b7`, `k_54265a53efa9`. A kernel lowered on its own needs no GPU, so the lift of one of these is the smallest reproducer:
+
+```bash
+emmy compile --golden <4090 working golden> --kernel k_2f65af085a5c
+```
+
 The error is CPU-side (it fires while lifting the loop), so the tune is not needed to see it: the first schedule of
 `--tune` reaches it. Check whether a plain compile of the kernel under the failing schedule reproduces it without a
 GPU.
