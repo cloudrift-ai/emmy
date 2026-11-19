@@ -256,17 +256,21 @@ fn scope(
             // A bound reads the coordinates around the loop and the symbolic dims: no value the body computes.
             let outer = |name: Name| around.contains(&name) || !values.contains(&name);
             let mut range = l.walk();
-            if let Some(bounds) = masked_bounds(l, &literals, &outer) {
-                range.start = bounds.lower.into_iter().fold(range.start, |start, bound| {
-                    Expression::apply(Operation::Maximum, vec![start, bound])
-                });
-                range.end = bounds.upper.into_iter().fold(range.end, |end, bound| {
-                    Expression::apply(Operation::Minimum, vec![end, bound])
-                });
-            }
-            let ranged = over(l, range, ctx)?;
-            if ranged != *l {
-                stmt = Arc::new(Statement::Loop(ranged));
+            let masked = masked_bounds(l, &literals, &outer);
+            // A loop that states no range and gains none is left as it is: its extent is its spelling.
+            if l.range.is_some() || masked.is_some() {
+                if let Some(bounds) = masked {
+                    range.start = bounds.lower.into_iter().fold(range.start, |start, bound| {
+                        Expression::apply(Operation::Maximum, vec![start, bound])
+                    });
+                    range.end = bounds.upper.into_iter().fold(range.end, |end, bound| {
+                        Expression::apply(Operation::Minimum, vec![end, bound])
+                    });
+                }
+                let ranged = over(l, range, ctx)?;
+                if ranged != *l {
+                    stmt = Arc::new(Statement::Loop(ranged));
+                }
             }
         }
         let nested = stmt.nested();
