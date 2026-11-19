@@ -9,6 +9,11 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp, splice_graph
 
 
+def carries_state(op: LoopOp) -> bool:
+    """Whether ``op`` holds a carried state — a recurrence rolled into one kernel."""
+    return bool(op.body.carries)
+
+
 def writes_in_place(node: Node) -> bool:
     """Whether an output of ``node`` is stored in another buffer's memory (``Tensor.alias``): a scatter,
     whose unstored cells are the destination's and so have no spelling a reader could inline."""

@@ -188,6 +188,8 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     if node.axis is not None:
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
         items.append((f"init: ({init})", lambda cont: []))
+    if node.cells:
+        items.append((f"cells: ({', '.join(node.cells)})", lambda cont: []))
     # Always emitted, even for an empty body: the branch carries the SIGNATURE, and a node's
     # binder is storage whether or not it computes anything (an identity projection binds too).
     # APPLIED, not stored: the lift prints with every operand-bound param spelled as the operand
@@ -273,6 +275,8 @@ def _pretty_place(tile) -> list[str]:
         out.append(f"place  free=({axes(tile.place.free)})  {grid}")
     if tile.schedule is not None and tile.schedule.kernel.work.spell():
         out.append(f"work   {tile.schedule.kernel.work.spell()}")
+    if tile.schedule is not None and tile.schedule.kernel.state.transport == "reg":
+        out.append(f"register  TILE={tile.schedule.kernel.state_tile.spell()} STAGE=d1/reg")
     if tile.workers is not None:
         out.append(f"band   {tile.workers.spell()}")
     return out

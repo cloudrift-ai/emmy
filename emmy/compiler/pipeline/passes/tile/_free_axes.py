@@ -218,7 +218,7 @@ def _split_once(body: Body, names: frozenset[str]) -> Body | None:
         if not isinstance(stmt, Loop) or stmt.is_reduce:
             continue
         axis = stmt.axis
-        if axis.extent.is_static and axis.window is None:
+        if axis.extent.is_static and axis.window is None and not stmt.body.carries:
             extent = axis.extent.as_static()
             for factor, uses in sorted(_divisors(stmt.body.iter_of_type(Load), axis.name).items()):
                 if uses != {"/", "%"} or factor >= extent or extent % factor or _owned_whole(stmt, axis.name, factor):

@@ -424,6 +424,12 @@ def _serialize_op_fields(op: Op) -> dict:
 
     if not isinstance(op, TileOp) or op.schedule is None:
         return fields
+    from emmy.compiler.ir.schedule.register import RegisterMaterialization, register_row  # noqa: PLC0415
+
+    if isinstance(op.materialization, RegisterMaterialization):
+        fields["schedule"] = register_row(op.schedule)
+        fields["materialization"] = {"register": True}
+        return fields
     from emmy.compiler.ir.schedule.classic import (
         # noqa: PLC0415,
         ClassicScheduleCodec,
@@ -475,6 +481,12 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict, *, inputs=None, outputs=
     )
 
     source = op_cls(**fields)
+    if materialization_row == {"register": True}:
+        from emmy.compiler.ir.schedule.register import RegisterMaterialization, register_schedule  # noqa: PLC0415
+
+        fields["schedule"] = register_schedule(source, _wire_mapping(schedule_row, "register schedule"))
+        fields["materialization"] = RegisterMaterialization()
+        return op_cls(**fields)
     codec = ClassicScheduleCodec(ClassicScheduleContext(source))
     schedule_wire = _wire_mapping(schedule_row, "classic schedule")
     schedule = codec._parse(schedule_wire)

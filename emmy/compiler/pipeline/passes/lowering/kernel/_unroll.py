@@ -13,7 +13,7 @@ from itertools import chain, count
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var, apply_binop
 from emmy.compiler.ir.kernel.ir import Tile
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Loop, Statement, StridedLoop
+from emmy.compiler.ir.stmt import Accum, Body, Carry, Cond, Init, Loop, Statement, StridedLoop
 
 
 def trip_counts(loop: Statement, ctx: SimplifyCtx) -> tuple[int, int] | None:
@@ -25,7 +25,7 @@ def trip_counts(loop: Statement, ctx: SimplifyCtx) -> tuple[int, int] | None:
     smallest start under the ranges of ``ctx``. They are equal for a start of zero and for a lane index under a step
     the extent divides, and differ where the lanes share a row their count does not divide.
     """
-    if not loop.axis.extent.is_static:
+    if any(isinstance(stmt, Carry) for stmt in loop.body) or not loop.axis.extent.is_static:
         return None
     extent = loop.axis.extent.as_static()
     if isinstance(loop, Loop):
@@ -41,9 +41,9 @@ def trip_counts(loop: Statement, ctx: SimplifyCtx) -> tuple[int, int] | None:
 
 
 def runtime_bound(loop: Statement) -> bool:
-    """Whether only the launch knows how many trips ``loop`` runs: a symbolic extent, no early stop
-    and a constant step. Such a loop takes its copies with a remainder (:func:`_runtime`)."""
-    if loop.axis.extent.is_static:
+    """Whether only the launch knows how many trips ``loop`` runs: a symbolic extent, no early stop, a constant step
+    and nothing carried. Such a loop takes its copies with a remainder (:func:`_runtime`)."""
+    if any(isinstance(stmt, Carry) for stmt in loop.body) or loop.axis.extent.is_static:
         return False
     if isinstance(loop, Loop):
         return True

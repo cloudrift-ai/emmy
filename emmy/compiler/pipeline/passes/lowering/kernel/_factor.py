@@ -99,6 +99,8 @@ class Ctx:
     (the ``STAGE`` slice)."""
 
     grid: tuple
+    #: The placement's serial axes — runtime coordinates shared by every cell, like a lead axis.
+    serial: tuple = ()
     inputs: dict | None = None
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
@@ -171,7 +173,14 @@ def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
     """The entry to the recursive emitter — build the ambient :class:`Ctx` from the ``TileOp`` and its
     root graph node, then dispatch its ``op`` into a bound ``Tile`` via :func:`_factorize`. ``out_val``
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
-    once here and threaded down for the store glue."""
+    once here and threaded down for the store glue. Register storage instead evaluates the same
+    Fold tree in warp fragments, keeping the ordered step loop inside the CTA."""
+    from emmy.compiler.ir.schedule.register import RegisterMaterialization  # noqa: PLC0415
+
+    if isinstance(tile.materialization, RegisterMaterialization):
+        from ._register import factorize_register  # noqa: PLC0415
+
+        return factorize_register(tile)
     # Stored trees are already resolved — a computed operand is an inline node on its edge, so the
     # emitter below walks the tree as stored and every reader (``cone_seam``) reads the node
     # boundary straight off ``Fold.a``.
@@ -184,6 +193,7 @@ def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
     op = tile.op
     ctx = Ctx(
         grid=tuple(tile.place.grid),
+        serial=tuple(tile.place.serial),
         inputs=tile.inputs,
         output=(root.output.name if root is not None else ""),
         workers=tile.workers,
@@ -574,7 +584,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             ctx.inputs,
             ctx.workers,
             seam,
-            lead,
+            (*lead, *ctx.serial),
             frag_ns,
             k_axis=k_axis,
             axes=ctx.sched.tile.axes,
@@ -588,7 +598,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
                 c,
                 tile,
                 Body(tuple(epi)),
-                lead,
+                (*lead, *ctx.serial),
                 frag_ns,
                 stage=stage,
                 k_axis=k_axis,
@@ -624,7 +634,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             # streamed store rides its observed fold's reduce loop — the one placement rule the
             # kernel's identity (``TileOp.loop_body``) already reads.
             axes = ctx.sched.tile.axes
-            bound = frozenset(axis.name for axis in ctx.grid)
+            bound = frozenset(axis.name for axis in (*ctx.grid, *ctx.sched.tile.place.serial))
             placed = op.lower(bound, output_specs, axes) if output_specs else op.lower(axes=axes)
             body = _one_value_per_name(dict.fromkeys([*placed, *tail]))
             # A kernel whose only work is a FREE output sweep — the elementwise half a placement
@@ -944,7 +954,7 @@ def _tile_reduce_axis_transposed(
     out_ax = _coalescing_axis(rloop, grid, ctx.inputs)
     candidate = rloop
     if GUARD_REDUCTIONS.narrow((True,))[0]:
-        guarded = _guard_reductions._guard(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in grid))
+        guarded = _guard_reductions._guard(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in (*grid, *ctx.serial)))
         candidate = guarded[len(hoisted)]
     predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpression) else None
 

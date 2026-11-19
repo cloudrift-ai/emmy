@@ -20,6 +20,8 @@ from .schedule import (
     classic_keys,
     classic_node_key,
     classic_stage_key,
+    classic_state_keys,
+    classic_state_tile_keys,
     node_id_spelling,
 )
 
@@ -66,6 +68,10 @@ class ClassicScheduleCodec:
             if len(stages) != 1:
                 raise ValueError(f"{node_id_spelling(site)}: one STAGE value must cover every operand edge")
             row[classic_stage_key(self.tile_op, edges[0])] = stages.pop().spell()
+        for key in classic_state_tile_keys(self.tile_op):
+            row[key] = schedule.kernel.state_tile.spell()
+        for key in classic_state_keys(self.tile_op):
+            row[key] = schedule.kernel.state.spell()
         return row
 
     def delta(self, before: ClassicScheduleContext, after: ClassicScheduleContext) -> dict[str, str]:
@@ -118,8 +124,13 @@ class ClassicScheduleCodec:
                 else Tile()
             )
             nodes[site] = ProjectionSchedule(tile) if reduce is None else ReductionSchedule(tile, reduce)
+        # One state takes the row's value; several are kept direct, the only storage a kernel offers them.
+        states = {Stage.parse(row[key]) for key in classic_state_keys(self.tile_op)} or {Stage.direct()}
+        if len(states) != 1:
+            raise ValueError("a kernel that carries several states keeps each of them direct")
+        spelled = next((row[key] for key in classic_state_tile_keys(self.tile_op)), "")
         return Schedule(
-            KernelSchedule(work, Raster.parse(row["RASTER"])),
+            KernelSchedule(work, Raster.parse(row["RASTER"]), states.pop(), Tile.parse(spelled, work) if spelled else Tile()),
             nodes,
             {
                 edge: EdgeSchedule(Stage.parse(row[classic_stage_key(self.tile_op, edge)]))
