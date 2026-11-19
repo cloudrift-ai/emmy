@@ -146,6 +146,35 @@ def test_the_masked_form_computes_what_the_range_means(text: str, expected) -> N
     np.testing.assert_allclose(got, expected(data["X"]) @ data["Y"], rtol=1e-4, atol=1e-4)
 
 
+def test_a_split_states_a_folds_range_inside_each_block(monkeypatch) -> None:
+    """A range bounds the position on the whole axis, and a block of a cross-CTA split reads it as
+    ``length * block + k``: the piece's fold walks the range moved back by the block's start. The partial and the
+    finalize, run in order on the Loop IR runner, compute the masked product."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.loop.runner import execute_loop_op_cpp  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import TILE_PASSES  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    shapes = {"X": (16, 64), "Y": (64, 16)}
+    text = MASKED.replace("0..8", "0..16").replace("for k in 0..16", "for k in 0..64").replace("k < i + 1", "k < 4 * i + 4")
+    run = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0)))
+    out, _ = run.resolve(_graph(text, shapes, (16, 16)), lambda fork: next(fork.leaves()))
+    assert {"O", "O__partial"} <= set(out.nodes)
+    assert "a3 < 4 * a1 - 32 * a0 + 4" in str(out.nodes["O__partial"].op.loop_body), "the bound inside the block"
+    env = _data(shapes)
+    for nid in out.topological_order():
+        node = out.nodes[nid]
+        if isinstance(node.op, TileOp):
+            op = LoopOp(body=node.op.loop_body)
+            shape = {tensor.name: tuple(dim.as_static() for dim in tensor.shape) for tensor in node.outputs}
+            got = execute_loop_op_cpp(op, {buffer: env[buffer] for buffer in op.inputs}, shape)
+            env.update(zip(op.outputs, got if isinstance(got, tuple) else (got,), strict=True))
+    inside = np.arange(64)[None, :] < 4 * np.arange(16)[:, None] + 4
+    np.testing.assert_allclose(env["O"], (env["X"] * inside) @ env["Y"], rtol=1e-4, atol=1e-4)
+
+
 def test_a_value_defined_once_is_the_kernel_that_computes_it_at_each_read() -> None:
     shapes = {"K": (4, 16), "W": (4,)}
     defined, copied = _tile(DEFINED, shapes, (4, 16)), _tile(COPIED, shapes, (4, 16))
