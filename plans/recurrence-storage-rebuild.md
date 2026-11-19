@@ -12,9 +12,10 @@ the deleted code had to do, what was measured, and the design question that is o
 - What is shared now: a lift is evaluated by the chunk tier's own `_residence`, and a direct operand load by the
   plain tier's `_direct_operand`. What is not shared yet: the product (pack, load, atom, promote) is written here
   and again in the chunk tier.
-- What changed in the design: equal products and equal memory reads are one, whatever their axes are called. A value that does not read the column
-  axis is one block for every column. There is no second materialization type and no second row codec: the
-  geometry is a field of the kernel schedule, and the materializer builds the carrying kernel's own term.
+- What changed in the design: equal products and equal memory reads are one, whatever their axes are called. A value
+  that does not read the column axis is one block for every column. There is no second materialization type and no
+  second row codec: the geometry is a field of the kernel schedule, and the materializer builds the carrying kernel's
+  own term.
 - The offer is on the state's shape alone (`TileOp.resident_state`). A step the fragments cannot evaluate declines
   the row where it is lowered.
 - Not held yet: a ragged state (rows no multiple of sixteen, columns no multiple of the fragment's), which the
