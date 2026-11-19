@@ -48,7 +48,7 @@ def test_an_external_ssa_read_is_shared_by_every_ilp_copy() -> None:
     )
     ctx = Ctx(grid=(Axis("m", 4),), inputs={}, output="o", sched=sched)
 
-    _state, fold, _close, _lane = _tile_reduce_axis(red, Reduce.of(reg=2), ctx, tail=(), out_val="acc")
+    _state, fold, _close, _lane = _tile_reduce_axis(red, ((red, Reduce.of(reg=2)),), ctx, tail=(), out_val="acc")
 
     read = _names_read(fold)
     assert "alpha__r1" not in read, "the shared external value must not be renamed per copy"
