@@ -106,27 +106,22 @@ def _shared_state_fits(tile: TileOp, ctx) -> bool:
 
 
 def _resident_tiles(tile: TileOp, ctx) -> tuple[Tile, ...]:
-    """The fragment geometries registers can hold ``tile``'s state in on this card: per 16-bit atom whose C
-    fragments repack into its A, the geometry the state's columns give, where the kernel builds."""
+    """The fragment geometries registers may hold ``tile``'s state in on this card: per 16-bit atom whose C
+    fragments repack into its A, the geometry the state's columns give. Offered on the state's shape alone
+    (:attr:`TileOp.resident_state`); a step the fragments cannot evaluate declines the row where it is lowered."""
     from emmy.compiler.dtype import BF16, F16, F32  # noqa: PLC0415
     from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.kernel._resident import Unresident, resident_walk  # noqa: PLC0415
 
     if tile.resident_state is None:
         return ()
-    _, _, col, _ = tile.resident_state
+    columns = tile.axis_of(tile.resident_state[2]).extent.as_static()
     names = dict.fromkeys(name for dtype in (F16, BF16) for acc in (F32, dtype) for name in atoms_for(dtype, acc=acc, ctx=ctx))
-    tiles: list[Tile] = []
-    for atom in (ATOM_REGISTRY[name] for name in names):
-        if not atom.c_to_a_repack:
-            continue
-        try:
-            resident_walk(tile, atom, 1, 1)
-        except Unresident:
-            continue
-        columns = tile.axis_of(col).extent.as_static() // atom.atom_n
-        tiles += [Tile.parse(f"{atom.name}/f1x{columns}/k{period}", Work.parse("w1x1")) for period in (2, 4, 8)]
-    return tuple(tiles)
+    return tuple(
+        Tile.parse(f"{atom.name}/f1x{columns // atom.atom_n}/k{period}", Work.parse("w1x1"))
+        for atom in (ATOM_REGISTRY[name] for name in names)
+        if atom.c_to_a_repack and columns % atom.atom_n == 0
+        for period in (2, 4, 8)
+    )
 
 
 def classic_forks(

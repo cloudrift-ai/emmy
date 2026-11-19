@@ -6,13 +6,37 @@ the deleted code had to do, what was measured, and the design question that is o
 
 ## State of the branch
 
-- Deleted: the shared-memory storage pass (319 lines of code), the register storage emitter (257), the register
-  schedule (151), and their hooks in the schedule pass, the kernel schedule, the codec, the site catalog, the graph
-  codec, the materializer and the lift. About 1,190 lines under `emmy/`, with their tests.
-- Kept: the roll, the lift of a carrying loop, the serial form (the state a buffer in global memory, one launch per
-  step), the split across the sequence, and the `STAGE` key of a state, which now offers direct storage alone.
-- Golden rows that spell `d1/smem` or `d1/reg` for a state do not realize. None is restamped.
-- Corpus PTX is identical for all 258 cases: no corpus case keeps a state in shared memory or registers.
+- Shared-memory storage is restored as it was. Reading it showed it is no second staging path.
+- Register storage is rebuilt in one module, `lowering/kernel/_resident.py`, 248 lines of code where the old
+  emitter and its schedule module had 408. Against the refactor PR the compiler is 189 lines smaller.
+- What is shared now: a lift is evaluated by the chunk tier's own `_residence`, and a direct operand load by the
+  plain tier's `_direct_operand`. What is not shared yet: the product (pack, load, atom, promote) is written here
+  and again in the chunk tier.
+- What changed in the design: the state is seeded ahead of the loop, not selected in at the first step. Equal
+  products and equal memory reads are one, whatever their axes are called. A value that does not read the column
+  axis is one block for every column. There is no second materialization type and no second row codec: the
+  geometry is a field of the kernel schedule, and the materializer builds the carrying kernel's own term.
+- The offer is on the state's shape alone (`TileOp.resident_state`). A step the fragments cannot evaluate declines
+  the row where it is lowered.
+- Not held yet: a ragged state (rows no multiple of sixteen, columns no multiple of the fragment's), which the
+  old emitter masked; a select in the step. Neither appears in a recorded row.
+- No test covers the new module. The old register tests are deleted with the old code.
+- Corpus PTX is identical for all 258 cases: no corpus case keeps a state in registers.
+
+## Measured on the dev-box RTX 5090, old and new back to back
+
+| kernel | old | new |
+|---|---|---|
+| the walk of the 256-row layer, 4 steps, 128 x 128 | 26.8 µs | 27.1 µs |
+| delta rule, 4 steps, 128 x 128 | 6.3 | 6.4 |
+| delta rule, 8 steps, 64 x 64 | 4.8 | 4.8 |
+| delta rule, 2 steps, 256 x 256 | 12.2 | 12.2 |
+| delta rule, 16 steps, 128 x 128 | 21.5 | 22.4 |
+| dense recurrence, 16 steps, 128 x 128 | 150.4 | 161.1 |
+
+All six rows realize from their golden under strict evidence and pass the strict accuracy check. All thirteen
+recorded register rows, on five cards, build; only the six above were run, on one card. The dense recurrence is 7%
+slower and is not explained yet.
 
 ## What the two storages buy, measured on the dev-box RTX 5090
 
@@ -59,18 +83,9 @@ microsecond the refactor plan assumed.
   twisted carrier does the same job for its own programs (the evaluation of a straight-line program at the
   residence of each value, 115 lines, and the repack of a C fragment into an operand). Those two are the overlap.
 
-## The design question
+## What is left
 
-A rebuild from scratch of shared-memory storage arrives close to what was deleted, because that code already
-reused the plain lowering. What would differ:
-
-- The lift writes the state as a kernel-local buffer directly when the row asks for shared storage: no select to
-  write and match back.
-- The wrap is one function on the lowered kernel: declare, seed, loop, barrier, store behind the loop.
-- The two rewrites of item 6 become ordinary kernel passes, added only when the solve's time asks for them.
-
-For register storage the proper form is one evaluator of a term in fragments, used by the chunk tier and by a
-resident state. That touches attention on every card.
-
-Open: rebuild shared-memory storage in that cleaner form (a few hundred lines again, for about the same code), or
-restore it and spend the effort on the fragment evaluator alone.
+- Find the 7% on the dense recurrence.
+- Tests for the new module, and a corpus case that keeps a state in registers.
+- One product for the chunk tier and this module. It touches attention on every card.
+- The rows of the other four cards, on their cards.
