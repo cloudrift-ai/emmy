@@ -5,6 +5,65 @@ Written 2026-11-18 against main `45e539c6a`. Every stage is one PR from main, an
 Line counts and the reading of today's code come from one pass over the tree in this session. They are starting
 points. Read the code again before building on a number.
 
+## What the first build showed (2026-11-18)
+
+Built on this branch with the recurrence code removed, so that only the plain cases shape the design. Read this
+before the rest: it changes stages 2 and 3.
+
+**State of the branch.** A kernel carries no state. The roll, the lift of a carrying loop, the split across the
+sequence, the serial launch axis and both storages of a state are deleted: 2,557 lines under `emmy/`, 10 files, and
+the tests that covered them. The Rust statement kinds and Fold fields stay, and so does the `g<n>k<p>` spelling, so
+stored files load. A program with a recurrence fails at the splice bound. The hardware goldens and the Qwen3.8
+goldens still store kernels with a carried state and are not restamped. Restoring is a revert of the removal commit
+plus whatever the new design asks of it.
+
+**The gate.** The PTX of every kernel of all 258 corpus cases, taken before any change, with a scratch tool. It is
+not a flag yet, and it does not cover the golden rows. Every step below compiles to that PTX byte for byte.
+
+**Stage 1 holds.** `split_axis` and `merged` in `ir/tile/split.py` replace `_factor_k`, `_sliced_contraction`,
+`_slice_fold`, `_sliced_edge` and `_state_fold`: 66 lines fewer, identical PTX, and the corpus regen writes nothing,
+so no piece is re-keyed. The two slicers differed in the name of the block axis, the order of one sum and whether a
+lift reads a clamped position. None of the three reaches the stored Loop IR or the PTX.
+
+**Stage 2 does not hold as written.** The functions it names hold about 510 lines of code (the coop reduce, 145;
+the K loops, 363). About a tenth of that decides which blocks exist: a lane axis, a start, a stride, a chunk count.
+The rest is how a level runs: register copies with a masked tail, the shuffle and shared-memory combines, the
+staging rings, the drains. The split says nothing about those, as "Two limits on replace" already states. Two more
+facts:
+
+- The coop reduce is an interleaved split, `k = coop * ks + lane`, with the in-block coordinate outside (case 2).
+  The lowering spells it as one strided loop over `k`. The term lowers to a counted loop over `ks` with a multiply
+  in every index, which is other PTX. Converting it back costs more lines than the six it removes.
+- `_tiling.py` is already the levels of the free axes, held as counts: 75 lines of code.
+
+So a lowering that reads levels from the term adds code and cannot keep the PTX. Not built.
+
+**Stage 3 does not hold as written either.** A rule in `refusals.py` mostly says what the emitter can build or how
+memory is laid out: which reduce the binder partitions, a projection that runs per fragment, an operand the
+fragment loaders read contiguously, the chunk tier's shape, which free axes are m and n. A split of any axis
+succeeds on all of them. Measured by switching one rule off and compiling what is newly offered:
+
+- A census of where the rules fire, over the 296 kernels the corpus compiles to and their 231 contraction sites.
+  No atom for the dtype on the card: 71 sites, a hardware rule. Structural rules: 35 sites. Of those, 9 have no
+  pair of free axes for a fragment, which is the split's own answer. The other 26 are the emitter's: a projection
+  that is no straight-line program per fragment (13), the chunk tier's operands (5), a root an output sweep rides
+  (5), an operand the loaders do not read contiguously (2), a nested site on an operand edge (1). The store-address
+  rule, the fragment-row rule and the scalar-tile rule fire nowhere.
+- Over 67 one-kernel cases (every reduce case, a few fused, scan and pointwise ones) seven of the eight rules
+  tried change no offer. The full row product of a contraction kernel (about 50,000 rows) was too slow to
+  enumerate eight times, so the 26 sites above are not tested this way.
+- One rule is over-cautious: a transposed band (`coop-t`) is refused when the projection has a loop. Without it 20
+  cases gain 20 rows each, all 100 sampled rows build, and the four run on the RTX 5090 compute the right answer.
+  That is a point the old reading never offered (stage 6). It needs timing before it is offered.
+
+**What may still simplify.** None of it is built or measured.
+
+- The last block is masked in six places, each with its own spelling: the split across CTAs, the tail of the
+  register copies, the padded scan, the staged fill, the M and N overhang, the transposed band. One rule for "a
+  width the extent is no multiple of" could replace them. It changes PTX, so its gate is a measurement.
+- Stage 5 is untested by this build: the chunk loop of the twisted carrier is the one emitter that holds a whole
+  second tiling of its own.
+
 ## The idea
 
 A Fold in block form takes four steps. They are the same four for a product, a reduction, a map and a recurrence.
