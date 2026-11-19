@@ -102,7 +102,11 @@ form is a realization of the kernel, not another kernel: the kernel keeps the li
 fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
 no cell; a seed tensor keeps that dim, and every storage reads it with `0` there (`seed_index`). Register
 storage reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
-independent. An unmapped classic fallback takes the same serial form during materialization. Re-lifting a stored
+independent. An unmapped classic fallback takes the same serial form during materialization. Every reader of a
+kernel's schedule sites takes the kernel through one more step, `TileOp.masked` (`scheduled_form`): a term that walks
+a range reaches the tiers as the walk from zero that folds its seed past the end, since a tensor-core block is a
+rectangle and a cooperative lane a strided walk. Like the serial form it is a realization of the kernel, and the
+kernel keeps the identity of the tile its fork was offered. Re-lifting a stored
 kernel reuses the state ports it already owns. The state's port, added at the lift for the classic realization,
 disappears during materialization,
 and externally read snapshots remain global outputs. A state the term itself stores every step, beside its `Carry`,

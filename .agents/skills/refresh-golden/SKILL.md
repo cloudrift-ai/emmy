@@ -83,7 +83,21 @@ emmy golden restamp recipes/<model>/golden/<card>.json    # rewrites the file in
 It lowers every traced program again, gives each kernel the body the fresh lowering gives it, takes every kernel-set
 decision again on the fresh parent, and keeps each row on its kernel. A row keeps its measurement only while its
 kernel kept its exact identity; otherwise it keeps its schedule and loses its microseconds: a *proposal*, no evidence
-until measured again. It refuses to write a file nothing survives in. Read its report:
+until measured again. It refuses to write a file nothing survives in.
+
+When the compiler change re-spells kernels and is not meant to change their code, decide by the code instead. Take
+the baseline on the tree before the change, then restamp on the tree after it:
+
+```bash
+emmy golden realize --ptx <baseline-dir> recipes/<model>/golden/<card>.json            # before the change
+emmy golden restamp --ptx-baseline <baseline-dir> recipes/<model>/golden/<card>.json   # after it
+```
+
+A row then keeps its measurement exactly when its kernel compiles, under the row's schedule, to the PTX the
+baseline holds, re-keyed or not, and the report names each row whose code changed (`the code changed under NAME`).
+Run both from the same working directory: the baseline's folders are named by the file's path under it.
+
+Read the restamp's report:
 
 | Report line | Meaning | Next |
 | --- | --- | --- |
