@@ -660,8 +660,10 @@ kernel — captured, with the golden's digest as its source. A file stores no id
 each stored kernel's exact identity, from its Loop IR (`GoldenFile.identities` — a lift per formed kernel, once per
 loaded file, on `EMMY_WORKERS` forked processes), and the rows are filed under it. A record finds a kernel already
 stored through the same identities (`GoldenFile.add_kernel`). A stored kernel whose body no longer lowers is skipped
-with a warning, and its rows are no evidence. Whether a file still describes what the compiler builds is the
-restamp's question (Part 7): a stale file is one `emmy golden restamp` would change.
+with a warning, and its rows are no evidence. An import writes in one transaction (`SearchDB.transaction`): the tune
+DB otherwise commits each statement on its own, and a working golden is imported again whenever it changed. Whether
+a file still describes what the compiler builds is the restamp's question (Part 7): a stale file is one
+`emmy golden restamp` would change.
 
 **Goldens are the prior's training data.** `emmy fit` enumerates, for each kernel a golden row was measured on, the
 candidates that kernel offers, and trains the weights to rank the recorded row well inside that set (Part 8).
