@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleRefused
 from emmy.compiler.ir.schedule.choices import PlacedTile, Work
-from emmy.compiler.ir.schedule.register import register_accepts
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 
 from .refusals import _Relation, _relation_refusal
@@ -328,12 +327,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         ):
             self._refuse("pick is incompatible with the classic kernel position")
         work = self._relation.work or Work()
-        register = pick.kernel.state.transport == "reg"
-        if register:
-            if not register_accepts(self.tile_op.state_program, pick.kernel.work, pick.kernel.state_tile, self.target):
-                self._refuse("registers cannot hold this kernel's state under that inventory and fragment geometry")
-            if not self._step_undecided:
-                self._refuse("register storage evaluates the step in its own fragments: the step's sites take no choice")
+        # Registers evaluate the whole step in their own fragments, so the step's sites take no choice.
+        if pick.kernel.state.transport == "reg":
+            if not self._step_off:
+                self._refuse("a state in registers leaves the step's sites no choice")
         # Same rule as :meth:`_kernel_composes`: serial node choices leave output sweeps free to
         # take one of their own offered worker inventories.
         elif (pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units) and not (
@@ -428,16 +425,16 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         )
 
     @property
-    def _step_undecided(self) -> bool:
+    def _step_off(self) -> bool:
         """Whether every site of this prefix took its off value: no tile, a serial fold, direct operands."""
         return all(
-            not node.tile.spell() and (not isinstance(node, ReductionSchedule) or not node.reduce.spell())
+            not node.tile.spell() and not (isinstance(node, ReductionSchedule) and node.reduce.spell())
             for node in self.schedule.nodes.values()
         ) and all(edge.stage.is_direct for edge in self.schedule.edges.values())
 
     def _kernel_composes(self, kernel: KernelSchedule) -> bool:
         if kernel.state.transport == "reg":
-            return self._step_undecided
+            return self._step_off
         work = self._relation.work or Work()
         # Serial node choices do not constrain a worker inventory used only to stripe output
         # sweeps; a node-owned inventory still follows the ordinary equality relation, or packs
