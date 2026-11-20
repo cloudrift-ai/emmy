@@ -715,13 +715,16 @@ row pair into a fragment and takes the same fragment store, which is what lets t
 (`REDUCE@map.1/twist=g<n>k`, FlashAttention-2's split-KV) keep the chunk tier for its partial: decode's few query
 rows then spread over `n` times the CTAs, and the finalize folds the per-cell states through the recipe's merge.
 
-The score's own PREFIX — the carrier's lift cut to its score role — is where an SDPA mask arrives, and it takes two
-readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand that feeds
-one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
-and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
-carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
-coordinate-masking `FragmentApply` under the same coordinate substitution the boundary mask performs. A program that
-spells its mask as a comparison and a `where` instead — native's causal attention, `key − row <= position` with the
+The score's own PREFIX — the carrier's lift cut to its score role — is where an attention's mask arrives. A causal or
+a sliding-window attention states the keys a row folds as the carrier's range, and the masked form
+(`Fold.masked`) spells each bound of it there as a comparison and a `where` added to the score: `key <= row` for the
+causal end, `row − W + 1 <= key` for a window's start, the fill the pivot's seed. The prefix takes two readings the
+tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand that feeds one needs no
+gmem address at all, and only the pivot source and the streamed value are ever asked for a slab. And a mask on the
+score fragment's OWN coordinates — the row the carrier folds and the chunk it folds over — is per ELEMENT, not
+cell-uniform, so `_residence` lands it as a coordinate-masking `FragmentApply` under the same coordinate substitution
+the boundary mask performs. A program that spells its own mask as a comparison and a `where` — native's causal
+attention, `key − row <= position` with the
 position loaded from memory — reaches the tier with its row index as a `Let` alias of the coordinate, hoisted with
 the position and the fill constants into a leaf over the row axis; `select_masks` (`ir/schedule/mask.py`) folds the
 aliases into the predicate and spells the `where` as that same `Select`, the uniform position a free variable the

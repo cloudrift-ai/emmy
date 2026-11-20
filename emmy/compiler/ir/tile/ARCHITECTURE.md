@@ -370,7 +370,8 @@ creates one zero-axis root `Fold` over the lifted cell.
 tries every twist recipe (`ir/pure/twist.py`) on every reduce that reads a reduce as an operand — the shape the lift
 gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.fuse` returns, to a fixpoint. Pure
 softmax is the arity-two case; SDPA adds expectation components, which join by the same call once the `1/l` factor
-constant along the axis has hoisted out of the fold, and a causal mask is simply part of the shared score cone. The
+constant along the axis has hoisted out of the fold. Two folds fuse where they walk the same range of the axis, and
+the carrier keeps it: a causal attention's three reductions all walk the keys at or before the row. The
 pass has no operation-family matcher: a recipe clicks by canonical form, or it does not.
 
 The rewrite consumes the canonical Fold tree. It reuses the registered monoid generator, invariant-factor splitting,

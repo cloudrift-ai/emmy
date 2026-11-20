@@ -94,9 +94,10 @@ def const_bc(frag: Graph, *, name: str, value=None, context_value=None, target_s
     return broadcast_to(frag, cid, tuple(target_shape))
 
 
-def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dtype: str | None = None) -> Node:
+def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dtype: str | None = None, range=None) -> Node:
     """Decompose a matmul into unsqueeze → broadcast → multiply → reduce_sum → squeeze.
 
+    ``range`` gives the part of the contracted axis each row folds, from the row's coordinate (``ReduceOp.range``).
     Returns the squeezed output node.
     """
     a, b = _node(frag, a), _node(frag, b)
@@ -114,22 +115,25 @@ def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dt
         output=Tensor(f"{name}_ew", mul_shape, opmath_dtype(dtype)),
     )
     red_shape = reduction_shape(mul_shape, k_axis)
+    row = k_axis % len(mul_shape) - 1
     red = frag.add_node(
-        op=ReduceOp(op="sum", axis=k_axis),
+        op=ReduceOp(op="sum", axis=k_axis, range=None if range is None else range(placeholder(row))),
         inputs=[ew],
         output=Tensor(f"{name}_reduce", red_shape, dtype),
     )
     return squeeze_axis(frag, red, k_axis, out_name=name)
 
 
-def softmax_decompose(frag: Graph, x: Node | str, axis: int, *, name: str, dtype: str | None = None) -> Node:
-    """Decompose softmax into max → sub → exp → sum → div. Returns the div node."""
+def softmax_decompose(frag: Graph, x: Node | str, axis: int, *, name: str, dtype: str | None = None, range=None) -> Node:
+    """Decompose softmax into max → sub → exp → sum → div. Returns the div node. ``range`` is the part of ``axis``
+    the distribution is over (``ReduceOp.range``): both reductions walk it, and the quotient outside it is read by
+    nothing that walks the same range."""
     x = _node(frag, x)
     dtype = dtype or x.output.dtype
     out_shape = tuple(x.output.shape)
     red_shape = reduction_shape(out_shape, axis) if out_shape else (1,)
     max_id = frag.add_node(
-        op=ReduceOp(op="maximum", axis=axis),
+        op=ReduceOp(op="maximum", axis=axis, range=range),
         inputs=[x],
         output=Tensor(f"{name}_max", red_shape, dtype),
     )
@@ -145,7 +149,7 @@ def softmax_decompose(frag: Graph, x: Node | str, axis: int, *, name: str, dtype
         output=Tensor(f"{name}_exp", out_shape, dtype),
     )
     sum_id = frag.add_node(
-        op=ReduceOp(op="sum", axis=axis),
+        op=ReduceOp(op="sum", axis=axis, range=range),
         inputs=[exp_id],
         output=Tensor(f"{name}_sum", red_shape, dtype),
     )
