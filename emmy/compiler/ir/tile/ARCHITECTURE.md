@@ -106,11 +106,10 @@ independent. An unmapped classic fallback takes the same serial form during mate
 kernel's schedule sites takes the kernel through one more step, `TileOp.scheduled` (`scheduled_form`): a block of a
 split walks from zero, and every term keeps its range, stated of its axis as a tier walks it. Like the serial form
 it is a realization of the kernel, and the kernel keeps the identity of the tile its fork was offered. The schedule
-is enumerated on that form and the kernel lowering takes it. A tier reads a range itself: the chunk tier as the
-chunks it walks and the mask of the block a bound cuts, a scalar walk as its loop's bounds. A tile folds a rectangle
-of every position, so a contraction that walks a range is no tile site unless the chunk tier folds it
-(`TileOp.contracts`). A tier that cannot read a range, a cooperative reduce among them, takes `TileOp.masked`: the
-walk from zero that folds its seed outside the range. `Fold.block_start` is the one place that says which coordinate
+is enumerated on that form and the kernel lowering takes it. A tier reads a range itself: a scalar walk and a
+cooperative reduce as their loop's bounds, the chunk tier as the chunks it walks and the mask of the block a bound
+cuts. A tile folds a rectangle of every position, so a contraction that walks a range is no tile site unless the
+chunk tier folds it (`TileOp.contracts`). `Fold.block_start` is the one place that says which coordinate
 moves a block; the lowering's nest order and the tile's shared coordinates (`batch_axes`) ask it. Re-lifting a stored
 kernel reuses the state ports it already owns. The state's port, added at the lift for the classic realization,
 disappears during materialization,

@@ -6,7 +6,6 @@ use std::sync::Arc;
 use super::{Key, Number, Param, Tag, expression_key, hash_parts, params_key};
 use crate::Name;
 use crate::body::{Body, StmtRef};
-use crate::elementwise::Operation;
 use crate::expr::{Expr, ExprClass, ExprType, Expression};
 use crate::field::NumOr;
 use crate::normalize::{affine_node, affine_terms};
@@ -256,12 +255,11 @@ impl Context<'_> {
                     .collect::<Vec<_>>(),
             )),
             (None, Some((op, args))) if op.info().commutative && args.len() == 2 => {
-                let mut terms: Vec<Expression> = Vec::new();
-                if op.info().associative && self.chains == Chains::Flat {
-                    associative_terms(e, op, &mut terms);
+                let terms = if op.info().associative && self.chains == Chains::Flat {
+                    e.chain(op)
                 } else {
-                    terms = args.to_vec();
-                }
+                    args.to_vec()
+                };
                 Some((
                     Key::str(op.text()),
                     terms.into_iter().map(|term| (Key::None, term)).collect(),
@@ -1095,17 +1093,6 @@ fn placeholder(spellings: &mut Vec<(Name, String)>, spelling: String) -> Name {
 
 /// The terms a chain of the associative operation `op` combines, in spelled order: the operands of every nested
 /// `op` node, left to right.
-fn associative_terms(e: &Expression, op: Operation, out: &mut Vec<Expression>) {
-    match e.operation() {
-        Some((nested, args)) if nested == op && args.len() == 2 => {
-            for arg in args {
-                associative_terms(arg, op, out);
-            }
-        }
-        _ => out.push(e.clone()),
-    }
-}
-
 /// `key` with every operand placeholder replaced by the number of the value it stands for, and every coordinate
 /// placeholder by its parameter: what an operand computes, for ordering two operands of one commutative node.
 fn by_content(key: &Key, ops: &[Value], params: &[Param]) -> Key {

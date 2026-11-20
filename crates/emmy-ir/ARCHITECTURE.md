@@ -101,7 +101,8 @@ file imports what it uses by name; no child module takes its parent's imports.
   is provenance. `Range` is where an axis walks, a start and an exclusive end, with the few questions every reader
   asks of one: its trips where it fixes them, the comparisons it states of the axis, the interval the axis stays
   in, and the simplification context inside the loop. A `Loop` holds its range as a field and a `Fold` as a stored
-  part; `StridedLoop` keeps its own `start`, `step` and `end`. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
+  part. A `Loop` may also state a `step`, how far its axis moves each trip: a kernel loop takes one where the
+  threads of a block stride through an axis, and a Loop IR body states none. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
   holds a name (or an axis's parts) and the extension makes the object on first read.
 
 ## Protocol and body

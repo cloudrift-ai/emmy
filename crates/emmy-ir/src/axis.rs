@@ -245,19 +245,9 @@ impl Range {
     /// `axis < end`. A `max` in the start and a `min` in the end state one per operand; a bound that is not affine
     /// states nothing.
     pub fn relations(&self, axis: Name) -> Vec<Linear> {
-        fn operands(e: &Expression, op: Operation, out: &mut Vec<Expression>) {
-            match e.operation() {
-                Some((found, [a, b])) if found == op => {
-                    operands(a, op, out);
-                    operands(b, op, out);
-                }
-                _ => out.push(e.clone()),
-            }
-        }
         let axis = Expression::var(&axis);
-        let (mut lower, mut upper) = (Vec::new(), Vec::new());
-        operands(&self.start, Operation::Maximum, &mut lower);
-        operands(&self.end, Operation::Minimum, &mut upper);
+        let lower = self.start.chain(Operation::Maximum);
+        let upper = self.end.chain(Operation::Minimum);
         let one = Expression::int(1);
         lower
             .iter()

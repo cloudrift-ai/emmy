@@ -54,7 +54,6 @@ from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import (
     UnbindableProjection,
-    carries_partition,
     edge_dtypes,
     output_regions,
     owns_outputs_it_cannot_bind,
@@ -2080,7 +2079,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
 
     Every kernel the cut leaves is a new kernel and carries the :data:`PIECE` hint."""
     tile: TileOp = root.op
-    split_consumed = tile.split_consumed or carries_partition(tile)
+    split_consumed = tile.split_taken
     owning = tuple(seam for seam in seams if seam.owned is not None)
     contractions = tuple(group for seam in seams for group in seam.contraction)
     # The contractions of one seam are one decision and one producer, named by the seam like any cut piece.

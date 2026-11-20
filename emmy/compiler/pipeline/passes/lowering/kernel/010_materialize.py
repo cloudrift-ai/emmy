@@ -13,8 +13,7 @@ reads the node kind + role + reduce plan off ``tile.op`` and picks the tier:
   ``Reduce`` carries a BLOCK ``coop`` and/or a REG ``reg`` stage: the reduce axis is partitioned
   ``coop`` ways across the CTA's threads (cooperation) and ``reg`` ways across per-thread register
   accumulators (ILP), then a REG-tree fold, the cross-thread combine, and the projection.
-- **Scalar tier** — one thread per output cell (``op.lower()`` + an output-store glue). A reduce loop that
-  states a range becomes the kernel loop that walks it.
+- **Scalar tier** — one thread per output cell (``op.lower()`` + an output-store glue).
 
 The op tree + ``lower`` are shared across kinds; only the schedule's partition changes — the
 article's "schedule separate from combine" thesis. The tier machinery all lives in ``_factor``.
@@ -33,7 +32,7 @@ from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write, exposed_defines, free_names
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import NeedsMask, UnbindableProjection, reduce_plan, sched_of
+from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 
@@ -52,17 +51,13 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
 
         tile = serial_form(tile, root.id)
-    # The schedule addressed the kernel with each range left on its term (``TileOp.scheduled``), and a tier that reads
-    # a range lowers it so. A tier that folds every position of its axis says so, and takes the kernel masked.
+    # The schedule addressed the kernel with each range left on its term (``TileOp.scheduled``), and every tier
+    # reads a range itself: as the bounds of its loop, or as the chunks it walks and the mask of the block a bound cuts.
     tile = tile.scheduled()
     rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
-        try:
-            materialized = _lowered(tile, root, ctx)
-        except NeedsMask:
-            tile = tile.masked()
-            materialized = _lowered(tile, root, ctx)
+        materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
         body = Body((materialized,))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
@@ -81,12 +76,6 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
 
 
-def _lowered(tile: TileOp, root: Node, ctx):
-    """``tile`` lowered to its kernel statement. A reduce loop that still states a range after the lowering was put
-    there by a tier that does not read one, and the backend would walk its whole axis: the kernel takes its mask."""
-    return _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
-
-
 def _resident(match: Match, root: Node, tile: TileOp):
     """The kernel of a row that keeps the state in registers: the carrying kernel's own term in fragments, and
     the port of the state gone from the node where nothing reads it."""
@@ -94,7 +83,7 @@ def _resident(match: Match, root: Node, tile: TileOp):
 
     choice = tile.schedule.kernel
     try:
-        body = resident_walk(tile._carrying.masked(), choice.state_tile.atom, choice.work.units[0], choice.state_tile.bk)
+        body = resident_walk(tile._carrying, choice.state_tile.atom, choice.work.units[0], choice.state_tile.bk)
     except Unresident as exc:
         raise RuleSkipped(f"registers do not hold this kernel's state: {exc}", reject=True) from exc
     return _drop_private_ports(match, root, KernelOp(body=Body((body,)), source=tile, knobs=tile.knobs), "resident")

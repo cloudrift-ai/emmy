@@ -786,6 +786,20 @@ impl Expression {
         }
     }
 
+    /// The operands of the chain of `op` this node heads, in order: `a`, `b` and `c` of `max(max(a, b), c)`, and the
+    /// node itself where it applies another operation or none. A range spells its start as such a chain of
+    /// `maximum` and its end as one of `minimum`.
+    pub fn chain(&self, op: Operation) -> Vec<Expression> {
+        match self.operation() {
+            Some((found, [left, right])) if found == op => {
+                let mut out = left.chain(op);
+                out.extend(right.chain(op));
+                out
+            }
+            _ => vec![self.clone()],
+        }
+    }
+
     /// `op` applied to `args`: one node, except that an associative operator over more than two operands is its
     /// left-nested chain, the shape the reader gives `a + b + c`. One operation, one node: the reader builds the same.
     pub fn apply(op: Operation, args: Vec<Expression>) -> Expression {

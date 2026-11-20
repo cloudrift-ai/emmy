@@ -17,7 +17,7 @@ from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Select, parse_body
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.pipeline import Pipeline
 from tests.compiler.helpers import inject_constants
 
@@ -109,42 +109,26 @@ def test_a_mask_to_the_neutral_element_is_a_range_in_the_body_and_on_the_fold() 
     assert "a0" in tile.op.free_axes, "the range is evaluated where the term is"
 
 
-def test_a_tier_reads_a_range_as_the_mask_it_stands_for() -> None:
-    """The masked form is the tree the lift gave before the range existed: the fold over the whole axis, its value
-    selected against the seed, the seed a literal operand. It is another spelling of one kernel."""
-    tile = _tile(MASKED, {"X": (8, 8), "Y": (8, 8)}, (8, 8))
-    masked = tile.masked()
-    assert masked.op.range is None and masked is not tile
-    (mask,) = [stmt for stmt in masked.op.lift.body if isinstance(stmt, Select)]
-    assert [str(branch.select) for branch in mask.branches] == ["a2 < a0 + 1", "true"]
-    assert len(masked.op.operands) == len(tile.op.operands) + 1, "the seed is a literal operand"
-    assert masked.identity_key(structural=False, with_io=True) == tile.identity_key(structural=False, with_io=True)
-    assert masked.masked() is masked, "a tree without a range is itself"
-
-
-def test_a_range_that_starts_past_zero_is_a_mask_at_its_start() -> None:
-    """No end lies a fixed way past the start, so leaving from the start would shorten nothing: the tier walks the
-    axis from zero, reads the position itself and folds the seed ahead of the start."""
-    tile = _tile(FROM_THE_ROW, {"X": (8, 8), "Y": (8, 8)}, (8, 8))
-    assert [str(bound) for bound in tile.op.range] == ["a0", "8"]
-    masked = tile.masked()
-    (mask,) = [stmt for stmt in masked.op.lift.body if isinstance(stmt, Select)]
-    assert str(mask.branches[0].select) == "a0 <= a2"
-    loads = [str(edge.as_slab().load) for edge in masked.op.operands if edge.as_slab() is not None]
-    assert all("?" not in load for load in loads), loads
+def test_a_term_keeps_its_range_in_the_form_a_tier_takes() -> None:
+    """Only a block of a split is rewritten for a tier, to walk from zero. Any other term that walks a range is the
+    term itself in the scheduled form, a start that moves with the row included: no end lies a fixed way past it,
+    and the tier reads the range as it stands."""
+    for text, walked in ((MASKED, ["0", "a0 + 1"]), (FROM_THE_ROW, ["a0", "8"])):
+        tile = _tile(text, {"X": (8, 8), "Y": (8, 8)}, (8, 8))
+        assert [str(bound) for bound in tile.op.range] == walked
+        assert tile.scheduled() is tile
 
 
 @pytest.mark.parametrize(("text", "expected"), [(MASKED, np.tril), (FROM_THE_ROW, np.triu)], ids=["masked", "from_the_row"])
-def test_the_masked_form_computes_what_the_range_means(text: str, expected) -> None:
-    """The tree a tier reads, lowered and run as it stands on the reference model: a walk of the whole extent from
-    zero whose trips past the range fold the seed and read inside their buffers."""
-    from tests.compiler.ir import reference_model  # noqa: PLC0415
+def test_a_ranged_fold_computes_what_its_mask_computed(text: str, expected) -> None:
+    """The body a ranged fold lowers to, run on the Loop IR runner: the loop takes the trips of the range alone."""
+    from emmy.compiler.ir.loop.runner import execute_loop_op_cpp  # noqa: PLC0415
 
     shapes = {"X": (8, 8), "Y": (8, 8)}
     data = _data(shapes)
-    body = _tile(text, shapes, (8, 8)).masked().loop_body
-    assert " of " not in str(body), "no range is left"
-    got = reference_model.run(body, data, {"O": (8, 8)})["O"]
+    op = LoopOp(body=_tile(text, shapes, (8, 8)).loop_body)
+    assert "select" not in str(op.body)
+    got = execute_loop_op_cpp(op, {name: data[name] for name in op.inputs}, {"O": (8, 8)})
     np.testing.assert_allclose(got, expected(data["X"]) @ data["Y"], rtol=1e-4, atol=1e-4)
 
 
@@ -209,11 +193,12 @@ def _masked_attention(data: dict[str, np.ndarray], keep: np.ndarray) -> np.ndarr
 def test_an_attention_folds_each_rows_keys_over_a_range(queries: int, keys: int, attrs: dict, walked: tuple[str, str]) -> None:
     """Causal attention is a range of the key axis, the keys at or before the row, and a sliding window starts it
     ``window`` keys back. Fusion keeps the range on the loops it merges, the softmax fuses with its product where
-    both walk the same range, and the carrier keeps it. A tier reads one additive mask for each bound. A row that
-    folds no key past the queries leaves the key axis that short."""
+    both walk the same range, and the carrier keeps it. The chunk tier lands one coordinate mask for each bound. A
+    row that folds no key past the queries leaves the key axis that short."""
     from emmy.compiler.ir.loop.runner import execute_loop_op_cpp  # noqa: PLC0415
     from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _outside  # noqa: PLC0415
 
     fused = Pipeline.build(LOOP_PASSES).run(_attention(queries, keys, **attrs))
     (kernel,) = (node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
@@ -222,8 +207,7 @@ def test_an_attention_folds_each_rows_keys_over_a_range(queries: int, keys: int,
     carrier = head(tile.op)
     assert carrier.twist is not None and tuple(str(bound) for bound in carrier.range) == walked
     assert tile.axis_of(carrier.axis).extent.as_static() == min(queries, keys)
-    masks = [stmt for stmt in head(tile.masked().op).lift.body if str(getattr(stmt, "value", "")).startswith("where(")]
-    assert len(masks) == 1 + ("sliding_window" in attrs)
+    assert len(_outside(carrier.range, tile.axis_of(carrier.axis), False)) == 1 + ("sliding_window" in attrs)
 
     data = _data({"q": (1, 2, queries, 8), "k": (1, 2, keys, 8), "v": (1, 2, keys, 8)})
     got = execute_loop_op_cpp(kernel, {name: data[name] for name in kernel.inputs}, {"o": (1, 2, queries, 8)})
@@ -232,11 +216,11 @@ def test_an_attention_folds_each_rows_keys_over_a_range(queries: int, keys: int,
     np.testing.assert_allclose(got, _masked_attention(data, keep), rtol=1e-4, atol=1e-4)
 
 
-def test_a_tier_reads_a_range_or_takes_its_mask() -> None:
+def test_a_scalar_walk_and_a_cooperative_reduce_read_a_range_as_their_loops_bounds() -> None:
     """The schedule addresses a kernel with each range left on its term, and the lowering takes it so. A scalar walk
-    opens its loop over the range: it takes the range's trips and masks nothing, for an attention's carrier and for
-    a plain sum alike. A cooperative reduce strides every position of its axis: it says so, and the kernel is
-    lowered from its masked form instead."""
+    opens its loop over the range, for an attention's carrier and for a plain sum alike. A cooperative reduce gives
+    each lane every ``coop``-th position of the range, from the lane's own start to the range's end. Neither masks
+    a position inside the range."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.stmt import Loop, pretty_body  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
@@ -260,8 +244,10 @@ def test_a_tier_reads_a_range_or_takes_its_mask() -> None:
     assert walks(triangle) == [("0", "a0 + 1", "1")]
     assert "select" not in text
 
-    _, text = lowered(attention, WORK="t32", REDUCE="coop")
-    assert "where(" in text, "the mask the range stands for"
+    cooperative, text = lowered(attention, WORK="t32", REDUCE="coop")
+    ((start, end, step),) = walks(cooperative)
+    assert (end, step) == ("a1 + 1", "32") and start.endswith("_co"), (start, end, step)
+    assert "where(" not in text and "select" not in text
 
 
 def test_a_value_defined_once_is_the_kernel_that_computes_it_at_each_read() -> None:

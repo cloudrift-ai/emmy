@@ -1381,25 +1381,9 @@ impl PyFold {
         PyFold::wrap(py, &self.fold.rewrite(&rewrite).py()?)
     }
 
-    /// This tree with no range left, as a kernel tier reads it, and the axis table it then reads: a term that
-    /// walks a range walks from zero and selects each value it folds against its seed past the end
-    /// (`Fold::masked`). `axes` is the kernel's axis table.
-    fn masked<'py>(
-        &self,
-        py: Python<'py>,
-        axes: &Bound<'py, PyAny>,
-    ) -> PyResult<(Bound<'py, PyFold>, Bound<'py, PyTuple>)> {
-        let axes = axes_from_py(Some(axes))?;
-        let (masked, table) = self.fold.masked(&axes).py()?;
-        let table = table
-            .iter()
-            .map(|axis| crate::convert::axis_to_py(py, axis))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok((PyFold::wrap(py, &masked)?, PyTuple::new(py, table)?))
-    }
-
-    /// This tree as the kernel tiers take it, and the axis table it then reads: `masked`, except that a twisted
-    /// carrier keeps its range for the tier that folds it to read (`Fold::scheduled`).
+    /// This tree as the schedule addresses it and a kernel tier lowers it, and the axis table it then reads: every
+    /// term keeps its range, and a block of a partition walks from zero (`Fold::scheduled`). `axes` is the kernel's
+    /// axis table.
     fn scheduled<'py>(
         &self,
         py: Python<'py>,

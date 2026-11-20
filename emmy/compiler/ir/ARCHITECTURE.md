@@ -486,9 +486,10 @@ says which trips there are. The normal form takes the range where it can (`range
 whose every accumulator folds a select between a value and the operation's neutral element, with a condition that
 bounds the loop's own axis by the coordinates around it, walks that part of the axis. A condition that reads data, or
 that bounds another axis, stays a select. The `Fold` term keeps the range of the axis it binds as a stored part, the
-lift and `Fold.lower` carry it, and the Loop IR runner and the CPU code generator walk it. A kernel tier covers an
-axis from zero to a number of trips, so the classic schedule and the kernel lowering read the kernel through
-`TileOp.masked`: the tree with every range spelled as the mask it stands for (`ir/tile/ARCHITECTURE.md`).
+lift and `Fold.lower` carry it, and the Loop IR runner and the CPU code generator walk it. The classic schedule and
+the kernel lowering read the kernel through `TileOp.scheduled`, in which every term keeps its range and a kernel
+tier reads it (`ir/tile/ARCHITECTURE.md`). A loop may also state a `step`, how far its axis moves each trip: a
+kernel loop takes one where the threads of a block stride through an axis, and a Loop IR body states none.
 
 **A value may be defined once and read by index.** A `Carry` without a seed is the definition of a value the kernel
 keeps for itself: one cell per coordinate of the loops around it, each an index entry. A `Pre` reads a cell by index

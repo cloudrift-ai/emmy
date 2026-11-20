@@ -315,14 +315,12 @@ block, `length * block .. length * (block + 1)`, inside the range it walked befo
 re-enters the scan as a fresh kernel that decides its own row. The block axis is a free axis of the partial, and the
 axis the fold binds keeps its name and its extent, with a partition window as the receipt of the split.
 A stream whose length is symbolic (an attention window) splits into blocks of `⌈K/w⌉` positions, and the last block
-ends where the stream does. A tier reads a block through the masked form (`Fold.masked`): the walk leaves from the
-block's start and takes the block's length, a load clamps onto the stream's last position, and the lift folds
-nothing past the end: a monoid folds its seed there, and a twisted carrier's score takes the pivot's identity
-through the `where` selects a program's own mask spells, the additive coordinate mask the chunk tier lands, so the
-carrier past the end weighs its channels by nothing. A carried or observed fold has neither and is refused. The lift
-of the masked form reads the absolute key unclamped (only a load needs the clamp), so a causal mask compares the key
-its loads read, and the chunk tier's stream bounds land per block: the block end plus the position minus the block's
-start, and a block past the diagonal folds nothing.
+ends where the stream does. A tier reads a block through the scheduled form (`Fold.scheduled`): the walk leaves
+from the block's start and takes the block's length, a load clamps onto the stream's last position, and the term
+keeps what the stream leaves of the block as its range, which the tier reads as it reads any range. A carried or
+observed fold is not split over a symbolic stream. The lift reads the absolute key unclamped (only a load needs
+the clamp), so a causal mask compares the key its loads read, and the chunk tier's stream bounds land per block:
+the block end plus the position minus the block's start, and a block past the diagonal folds nothing.
 A fold with an operand that reduces its own axis (a softmax's row maximum or a contraction's RMS statistic) is therefore
 offered no split, and a pin that names one raises the refusal instead of slicing. A piece is the region
 term rebound over the partial or the finalize fold: the projection keeps its epilogue and its other operands whole,

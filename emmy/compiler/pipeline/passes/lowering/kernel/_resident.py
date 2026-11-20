@@ -196,6 +196,8 @@ class _Blocks:
         view = node.as_contraction()
         if view is None or (view.product.name, view.plus.name) != ("multiply", "add") or len(node.operands) != 2:
             raise Unresident("a reduction that is no product under a sum")
+        if node.range is not None:
+            raise Unresident("a product that walks a range of its axis, where the atom folds every position")
         atom, axis = self.atom, node.axis
         bound = {param: (edge, edge.exposes[component]) for param, edge, component in node.bindings}
         (left, left_name), (right, right_name) = sorted(bound.values(), key=lambda pair: row not in pair[0].free_axes)
