@@ -304,30 +304,18 @@ impl Range {
         )
     }
 
-    /// `ctx` inside a loop that walks `axis` over this range: the axis's interval, the comparisons the range
-    /// states, and the end as the axis's symbolic bound where it is one expression.
-    pub fn extend(&self, ctx: &SimplifyCtx, axis: Name) -> SimplifyCtx {
-        self.extend_within(ctx, axis, None)
-    }
-
-    /// [`Range::extend`] for an axis whose values also lie inside `0..extent`: the interval is the range's, cut to
-    /// the extent's where that is static, and never below zero.
-    pub fn extend_within(
-        &self,
-        ctx: &SimplifyCtx,
-        axis: Name,
-        extent: Option<&Dim>,
-    ) -> SimplifyCtx {
+    /// `ctx` inside a loop that walks `axis` over this range, the axis of extent `extent`: the axis's interval (the
+    /// range's, inside `0..extent`), the comparisons the range states, and the end as the axis's symbolic bound where
+    /// it is one expression.
+    pub fn extend(&self, ctx: &SimplifyCtx, axis: Name, extent: &Dim) -> SimplifyCtx {
         let clamps = matches!(
             self.end.operation(),
             Some((Operation::Minimum | Operation::Maximum, _))
         );
         let mut interval = self.interval(ctx);
-        if let Some(extent) = extent {
-            interval.lo = interval.lo.max(0);
-            if let Some(bound) = extent.as_static() {
-                interval.hi = interval.hi.min(i128::from(bound) - 1);
-            }
+        interval.lo = interval.lo.max(0);
+        if let Some(bound) = extent.as_static() {
+            interval.hi = interval.hi.min(i128::from(bound) - 1);
         }
         let mut out = ctx.extend(&axis, interval, (!clamps).then(|| self.end.clone()));
         if clamps {
