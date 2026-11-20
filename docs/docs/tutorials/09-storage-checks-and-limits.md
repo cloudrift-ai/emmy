@@ -56,22 +56,16 @@ write, since every row in it can be measured again, and refused by a reader. The
 way a kernel's identity is computed, and a file written under another version is re-created the same way.
 
 **The tables are checked, not the code.** `emmy db check` verifies that an instance's tables agree with
-themselves — every knob row's digest, every reference, every card, the two knob vocabularies — and counts the rows
-that fail. It does not re-derive what the compiler wrote: the tuning database is a cache, and a row the current code
-disagrees with is re-benched or re-imported. The freeze is what travels between machines.
+themselves — every reference, every card — and counts the rows that fail. It does not re-derive what the compiler
+wrote: the tuning database is a cache, and a row the current code disagrees with is re-benched or re-imported.
 
-**A frozen snapshot makes a fit reproducible.** The tuning database is a live store — benches keep writing into it
-— so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a golden file per
-card: every measured kernel — the loop body the compiler formed it from, with no identity or feature stored beside
-it — the kernel-set decisions that reach it, and its measured schedule rows, each with the setting it was measured
-under and its median. Importing a freeze puts those rows back, row for row, each under the identity computed from
-its kernel's body. A freeze keeps no traced program, so a compiler change that re-keys a kernel leaves its frozen rows
-behind; the repository goldens, which do, are restamped instead. Freezing the same database twice produces
-byte-identical files. A freeze is named on the `emmy db import` command line like any
-other source — a golden configuration file, or a tuning database from this machine or a rented card — and that
-database is what every evaluation and the offline fit read; nothing is loaded into it by default. The repository
-keeps one freeze, a file per card in git LFS, plus the files tunes write beside them until the nightly refresh folds
-them in.
+**A dataset names its sources.** The tuning database is a live store — benches keep writing into it — so a model is
+never fitted straight from it. `emmy db import` fills a database of its own from the sources named on its command
+line: golden configuration files, each row filed under the identity computed from its kernel's body, and tuning
+databases, from this machine or a rented card, whose own measured rows are copied as they stand. Every evaluation and
+the offline fit read the dataset exported from that database, which lists its sources by digest; nothing is loaded
+into it by default. What travels between machines is the golden files, the candidate files beside them, and a tuning
+database you copy.
 
 **Hand-run measurements are recorded too.** A `run --bench` that measured configurations with knob values forced by
 hand records each clean result through the same writer as the compiler's own pick, so that manually found optima
@@ -153,7 +147,7 @@ Gathered in one place, honestly.
 
 ## See it yourself
 
-The measured view reads the dataset exported from the dataset database, filled from a freeze or from a tuning database:
+The measured view reads the dataset exported from the dataset database, filled from a tuning database:
 
 ```bash
 emmy db import --db _data/tune.db ~/.cache/emmy/autotune.db
