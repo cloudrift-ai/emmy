@@ -59,7 +59,7 @@ next row, and when no row keeps the store, the `LoweringError` names the kernel 
 materialization returns before this check: its state port has no store by design, and `_drop_private_ports` removes it.
 
 For a register materialization, `factorize` emits the same Fold tree as C fragments through `_register`.
-The ordered axis becomes a `StridedLoop` inside the CTA, enclosed by FP32 state declarations. Equal fragment
+The ordered axis becomes a `Loop` inside the CTA, enclosed by FP32 state declarations. Equal fragment
 expressions share results. The schedule proves row ownership before lowering; the emitter uses the atom's
 geometry with existing `FragmentApply`, `MmaSyncPtx`, `FragmentPromote`, and `RegStore` nodes. `FragmentRepack`
 supplies C→A and C→B conversion, with every warp lane participating. Loads clamp padded coordinates, stores guard
@@ -719,7 +719,7 @@ A term that walks a RANGE reaches the lowering with the range on it (`TileOp.sch
 itself. A causal or a sliding-window attention states the keys a row folds as its carrier's range: `_outside` turns
 it into one comparison for each bound, where the carrier folds nothing — `row < key` past the causal end, `key < row
 − W + 1` ahead of a window's start — and the chunk tier reads those twice: for the chunks every row of the CTA skips
-(`_mask_key_bounds`), and as one coordinate-masking `FragmentApply` per bound on each score fragment, the fill the
+(`_key_bounds`), and as one coordinate-masking `FragmentApply` per bound on each score fragment, the fill the
 pivot's identity. A scalar walk reads a range, a carrier's or a plain fold's, as its loop's bounds and masks
 nothing: the reduce loop the term lowers to states the range, and the kernel's one loop statement carries it to the
 PTX compiler. A cooperative reduce reads it the same way: each lane takes every `coop`-th position from its own
