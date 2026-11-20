@@ -53,15 +53,15 @@ and a view are values: they compare by what they hold.
   unread-component prune and the cone sharing, to a fixpoint remembered on the result per stored set.
 - `lower.rs` — the one lowering to Loop IR (`Fold::lower`), whose result kernel identity digests, and the demand walk
   under it (`read_components`). The free loops open outermost the coordinate the most terms are evaluated over, and a
-  term read along a range counts for the coordinates the range's start reads: it is evaluated at `start + trip`, so
-  the nest is ordered as it would be were the start written into every index.
+  term read along a block of a partition counts for the block's coordinate: it is evaluated at `start + trip`, so the
+  nest is ordered as it would be were the start written into every index.
 - `range.rs` — `Fold::masked`: the tree with every range spelled as a kernel tier reads it. A term that walks a
   range folds each value selected against its seed where the position is outside the range; a twisted carrier adds
   the pivot's seed to its score through the `where` a program's own mask spells. A range starts at the greatest of
-  its starts and ends at the least of its ends. Where some end lies a fixed way past a start (a block of a split),
-  the walk leaves from that start: the axis takes that distance as its extent in the axis table returned, reads its
-  axis as `start + axis`, and clamps what it reads below it onto the range. Any other range is walked over the whole
-  axis from zero, and every bound is a mask.
+  its starts and ends at the least of its ends. A block of a split (an axis whose window is a partition) leaves from
+  the block's start, the start some end lies a fixed way past: the axis takes that distance as its extent in the axis
+  table returned, reads its axis as `start + axis`, and clamps what it reads below it onto the range. Any other range
+  is walked over the whole axis from zero, and every bound is a mask.
 
 ## Memos
 

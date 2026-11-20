@@ -746,8 +746,15 @@ impl Fold {
         Ok(body)
     }
 
-    /// For each axis a term of this tree walks from a start other than zero, the names that start reads.
-    fn range_origins(&self) -> HashMap<Name, HashSet<Name>> {
+    /// For each axis of `axes` that is a block of a partition and that a term of this tree walks a range of, the
+    /// names the range's start reads: the block's coordinate.
+    fn range_origins(&self, axes: &[Arc<Axis>]) -> HashMap<Name, HashSet<Name>> {
+        let block = |name: Name| {
+            axes.iter()
+                .rev()
+                .find(|axis| axis.name == name)
+                .is_some_and(|axis| axis.window.as_ref().is_some_and(|w| w.partition))
+        };
         let mut origins: HashMap<Name, HashSet<Name>> = HashMap::new();
         let mut seen: HashSet<usize> = HashSet::new();
         let mut pending = vec![self.clone()];
@@ -755,7 +762,9 @@ impl Fold {
             if !seen.insert(term.address()) {
                 continue;
             }
-            if let (Some(axis), Some((start, _))) = (term.axis(), term.range()) {
+            if let (Some(axis), Some((start, _))) = (term.axis(), term.range())
+                && block(axis)
+            {
                 origins.entry(axis).or_default().extend(start.free_vars());
             }
             pending.extend(term.operands().iter().cloned());
@@ -794,7 +803,7 @@ impl Fold {
         let mut readers: HashMap<Name, usize> = HashMap::new();
         let mut origin: HashMap<Name, (usize, Kind)> = HashMap::new();
         let mut terms: HashMap<usize, Fold> = HashMap::new();
-        let origins = self.range_origins();
+        let origins = self.range_origins(axes);
         let mut seen: HashSet<usize> = HashSet::new();
         let mut pending = vec![self.clone()];
         while let Some(term) = pending.pop() {
@@ -817,8 +826,8 @@ impl Fold {
                     internal.extend(edge.free_axes().iter().copied());
                 }
             }
-            // A term read along a range is evaluated at `start + trip`: over the coordinates the start reads too, as
-            // it would be were the start written into its index.
+            // A term read along a block of a partition is evaluated at `start + trip`: over the block's coordinate
+            // too, as it would be were the start written into its index.
             let mut over: HashSet<Name> = term.free_axes().clone();
             for axis in term.free_axes() {
                 over.extend(origins.get(axis).into_iter().flatten().copied());
