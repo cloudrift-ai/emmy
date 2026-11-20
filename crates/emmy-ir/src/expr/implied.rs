@@ -179,13 +179,6 @@ fn infeasible(forms: Vec<Linear>) -> Option<bool> {
 }
 
 impl SimplifyCtx {
-    /// The context with one more comparison in scope: `form` is at least zero.
-    pub fn with_relation(&self, form: Linear) -> SimplifyCtx {
-        let mut out = self.clone();
-        out.relations.push(form);
-        out
-    }
-
     /// Whether the context holds `name` as an integer: it has an interval, or a comparison in scope reads it.
     fn knows(&self, name: &Name) -> bool {
         self.ranges.contains_key(name)
@@ -306,7 +299,7 @@ mod tests {
         }
         for (left, right) in relations {
             let form = Linear::at_least(&parse(left).unwrap(), &parse(right).unwrap()).unwrap();
-            ctx = ctx.with_relation(form);
+            ctx.relations.push(form);
         }
         ctx
     }

@@ -50,9 +50,7 @@ pub fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
     if let Statement::Loop(l) = stmt
         && l.range.is_some()
     {
-        return l
-            .walk()
-            .extend_within(ctx, l.axis.name, Some(&l.axis.extent));
+        return l.walk().extend(ctx, l.axis.name, &l.axis.extent);
     }
     stmt.bound_axes()
         .iter()
