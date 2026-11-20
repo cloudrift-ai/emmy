@@ -478,27 +478,17 @@ the state in shared memory or registers, inside a CTA as a loop.
 
 **A loop may walk a range.** A `Loop` states where its axis walks when that is not all of it: a start and an exclusive
 end (`axis::Range`), each over the coordinates around the loop and the symbolic dims, affine or a `min` / `max` of
-affine forms. The text is `for a4 in 0..a0 + 2 of 62:`. The values lie inside `0..extent`, so the extent stays the bound
-every index is analysed under, and the range says how many trips the loop takes. A condition on a coordinate is a
-select in a body or a range on a loop. A select decides what a cell computes and every trip evaluates it. A range
-says which trips there are. The normal form takes the range where it can (`range_masked_reductions`): a reduce loop
-whose every accumulator folds a select between a value and the operation's neutral element, with a condition that
-bounds the loop's own axis by the coordinates around it, walks that part of the axis. A condition that reads data, or
-that bounds another axis, stays a select. The `Fold` term keeps the range of the axis it binds as a stored part, the
-lift and `Fold.lower` carry it, and the Loop IR runner and the CPU code generator walk it. The classic schedule and
-the kernel lowering read the kernel through `TileOp.scheduled`, in which every term keeps its range and a kernel
-tier reads it (`ir/tile/ARCHITECTURE.md`). A loop may also state a `step`, how far its axis moves each trip: a
-kernel loop takes one where the threads of a block stride through an axis, and a Loop IR body states none.
-
-**A value may be defined once and read by index.** A `Carry` without a seed is the definition of a value the kernel
-keeps for itself: one cell per coordinate of the loops around it, each an index entry. A `Pre` reads a cell by index
-wherever those loops have closed, as a `Load` reads a buffer. Nothing is declared: the name is neither an input nor
-an output of the kernel, and no loop carries it. The normal form orders the statement that holds a definition ahead
-of every sibling that reads it. The term has no place for such a value yet, so the lift spells each read as the
-computation it stands for (`values::inline_values`), and that body normalizes to the one that computes the value at
-each read: the two spellings are one kernel. `tests/compiler/ir/reference_model.py` is the meaning of the form in
-numpy, apart from every compiler: a read sees the last definition at or before the coordinate read, and the seed
-where there is none.
+affine forms. The text is `for a4 in 0..a0 + 2 of 62:`. The values lie inside `0..extent`, so the extent stays the
+bound every index is analysed under, and the range says how many trips the loop takes. A condition on a coordinate is
+a select in a body or a range on a loop. A select decides what a cell computes and every trip evaluates it. A range
+says which trips there are. Three writers state ranges: the cross-CTA split (each block of the stream), the roll (a
+loop that grows with the step) and the attention decomposition (the keys a row folds). The normal form gives a range
+one spelling (`canonical_ranges`) and writes none itself: a mask a body spells as a select stays a select. The `Fold`
+term keeps the range of the axis it binds as a stored part, the lift and `Fold.lower` carry it, and the Loop IR runner
+and the CPU code generator walk it. The classic schedule and the kernel lowering read the kernel through
+`TileOp.scheduled`, in which every term keeps its range and a kernel tier reads it (`ir/tile/ARCHITECTURE.md`). A loop
+may also state a `step`, how far its axis moves each trip: a kernel loop takes one where the threads of a block stride
+through an axis, and a Loop IR body states none.
 
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
@@ -840,13 +830,8 @@ from that CSE form. Subroutine boundaries never limit fusion.
   temps and one tree are one body up to the single-reader guard — a sum two statements read stays a definition — so
   the readers of the normal form (the tile lift, the kernel passes, the code generators) read one operation per
   statement; the host renderer spells a nested value as temps of its own.
-- `range_masked_reductions` — a reduce loop whose every accumulator folds a select between a value and its
-  operation's neutral element (or the seed a kernel starts the accumulator from), under a condition that bounds the
-  loop's own axis by the coordinates around it and the symbolic dims, walks that part of its axis: the bounds join the
-  loop's range, and the simplification that follows decides the comparison and folds the select to its value. A
-  comparison is a bound when it is affine with integer coefficients and the axis's is one. Accumulators masked apart
-  keep the whole axis. The same step spells every range one way: no range where it is the whole axis, and the extent
-  the least bound the analysis proves of the end. Each rule removes work and adds none.
+- `canonical_ranges` — every range a loop states takes one spelling: its bounds simplified under the loops around
+  it, no range where it is the whole axis, and the extent the least bound the analysis proves of the end.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. Two loops match when they walk one extent and one range. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
@@ -996,15 +981,6 @@ emits back to `i`, the symbolic-shape counterpart of the literal-divisor
 `_div_mod_decompose` cleanup (a static `seq_len` already constant-folds it).
 Symbolic-extent axes get `[0, sentinel]` ranges (non-negativity for the inner
 `(i*c + …)//c → i` div fold) instead of being dropped.
-
-An interval per name cannot say that one coordinate lies below another. A loop that walks a range states exactly
-that, so the context also holds comparisons between names (`SimplifyCtx.relations`), each an affine form that is at
-least zero, and one test decides a comparison they imply (`expr/implied.rs`): the comparisons in scope, the intervals
-of the names they read and the negation of the one asked have no integer solution, by Fourier-Motzkin elimination.
-Every name is an integer, so `a < b` is `a + 1 <= b`. The test is sound and not complete, takes part only where a
-range is in scope, reads only the forms that share a name with the question, and gives up past a fixed number of
-forms. A comparison it decides folds to its literal, and a `min` or `max` it decides to the operand it picks, which is
-how the clamp of an index a range already bounds goes away.
 
 `_div_mod_decompose` also sees through a division standing in its way (`A / d`
 decomposes by `n` once `A` decomposes by `n·d`), and through a sum whose one

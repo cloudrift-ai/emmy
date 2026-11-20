@@ -1,9 +1,8 @@
-"""A range and a value defined once, from the Loop IR body to the kernel a tier compiles.
+"""A range, from the Loop IR body to the kernel a tier compiles.
 
-A reduction masked to a triangle reaches the term as a range on the fold's axis, and the classic schedule and the
-kernel lowering read the range itself (``TileOp.scheduled``). A value the body defines once and reads by index
-lifts as the kernel that computes it at each read. Both are held to numpy on the CPU backend, which compiles
-the lowered kernel.
+A reduction over a triangle states the part of its axis it walks as its loop's range. The range reaches the term on
+the fold's axis, and the classic schedule and the kernel lowering read it there (``TileOp.scheduled``). The lowered
+kernel is held to numpy on the CPU backend.
 """
 
 from __future__ import annotations
@@ -21,19 +20,15 @@ from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.pipeline import Pipeline
 from tests.compiler.helpers import inject_constants
 
-#: ``O[i, j] = sum(X[i, k] * Y[k, j] for k <= i)``, the bound written as a mask to the sum's neutral element.
-MASKED = """
+#: ``O[i, j] = sum(X[i, k] * Y[k, j] for k <= i)``: the sum walks the keys at or before the row.
+TO_THE_ROW = """
 for i in 0..8:
   for j in 0..8:
-    for k in 0..8:
+    for k in 0..i + 1 of 8:
       x = load X[i, k]
       y = load Y[k, j]
       p = multiply(x, y)
-      let zero = 0.0
-      m = select:
-        p when k < i + 1
-        zero when true
-      s <- add(s, m) over k
+      s <- add(s, p) over k
     O[i, j] = s
 """
 
@@ -47,38 +42,6 @@ for i in 0..8:
       p = multiply(x, y)
       s <- add(s, p) over k
     O[i, j] = s
-"""
-
-#: A normalized key read at the cell and inside the sum, defined once.
-DEFINED = """
-for h in 0..4:
-  for a in 0..16:
-    k = load K[h, a]
-    w = load W[h]
-    v = multiply(k, w)
-    kn[h, a] <- v
-  for n in 0..16:
-    for m in 0..16:
-      b = pre kn[h, m]
-      c = pre kn[h, n]
-      p = multiply(b, c)
-      s <- add(s, p) over m
-    O[h, n] = s
-"""
-
-#: The same kernel with the key computed at each read: what fusion writes today.
-COPIED = """
-for h in 0..4:
-  for n in 0..16:
-    for m in 0..16:
-      w = load W[h]
-      k = load K[h, m]
-      b = multiply(k, w)
-      j = load K[h, n]
-      c = multiply(j, w)
-      p = multiply(b, c)
-      s <- add(s, p) over m
-    O[h, n] = s
 """
 
 
@@ -100,10 +63,10 @@ def _data(inputs: dict[str, tuple[int, ...]]) -> dict[str, np.ndarray]:
     return {name: rng.standard_normal(shape).astype(np.float32) for name, shape in inputs.items()}
 
 
-def test_a_mask_to_the_neutral_element_is_a_range_in_the_body_and_on_the_fold() -> None:
+def test_a_loops_range_is_in_the_body_and_on_the_fold() -> None:
     square = {"X": (8, 8), "Y": (8, 8)}
-    tile = _tile(MASKED, square, (8, 8))
-    assert "for a2 in 0..a0 + 1 of 8:" in str(tile.loop_body) and "select" not in str(tile.loop_body)
+    tile = _tile(TO_THE_ROW, square, (8, 8))
+    assert "for a2 in 0..a0 + 1 of 8:" in str(tile.loop_body)
     start, end = tile.op.range
     assert (str(start), str(end)) == ("0", "a0 + 1")
     assert "a0" in tile.op.free_axes, "the range is evaluated where the term is"
@@ -113,14 +76,14 @@ def test_a_term_keeps_its_range_in_the_form_a_tier_takes() -> None:
     """Only a block of a split is rewritten for a tier, to walk from zero. Any other term that walks a range is the
     term itself in the scheduled form, a start that moves with the row included: no end lies a fixed way past it,
     and the tier reads the range as it stands."""
-    for text, walked in ((MASKED, ["0", "a0 + 1"]), (FROM_THE_ROW, ["a0", "8"])):
+    for text, walked in ((TO_THE_ROW, ["0", "a0 + 1"]), (FROM_THE_ROW, ["a0", "8"])):
         tile = _tile(text, {"X": (8, 8), "Y": (8, 8)}, (8, 8))
         assert [str(bound) for bound in tile.op.range] == walked
         assert tile.scheduled() is tile
 
 
-@pytest.mark.parametrize(("text", "expected"), [(MASKED, np.tril), (FROM_THE_ROW, np.triu)], ids=["masked", "from_the_row"])
-def test_a_ranged_fold_computes_what_its_mask_computed(text: str, expected) -> None:
+@pytest.mark.parametrize(("text", "expected"), [(TO_THE_ROW, np.tril), (FROM_THE_ROW, np.triu)], ids=["to_the_row", "from_the_row"])
+def test_a_ranged_fold_computes_the_sum_over_its_range(text: str, expected) -> None:
     """The body a ranged fold lowers to, run on the Loop IR runner: the loop takes the trips of the range alone."""
     from emmy.compiler.ir.loop.runner import execute_loop_op_cpp  # noqa: PLC0415
 
@@ -145,7 +108,7 @@ def test_a_block_of_a_split_walks_the_part_of_the_folds_range_inside_it(monkeypa
 
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     shapes = {"X": (16, 64), "Y": (64, 16)}
-    text = MASKED.replace("0..8", "0..16").replace("for k in 0..16", "for k in 0..64").replace("k < i + 1", "k < 4 * i + 4")
+    text = TO_THE_ROW.replace("0..8", "0..16").replace("0..i + 1 of 8", "0..4 * i + 4 of 64")
     run = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0)))
     out, _ = run.resolve(_graph(text, shapes, (16, 16)), lambda fork: next(fork.leaves()))
     assert {"O", "O__partial"} <= set(out.nodes)
@@ -240,7 +203,7 @@ def test_a_scalar_walk_and_a_cooperative_reduce_read_a_range_as_their_loops_boun
     assert walks(scalar) == [("0", "a1 + 1", "1")]
     assert "where(" not in text and "select" not in text
 
-    triangle, text = lowered(_graph(MASKED, {"X": (8, 8), "Y": (8, 8)}, (8, 8)), WORK="", REDUCE="")
+    triangle, text = lowered(_graph(TO_THE_ROW, {"X": (8, 8), "Y": (8, 8)}, (8, 8)), WORK="", REDUCE="")
     assert walks(triangle) == [("0", "a0 + 1", "1")]
     assert "select" not in text
 
@@ -248,14 +211,6 @@ def test_a_scalar_walk_and_a_cooperative_reduce_read_a_range_as_their_loops_boun
     ((start, end, step),) = walks(cooperative)
     assert (end, step) == ("a1 + 1", "32") and start.endswith("_co"), (start, end, step)
     assert "where(" not in text and "select" not in text
-
-
-def test_a_value_defined_once_is_the_kernel_that_computes_it_at_each_read() -> None:
-    shapes = {"K": (4, 16), "W": (4,)}
-    defined, copied = _tile(DEFINED, shapes, (4, 16)), _tile(COPIED, shapes, (4, 16))
-    assert defined.identity_key(structural=False, with_io=True) == copied.identity_key(structural=False, with_io=True)
-    op = LoopOp(body=parse_body(DEFINED))
-    assert "<-" in str(op.body) and sorted(op.inputs) == ["K", "W"] and list(op.outputs) == ["O"], "the value is the kernel's own"
 
 
 def _native_available() -> bool:
@@ -272,11 +227,10 @@ def _native_available() -> bool:
 @pytest.mark.parametrize(
     ("text", "inputs", "shape"),
     [
-        (MASKED, {"X": (8, 8), "Y": (8, 8)}, (8, 8)),
+        (TO_THE_ROW, {"X": (8, 8), "Y": (8, 8)}, (8, 8)),
         (FROM_THE_ROW, {"X": (8, 8), "Y": (8, 8)}, (8, 8)),
-        (DEFINED, {"K": (4, 16), "W": (4,)}, (4, 16)),
     ],
-    ids=["masked", "from_the_row", "defined"],
+    ids=["to_the_row", "from_the_row"],
 )
 def test_the_lowered_kernel_computes_what_the_body_means(text: str, inputs: dict, shape: tuple) -> None:
     from emmy.compiler.backend.cpu import CpuBackend  # noqa: PLC0415
@@ -289,7 +243,7 @@ def test_the_lowered_kernel_computes_what_the_body_means(text: str, inputs: dict
     program = cpu.compile(_graph(text, inputs, shape))
     got = cpu.run(program, input_data=inject_constants(dict(data), program.graph))[0].outputs["O"]
     np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-4)
-    if text is MASKED:
+    if text is TO_THE_ROW:
         np.testing.assert_allclose(want, np.tril(data["X"]) @ data["Y"], rtol=1e-4, atol=1e-4)
     if text is FROM_THE_ROW:
         np.testing.assert_allclose(want, np.triu(data["X"]) @ data["Y"], rtol=1e-4, atol=1e-4)

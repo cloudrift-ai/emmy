@@ -321,10 +321,6 @@ def _validate(loop: LoopOp) -> None:
     # earlier Accum sharing its name. ``target_ops`` is the running map.
     target_ops: dict[str, ElementwiseImpl] = {}
     celled: dict[str, int] = {}  # carried states -> their rank
-    # A value the kernel defines for itself, one cell per coordinate of the loops around its definition: any
-    # statement may read it by index once those loops have closed, so it is in scope for the whole body.
-    values = {stmt.name: len(stmt.index) for stmt in loop.body.iter() if isinstance(stmt, Carry) and stmt.seed is None}
-    celled.update(values)
 
     def _walk(stmts: Body, defined: set[str]) -> set[str]:
         """Validate a body scope. Returns the set of ``Accum.name`` names
@@ -374,7 +370,7 @@ def _validate(loop: LoopOp) -> None:
                     raise ValueError(f"Carry {stmt.name!r}: value {stmt.value!r} not defined")
                 if stmt.name in exported_accs:
                     raise ValueError(f"Carry {stmt.name!r}: one statement defines a carried state")
-                if stmt.name not in celled and stmt.name not in values:
+                if stmt.name not in celled:
                     raise ValueError(
                         f"Carry {stmt.name!r}: no loop carries its cells {tuple(str(e) for e in stmt.index)} — each is a bare "
                         "axis (or the 0 of a size-one axis) bound by a loop inside the one over the steps"
@@ -437,7 +433,7 @@ def _validate(loop: LoopOp) -> None:
                 exported_accs.update(inner_exports)
         return exported_accs
 
-    _walk(loop.body, set(values))
+    _walk(loop.body, set())
 
     # Every LoopOp must Write at least one output buffer — that's its
     # observable result. Renderers, ``forward``, and ``_infer_write_shape``

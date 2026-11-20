@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use super::{Expr, ExprClass, Expression, Linear, Lit, LitType, Num, Operation, apply_binop};
+use super::{Expr, ExprClass, Expression, Lit, LitType, Num, Operation, apply_binop};
 use crate::{Name, Result};
 
 use std::collections::BTreeMap;
@@ -224,10 +224,6 @@ pub(super) fn simplify_binary(
             if let (Some(la), Some(lb)) = (left.range(ctx), right.range(ctx))
                 && let Some(decided) = static_cmp(op, la, lb)
             {
-                return Ok(Expression::int(decided as i64));
-            }
-            // What the intervals leave open, the comparisons the ranges in scope state may decide.
-            if let Some(decided) = ctx.decides(op, &left, &right) {
                 return Ok(Expression::int(decided as i64));
             }
         }
@@ -663,14 +659,12 @@ impl Interval {
     }
 }
 
-/// The ranges in scope: an integer interval per name, a symbolic exclusive upper bound per name where one is
-/// known (`i < seq_len`), so a modulo by a non-literal divisor folds, and the comparisons between names that the
-/// ranges of the loops around state (`implied.rs`), each an affine form that is at least zero.
+/// The ranges in scope: an integer interval per name, and a symbolic exclusive upper bound per name where one is
+/// known (`i < seq_len`), so a modulo by a non-literal divisor folds.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct SimplifyCtx {
     pub ranges: HashMap<Name, Interval>,
     pub bounds: HashMap<Name, Expression>,
-    pub relations: Vec<Linear>,
 }
 
 impl SimplifyCtx {

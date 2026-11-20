@@ -631,13 +631,12 @@ impl Line {
     ) -> Result<Statement> {
         if self.parser.accept("<-") {
             let value = self.name()?;
-            let seed = if self.word("seed") {
-                Some(match self.parser.number()? {
-                    Some(lit) => NumOr::Num(Num::Float(lit.value.as_f64())),
-                    None => NumOr::Value(self.name()?),
-                })
-            } else {
-                None
+            if !self.word("seed") {
+                return Err(self.parser.error("expected 'seed'"));
+            }
+            let seed = match self.parser.number()? {
+                Some(lit) => NumOr::Num(Num::Float(lit.value.as_f64())),
+                None => NumOr::Value(self.name()?),
             };
             return Ok(Statement::Carry(Carry {
                 name,
