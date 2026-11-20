@@ -208,8 +208,6 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     functions += ["reduce_strength"]
     # The input check of a code generator: the body says every type and every conversion, and asks for nothing.
     functions += ["check_types", "check_input"]
-    # A value the body defines for itself, spelled at each read: what the lift asks while the term keeps no such value.
-    functions += ["inline_values"]
     # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
     steps = list(_STEPS)
     assembly = ["Call", "Subroutine"]

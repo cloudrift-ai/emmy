@@ -36,7 +36,6 @@ from emmy.compiler.ir.stmt import (
     SelectBranch,
     Statement,
     Write,
-    inline_values,
 )
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 from emmy.compiler.ir.tile.ir import guarded_store
@@ -881,9 +880,7 @@ def lift_loop_op(op: LoopOp, *, body: Body | None = None, serial: tuple[Axis, ..
 
 
 def _lift_loop_op(op: LoopOp, body, serial: tuple[Axis, ...]) -> TileOp:
-    # The term has no place yet for a value the body defines once and reads by index: each read is lifted as the
-    # computation it stands for, which is the tree every reader of the term knows.
-    free, cell = _peel(inline_values(op.body if body is None else Body.coerce(body)))
+    free, cell = _peel(op.body if body is None else Body.coerce(body))
     if any(axis not in free for axis in serial):
         raise ValueError(f"a loop that carries a state must sit outside every reduction: {[axis.name for axis in serial]}")
     edges, stmts = lift_body(cell, tuple(free))

@@ -1005,7 +1005,7 @@ impl Fold {
                         name: *state,
                         value: *value,
                         index: index.clone().into(),
-                        seed: Some(seed),
+                        seed,
                         dtype: None,
                     })));
                 }

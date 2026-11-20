@@ -169,17 +169,11 @@ macro_rules! with_statement_types {
                 /// the loops over the cells, which is what lets a step read OTHER cells of its own state (a delta rule's `k @ S`)
                 /// through `Pre`; a scalar `Accum` lives inside the cell loops and cannot. One statement defines a state;
                 /// a cell it skips keeps its value.
-                ///
-                /// Without a seed the statement is the DEFINITION of a value the kernel keeps for itself: one
-                /// cell of it per coordinate of `index`, which lists every loop around the statement. No loop
-                /// carries it, nothing reads it one step back, and a `Pre` reads it by index wherever the
-                /// definition's loops have closed, the way a `Load` reads a buffer. A value two or more places
-                /// read is defined once this way and read by each, where it would be computed again at each.
                 shared Carry {} {
                     name: Name [DEFINES],
                     value: Name [READS],
                     index: Exprs [EXPRESSION] : Index,
-                    seed: Option<NumOr<Name>> [BUFFER_READ] = None,
+                    seed: NumOr<Name> [BUFFER_READ],
                     dtype: Option<DType> [] = None,
                 }
                 /// A read of one cell of a carried state: `name = carrier[index]`.

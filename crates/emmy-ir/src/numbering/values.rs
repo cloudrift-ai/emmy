@@ -811,9 +811,8 @@ impl Context<'_> {
                         .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
                         .collect();
                     let seed = match &s.seed {
-                        Some(NumOr::Value(name)) => self.resource(name, Tag::Buffer, &mut touched),
-                        Some(NumOr::Num(number)) => Key::num(*number),
-                        None => Key::None,
+                        NumOr::Value(name) => self.resource(name, Tag::Buffer, &mut touched),
+                        NumOr::Num(number) => Key::num(*number),
                     };
                     let state = self.resource(&s.name, Tag::State, &mut touched);
                     let payload = Key::tuple([

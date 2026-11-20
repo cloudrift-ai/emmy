@@ -122,10 +122,7 @@ behavior genuinely lives there — each costs roughly an order of magnitude more
 Reusable callables live in an explicit helper module at the nearest directory shared by their callers: compiler-wide
 helpers and CUDA markers in `tests/compiler/helpers.py`, the hand-spelled tile-term builders (`slab`, `projection`,
 `reduction`, `contraction` — the vocabulary the total lift forms, for fixtures the lift cannot yet form from Loop IR)
-in `tests/compiler/terms.py`, search-only node builders in `tests/compiler/pipeline/search/helpers.py`, the reference
-model of Loop IR's value form in `tests/compiler/ir/reference_model.py` (a numpy interpreter of a parsed body: ranges,
-values read by index, a read that sees the last definition at or before its coordinate or the seed; what a body
-means, stated apart from the runner and every compiler), and the
+in `tests/compiler/terms.py`, search-only node builders in `tests/compiler/pipeline/search/helpers.py`, and the
 cross-subsystem synthetic checkpoint builder in `tests/support/checkpoints.py`. Test modules import those dependencies
 directly; they never import from another test module or from `conftest.py`. A test module never re-declares a builder
 the shared module already provides.

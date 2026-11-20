@@ -1242,25 +1242,6 @@ impl Expression {
                         return Ok(b.clone());
                     }
                 }
-                // A clamp the ranges in scope already hold: the operand their comparisons pick.
-                if let ElementwiseOp::Known(op @ (Operation::Minimum | Operation::Maximum)) = name
-                    && let [a, b] = &new[..]
-                {
-                    let below = |x: &Expression, y: &Expression| {
-                        ctx.decides(Operation::LessEqual, x, y) == Some(true)
-                    };
-                    let (low, high) = if below(a, b) {
-                        (Some(a), Some(b))
-                    } else if below(b, a) {
-                        (Some(b), Some(a))
-                    } else {
-                        (None, None)
-                    };
-                    let picked = if *op == Operation::Minimum { low } else { high };
-                    if let Some(picked) = picked {
-                        return Ok(picked.clone());
-                    }
-                }
                 // An operation an index may hold (`maximum(1, 2)`, integer arithmetic) over integer literals is the
                 // integer the host computes — an index admits no float — except a quotient, whose inexact case is the
                 // field's class's to fold (`simplify_binary`).
@@ -1446,11 +1427,9 @@ pub fn python_repr(text: &str) -> String {
     out
 }
 
-pub mod implied;
 pub mod parse;
 pub mod simplify;
 
-pub use implied::Linear;
 pub use parse::*;
 pub use simplify::*;
 

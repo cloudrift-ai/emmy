@@ -241,13 +241,7 @@ pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
                 );
             }
             Statement::Carry(c) => {
-                // A definition without a seed is no state of a step: it produces the value, and its readers follow.
-                let kind = if c.seed.is_some() {
-                    Site::Carry
-                } else {
-                    Site::Binding
-                };
-                kinds.insert(c.name, kind);
+                kinds.insert(c.name, Site::Carry);
             }
             _ => {
                 // An update in place is read where it stands, as an accumulator's update is.

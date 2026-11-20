@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::elementwise::Operation;
-use crate::expr::{Expr, Expression, Interval, Linear, Num, SimplifyCtx, spell_name};
+use crate::expr::{Expr, Expression, Interval, Num, SimplifyCtx, spell_name};
 use crate::{Name, Result};
 
 /// A name as a statement's text spells it: bare, or between backticks when it reads as a keyword or is no identifier.
@@ -241,24 +241,6 @@ impl Range {
         (trips > 0).then_some(trips)
     }
 
-    /// The comparisons the range states of `axis`, each an affine form that is at least zero: `start <= axis` and
-    /// `axis < end`. A `max` in the start and a `min` in the end state one per operand; a bound that is not affine
-    /// states nothing.
-    pub fn relations(&self, axis: Name) -> Vec<Linear> {
-        let axis = Expression::var(&axis);
-        let lower = self.start.chain(Operation::Maximum);
-        let upper = self.end.chain(Operation::Minimum);
-        let one = Expression::int(1);
-        lower
-            .iter()
-            .filter_map(|bound| Linear::at_least(&axis, bound))
-            .chain(upper.iter().filter_map(|bound| {
-                let last = Expression::binary(Operation::Subtract, bound.clone(), one.clone());
-                Linear::at_least(&last, &axis)
-            }))
-            .collect()
-    }
-
     /// The interval the axis stays in under `ctx`: from the least value the start takes to one below the most the
     /// end takes, each side open (the stand-in for a symbolic extent) where the analysis cannot bound it.
     pub fn interval(&self, ctx: &SimplifyCtx) -> Interval {
@@ -287,8 +269,7 @@ impl Range {
     }
 
     /// `ctx` inside a loop that walks `axis` over this range, the axis of extent `extent`: the axis's interval (the
-    /// range's, inside `0..extent`), the comparisons the range states, and the end as the axis's symbolic bound where
-    /// it is one expression.
+    /// range's, inside `0..extent`), and the end as the axis's symbolic bound where it is one expression.
     pub fn extend(&self, ctx: &SimplifyCtx, axis: Name, extent: &Dim) -> SimplifyCtx {
         let clamps = matches!(
             self.end.operation(),
@@ -303,7 +284,6 @@ impl Range {
         if clamps {
             out.bounds.remove(&axis);
         }
-        out.relations.extend(self.relations(axis));
         out
     }
 }
