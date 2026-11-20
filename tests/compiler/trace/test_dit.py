@@ -35,8 +35,8 @@ def test_dit_adapter_traces_tiny_block_and_binds_weights():
     parameter/buffer all survive the tiny offline trace."""
     import torch
 
-    from emmy.commands.run import _bind_inputs
     from emmy.compiler.ir.frontend.ir import SdpaOp, SliceOp
+    from emmy.compiler.loader.binder import bind_inputs
     from emmy.compiler.trace.dit import DIT_CLASS_LABEL, DIT_TIMESTEP, trace_dit_transformer
 
     graph, (block, args, kwargs) = trace_dit_transformer(_tiny_transformer(), 0, hidden_shape=(1, 4, 8))
@@ -49,21 +49,21 @@ def test_dit_adapter_traces_tiny_block_and_binds_weights():
     assert len([node for node in graph.nodes.values() if isinstance(node.op, SdpaOp)]) == 1
     assert type(block.attn1.processor).__name__ == "AttnProcessor2_0"
 
-    bound = _bind_inputs(graph, block, args, kwargs)
+    bound = bind_inputs(graph, block, args, kwargs)
     assert all(node_id in bound for node_id, _op in graph.loadable_constants())
 
 
 @pytest.mark.skip(reason="full DiT LoopBackend accuracy is blocked by Cling compilation of the 3.7K-statement fused body")
 def test_dit_adapter_tiny_block_matches_loop_backend():
     """The fully decomposed/fused CPU path agrees with the same normalized DiT block."""
-    from emmy.commands.run import _bind_inputs
     from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.loader.binder import bind_inputs
     from emmy.compiler.trace.dit import trace_dit_transformer
 
     graph, (block, args, kwargs) = trace_dit_transformer(_tiny_transformer(), 0, hidden_shape=(1, 4, 8))
     backend = LoopBackend()
     compiled = backend.compile(graph)
-    result, _ = backend.run(compiled, input_data=_bind_inputs(compiled, block, args, kwargs))
+    result, _ = backend.run(compiled, input_data=bind_inputs(compiled, block, args, kwargs))
 
     expected = block(*args, **kwargs).detach().numpy()
     actual = next(iter(result.outputs.values())).reshape(expected.shape)

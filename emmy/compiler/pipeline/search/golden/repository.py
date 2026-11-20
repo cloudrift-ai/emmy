@@ -43,12 +43,17 @@ def is_repository_golden_path(path: str | Path) -> bool:
         return len(relative.parts) >= 2 and relative.parts[1] == _RECIPE_GOLDEN_DIR
 
 
+def hardware_golden_paths() -> list[Path]:
+    """The maintained hardware goldens, one file per exact card."""
+    return sorted(_RECORDS_DIR.glob("*.json"))
+
+
 @contextmanager
 def repository_golden_paths():
     """Yield hardware goldens plus the model goldens of maintained recipes: what a compile reads as evidence, a refit
     trains on and the tests check. Another recipe's golden is evidence only where a caller names it."""
     with default_recipe_root() as recipe_root:
-        paths = list(_RECORDS_DIR.glob("*.json"))
+        paths = hardware_golden_paths()
         if recipe_root is not None:
             paths.extend(
                 path for path in recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.json") if _is_maintained(path.parent.parent / "recipe.yaml")

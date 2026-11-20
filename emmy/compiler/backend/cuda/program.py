@@ -1021,9 +1021,8 @@ class _AsyncBenchWorker:
 
     Drives the ``_bench_worker`` protocol (``<8-byte LE length><pickle>``, both
     directions) over asyncio streams, so one event loop can keep N device-pinned
-    workers benching concurrently. The deployable ``--bench`` comparison awaits
-    ``benchmark_compare_isolated_async`` over a one-shot instance (via
-    ``_run_job_oneshot``); the pinned-row jobs share one persistent instance per run.
+    workers benching concurrently. One run session's jobs — the greedy comparison and every pinned
+    row — share one persistent instance.
 
     The wall-clock cap is :func:`asyncio.wait_for`; on overrun the child is
     SIGKILLed and respawned on the next bench."""
@@ -1258,12 +1257,6 @@ class _AsyncBenchWorker:
             return resp
         raise RuntimeError("bench worker unreachable")  # both attempts exhausted (defensive)
 
-    async def warmup(self, *, wall_timeout_s: float = 60.0) -> None:
-        """Initialize the child CUDA context outside a candidate's wall budget."""
-        response = await self.run_job({"worker_warmup": True}, wall_timeout_s=wall_timeout_s)
-        if not response.get("warmed"):
-            raise RuntimeError("bench worker did not acknowledge CUDA warmup")
-
     def _tail_suffix(self) -> str:
         """The drained stderr tail as an error-message suffix ('' when the child was quiet)."""
         return f"; child stderr tail:\n{self._stderr_tail}" if self._stderr_tail.strip() else ""
@@ -1334,11 +1327,11 @@ async def benchmark_compare_worker_async(
     want_ref: bool = False,
     strict_accuracy: bool = False,
 ) -> dict:
-    """``run --bench``'s greedy-row transport: the same comparison job as
-    :func:`benchmark_compare_isolated_async` but over a caller-supplied persistent
-    ``worker`` (shared with the pinned-row jobs — one worker per run session) and with the
-    run path's extras: ``accuracy`` (the in-child real-input emmy-vs-eager verdict) and
-    ``want_ref`` (that run's ``(inputs, outputs)`` for the pinned rows' wrong-answer gate).
+    """``run --bench``'s greedy-row transport: the eager / torch.compile / emmy comparison as one job on
+    ``worker``, the persistent worker the pinned-row jobs share (one per run session). ``torch_spec`` rebuilds the
+    torch side in the child (``_bench_worker._run_job``), so no live module crosses the pipe and a hung kernel hangs
+    the child, which the parent SIGKILLs on ``wall_timeout_s``. ``accuracy`` asks for the in-child real-input
+    emmy-vs-eager verdict, ``want_ref`` for that run's ``(inputs, outputs)``, the pinned rows' wrong-answer reference.
     Returns the normalized response dict — keys ``results`` / ``result`` /
     ``torch_available`` / ``captured`` / ``accuracy_error`` / ``run_io`` plus the optional
     ``greedy_error`` / ``reference_run_us`` when an embedded Loop reference completed before
@@ -1369,61 +1362,3 @@ async def benchmark_compare_worker_async(
         "sym_env": resp.get("sym_env"),
         "correctness": resp.get("correctness"),
     }
-
-
-async def _run_job_oneshot(request_obj: dict, *, wall_timeout_s: float) -> dict:
-    """Spawn a fresh ``_AsyncBenchWorker``, run one job, tear it down.
-    The transport for the synchronous one-shot bridges below — they each wrap this
-    in ``asyncio.run`` (the worker's streams bind to the loop, so it can't persist
-    across ``asyncio.run`` calls; the per-call ~0.2 s spawn is negligible against a
-    deployable ``--bench``)."""
-    worker = _AsyncBenchWorker()
-    try:
-        return await worker.run_job(request_obj, wall_timeout_s=wall_timeout_s)
-    finally:
-        await worker.aclose()
-
-
-async def benchmark_compare_isolated_async(
-    *,
-    lowered: Graph,
-    torch_spec: tuple,
-    bench_backends: str,
-    wall_timeout_s: float,
-    warmup: int,
-    iters: int,
-    seed: int,
-) -> tuple:
-    """Run the deployable eager / torch.compile / emmy comparison in the
-    SIGKILL-able worker, awaiting a fresh one-shot :class:`_AsyncBenchWorker`
-    (the one transport).
-
-    Unlike the emmy-only autotune bench, the deployable comparison interleaves emmy with
-    real torch in one process and so couldn't be isolated before — a hung generated kernel wedged
-    the whole run. This ships the *entire* comparison to the worker: a hung kernel hangs the child,
-    which the parent SIGKILLs on ``wall_timeout_s``, freeing the device and leaving the parent clean.
-
-    ``torch_spec`` rebuilds the torch side **in the child** (no live module crosses the pipe), reusing
-    the same core functions the in-process path uses:
-
-    - ``("trace_args", {code, input, adapter, layer, seq_len, dynamic})`` → ``load_or_trace`` rebuilds the real
-      module (an HF model id or a ``--code`` expression), benched via ``bench_full_model_real``.
-    - ``("frontend_graph", Graph | None)`` → ``bench_lowered_vs_torch`` (per-kernel reproducer; ``None``
-      benches emmy-only when the graph isn't torch-runnable).
-
-    Returns ``(results, bench, torch_available, captured, accuracy_error)`` — the shape
-    ``bench_lowered_vs_torch`` returns (``captured``: all backends were timed under CUDA graph
-    capture; False means the all-or-nothing fallback ran and the timings include host dispatch).
-    ``accuracy_error`` is the non-fatal eager-reference verdict for a frontend reproducer."""
-    resp = await _run_job_oneshot(
-        {
-            "graph": lowered,
-            "torch_spec": torch_spec,
-            "bench_backends": bench_backends,
-            "warmup": warmup,
-            "iters": iters,
-            "seed": seed,
-        },
-        wall_timeout_s=wall_timeout_s,
-    )
-    return resp["results"], resp["result"], resp["torch_available"], resp.get("captured", False), resp.get("accuracy_error")

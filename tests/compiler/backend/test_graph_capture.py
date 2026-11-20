@@ -16,6 +16,8 @@ event windows measure dense GPU work instead of per-launch dispatch gaps. These 
 
 import asyncio
 
+from emmy.compiler.backend.base import BenchmarkResult
+from emmy.compiler.backend.cuda import compare as compare_mod
 from emmy.compiler.backend.cuda.program import GraphCaptureError, benchmark_program
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
@@ -159,13 +161,13 @@ def test_reference_free_benchmark_respects_iteration_budget():
     """A slow reference-free target must not silently run ten iterations when the caller budgets one."""
     from types import SimpleNamespace
 
-    from emmy.commands.run import bench_lowered_vs_torch
+    from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
 
     calls = []
 
     async def benchmark(graph, **kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(time_ms=1.0, captured=True)
+        return BenchmarkResult(time_ms=1.0, captured=True)
 
     backend = SimpleNamespace(run=lambda graph, **kwargs: (SimpleNamespace(outputs={}, time_ms=1.0), None), benchmark_async=benchmark)
     asyncio.run(bench_lowered_vs_torch(None, Graph(), backend, seed=0, do_bench=True, warmup=0, iters=1, bench_backends="emmy"))
@@ -174,8 +176,8 @@ def test_reference_free_benchmark_respects_iteration_budget():
 
 @requires_cuda
 def test_bench_lowered_vs_torch_captures():
-    from emmy.commands.run import bench_lowered_vs_torch
     from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
 
     fe, lowered = _lowered_rmsnorm()
     results, bench, torch_available, captured, _accuracy = asyncio.run(
@@ -190,8 +192,8 @@ def test_bench_lowered_vs_torch_captures():
 
 @requires_cuda
 def test_emmy_capture_failure_falls_back_uncaptured(monkeypatch):
-    from emmy.commands.run import bench_lowered_vs_torch
     from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
     def _boom(self, batch_sizes):
@@ -210,7 +212,6 @@ def test_emmy_capture_failure_falls_back_uncaptured(monkeypatch):
 
 @requires_cuda
 def test_torch_capture_failure_disables_emmy_capture(monkeypatch):
-    import emmy.commands.run as run_mod
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
@@ -219,12 +220,14 @@ def test_torch_capture_failure_disables_emmy_capture(monkeypatch):
 
     emmy_captures: list = []
     orig = CompiledProgram.capture_launch_graphs
-    monkeypatch.setattr(run_mod, "_capture_torch_fn", _boom)
+    monkeypatch.setattr("emmy.compiler.backend.cuda.compare._capture_torch_fn", _boom)
     monkeypatch.setattr(CompiledProgram, "capture_launch_graphs", lambda self, bs: emmy_captures.append(bs) or orig(self, bs))
 
     fe, lowered = _lowered_rmsnorm()
     results, _, torch_available, captured, _accuracy = asyncio.run(
-        run_mod.bench_lowered_vs_torch(fe, lowered, CudaBackend(), seed=0, do_bench=True, warmup=2, iters=5, bench_backends="eager,emmy")
+        compare_mod.bench_lowered_vs_torch(
+            fe, lowered, CudaBackend(), seed=0, do_bench=True, warmup=2, iters=5, bench_backends="eager,emmy"
+        )
     )
     assert torch_available
     assert captured is False
