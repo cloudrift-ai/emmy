@@ -1625,7 +1625,8 @@ def _fmt_op(node: Node, graph: Graph) -> str:
     if cls == "ElementwiseOp":
         return f"{op.name}({', '.join(arg_names)})"
     if cls == "ReduceOp":
-        return f"{op.name}({', '.join(arg_names)}, axis={op.axis})"
+        walked = "" if op.range is None else f", range={op.range[0]}..{op.range[1]}"
+        return f"{op.name}({', '.join(arg_names)}, axis={op.axis}{walked})"
     if cls == "ScanOp":
         return f"scan_{op.name}({', '.join(arg_names)}, axis={op.axis})"
     if cls == "GatherOp":

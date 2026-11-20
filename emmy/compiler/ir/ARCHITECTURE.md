@@ -418,7 +418,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 | `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…); unary `pad` is the frontend's exact zero-width identity. |
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
 | `RangeOp`                            | One-dimensional integer sequence, static or of a symbolic length. |
-| `ReduceOp`                           | Collapse one axis via associative binary op.                   |
+| `ReduceOp`                           | Collapse one axis via associative binary op, over the whole axis or the `range` of it the op states. |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |
 | `IndexMapOp` + `IndexSource`         | Unified layout-only op over `Expression`.                            |
@@ -794,7 +794,8 @@ is no coordinate, so the definition reads it free, as it reads a buffer. Fusion 
 body: ordering, placement and coordinate simplification operate on the calls, and on each shared definition once.
 Identical calls to the same definition share by argument structure without searching their bodies. Fusion then
 expands the calls with the demand reconstruction that built the region. Independent reductions with equal extents
-and reduction depths share axes; coordinate substitutions keep different arguments distinct. Terminal values also
+and reduction depths that walk the same range share axes (a reduce loop's range travels with it, read at the
+coordinates the reader binds); coordinate substitutions keep different arguments distinct. Terminal values also
 seed expansion, so a body without output writes expands too. The expanded body is the only form that leaves fusion:
 normalization refuses a body that holds a call, so validation, executable identity, serialization and Tile IR
 lifting never meet one. Placement then shares common producers across definitions, and operation clustering starts

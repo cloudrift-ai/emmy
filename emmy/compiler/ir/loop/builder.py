@@ -8,6 +8,7 @@ enclosing ``Scope``. Callers drive two concerns:
 - **Scope-aware insertion**: ``insert(stmt, scope)`` descends the body
   tree along the enclosing axis path, creates ``Loop`` nodes as needed,
   and prepends the stmt at the leaf.
+- **Ranges**: ``walk(axis, range)`` states the range the loop of ``axis`` walks.
 
 Insertions are prepend-at-leaf. Callers that want defined-before-use
 ordering should insert in reverse-topological order (consumers first,
@@ -51,6 +52,7 @@ class BodyBuilder:
         self._root = _Scope()
         self._used: set[str] = set(used_names)
         self._next_suffix: dict[str, int] = {}
+        self._ranges: dict[Axis, tuple] = {}
 
     def fresh(self, hint: str) -> str:
         """Return an unused name derived from ``hint`` and reserve it."""
@@ -78,15 +80,20 @@ class BodyBuilder:
             scope = child
         scope.entries.append(stmt)
 
+    def walk(self, axis: Axis, walked: tuple) -> None:
+        """State the range the loop of ``axis`` walks, over the coordinates of the loops around it."""
+        self._ranges[axis] = walked
+
     def finish(self) -> Body:
         """Return the accumulated body — the one point the immutable tree is built."""
-        return _materialize(self._root)
+        return _materialize(self._root, self._ranges)
 
 
-def _materialize(scope: _Scope) -> Body:
+def _materialize(scope: _Scope, ranges: dict[Axis, tuple]) -> Body:
     """The scope tree as loop IR: reverse each level back into insertion order, and give every
-    nested scope its ``Loop``. A scope carries only its axis, so a ``Loop`` built here takes the
-    defaults for every other field — as it did when each insert rebuilt it."""
+    nested scope its ``Loop``. A scope carries its axis, and the builder the range a loop walks; a
+    ``Loop`` built here takes the defaults for every other field."""
     return tuple(
-        Loop(axis=entry.axis, body=_materialize(entry)) if isinstance(entry, _Scope) else entry for entry in reversed(scope.entries)
+        Loop(axis=entry.axis, range=ranges.get(entry.axis), body=_materialize(entry, ranges)) if isinstance(entry, _Scope) else entry
+        for entry in reversed(scope.entries)
     )

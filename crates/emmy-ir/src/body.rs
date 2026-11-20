@@ -696,6 +696,15 @@ impl Body {
                             if let Statement::Accum(a) = &**child {
                                 let mut axes = read_dependencies(&a.value, dependencies);
                                 axes.remove(&l.axis.name);
+                                // What the loop folds depends on where it walks: the coordinates its range reads.
+                                for bound in l.range.iter().flat_map(|(start, end)| [start, end]) {
+                                    axes.extend(
+                                        bound
+                                            .free_vars()
+                                            .into_iter()
+                                            .filter(|name| axis_names.contains(name)),
+                                    );
+                                }
                                 dependencies.insert(a.name, axes);
                             }
                         }

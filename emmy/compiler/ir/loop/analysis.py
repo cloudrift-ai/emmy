@@ -39,6 +39,8 @@ class BodyAnalysis:
     - ``reduce_axes``: ``Accum`` name → its reduce ``Axis`` (the tail of
       the raw enclosing chain, stripped from ``scopes``). Only present
       for ``Accum`` defs.
+    - ``reduce_ranges``: ``Accum`` name → the range its reduce loop walks, over the coordinates around
+      that loop. Only present where the loop states one.
     - ``writes``: every ``Write`` stmt paired with the ``Scope`` it sits
       in — one entry per output, in body order.
     - ``guards``: the predicate of the bare ``Cond`` a ``Write`` sits in, by the write's identity: a
@@ -56,6 +58,7 @@ class BodyAnalysis:
     writes: tuple[tuple[Write, Scope], ...]
     live_axes: dict[str, frozenset[str]]
     guards: dict[int, Expression] = field(default_factory=dict)
+    reduce_ranges: dict[str, tuple[Expression, Expression]] = field(default_factory=dict)
 
     @classmethod
     def from_body(cls, body: Body, enclosing: tuple[Axis, ...] = ()) -> BodyAnalysis:
@@ -64,13 +67,14 @@ class BodyAnalysis:
         defs: dict[str, Statement] = {}
         scopes: dict[str, Scope] = {}
         reduce_axes: dict[str, Axis] = {}
+        reduce_ranges: dict[str, tuple[Expression, Expression]] = {}
         writes: list[tuple[Write, Scope]] = []
         guards: dict[int, Expression] = {}
 
-        def walk(stmts: Body, scope: Scope) -> None:
+        def walk(stmts: Body, scope: Scope, walked: tuple[Expression, Expression] | None = None) -> None:
             for s in stmts:
                 if isinstance(s, Loop):
-                    walk(s.body, scope.nest(s.axis))
+                    walk(s.body, scope.nest(s.axis), s.range)
                 elif isinstance(s, Cond):
                     if not s.else_body:
                         guards.update((id(w), s.cond) for w in s.body if isinstance(w, Write))
@@ -83,6 +87,8 @@ class BodyAnalysis:
                     if scope.enclosing:
                         reduce_axes[s.name] = scope.enclosing[-1]
                         scopes[s.name] = Scope(enclosing=scope.enclosing[:-1])
+                        if walked is not None:
+                            reduce_ranges[s.name] = walked
                     else:
                         scopes[s.name] = scope
                 elif isinstance(s, Write):
@@ -106,6 +112,7 @@ class BodyAnalysis:
             writes=tuple(writes),
             live_axes=bound.axis_dependencies,
             guards=guards,
+            reduce_ranges=reduce_ranges,
         )
 
     def observes_running_accumulator(self, write: Write, scope: Scope) -> bool:
