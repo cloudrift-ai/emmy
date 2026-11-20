@@ -325,9 +325,7 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
     let params = lowerer.parameters(kernel)?;
     lowerer.body(kernel.body, &SimplifyCtx::empty())?;
     let mut code = lowerer.b.finish()?;
-    if target.sm < SM_AMPERE {
-        code.items = bf16::legalize(code.items, &mut code.registers);
-    }
+    code.items = bf16::legalize(code.items, &mut code.registers, target.sm);
     Ok(Module {
         version: lowerer.version,
         target: target.text(lowerer.arch_specific),

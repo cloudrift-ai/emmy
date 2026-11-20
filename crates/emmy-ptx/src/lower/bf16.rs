@@ -1,21 +1,31 @@
-//! The bfloat16 conversions on a card before sm_80, which has no `cvt` to or from bf16: a bf16 is the high half of
-//! an f32's bits. A widening places the half there, exactly. A narrowing rounds the f32's bits to nearest, ties to
+//! The bfloat16 conversions a card has no `cvt` for: between bf16 and f32 before sm_80, between bf16 and an integer
+//! before sm_90. A bf16 is the high half of an f32's bits. A widening places the half there, exactly. A narrowing rounds the f32's bits to nearest, ties to
 //! even, in integer arithmetic, which is what `cvt.rn.bf16.f32` computes for every value but a NaN; a NaN keeps its
-//! sign and the top of its payload, with the quiet bit set.
+//! sign and the top of its payload, with the quiet bit set. A conversion between bf16 and an integer goes through
+//! f32: exact for an integer of at most 24 bits, the only ones a kernel converts.
 
 use std::collections::HashMap;
 
+use super::{SM_AMPERE, SM_HOPPER};
 use crate::inst::{Bank, Cmp, Inst, Item, Opcode, Operand, Reg, Ty};
 
-/// Rewrite every scalar conversion between bf16 and f32 in `items` into integer instructions, taking the registers
-/// it needs past the counts in `registers`.
-pub(crate) fn legalize(items: Vec<Item>, registers: &mut [(Bank, u32)]) -> Vec<Item> {
+/// Rewrite the bf16 conversions the target `sm` has no `cvt` for — between bf16 and f32 before sm_80, between bf16
+/// and an integer before sm_90 — taking the registers they need past the counts in `registers`. On a target that
+/// has the instruction the code is unchanged. Below sm_80 the f32 step of an integer conversion is rewritten too.
+pub(crate) fn legalize(items: Vec<Item>, registers: &mut [(Bank, u32)], sm: u32) -> Vec<Item> {
     let mut counts: HashMap<Bank, u32> = registers.iter().copied().collect();
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         match item {
-            Item::Inst(inst) if is_widening(&inst) => widen(inst, &mut counts, &mut out),
-            Item::Inst(inst) if is_narrowing(&inst) => narrow(inst, &mut counts, &mut out),
+            Item::Inst(inst) if sm < SM_AMPERE && is_widening(&inst) => {
+                widen(inst, &mut counts, &mut out)
+            }
+            Item::Inst(inst) if sm < SM_AMPERE && is_narrowing(&inst) => {
+                narrow(inst, &mut counts, &mut out)
+            }
+            Item::Inst(inst) if sm < SM_HOPPER && is_integer_conversion(&inst) => {
+                through_f32(inst, &mut counts, &mut out, sm)
+            }
             other => out.push(other),
         }
     }
@@ -31,6 +41,82 @@ fn is_widening(inst: &Inst) -> bool {
 
 fn is_narrowing(inst: &Inst) -> bool {
     inst.opcode == Opcode::Cvt(Ty::F32) && inst.ty == Ty::Bf16
+}
+
+const INTEGERS: [Ty; 7] = [Ty::U8, Ty::U16, Ty::S16, Ty::S32, Ty::U32, Ty::S64, Ty::U64];
+
+fn is_integer_conversion(inst: &Inst) -> bool {
+    match inst.opcode {
+        Opcode::Cvt(from) => {
+            (from == Ty::Bf16 && INTEGERS.contains(&inst.ty))
+                || (inst.ty == Ty::Bf16 && INTEGERS.contains(&from))
+        }
+        _ => false,
+    }
+}
+
+/// An integer to bf16 (`cvt.rn.bf16.s32`), or bf16 to an integer (`cvt.rzi.s32.bf16`): the same conversion to or
+/// from an f32 register, and the widening or narrowing above for the other step.
+fn through_f32(inst: Inst, counts: &mut HashMap<Bank, u32>, out: &mut Vec<Item>, sm: u32) {
+    let Opcode::Cvt(from) = inst.opcode else {
+        unreachable!("an integer conversion is a cvt")
+    };
+    let wide = {
+        let count = counts.entry(Bank::F32).or_insert(0);
+        *count += 1;
+        Reg {
+            bank: Bank::F32,
+            number: *count - 1,
+        }
+    };
+    if from == Ty::Bf16 {
+        let widening = Inst {
+            results: vec![wide],
+            ..Inst::new(
+                Opcode::Cvt(Ty::Bf16),
+                Ty::F32,
+                Vec::new(),
+                inst.operands.clone(),
+            )
+        };
+        let widening = Inst {
+            guard: inst.guard,
+            ..widening
+        };
+        match sm < SM_AMPERE {
+            true => widen(widening, counts, out),
+            false => out.push(Item::Inst(widening)),
+        }
+        let operands = vec![wide.into()];
+        out.push(Item::Inst(Inst {
+            opcode: Opcode::Cvt(Ty::F32),
+            operands,
+            ..inst
+        }));
+    } else {
+        let operands = inst.operands.clone();
+        out.push(Item::Inst(Inst {
+            opcode: Opcode::Cvt(from),
+            ty: Ty::F32,
+            results: vec![wide],
+            operands,
+            ..inst.clone()
+        }));
+        let narrowing = Inst::new(
+            Opcode::Cvt(Ty::F32),
+            Ty::Bf16,
+            inst.results.clone(),
+            vec![wide.into()],
+        );
+        let narrowing = Inst {
+            guard: inst.guard,
+            ..narrowing.rounded(crate::inst::Round::Rn)
+        };
+        match sm < SM_AMPERE {
+            true => narrow(narrowing, counts, out),
+            false => out.push(Item::Inst(narrowing)),
+        }
+    }
 }
 
 struct Emit<'a> {

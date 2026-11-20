@@ -58,7 +58,7 @@ fn narrowed(bits: u32) -> u16 {
         (Bank::B32, 0),
         (Bank::Pred, 0),
     ];
-    let items = legalize(vec![Item::Inst(cvt)], &mut counts);
+    let items = legalize(vec![Item::Inst(cvt)], &mut counts, 70);
     let mut regs = HashMap::from([(f, u64::from(bits))]);
     run(&items, &mut regs);
     regs[&h] as u16
@@ -73,7 +73,7 @@ fn widened(half: u16) -> u32 {
         (Bank::B32, 0),
         (Bank::Pred, 0),
     ];
-    let items = legalize(vec![Item::Inst(cvt)], &mut counts);
+    let items = legalize(vec![Item::Inst(cvt)], &mut counts, 70);
     let mut regs = HashMap::from([(h, u64::from(half))]);
     run(&items, &mut regs);
     regs[&f] as u32
@@ -175,4 +175,54 @@ fn a_volta_kernel_converts_without_cvt_and_assembles() {
         );
         assert!(ampere.iter().all(|line| !line.starts_with("setp.gt.u32")));
     }
+}
+
+/// An integer converted to bf16 and back goes through f32 before sm_90, which first has the `cvt`: before sm_80 no
+/// bf16 instruction is left, from sm_80 the f32 step is the float `cvt`.
+#[test]
+fn a_volta_integer_conversion_goes_through_f32() {
+    let body = format!(
+        "{GRID}\n{}",
+        super::common::indented(
+            "
+        i32 x = load a[i]
+        bf16 b = (bf16)x
+        i32 back = (i32)b
+        i32 o[i] = back
+        "
+        )
+    );
+    let params: super::common::Params = &[
+        ("a", Input, Some(DType::I32)),
+        ("o", Output, Some(DType::I32)),
+    ];
+    let volta = listing(&lowered(&body, params, Target { sm: 70 }, EXACT).unwrap());
+    assert!(
+        volta.iter().all(|line| !line.contains("bf16")),
+        "{volta:#?}"
+    );
+    assert!(
+        volta.iter().any(|line| line.starts_with("cvt.rn.f32.s32")),
+        "{volta:#?}"
+    );
+    let ampere = listing(&lowered(&body, params, Target { sm: 80 }, EXACT).unwrap());
+    assert!(
+        ampere
+            .iter()
+            .any(|line| line.starts_with("cvt.rn.bf16.f32")),
+        "{ampere:#?}"
+    );
+    assert!(
+        ampere
+            .iter()
+            .all(|line| !line.contains("bf16.s32") && !line.contains("s32.bf16")),
+        "{ampere:#?}"
+    );
+    let hopper = listing(&lowered(&body, params, Target { sm: 90 }, EXACT).unwrap());
+    assert!(
+        hopper
+            .iter()
+            .any(|line| line.starts_with("cvt.rn.bf16.s32")),
+        "{hopper:#?}"
+    );
 }
