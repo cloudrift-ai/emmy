@@ -310,16 +310,19 @@ post-compile pin check still asks that some kernel realized the pin.
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so the cross-CTA domain is the second slice of `030_cut`, BEFORE
 any schedule is composed. The
-rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges; any other
-fold slices through the generic `Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides
-its own row. The pieces' axis table holds one axis per name, so either slicer narrows every fold that names it.
-A stream whose length is symbolic (an attention window) splits into slices of `⌈K/w⌉` positions; the last overhangs
-the stream, its loads read the stream's last position and its lift folds nothing past the end: a monoid folds its
-seed there, and a twisted carrier's score takes the pivot's identity through the `where` selects a program's own mask
-spells, the additive coordinate mask the chunk tier lands, so the carrier past the end weighs its channels by
-nothing. A carried or observed fold has neither and is refused. The sliced lift reads the absolute key unclamped
-(only a load needs the clamp), so a causal mask compares the key its loads read, and the chunk tier's stream bounds
-land per slice: the block end plus the position minus the slice base, and a slice past the diagonal folds nothing.
+rewrite consumes only the stored Fold algebra: the fold keeps its body and its reads and walks the range of one
+block, `length * block .. length * (block + 1)`, inside the range it walked before (`ir/tile/split.py`). Each piece
+re-enters the scan as a fresh kernel that decides its own row. The block axis is a free axis of the partial, and the
+axis the fold binds keeps its name and its extent, with a partition window as the receipt of the split.
+A stream whose length is symbolic (an attention window) splits into blocks of `⌈K/w⌉` positions, and the last block
+ends where the stream does. A tier reads a block through the masked form (`Fold.masked`): the walk leaves from the
+block's start and takes the block's length, a load clamps onto the stream's last position, and the lift folds
+nothing past the end: a monoid folds its seed there, and a twisted carrier's score takes the pivot's identity
+through the `where` selects a program's own mask spells, the additive coordinate mask the chunk tier lands, so the
+carrier past the end weighs its channels by nothing. A carried or observed fold has neither and is refused. The lift
+of the masked form reads the absolute key unclamped (only a load needs the clamp), so a causal mask compares the key
+its loads read, and the chunk tier's stream bounds land per block: the block end plus the position minus the block's
+start, and a block past the diagonal folds nothing.
 A fold with an operand that reduces its own axis (a softmax's row maximum or a contraction's RMS statistic) is therefore
 offered no split, and a pin that names one raises the refusal instead of slicing. A piece is the region
 term rebound over the partial or the finalize fold: the projection keeps its epilogue and its other operands whole,
@@ -986,8 +989,8 @@ so the depth is measured per shape), crossed with the shared `RASTER` launch-ord
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
 edge, 5090). The **redundant-statistic split-K** form is no longer a schedule row: the structural
 `030_cut` pass
-slices the contraction across CTAs BEFORE any schedule is composed, σ-reindexing the per-cell cone to
-absolute k while a statistic over a distinct axis stays full-row in every partition (each recomputes it, which is
+slices the contraction across CTAs BEFORE any schedule is composed, each block a range of the reduce axis,
+while a statistic over a distinct axis stays full-row in every partition (each recomputes it, which is
 cheap on the small-free decode shapes and is left to evidence to price), and the wrapping zero-axis fold's
 projection folds into the deferred finalize. Multi-channel (gate/up) nodes split too: the sliced contraction
 carries the true N-component identity-family carrier (one additive state per channel), the partial stores each

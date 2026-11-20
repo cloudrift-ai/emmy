@@ -14,7 +14,9 @@ use std::sync::Arc;
 use emmy_ir::axis::{Axis, Dim};
 use emmy_ir::body::Body;
 use emmy_ir::elementwise::Operation;
-use emmy_ir::expr::{Expr, Expression, LitType, Num, SimplifyCtx};
+use emmy_ir::expr::{Expr, ExprClass, Expression, LitType, Num, SimplifyCtx};
+use emmy_ir::normalize::ties::unranked;
+use emmy_ir::normalize::{affine_sum, affine_terms};
 use emmy_ir::statement::{Assign, Let, Select, SelectBranch, Statement};
 use emmy_ir::{Error, Name, Result};
 
@@ -69,8 +71,10 @@ fn assign(name: Name, value: Expression) -> Arc<Statement> {
 
 /// What a term's range comes to once its axis walks from zero.
 struct Walk {
-    /// The axis as the body reads it: `start + axis`, or the axis itself where the range starts at zero.
+    /// The axis as the body reads it: `start + axis`, or the axis itself where the walk leaves from zero.
     position: Expression,
+    /// The starts the walk does not leave from, each a bound `position` stays at or past.
+    starts: Vec<Expression>,
     /// The ends the trips do not already hold, each a bound `position` stays below.
     ends: Vec<Expression>,
     /// The trips, where the range fixes them apart from the extent the axis table states.
@@ -78,23 +82,48 @@ struct Walk {
 }
 
 impl Walk {
+    /// A range starts at the greatest of its starts and ends at the least of its ends. The walk leaves from the
+    /// start some end lies a fixed way past, the shortest way first: a block of a split leaves from the block's
+    /// start and takes the block's length, whatever range the fold walked before the split.
     fn of(axis: Name, start: &Expression, end: &Expression, axes: &[Arc<Axis>]) -> Result<Walk> {
-        let rebased = start.int_literal() != Some(0);
+        let (mut lows, mut highs) = (Vec::new(), Vec::new());
+        chain(start, Operation::Maximum, &mut lows);
+        chain(end, Operation::Minimum, &mut highs);
+        let coordinate = |name: &Name| axes.iter().any(|known| known.name == *name);
+        // How far `high` lies past `low`, like terms merged: a block's end less its start is the block's length.
+        let room = |low: &Expression, high: &Expression| {
+            let apart = Expression::binary(Operation::Subtract, high.clone(), low.clone());
+            affine_sum(affine_terms(&apart, ExprClass::Index), &|_| unranked())
+                .simplify(&SimplifyCtx::empty())
+        };
+        let mut from: Option<(usize, Option<i64>)> = None;
+        for (index, low) in lows.iter().enumerate() {
+            for high in &highs {
+                let room = room(low, high)?;
+                if room.free_vars().iter().any(coordinate) {
+                    continue;
+                }
+                let shorter = match (&from, room.int_literal()) {
+                    (None, _) => true,
+                    (Some((_, held)), Some(new)) => held.is_none_or(|held| new < held),
+                    (Some(_), None) => false,
+                };
+                if shorter {
+                    from = Some((index, room.int_literal()));
+                }
+            }
+        }
+        let base = lows.remove(from.map_or(0, |(index, _)| index));
+        let rebased = base.int_literal() != Some(0);
         let position = if rebased {
-            Expression::binary(Operation::Add, start.clone(), Expression::var(&axis))
+            Expression::binary(Operation::Add, base.clone(), Expression::var(&axis))
         } else {
             Expression::var(&axis)
         };
-        let mut bounds = Vec::new();
-        chain(end, Operation::Minimum, &mut bounds);
         // How far each end lies past the start: the trips are the least of the ones no coordinate moves.
-        let coordinate = |name: &Name| axes.iter().any(|known| known.name == *name);
-        let rooms: Vec<Expression> = bounds
+        let rooms: Vec<Expression> = highs
             .iter()
-            .map(|bound| {
-                Expression::binary(Operation::Subtract, bound.clone(), start.clone())
-                    .simplify(&SimplifyCtx::empty())
-            })
+            .map(|high| room(&base, high))
             .collect::<Result<_>>()?;
         let fixed: Vec<&Expression> = rooms
             .iter()
@@ -109,7 +138,7 @@ impl Walk {
                 None => fixed.first().map(|room| (*room).clone()),
             }
         };
-        let ends = bounds
+        let ends = highs
             .into_iter()
             .zip(&rooms)
             .filter(|(_, room)| match (&trips, room.int_literal()) {
@@ -121,35 +150,47 @@ impl Walk {
             .collect();
         Ok(Walk {
             position,
+            starts: lows,
             ends,
             trips: trips.filter(|_| rebased).map(|trips| Dim::new(trips, None)),
         })
     }
 
-    /// `position` below every end the trips do not hold, or `None` when they hold them all.
+    /// `position` at or past every start the walk does not leave from and below every end the trips do not hold,
+    /// or `None` when the walk holds them all.
     fn inside(&self) -> Option<Expression> {
-        self.ends
+        let past = self.starts.iter().map(|start| {
+            Expression::binary(Operation::LessEqual, start.clone(), self.position.clone())
+        });
+        let below = self
+            .ends
             .iter()
-            .map(|end| Expression::binary(Operation::Less, self.position.clone(), end.clone()))
+            .map(|end| Expression::binary(Operation::Less, self.position.clone(), end.clone()));
+        past.chain(below)
             .reduce(|so_far, holds| Expression::binary(Operation::LogicalAnd, so_far, holds))
     }
 
-    /// The position a read below the term takes: clamped onto the last position in range where a trip may leave
-    /// it, so the read stays inside its buffer and the fold masks what it folds there.
+    /// The position a read below the term takes: clamped onto the first or the last position in range where a
+    /// trip may leave it, so the read stays inside its buffer and the fold masks what it folds there.
     fn read(&self) -> Expression {
-        let Some(end) = self
-            .ends
-            .iter()
-            .cloned()
-            .reduce(|a, b| Expression::apply(Operation::Minimum, vec![a, b]))
-        else {
-            return self.position.clone();
+        let least = |a, b| Expression::apply(Operation::Minimum, vec![a, b]);
+        let greatest = |a, b| Expression::apply(Operation::Maximum, vec![a, b]);
+        let below = match self.ends.iter().cloned().reduce(least) {
+            None => self.position.clone(),
+            Some(end) => Expression::new(Expr::Ternary(
+                Expression::binary(Operation::Less, self.position.clone(), end.clone()),
+                self.position.clone(),
+                Expression::binary(Operation::Subtract, end, Expression::int(1)),
+            )),
         };
-        Expression::new(Expr::Ternary(
-            Expression::binary(Operation::Less, self.position.clone(), end.clone()),
-            self.position.clone(),
-            Expression::binary(Operation::Subtract, end, Expression::int(1)),
-        ))
+        match self.starts.iter().cloned().reduce(greatest) {
+            None => below,
+            Some(start) => Expression::new(Expr::Ternary(
+                Expression::binary(Operation::Less, self.position.clone(), start.clone()),
+                start,
+                below,
+            )),
+        }
     }
 }
 
