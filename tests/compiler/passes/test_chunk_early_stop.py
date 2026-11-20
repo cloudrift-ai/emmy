@@ -13,7 +13,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp
-from emmy.compiler.ir.stmt import Select, StridedLoop, parse_body
+from emmy.compiler.ir.stmt import Loop, Select, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _mask_key_bounds
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -138,8 +138,8 @@ def _kernels(code: str, window: int | None = None) -> list:
     return list(kernels.values())
 
 
-def _chunk_loops(kernel) -> list[StridedLoop]:
-    return [loop for loop in statements(kernel, StridedLoop) if loop.axis.name.endswith("__ck")]
+def _chunk_loops(kernel) -> list[Loop]:
+    return [loop for loop in statements(kernel, Loop) if loop.axis.name.endswith("__ck")]
 
 
 @pytest.mark.parametrize(
@@ -163,8 +163,9 @@ def test_the_emitted_chunk_loop_carries_the_bounds_only_where_they_can_shorten_t
     kernels = _kernels(code, window)
     assert len(kernels) == 1 and _chunk_loops(kernels[0]), "one fused kernel with a chunk loop"
     loop = _chunk_loops(kernels[0])[0]
-    assert (loop.end is not None) is stops, f"{why}: {loop.end}"
-    assert (loop.start != Literal(0, "int")) is starts, f"{why}: {loop.start}"
+    start, end, _ = loop.walk()
+    assert (end != loop.axis.extent_expression()) is stops, f"{why}: {end}"
+    assert (start != Literal(0, "int")) is starts, f"{why}: {start}"
 
 
 def test_the_launch_count_is_the_lead_extents_times_the_block_counts() -> None:

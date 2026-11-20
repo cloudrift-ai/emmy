@@ -42,7 +42,7 @@ class Window(Wire):
     instead of by name-suffix convention.
 
     Where an axis walks is not the window's to say: an axis's extent bounds its coordinate, a reduce states the
-    range it walks on its own loop or fold, and a kernel loop its own ``start`` / ``end`` (``StridedLoop``).
+    range it walks on its own loop or fold.
 
     ``partition`` marks the one window a CROSS-CTA SPLIT produced: this axis is one CTA's share of
     a reduce stream, not a tile of an iteration space. Every other window — the partition planner's

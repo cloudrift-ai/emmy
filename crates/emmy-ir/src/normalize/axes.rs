@@ -182,6 +182,7 @@ pub(crate) fn loop_over(axis: AxisRef, body: Body, l: &Loop) -> Body {
         seed: l.seed,
         unrolled: l.unrolled,
         range: l.range.clone(),
+        step: l.step.clone(),
     }))])
 }
 

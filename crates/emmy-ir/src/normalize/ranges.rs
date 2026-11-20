@@ -351,7 +351,7 @@ mod tests {
         O[i] = s
             ";
         assert!(
-            normal(given).contains("for a1 in 2..6 of 6:"),
+            normal(given).contains("for a1 in 2..6:"),
             "{}",
             normal(given)
         );

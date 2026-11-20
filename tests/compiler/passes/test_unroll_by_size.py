@@ -9,7 +9,7 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.kernel.ir import KernelOp, Tile
-from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, StridedLoop, parse_body
+from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, parse_body
 from emmy.compiler.pipeline import RuleSkipped
 
 _RULE = import_module("emmy.compiler.pipeline.passes.lowering.kernel.118_unroll_by_size")
@@ -32,7 +32,7 @@ def _unrolled(body: str) -> KernelOp:
 
 
 def _loops(op: KernelOp) -> list:
-    return [stmt for stmt in op.body.iter() if isinstance(stmt, (Loop, StridedLoop))]
+    return [stmt for stmt in op.body.iter() if isinstance(stmt, Loop)]
 
 
 def _visits(body: Body, env: dict) -> list:
@@ -43,13 +43,12 @@ def _visits(body: Body, env: dict) -> list:
             out.append(stmt.index[-1].eval(env))
         elif isinstance(stmt, Cond):
             out.extend(_visits(stmt.body if stmt.cond.eval(env) else stmt.else_body, env))
-        elif isinstance(stmt, (Loop, StridedLoop)):
-            start, step = (stmt.start.eval(env), stmt.step.eval(env)) if isinstance(stmt, StridedLoop) else (0, 1)
-            end = stmt.end if isinstance(stmt, StridedLoop) and stmt.end is not None else stmt.axis.extent.expression
-            at = start
+        elif isinstance(stmt, Loop):
+            start, end, step = stmt.walk()
+            at = start.eval(env)
             while at < end.eval(env):
                 out.extend(_visits(stmt.body, {**env, stmt.axis.name: at}))
-                at += step
+                at += step.eval(env)
         elif stmt.nested():
             for inner in stmt.nested():
                 out.extend(_visits(inner, env))
@@ -117,7 +116,7 @@ def test_a_lane_s_loop_over_a_static_extent_steps_sixteen_trips(extent: int, ste
     what the loop did."""
     op = _unrolled(f"for j in i..{extent} step 4:\n    f32 a = load A[0, j]\n    f32 acc <- add(acc, a) over j\nf32 O[i] = acc")
     [loop] = _loops(op)
-    assert (str(loop.start), str(loop.step), loop.unrolled) == ("i", step, True)
+    assert (str(loop.walk()[0]), str(loop.step), loop.unrolled) == ("i", step, True)
     for lane in range(4):
         assert _visits(op.body[0].body, {"i": lane}) == list(range(lane, extent, 4)), lane
 

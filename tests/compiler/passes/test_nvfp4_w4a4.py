@@ -29,7 +29,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaDescriptor,
     TmaLoad,
 )
-from emmy.compiler.ir.stmt import StridedLoop
+from emmy.compiler.ir.stmt import Loop
 from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations
 from emmy.compiler.tensor import Tensor
 from tests.compiler.helpers import compile_with_kernels, device_compute_capability, operations, requires_cuda, requires_sm, statements
@@ -551,7 +551,7 @@ def test_fp4_tma_copies_each_stored_buffer_by_box_ahead_of_the_mma(tmp_path, cha
         assert len({descriptor.name for descriptor in statements(kernel, TmaDescriptor)}) == 2 + 2 * channels
         assert not statements(kernel, CpAsyncCopy)
         assert [tuple(slab.extents) for slab in statements(kernel, Smem) if slab.name == "_mbar"] == [(2,)]
-        chunk = next(loop for loop in statements(kernel, StridedLoop) if loop.axis.name.startswith("_ks"))
+        chunk = next(loop for loop in statements(kernel, Loop) if loop.axis.name.startswith("_ks"))
         order = [type(stmt) for stmt in chunk.body.iter() if isinstance(stmt, (TmaLoad, MbarrierWait, MmaSyncPtx))]
         assert order.index(TmaLoad) < order.index(MbarrierWait) < order.index(MmaSyncPtx)
 

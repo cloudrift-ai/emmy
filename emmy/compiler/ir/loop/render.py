@@ -27,7 +27,7 @@ from emmy.compiler.ir.expression import (
     TernaryExpression,
     Var,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Init, Let, Load, Loop, Pre, Select, Statement, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Init, Let, Load, Loop, Pre, Select, Statement, Write
 from emmy.emmy_ir import DTYPES as _DTYPE_NAMES
 
 _FLOAT_DTYPES = frozenset({"f32", "f16", "f16x2", "f8e4m3", "f8e5m2"})
@@ -461,7 +461,7 @@ def defined_values(body: Body) -> dict[str, tuple[tuple[int, ...], str]]:
                     dims.append(reach.hi + 1)
                 out[stmt.name] = (tuple(dims), (stmt.dtype or F32).name)
             for child in stmt.nested():
-                inner = {**axes, stmt.axis.name: int(stmt.axis.extent.as_static())} if isinstance(stmt, (Loop, StridedLoop)) else axes
+                inner = {**axes, stmt.axis.name: int(stmt.axis.extent.as_static())} if isinstance(stmt, Loop) else axes
                 walk(child, inner)
 
     walk(body, {})
@@ -532,9 +532,11 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
         ctx.ssa_dtypes[name] = (carry.dtype or F32).name
     out.extend(_seeds(node, ctx))
     var = node.axis.name
-    # A loop that walks a range takes the values from its start to its end; any other walks its whole extent.
+    # A loop that walks a range takes the values from its start to its end, and one that steps every ``step``-th of
+    # them; any other walks its whole extent by one.
     start, end = ("0", _extent_c(node, ctx)) if node.range is None else (f"({render_expression(bound, ctx)})" for bound in node.range)
-    out.append(f"{pad}for (int {var} = {start}; {var} < {end}; {var}++) {{")
+    step = "++" if node.step is None else f" += {render_expression(node.step, ctx)}"
+    out.append(f"{pad}for (int {var} = {start}; {var} < {end}; {var}{step}) {{")
     inner = ctx.child()
     out.extend(render_body(node.body, inner))
     out.extend(f"{_pad(inner.indent)}{name} = {name}{NEXT_STEP};" for name in node.carries)
@@ -542,7 +544,7 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
     return out
 
 
-def _seeds(node: Loop | StridedLoop, ctx: RenderCtx) -> list[str]:
+def _seeds(node: Loop, ctx: RenderCtx) -> list[str]:
     """``<dtype> <acc> = identity;`` for each distinct ``Accum`` fold in the loop's immediate body: the seed rides on
     the fold, derived from ``op.identity``. A nested fold re-declares per enclosing iteration."""
     out: list[str] = []
@@ -559,20 +561,7 @@ def _seeds(node: Loop | StridedLoop, ctx: RenderCtx) -> list[str]:
     return out
 
 
-@render_stmt.register
-def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
-    """``for (int axis = start; axis < bound; axis += step)``, the bound the loop's own end where it has one."""
-    out = _seeds(stmt, ctx)
-    var = stmt.axis.name
-    bound = _extent_c(stmt, ctx) if stmt.end is None else f"({render_expression(stmt.end, ctx)})"
-    start, step = render_expression(stmt.start, ctx), render_expression(stmt.step, ctx)
-    out.append(f"{_pad(ctx.indent)}for (int {var} = {start}; {var} < {bound}; {var} += {step}) {{")
-    out.extend(render_body(stmt.body, ctx.child()))
-    out.append(f"{_pad(ctx.indent)}}}")
-    return out
-
-
-def _extent_c(node: Loop | StridedLoop, ctx: RenderCtx) -> str:
+def _extent_c(node: Loop, ctx: RenderCtx) -> str:
     """A loop's extent as a C expression: the int of a static one, the name of a symbolic one, parenthesized where
     it is a composite (``(seq_len+31)//32``), whose ``//`` the expression renderer spells."""
     ext = node.axis.extent

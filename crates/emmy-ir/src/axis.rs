@@ -341,8 +341,12 @@ pub fn spell_axis(axis: &Axis, start: Option<&str>) -> Result<String> {
     Ok(out)
 }
 
-/// `name in start..end of extent`, the header of a loop that walks a range inside its extent.
+/// `name in start..end of extent`, the header of a loop that walks a range inside its extent; `name in
+/// start..extent` where the range ends with the axis.
 pub fn spell_ranged_axis(axis: &Axis, range: &Range) -> Result<String> {
+    if range.end == axis.extent.expression {
+        return spell_axis(axis, Some(&range.start.try_text()?));
+    }
     Ok(format!(
         "{} in {}..{} of {}{}",
         spell_stmt_name(&axis.name)?,

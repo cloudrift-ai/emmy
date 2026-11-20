@@ -319,7 +319,7 @@ impl Placer<'_> {
                 self.bump(name, depth + 1);
             }
         }
-        let scope = matches!(&**stmt, Statement::Loop(_) | Statement::StridedLoop(_));
+        let scope = matches!(&**stmt, Statement::Loop(_));
         self.binders.push(stmt.binds_axes().into_iter().collect());
         self.floor
             .push(if scope { self.floor[depth] } else { depth + 1 });
@@ -1057,7 +1057,7 @@ mod tests {
         o[a] = x
             ",
         );
-        assert_eq!(statement_types(&out), ["Load", "StridedLoop"]);
+        assert_eq!(statement_types(&out), ["Load", "Loop"]);
         assert_eq!(load_names(&out), ["x"]);
         assert_eq!(axis(&out.stmts()[1]), "a");
         assert_eq!(statement_types(&inner(&out.stmts()[1])), ["Write"]);
@@ -1077,7 +1077,7 @@ mod tests {
         );
         assert_eq!(
             statement_types(&out),
-            ["StridedLoop", "Assign", "Loop"],
+            ["Loop", "Assign", "Loop"],
             "{}",
             text(&out)
         );

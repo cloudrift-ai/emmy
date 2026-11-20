@@ -61,8 +61,12 @@ pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> Result<B
 /// Rename reduce-axis vars across sibling reduce loops whose Load positions overlap, so they share one axis name.
 pub fn unify_siblings(body: &Body) -> Result<Body> {
     let mut stmts: Vec<Arc<Statement>> = body.stmts().to_vec();
-    // Two loops share an axis when they walk it alike: one extent and one range.
-    type Walk = (Expression, Option<(Expression, Expression)>);
+    // Two loops share an axis when they walk it alike: one extent, one range and one step.
+    type Walk = (
+        Expression,
+        Option<(Expression, Expression)>,
+        Option<Expression>,
+    );
     let mut entries: Vec<(usize, Name, Walk, BTreeSet<Key>)> = Vec::new();
     for (i, s) in stmts.iter().enumerate() {
         if let Statement::Loop(l) = &**s
@@ -70,7 +74,11 @@ pub fn unify_siblings(body: &Body) -> Result<Body> {
         {
             let positions = reduce_axis_source_positions(&l.body, &l.axis.name)?;
             if !positions.is_empty() {
-                let walk = (l.axis.extent.expression.clone(), l.range.clone());
+                let walk = (
+                    l.axis.extent.expression.clone(),
+                    l.range.clone(),
+                    l.step.clone(),
+                );
                 entries.push((i, l.axis.name, walk, positions));
             }
         }
@@ -102,7 +110,7 @@ pub fn unify_siblings(body: &Body) -> Result<Body> {
     for k in 0..entries.len() {
         let root = find(&mut parent, k);
         let canonical = entries[root].1;
-        let (index, axis_name, (extent, _), _) = &entries[k];
+        let (index, axis_name, (extent, _, _), _) = &entries[k];
         if canonical == *axis_name {
             continue;
         }
@@ -127,6 +135,7 @@ pub fn unify_siblings(body: &Body) -> Result<Body> {
             seed: l.seed,
             unrolled: l.unrolled,
             range: l.range.clone(),
+            step: l.step.clone(),
         }));
     }
     Ok(body.rebuilt(stmts))
@@ -166,6 +175,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
         a.axis.name == b.axis.name
             && a.axis.extent == b.axis.extent
             && a.range == b.range
+            && a.step == b.step
             && a.unroll == b.unroll
             && a.seed == b.seed
             && a.unrolled == b.unrolled
@@ -260,6 +270,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
                 seed: merged.seed,
                 unrolled: merged.unrolled,
                 range: merged.range.clone(),
+                step: merged.step.clone(),
             };
             consumed.insert(j);
             absorbed_from.insert(j);

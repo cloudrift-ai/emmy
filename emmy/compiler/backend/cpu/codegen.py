@@ -88,7 +88,7 @@ def _ext(loop):
 def _cost(stmts) -> int:
     total = 0
     for s in stmts:
-        if _kind(s) in ("Loop", "StridedLoop"):
+        if _kind(s) == "Loop":
             extent = s.axis.extent
             total += (extent.value if isinstance(extent.value, int) else (extent.hint or 512)) * _cost(s.body)
         elif _kind(s) == "Cond":
@@ -105,7 +105,7 @@ def _cost(stmts) -> int:
 def _loop_sizes(stmts) -> set[str]:
     names: set[str] = set()
     for s in stmts:
-        if _kind(s) in ("Loop", "StridedLoop") and isinstance(_ext(s), str):
+        if _kind(s) == "Loop" and isinstance(_ext(s), str):
             names.add(_ext(s))
         for attr in ("body", "else_body"):
             names |= _loop_sizes(getattr(s, attr, None) or ())

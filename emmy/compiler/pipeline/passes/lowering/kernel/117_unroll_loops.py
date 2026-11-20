@@ -1,7 +1,7 @@
 """Unroll every loop a lowering site flagged: a loop in the body is a loop in the code.
 
 A lowering site that wants a loop unrolled says so on the statement (``unroll``; the ``UNROLL`` budget caps which
-loops a site flags). Here each flagged ``Loop`` / ``StridedLoop`` whose trips a static number bounds becomes copies of
+loops a site flags). Here each flagged ``Loop`` whose trips a static number bounds becomes copies of
 its body, the axis bound to its value in each (``_unroll.unroll_where``), innermost first:
 
 - A loop of at most ``FLAGGED_WHOLE`` trips (``emmy.compiler.target``) becomes one copy per trip. A trip only some
@@ -28,7 +28,7 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Loop, Statement, StridedLoop
+from emmy.compiler.ir.stmt import Body, Loop, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._unroll import unroll_where
 from emmy.compiler.target import FLAGGED_PER_TRIP, FLAGGED_WHOLE
@@ -38,7 +38,7 @@ PATTERN = [Pattern("root", KernelOp)]
 
 def rewrite(root: Node) -> KernelOp:
     op: KernelOp = root.op
-    if not any(isinstance(stmt, (Loop, StridedLoop)) and stmt.unroll for stmt in op.body.iter()):
+    if not any(isinstance(stmt, Loop) and stmt.unroll for stmt in op.body.iter()):
         raise RuleSkipped("no loop flagged for unrolling")
     return replace(op, body=_unflagged(unroll_where(op.body, _copies)), knobs=dict(op.knobs))
 
@@ -60,5 +60,5 @@ def _unflagged(body: Body) -> Body:
         nested = stmt.nested()
         if nested:
             stmt = stmt.with_bodies(tuple(_unflagged(inner) for inner in nested))
-        out.append(stmt.replace(unroll=False) if isinstance(stmt, (Loop, StridedLoop)) and stmt.unroll else stmt)
+        out.append(stmt.replace(unroll=False) if isinstance(stmt, Loop) and stmt.unroll else stmt)
     return Body(out)

@@ -18,7 +18,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel.ir import Cond, CpAsyncCopy, CpAsyncWait, MbarrierArrive, RegStore, Sync, WgmmaWait
-from emmy.compiler.ir.stmt import Body, StridedLoop
+from emmy.compiler.ir.stmt import Body, Loop
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import compile_with_kernels, device_compute_capability, requires_cuda, statements
@@ -48,9 +48,9 @@ def _kernel(code: str, pins: dict):
     return compiled, kernel
 
 
-def _chunk_loops(kernel) -> list[StridedLoop]:
+def _chunk_loops(kernel) -> list[Loop]:
     """The K chunk loops: 1024 in steps of a 64-wide chunk (the consumer's, and a producer band's own)."""
-    return [loop for loop in statements(kernel, StridedLoop) if loop.axis.extent == Dim(1024) and loop.step == Literal(64, "int")]
+    return [loop for loop in statements(kernel, Loop) if loop.axis.extent == Dim(1024) and loop.step == Literal(64, "int")]
 
 
 def _waits(stmts) -> list[int]:

@@ -35,7 +35,7 @@ from emmy.compiler.ir.kernel.ir import (
     Tile,
     fragment_args,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, StridedLoop
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Pre
 
 from ._atom import _direct_operand, _residence
 
@@ -309,7 +309,9 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
         )
         for name, value in zip(state, following, strict=True)
     ]
-    loop = StridedLoop(axis=time, start=Literal(0, "int"), step=Literal(1, "int"), body=Body((*blocks.out, *stores, *commit)), unroll=False)
+    loop = Loop.strided(
+        axis=time, start=Literal(0, "int"), step=Literal(1, "int"), body=Body((*blocks.out, *stores, *commit)), unroll=False
+    )
     rows = extents[row]
     axes = (
         *(tile.axis_of(name) for name in batch),

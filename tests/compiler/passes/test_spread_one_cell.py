@@ -31,14 +31,19 @@ def _compiled():
 
 
 def test_a_single_cell_kernel_strides_its_free_loop_and_keeps_its_reduce_serial() -> None:
-    from emmy.compiler.ir.stmt import Accum, StridedLoop
+    from emmy.compiler.ir.stmt import Accum, Loop
     from tests.compiler.helpers import recording_kernels, statements, text
 
     with recording_kernels() as kernels_of:
         compiled = _compiled()
     (kernel,) = kernels_of(compiled).values()
-    (sweep,) = statements(kernel, StridedLoop)
-    assert (sweep.axis.name, str(sweep.start), str(sweep.step), sweep.axis.extent.as_static()) == ("a1", "thread_idx.x", "block_dim.x", 65)
+    (sweep,) = (loop for loop in statements(kernel, Loop) if loop.step is not None)
+    assert (sweep.axis.name, str(sweep.walk()[0]), str(sweep.step), sweep.axis.extent.as_static()) == (
+        "a1",
+        "thread_idx.x",
+        "block_dim.x",
+        65,
+    )
     # Every thread folds the reduce itself, serially, outside the sweep; no thread is turned away.
     folds = statements(kernel, Accum)
     assert len(folds) == 33 and not any(isinstance(stmt, Accum) for stmt in sweep.body.iter())

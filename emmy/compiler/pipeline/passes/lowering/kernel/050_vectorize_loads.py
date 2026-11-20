@@ -10,7 +10,7 @@ multiple LHS names).
 
 ## What the pass does
 
-For each ``Body`` (every nested Tile / Loop / StridedLoop / Cond body,
+For each ``Body`` (every nested Tile / Loop / Cond body,
 post-order):
 
 1. Take the scalar ``Load``s of each buffer and their complete flat addresses.

@@ -31,7 +31,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
 )
 from emmy.compiler.ir.schedule.catalog import MAX_FRAGMENT_REGISTERS, warp_tile_moves
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, StridedLoop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
@@ -226,7 +226,7 @@ def test_sm70_deep_chunk_stages_k_contiguous_b_through_the_crosswise_layout(monk
     kernel, knobs, _ = _source(_graph(m=32, n=128, k=256, trans=True), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f2x4/k16"
     assert _slab_writes(kernel, "_b_smem", "V70A")
-    chunks = [loop for loop in statements(kernel, StridedLoop) if loop.axis.extent == Dim(256) and loop.step == Literal(64, "int")]
+    chunks = [loop for loop in statements(kernel, Loop) if loop.axis.extent == Dim(256) and loop.step == Literal(64, "int")]
     assert chunks, "one chunk carries 64 K elements"
 
 
@@ -440,7 +440,7 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     kernel, knobs, _ = _source(_graph(m=64, n=64, k=64), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "STAGE") == "d2/smem"
     ((grid,),) = [kernel.body]
-    (at,) = [i for i, stmt in enumerate(grid.body) if isinstance(stmt, StridedLoop) and stmt.axis.extent == Dim(64)]
+    (at,) = [i for i, stmt in enumerate(grid.body) if isinstance(stmt, Loop) and stmt.axis.extent == Dim(64)]
     (chunk,) = [grid.body[at]]
     assert chunk.step == Literal(32, "int")
     prologue, body = grid.body[:at], list(chunk.body)
@@ -551,7 +551,7 @@ def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -
     monkeypatch.setenv("EMMY_RASTER", "")
     kernel, knobs, _ = _source(_sdpa_graph(d=128, causal=True), Context(compute_capability=(7, 0)))
     assert knobs["STAGE@map.1/twist"] == "d2/smem"
-    (chunk,) = [loop for loop in statements(kernel, StridedLoop) if loop.axis.name.endswith("__ck")]
+    (chunk,) = [loop for loop in statements(kernel, Loop) if loop.axis.name.endswith("__ck")]
     body = list(chunk.body)
     drain, deposit, barrier, issue = _register_ring_order(body)
     assert drain < deposit < barrier < issue, "the key and value of the chunk after next issue past the barrier"

@@ -20,7 +20,7 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.kernel.ir import FragmentLoad, Smem, WarpShuffle
 from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 from emmy.compiler.ir.schedule.views import cone_seam
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, StridedLoop, Write, parse_body
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write, parse_body
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 
 pytest.importorskip("torch")
@@ -109,7 +109,7 @@ def test_the_fused_quantize_refills_its_group_statistic_every_chunk(tmp_path):
     chunk's fill rather than a 128-element scan per slab cell."""
     graph, _, _ = _linear(tmp_path)
     ((grid,),) = [kernel.body for kernel in _lower(graph, _pins("fuse", "d2/smem-async")).values()]
-    loop = next(i for i, stmt in enumerate(grid.body) if isinstance(stmt, StridedLoop) and stmt.axis.name == "_ks")
+    loop = next(i for i, stmt in enumerate(grid.body) if isinstance(stmt, Loop) and stmt.axis.name == "_ks")
     head, chunk = list(Body(grid.body[:loop]).iter()), list(Body((grid.body[loop],)).iter())
     ((state, extents),) = [(smem.name, smem.extents) for smem in head if isinstance(smem, Smem) and smem.name.startswith("_a_stat_")]
     assert extents == (16,)
@@ -161,7 +161,7 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
         _, kernels = compile_with_kernels(graph, ctx=Context.from_target((7, 0)))
     (kernel,) = kernels.values()
     assert any(smem.name.startswith("_a_stat_") for smem in statements(kernel, Smem))
-    (chunk,) = [loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_ks"]
+    (chunk,) = [loop for loop in statements(kernel, Loop) if loop.axis.name == "_ks"]
     # Every scope of the chunk binds each value once (a fragment is a register set its loads refill, not a binding).
     for stmt in (chunk, *Body((chunk,)).iter()):
         for scope in stmt.nested():

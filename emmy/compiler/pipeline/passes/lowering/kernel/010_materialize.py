@@ -31,7 +31,7 @@ from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, THREAD_COORDS
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Loop, Write, exposed_defines, free_names
+from emmy.compiler.ir.stmt import Body, Load, Write, exposed_defines, free_names
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import NeedsMask, UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -84,10 +84,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
 def _lowered(tile: TileOp, root: Node, ctx):
     """``tile`` lowered to its kernel statement. A reduce loop that still states a range after the lowering was put
     there by a tier that does not read one, and the backend would walk its whole axis: the kernel takes its mask."""
-    materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
-    if any(isinstance(stmt, Loop) and stmt.range is not None for stmt in Body((materialized,)).iter()):
-        raise NeedsMask(f"a loop of kernel {tile.name!r} states a range no tier read")
-    return materialized
+    return _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
 
 
 def _resident(match: Match, root: Node, tile: TileOp):

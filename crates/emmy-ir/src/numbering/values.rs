@@ -146,7 +146,6 @@ fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
     };
     let flags = match stmt {
         Statement::Loop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
-        Statement::StridedLoop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
         other => Key::str(other.ty().name()),
     };
     Key::tuple([extent, window, flags])
@@ -167,15 +166,23 @@ fn depths(key: &Key, out: &mut Vec<usize>) {
 }
 
 impl Context<'_> {
-    /// [`descriptor`], and for a loop that walks a range the range too, every coordinate around the loop spelled by
-    /// its binding depth. A loop without a range keys as it always did.
+    /// [`descriptor`], and for a loop that walks a range or takes a step those too, every coordinate around the
+    /// loop spelled by its binding depth. A loop with neither keys as it always did.
     fn descriptor(&self, axis: &crate::axis::Axis, stmt: &Statement) -> Key {
         let plain = descriptor(axis, stmt);
-        match stmt {
-            Statement::Loop(l) if let Some((start, end)) = &l.range => {
-                Key::tuple([plain, self.by_depth(start), self.by_depth(end)])
-            }
-            _ => plain,
+        let Statement::Loop(l) = stmt else {
+            return plain;
+        };
+        let mut parts = vec![plain];
+        if let Some((start, end)) = &l.range {
+            parts.extend([self.by_depth(start), self.by_depth(end)]);
+        }
+        if let Some(step) = &l.step {
+            parts.extend([Key::str("step"), self.by_depth(step)]);
+        }
+        match parts.len() {
+            1 => parts.remove(0),
+            _ => Key::tuple(parts),
         }
     }
 
@@ -881,7 +888,7 @@ impl Context<'_> {
                         self.axes.insert(axis.name, key);
                         self.binding.push(axis.name);
                     }
-                    let is_loop = matches!(&*stmt, Statement::Loop(_) | Statement::StridedLoop(_));
+                    let is_loop = matches!(&*stmt, Statement::Loop(_));
                     if is_loop {
                         self.loops.push(bound[0].name);
                         // A state the loop updates is read inside it as the step before, whatever bound it ahead of

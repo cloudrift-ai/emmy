@@ -25,7 +25,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, ReshapeOp, RmsNormOp, SdpaOp, TransposeOp
 from emmy.compiler.ir.kernel.ir import CpAsyncCopy, LdmatrixLoad, MbarrierWait, MmaSyncPtx, TmaLoad
-from emmy.compiler.ir.stmt import Load, StridedLoop, Write
+from emmy.compiler.ir.stmt import Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, requires_sm90, statements
 
@@ -543,7 +543,7 @@ def test_computed_f16_tma_copies_each_weight_beside_the_activation_fill():
     ((nid, kernel),) = kernels.items()
     assert [descriptor.name for descriptor in lowered.nodes[nid].op.tma_descriptors] == ["_desc_b", "_desc_b_x1"]
     assert not statements(kernel, CpAsyncCopy), "the weights must not fall back to cp.async"
-    chunk = [stmt for loop in statements(kernel, StridedLoop) if loop.axis.name.startswith("_ks") for stmt in loop.body.iter()]
+    chunk = [stmt for loop in statements(kernel, Loop) if loop.axis.name.startswith("_ks") for stmt in loop.body.iter()]
 
     def first(found) -> int:
         return next(i for i, stmt in enumerate(chunk) if found(stmt))
