@@ -134,7 +134,7 @@ compilation when no compatible measurement is available. You can refit them from
 [source checkout](#contributing), without a GPU:
 
 ```bash
-# Load the repository goldens and the measurement freeze into a separate database
+# Load the repository goldens into a separate database
 emmy db import --db _data/dataset.db --fresh --repository
 
 # Export a dataset for each prior
@@ -165,36 +165,24 @@ a JSON report. See the [CLI reference](emmy/commands/ARCHITECTURE.md) for all tu
 
 ### Keep what a tune measured
 
-`emmy run --bench --tune N` writes every clean row it measures into the tune DB of the machine it ran on, and
-freezes the same rows into one file beside the card's under `emmy/compiler/pipeline/search/freezes/`, the
-measurement freeze the repository keeps, one golden file per card in git LFS: `--repository` reads it beside the
-goldens, and the nightly refresh reports the prior's regret over its pools. Commit the tune's file with your change
-(run `git lfs install` once on the machine that commits); the nightly refresh folds the files into each card's file
-on `main`, then compiles every row of the freeze under its own schedule and drops the rows the compiler no longer
-realizes (`emmy golden realize --drop`). A tune on a rented card writes the file into the copy there: copy it back
-next to the card's file, as you do the working golden. `EMMY_FREEZE_DIR` names another directory or, set empty, none.
+`emmy run --bench --tune N` writes every clean row it measures into the tune DB of the machine it ran on
+(`~/.cache/emmy/autotune.db`, or the file `EMMY_TUNE_DB` names), where the next compile on that machine picks the
+fastest. The rows travel with that file: after tuning on a rented card, copy it back before the VM goes. The best
+schedule reaches the repository through a record into a golden (`--record-greedy`) and a few of the others through
+the card's candidate file (below). A tune DB is also a source a dataset can name beside the goldens
+(`emmy db import --db _data/dataset.db --repository autotune.db`), which gives `emmy eval prior --pools measured` its
+pools.
 
 ### Candidate files
 
 A hardware golden holds the best known schedule of each kernel. A candidate file, one per hardware golden under
 `emmy/compiler/pipeline/search/candidates/records/`, holds a few other measured schedules of the same kernels: 3 where
 the kernel's schedule space is small, up to 10 where it is large, the slow ones beside the near misses. `emmy
-candidates build` fills the files from the measurement freeze and lists the groups still under their target; `emmy
-bench .github/candidates-fill --filter golden=PATH` tunes those kernels on the golden's card and returns the freeze
-files the next build takes. `emmy candidates check`, `restamp` and `realize --drop` keep the files current, as the
-`emmy golden` commands keep a golden; the `refresh-candidates` skill is the flow around them. No compile reads a
+candidates build --db TUNE_DB` fills the files from the tune DB the card's tunes wrote and lists the groups still
+under their target; `emmy bench .github/candidates-fill --filter golden=PATH` tunes those kernels on the golden's
+card and returns the filled file. `emmy candidates check`, `restamp` and `realize --drop` keep the files current, as
+the `emmy golden` commands keep a golden; the `refresh-candidates` skill is the flow around them. No compile reads a
 candidate file.
-
-A tune DB from a machine with no checkout is merged by hand (`~/.cache/emmy/autotune.db`, or the file `EMMY_TUNE_DB`
-names, copied over):
-
-```bash
-emmy db import --db _data/freeze.db --fresh emmy/compiler/pipeline/search/freezes autotune.db
-emmy db freeze --db _data/freeze.db --out emmy/compiler/pipeline/search/freezes
-```
-
-A schedule measured on both sides takes the tune DB's row, faster or slower, a kernel the compiler no longer lowers
-drops out, and merging the same tune DB again changes nothing. Commit the rewritten files.
 
 ## Deploy
 
@@ -429,7 +417,7 @@ require CloudRift organization access.
 
 ## Contributing
 
-Source setup requires Python 3.12+, a Rust toolchain and `git-lfs`. `make setup` builds the Rust extensions into the
+Source setup requires Python 3.12+ and a Rust toolchain. `make setup` builds the Rust extensions into the
 package and runs again on its own after a Rust or `pyproject.toml` change:
 
 ```bash

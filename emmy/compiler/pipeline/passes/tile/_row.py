@@ -548,6 +548,11 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
                 body, formed = again, reoriented
     except ValueError:
         return piece
+    if {spec.write.output for spec in formed.output_specs} != {spec.write.output for spec in piece.output_specs}:
+        # A piece that owns an output beside its workspace, at one row: the closed nest keeps the region that does
+        # not read the row outside the row loop and loses its store, so the formed kernel would declare an output
+        # nothing writes. Such a piece stays as minted.
+        return piece
     # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
     # sits ahead of it. The piece takes that grid whatever grid it was minted with: formed alone it
     # binds those axes, so a row measured on it alone describes the kernel its program runs.
@@ -561,7 +566,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
         grid = (unit, *grid)
     place = replace(formed.place, free=grid)
     # The loop op the piece was formed from rides as its ``source``, as a fused kernel's does: the body a
-    # kernel row stores and a freeze re-lowers is the one the lift was given.
+    # kernel row stores and an export lowers again is the one the lift was given.
     loop = LoopOp(body=body)
     return replace(
         piece, op=rewrite_twisted(formed.op, formed.axes), place=place, axes=formed.axes, output_specs=formed.output_specs, source=loop

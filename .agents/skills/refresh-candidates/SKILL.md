@@ -39,15 +39,13 @@ emmy candidates build GOLDEN…              # copy each golden's tables again; 
 emmy candidates realize --drop             # drop the rows the compiler no longer realizes
 ```
 
-- `build` is the step that follows any change to a hardware golden. It reads the measurement freeze
-  (`emmy/compiler/pipeline/search/freezes/`, git LFS: `git lfs pull` first, or it stops on a pointer file), so it
-  also tops each group up from rows already measured.
+- `build` is the step that follows any change to a hardware golden. With no `--db` it adds no row. With `--db PATH`,
+  a tune DB copied back from the golden's card, it also tops each group up from the rows that DB measured.
 - A restamp leaves a row whose kernel changed with its schedule and no time. The next build drops it: a candidate is
   a measurement. Its group is then short, and a tune refills it.
 - When main rewrites a stored spelling by a text edit (a knob retired, a format changed), apply the same edit to the
-  candidate files and to any tune freeze files not yet on main, then build. Read the PR that made the change for the
-  exact rule; do not guess one. A rewrite that drops a knob where main respelled it files a measurement under the
-  wrong schedule.
+  candidate files, then build. Read the PR that made the change for the exact rule; do not guess one. A rewrite that
+  drops a knob where main respelled it files a measurement under the wrong schedule.
 
 ## Fill short groups (on the card)
 
@@ -62,24 +60,24 @@ emmy bench .github/candidates-fill --ssh USER@HOST[:PORT] --filter golden=emmy/c
 
 On a rental, `--provider cloudrift` in place of `--ssh`: the recipe's row names the card, and the run rents it and
 tears it down. The recipe stages the checkout, so the card runs the code you are on: be on current main, or the
-freeze files come back in a format main no longer reads.
+file comes back in a format main no longer reads.
 
-The run returns into `.github/candidates-fill/<timestamp>/`: the freeze files the tunes wrote, `short.json`,
-`failed.txt` (kernels whose tune froze no row) and `fill.log`. Take the freeze files in under their own names, then
-build:
+On the card the recipe tunes each listed kernel into one tune DB, then builds the candidate file again from that DB.
+The run returns into `.github/candidates-fill/<timestamp>/`: the filled candidate file, `short.json` (the groups
+still under their target), the tune DB and `fill.log`. Copy the candidate file over the repository's:
 
 ```bash
 run=$(ls -d .github/candidates-fill/20* | tail -1)
-for f in "$run"/*_freezes_*.json; do cp "$f" "emmy/compiler/pipeline/search/freezes/${f##*_freezes_}"; done
-emmy candidates build emmy/compiler/pipeline/search/golden/records/<file>.json
+cp "$run"/*_candidates.json emmy/compiler/pipeline/search/candidates/records/<file>.json
 ```
 
-Commit the freeze files with the candidate file (the nightly refresh folds them into the card's file). Delete the
-run directory; it is not ignored by git.
+The tune DB is the only copy of every row the tunes measured; nothing in the repository holds it. Keep it outside
+the checkout if a later build should draw on it (`emmy candidates build GOLDEN --db PATH`). Delete the run
+directory; it is not ignored by git.
 
 ## What stays short, and when to stop
 
-Read `failed.txt` and the build's list after the fill. A group still under its target is one of these; say which in
+Read `short.json` and `fill.log` after the fill. A group still under its target is one of these; say which in
 the report, and do not tune it again:
 
 - **A parent a cross-CTA split divides.** Run alone it lowers to two scheduled kernels and the tune refuses it
@@ -103,10 +101,10 @@ the report, and do not tune it again:
 
 ## Traps
 
-- A tune exits 1 when it flags some rows, and still freezes the clean ones. The freeze file is the test, which is
-  what the recipe checks.
+- A tune exits 1 when it flags some rows, and still records the clean ones in the tune DB. The build after the
+  tunes is the test, not a tune's exit status.
 - `emmy bench` can report the run as failed when the SSH session to the box drops after the tunes are done (exit
-  255). The returned files are the result: `failed.txt` and the freeze files, not the exit status.
+  255). The returned files are the result: the candidate file and `short.json`, not the exit status.
 - If every bench on a Volta card fails with "no kernel image is available", the installed torch has no sm_70
   kernels: reinstall torch from the cu126 index in the box's venv and run again.
 - A remote shell started with `nohup` has no `nvcc` on its path; the recipe exports it. A hand-run command must too
@@ -123,6 +121,5 @@ emmy candidates realize                    # every row compiles under its own sc
 
 ## Report
 
-Per card: groups, groups under their target with the reason for each kind, candidate rows, how many freeze files
-were added, and the build's faster-than-golden lines. Say what was verified and what was not, and the state of any
-box left running.
+Per card: groups, groups under their target with the reason for each kind, candidate rows, and the build's
+faster-than-golden lines. Say what was verified and what was not, and the state of any box left running.

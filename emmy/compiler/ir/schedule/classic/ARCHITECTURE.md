@@ -684,6 +684,14 @@ the six roots the rule reaches sum to 474 against 524 for the rule as Transforme
 system and its inverse went from 192 to 94; the root that applies the inverse to the values and keys went from 279 to
 313, because its scaled products cut into pointwise kernels and scalar products that take no tensor-core tile.
 
+That root reads the recurrence out and then runs the layer's tail. Its output is normalized over each head, and the
+cut pass took the product under the norm's statistic and the same product at the output for two values, so both
+products of the readout and the stack of the chunk start states ran twice. Cut once (`passes/ARCHITECTURE.md`), the
+root records 226 and the six roots 388. The comparison with the reference is still not like for like: the six roots
+hold the layer's three FP8 projections (155), its convolution and its norms, which the reference kernel does not
+do. What the readout still pays is three f32 products on scalar code (60) and the copy that stacks the start states
+(33).
+
 What is left to match the reference: the solve is a 63-step forward substitution in f32, not a blocked inverse on
 tensor cores, and the reference's one launch per head has no spelling, since warp groups with different roles inside
 one CTA do not exist beyond the load warp. Composing the substitution's steps as dense matrix products is not the

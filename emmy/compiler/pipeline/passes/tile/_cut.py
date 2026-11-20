@@ -371,7 +371,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             )
         )
     grouped, rest = _group_contractions(out, tile.axes)
-    clustered = _cluster_reindexed_contractions(_cluster_value_seams(rest, tile.axes), tile.axes)
+    clustered = _cluster_remainder_copies(_cluster_value_seams(rest, tile.axes), tile.axes)
+    clustered = _cluster_reindexed_contractions(clustered, tile.axes)
     return (*grouped, *_inline_copies(tile, clustered, all_sites, outer))
 
 
@@ -614,6 +615,73 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         if siblings:
             merged[rep_index] = replace(rep, siblings=tuple(siblings), aliases=tuple(aliases))
     return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
+
+
+def _cluster_remainder_copies(seams: tuple[CutSite, ...], axes: tuple) -> tuple[CutSite, ...]:
+    """Fold a copy that reads one coordinate's remainder into the seam that reads that remainder as a coordinate of
+    its own.
+
+    A norm over each head of a flat (head, head-dim) width reads its operand twice: the statistic under its own
+    reduce over the head dim, at ``(i / c, j)``, and the normalized value at the kernel's free axis, at
+    ``(i / c, i % c)``. Those are one value, and :func:`_cluster_value_seams` keeps them apart because they capture
+    different coordinates. The seam that captures ``j`` is the representative: with ``j`` spelled ``i % c`` its
+    :func:`_value_forms` are the copy's, so the copy reads the representative's workspace at that address. The copy's
+    own duplicates follow it, each through its capture correspondence."""
+    eligible = [index for index, seam in enumerate(seams) if seam.frontier is None and seam.owned is None]
+    params = {index: tuple(axis for axis in seams[index].axes if axis.name in seams[index].node.free_axes) for index in eligible}
+    descendants = {index: {id(site.node) for site in sites(seams[index].node)[1:]} for index in eligible}
+    values: dict[int, tuple] = {}
+    dropped: set[int] = set()
+    updated: dict[int, CutSite] = {}
+    for rep_index in eligible:
+        for member_index in eligible:
+            if rep_index in dropped:
+                break
+            rep, member = updated.get(rep_index, seams[rep_index]), seams[member_index]
+            if (
+                member_index in (rep_index, *dropped, *updated)
+                or len(params[rep_index]) != len(params[member_index]) + 1
+                or tuple(rep.dtypes) != tuple(member.dtypes)
+                or id(member.node) in descendants[rep_index]
+                or id(rep.node) in descendants[member_index]
+            ):
+                continue
+            for low in params[rep_index]:
+                rest = tuple(axis for axis in params[rep_index] if axis is not low)
+                factor = low.extent.as_static() if low.extent.is_static and low.window is None else 0
+                flat = next(
+                    (
+                        (own, copy)
+                        for own, copy in zip(rest, params[member_index], strict=True)
+                        if factor > 1 and ("%", factor) in _divmods(member.node, copy.name)
+                    ),
+                    None,
+                )
+                if flat is None:
+                    continue
+                remainder = BinaryExpression("%", Var(flat[0].name), Literal(factor, "int"))
+                node = _substitute_and_fold(rep.node, low.name, Sigma({low.name: remainder}), SimplifyCtx.empty())
+                view = replace(rep, node=node, axes=tuple(axis for axis in rep.axes if axis is not low))
+                if member_index not in values:
+                    values[member_index] = _value_forms(member, axes)
+                own = _value_forms(view, axes)
+                pairs = _capture_pairs(view, own, member, values[member_index]) if own[0] == values[member_index][0] else None
+                if pairs is None:
+                    continue
+                pairs += ((low.name, remainder.substitute({flat[0].name: Var(flat[1].name)})),)
+                through = tuple(
+                    (sibling, tuple((name, read.substitute(dict(correspondence))) for name, read in pairs), channels)
+                    for sibling, correspondence, channels in member.siblings
+                )
+                channels = tuple(range(len(member.node.exposes)))
+                updated[rep_index] = replace(
+                    rep,
+                    siblings=(*rep.siblings, (member.node, pairs, channels), *through),
+                    aliases=(*rep.aliases, member.spelling, *member.aliases),
+                )
+                dropped.add(member_index)
+                break
+    return tuple(updated.get(index, seam) for index, seam in enumerate(seams) if index not in dropped)
 
 
 def _coarser_quotient(term: Expression, row: Expression) -> int | None:
@@ -1686,6 +1754,20 @@ def _divmod_reads(expression, name: str) -> list[tuple[str, int]]:
     return reads + [("", 1)] * (uses - len(reads))
 
 
+def _divmods(produced: Fold, name: str) -> set[tuple[str, int]]:
+    """How the terms under ``produced`` read the coordinate ``name`` (:func:`_divmod_reads`)."""
+    reads: set[tuple[str, int]] = set()
+    pending = [produced]
+    while pending:
+        term = pending.pop()
+        pending.extend(term.operands)
+        if name in term.free_axes:
+            for stmt in term.lift.body.iter():
+                for expression in stmt.expressions():
+                    reads.update(_divmod_reads(expression, name))
+    return reads
+
+
 def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
     """Whether the pair straddles ONE contraction's operands — the div feeding a DIFFERENT edge
     from the mod.
@@ -1734,16 +1816,7 @@ def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
         if not axis.extent.is_static:
             continue
         extent = axis.extent.as_static()
-        reads: set[tuple[str, int]] = set()
-        pending = [produced]
-        while pending:
-            term = pending.pop()
-            pending.extend(term.operands)
-            if name not in term.free_axes:
-                continue
-            for stmt in term.lift.body.iter():
-                for expression in stmt.expressions():
-                    reads.update(_divmod_reads(expression, name))
+        reads = _divmods(produced, name)
         divisors = {value for op, value in reads if op == "/"}
         remainders = {value for op, value in reads if op == "%"}
         # The pair's factor is the finest division; a coarser one that it divides reads the high

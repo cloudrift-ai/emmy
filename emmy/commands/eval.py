@@ -107,8 +107,8 @@ def _load_prior(space: str, path: str | None = None):
 def _measured_report(args, halves, dataset, source: str):
     """``eval prior --pools measured`` — the report over the dataset's measured pools: every benched row of the DB
     the export read, grouped by ``db/export.measured_groups`` (one op, one card, one regime). The header names the
-    sources the rows came from: two reports are comparable only when computed over the same rows, and a freeze's
-    digest in the source name is what says so.
+    sources the rows came from: two reports are comparable only when computed over the same rows, and a source's
+    digest in its name is what says so.
 
     ``--kernel`` matches the op LABEL, since a pool's own op identity is a digest with nothing readable in it. The
     label is a function of the ``S_*`` stamps every row of one pool shares — read off the pool's first row — so a

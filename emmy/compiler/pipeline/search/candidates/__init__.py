@@ -11,22 +11,21 @@ kernels and decisions, so it restamps onto a fresh lowering exactly as its golde
 and its rows are the candidates alone: the best row stays in the golden, and the two join on the kernel's exact
 identity, the sizes and the regime.
 
-:func:`build` fills a file from a measurement freeze of the same card, which is where a tune's measured rows end up;
-a group the freeze does not cover is listed short, for a tune on the card to fill.
+:func:`build` fills a file from a DB instance that holds the card's measurements — the tune DB a tune writes its
+rows into; a group it does not cover is listed short, for a tune on the card to fill.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from emmy.compiler.pipeline.knob import family_of, get, is_off_value, values_equal
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool, GoldenRow, regime_of
-from emmy.compiler.pipeline.search.db import knobs_json
-from emmy.compiler.pipeline.search.golden import GoldenFile, Row
+from emmy.compiler.pipeline.search.db import SearchDB, knobs_json
+from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Row, regime_context
 from emmy.compiler.pipeline.search.space import COLD_CACHE, REGIME_KNOBS
 
 logger = logging.getLogger(__name__)
@@ -144,9 +143,10 @@ def _others(pool: GoldenPool, taken: set[tuple]) -> int:
     return len({_key(row) for row in enumerate_pool(pool, pool_context(pool)).rows} - taken)
 
 
-def _spread(rows: list[Row], count: int) -> list[Row]:
-    """``count`` of ``rows`` at evenly spaced ranks of their latency, the fastest and the slowest among them."""
-    rows = sorted(rows, key=lambda row: (row.measurements.emmy_us, _schedule(row)))
+def _spread(rows: list[tuple[dict, dict, float]], count: int) -> list[tuple[dict, dict, float]]:
+    """``count`` of ``rows`` (the sizes, the schedule row and the µs of a measurement) at evenly spaced ranks of
+    their latency, the fastest and the slowest among them."""
+    rows = sorted(rows, key=lambda row: (row[2], _key(row[1])))
     if count >= len(rows):
         return rows
     if count == 1:
@@ -167,12 +167,13 @@ class Report:
     faster: list[tuple[str, float, float]] = field(default_factory=list)
 
 
-def build(golden: GoldenFile, freezes: Sequence[GoldenFile] = (), existing: GoldenFile | None = None) -> tuple[GoldenFile, Report]:
+def build(golden: GoldenFile, db: SearchDB | None = None, existing: GoldenFile | None = None) -> tuple[GoldenFile, Report]:
     """The candidate file of ``golden``: its programs, kernels and decisions, and for each of its measured groups the
-    candidate rows ``existing`` holds, topped up to the group's :func:`target` from the measured rows ``freezes`` (the
-    card's freeze files, a later file's row first at one schedule) hold on the same group. A schedule a golden row of
-    the group spells is never a candidate; a row of ``existing`` whose group the golden no longer holds is dropped,
-    as is one that holds no measurement."""
+    candidate rows ``existing`` holds, topped up to the group's :func:`target` from the measurements ``db`` holds of
+    the group's kernel on the card, in its regime and at its sizes (``SearchDB.measured``): the tune DB the card's
+    tunes wrote, where the row benched last stands at one schedule. With no ``db`` nothing is added: the file takes
+    its golden's tables again and keeps its rows. A schedule a golden row of the group spells is never a candidate; a
+    row of ``existing`` whose group the golden no longer holds is dropped, as is one that holds no measurement."""
     document = GoldenFile(
         gpu_name=golden.gpu_name,
         compute_cap=golden.compute_cap,
@@ -182,15 +183,11 @@ def build(golden: GoldenFile, freezes: Sequence[GoldenFile] = (), existing: Gold
     )
     report = Report()
     held = _groups(existing) if existing is not None else {}
-    measured: dict[tuple, list[Row]] = {}
-    for freeze in reversed(freezes):
-        for key, rows in _groups(freeze).items():
-            measured.setdefault(key, []).extend(rows)
     for key, rows in golden_groups(golden).items():
         best = [row for row in rows if row.measured]
         if not best:
             continue
-        _identity, _sizes, regime = key
+        identity, _sizes, regime = key
         head = min(best, key=lambda row: row.measurements.emmy_us)
         timed = tuple(GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.measurements.emmy_us, "") for row in best)
         pool = GoldenPool(golden.gpu_name or "", tuple(golden.compute_cap), regime, golden.kernel(head.kernel), dict(head.bindings), timed)
@@ -202,22 +199,25 @@ def build(golden: GoldenFile, freezes: Sequence[GoldenFile] = (), existing: Gold
         # A candidate is a measurement: a row a restamp left with a schedule and no time is dropped, and a tune refills.
         kept = [row for row in _of_group(held, key) if row.measured and _schedule(row) not in taken]
         taken.update(_schedule(row) for row in kept)
-        fresh = {}  # one row per schedule the group does not hold yet
-        for row in _of_group(measured, key):
-            if row.measured and _schedule(row) not in taken:
-                fresh.setdefault(_schedule(row), row)
+        # One measurement per schedule the group does not hold yet. A golden row that records no sizes counts at every
+        # size of its kernel, and a candidate taken for it names the sizes it was measured at.
+        ctx, fresh = regime_context(golden, head.pins), {}
+        for sizes in [] if db is None else [head.bindings] if head.bindings else db.sizes(ctx, identity):
+            for knobs, us in db.measured(ctx, identity, bindings=sizes):
+                if _key(knobs) not in taken:
+                    fresh.setdefault(_key(knobs), (sizes, knobs, us))
         names = {row.name for row in kept}
         numbers = (f"{head.name}.c{n}" for n in range(len(kept) + len(fresh) + 1))
         added = [
             Row(
                 name=next(name for name in numbers if name not in names),
                 kernel=head.kernel,
-                bindings=dict(head.bindings or row.bindings),
+                bindings=dict(sizes),
                 pins=dict(head.pins),
-                knobs=dict(row.knobs),
-                measurements=row.measurements,
+                knobs=knobs,
+                measurements=Measurements(emmy_us=us),
             )
-            for row in _spread(list(fresh.values()), max(0, wanted - len(kept)))
+            for sizes, knobs, us in _spread(list(fresh.values()), max(0, wanted - len(kept)))
         ]
         # A restamp of the golden can re-key a kernel; a kept row names it as the golden's file does now.
         group = [replace(row, kernel=head.kernel) for row in kept] + added

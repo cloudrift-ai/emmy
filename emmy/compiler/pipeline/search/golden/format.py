@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from emmy import config
 from emmy.compiler import provenance
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.knob import KnobType, family_of, get, validate_family_value
@@ -80,6 +81,15 @@ class Kernel(KernelDef):
         """This kernel under ``ref``, its identity kept where it is already known."""
         out = replace(self, ref=ref)
         return out.keyed(self.__dict__["exact_identity"]) if "exact_identity" in self.__dict__ else out
+
+
+def _identity(kernels: list[Kernel], index: int) -> str | None:
+    kernel = kernels[index]
+    try:
+        return kernel.exact_identity
+    except Exception as exc:  # noqa: BLE001 — whatever the lift raises, the kernel is stale, the file is not broken
+        logger.warning("golden kernel %d no longer lowers (%s: %s); its rows are no evidence", kernel.ref, type(exc).__name__, exc)
+        return None
 
 
 @dataclass(frozen=True)
@@ -314,16 +324,16 @@ class GoldenFile(Wire):
 
     def identities(self) -> dict[int, str]:
         """Each kernel's exact identity by its ``ref`` — computed from the stored Loop IR (a lift per formed
-        kernel, once per loaded file), which is why only an import, a restamp or a record asks. A kernel whose
-        stored body the compiler no longer takes back has none and is left out: a stale kernel, whose rows describe
-        nothing a compile builds (``emmy golden check`` names it)."""
-        out: dict[str, str] = {}
-        for kernel in self.kernels:
-            try:
-                out[kernel.ref] = kernel.exact_identity
-            except Exception as exc:  # noqa: BLE001 — whatever the lift raises, the kernel is stale, the file is not broken
-                logger.warning("golden kernel %d no longer lowers (%s: %s); its rows are no evidence", kernel.ref, type(exc).__name__, exc)
-        return out
+        kernel, once per loaded file, on ``EMMY_WORKERS`` forked processes), which is why only an import, a
+        restamp or a record asks. A kernel whose stored body the compiler no longer takes back has none and is
+        left out: a stale kernel, whose rows describe nothing a compile builds (``emmy golden check`` names it)."""
+        from emmy.compiler.pipeline.fork import forked  # noqa: PLC0415
+
+        unknown = [kernel for kernel in self.kernels if "exact_identity" not in kernel.__dict__]
+        for kernel, identity in zip(unknown, forked(_identity, range(len(unknown)), config.workers(), shared=unknown), strict=True):
+            if identity is not None:
+                kernel.keyed(identity)
+        return {kernel.ref: kernel.exact_identity for kernel in self.kernels if "exact_identity" in kernel.__dict__}
 
     def targets(self) -> list[Kernel]:
         """The kernels lowered from a traced program — what a trace inventory records and a bench compiles."""
@@ -456,10 +466,10 @@ class GoldenFile(Wire):
     def add_kernel(self, kernel: Kernel) -> Kernel:
         """Store ``kernel`` unless a kernel of that identity is stored already; the stored one is returned, and
         takes ``kernel``'s provenance when it had none. A kernel stored here takes a ``ref`` no other kernel of the
-        file has."""
-        identity = kernel.exact_identity
+        file has. The stored kernels' identities are the file's :meth:`identities`, computed once per loaded file."""
+        identity, known = kernel.exact_identity, self.identities()
         for index, stored in enumerate(self.kernels):
-            if stored.exact_identity == identity:
+            if known.get(stored.ref) == identity:
                 if stored.traced is None and kernel.traced is not None:
                     stored = replace(stored, traced=kernel.traced, origins=kernel.origins, bindings=kernel.bindings).keyed(identity)
                     self.kernels[index] = stored

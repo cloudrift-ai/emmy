@@ -126,12 +126,14 @@ def test_executable_keeps_the_pages_of_a_buffer_the_pager_holds_once(tmp_path, m
 
 
 def test_a_golden_edit_recompiles_only_the_programs_that_read_its_rows(tmp_path, monkeypatch):
-    """A pack entry is valid while the golden rows its compile read are: programs compiled from a two-file scope, one
-    row of one file re-measured, and the next load hands back no plan for the program that read it and for the other
-    twin of its wrapper, which settled its weights' layouts with it, while the rest load. A scope that moved without
-    moving any program's rows re-keys the pack, so the load after it compares nothing."""
+    """A pack entry is valid while the evidence its compile read is, as the tune DB holds it with the golden scope
+    imported: programs compiled from a two-file scope, one row of one file re-measured, and the next load hands back
+    no plan for the program that read it and for the other twin of its wrapper, which settled its weights' layouts
+    with it, while the rest load. A scope that moved without moving any program's rows re-keys the pack, so the load
+    after it compares nothing."""
     from emmy.compiler.backend import pack
     from emmy.compiler.backend.plan import KernelSpec, WeightSpec
+    from emmy.compiler.context import Context
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search import golden
     from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -158,6 +160,8 @@ def test_a_golden_edit_recompiles_only_the_programs_that_read_its_rows(tmp_path,
     monkeypatch.setenv("EMMY_CUBIN_CACHE", str(tmp_path / "cubin"))
     monkeypatch.setattr(pack, "_environment", lambda: {"backend": "cuda"})
     monkeypatch.setattr(golden, "live_gpu_key", lambda: ("NVIDIA GeForce RTX 5090", scan_case.compute_cap))
+    monkeypatch.setattr(Context, "probe", classmethod(lambda cls: scan_case.context()))  # the card the pack is of
+    monkeypatch.setenv("EMMY_TUNE_DB", str(tmp_path / "tune.db"))
     with pinned_knobs(scan_case.regime):
         compiled = []
         for case in (scan_case, mean_case):

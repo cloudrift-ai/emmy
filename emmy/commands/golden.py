@@ -10,8 +10,8 @@ takes the same way, a row whose measurement is of a kernel the compiler no longe
 rewrite (``search/golden/restamp.py`` decides what each row keeps). Both default to every repository golden; the
 ``refresh-golden`` skill is the flow around them, including what needs a card. ``realize`` compiles every row of the
 files it is given that has a schedule under it, the file as the compile's golden evidence, and names the rows the
-compiler no longer realizes — the check a measurement freeze admits, having no program to restamp from
-(``search/golden/realize.py``); ``--drop`` writes the file back without those rows. All three are GPU-free.
+compiler no longer realizes (``search/golden/realize.py``); ``--drop`` writes the file back without those rows. All
+three are GPU-free.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def register_golden_command(subparsers) -> None:
         help="Compile every row that has a schedule under it, the file as the compile's golden evidence, and say which "
         "rows the compiler no longer realizes",
     )
-    pz.add_argument("paths", nargs="+", help="Golden files, or directories searched for them (a measurement freeze).")
+    pz.add_argument("paths", nargs="+", help="Golden files, or directories searched for them.")
     pz.add_argument("--jobs", type=int, help="Worker processes compiling rows side by side (default: EMMY_WORKERS, one per core).")
     pz.add_argument("--drop", action="store_true", help="Write each file back without the rows the compiler no longer realizes.")
     pz.add_argument(

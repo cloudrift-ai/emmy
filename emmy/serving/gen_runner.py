@@ -859,6 +859,49 @@ def embed_gather_graph(rows, hidden, dtype):
     return rehint_program(graph, {"num_tokens": 1})
 
 
+def query_key_graph(heads, kv_heads, head_dim, rotary_dim, positions, eps, dtype):
+    """The program normalizing and rotating a sparse-attention layer's query and key, any number of tokens, compiled and
+    measured at the decode bucket's eight rows: the hosted ``Qwen4ExpQSAAttention``'s step from its fused projection
+    ``qkv`` (``[T, 2·q + 2·kv]``, each query head beside its gate) to the query, the key and the gate, as the fork's
+    eager modules compute it for text positions: each head's Gemma RMS norm in float32 (``x · (1 + w)``), then the
+    NeoX rotation of its first ``rotary_dim`` channels in ``dtype`` against the rows ``positions`` gathers from the
+    rotary cache. Returns the traced program and its example arguments; ``qk-norm-rope-sym`` is its twin."""
+    import torch
+
+    from emmy.compiler.specialize import rehint_program
+
+    q_size, kv_size = heads * head_dim, kv_heads * head_dim
+
+    def norm(x, weight):
+        x32 = x.float()
+        x32 = x32 * torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + eps)
+        return (x32 * (1.0 + weight.float())).to(x.dtype)
+
+    def rotate(x, cos, sin):
+        x1, x2 = x[..., : rotary_dim // 2], x[..., rotary_dim // 2 : rotary_dim]
+        return torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin, x[..., rotary_dim:]), dim=-1)
+
+    class QueryKey(torch.nn.Module):
+        def forward(self, qkv, positions, q_weight, k_weight, cos_sin):
+            t = qkv.shape[0]
+            q_gate = qkv[:, : 2 * q_size].reshape(t, heads, 2 * head_dim)
+            key = qkv[:, 2 * q_size : 2 * q_size + kv_size].reshape(t, kv_heads, head_dim)
+            cos, sin = cos_sin[positions].unsqueeze(1).chunk(2, dim=-1)
+            query = rotate(norm(q_gate[..., :head_dim], q_weight), cos, sin)
+            key = rotate(norm(key, k_weight), cos, sin)
+            return query.reshape(t, q_size), key.reshape(t, kv_size), q_gate[..., head_dim:].reshape(t, q_size)
+
+    rows = 8
+    example = (
+        torch.zeros(rows, 2 * q_size + 2 * kv_size, dtype=dtype),
+        torch.zeros(rows, dtype=torch.int64),
+        torch.zeros(head_dim, dtype=dtype),
+        torch.zeros(head_dim, dtype=dtype),
+        torch.empty(positions, rotary_dim, dtype=dtype),
+    )
+    return rehint_program(trace_split(QueryKey(), example, ["qkv", "positions"]), {"num_tokens": rows}), example
+
+
 def _embed_gather_plan(rows, hidden, dtype, slots):
     """:func:`embed_gather_graph`'s plan, its table a paged buffer of :data:`EMBED_PAGE_ROWS`-row pages with ``slots``
     device slots."""
@@ -3336,6 +3379,7 @@ class EmmyGenRunner:
         all of it: its blocks come last, in the order they run, followed by that span spare, and every
         block is lent with everything after it. Eager only — never under an outer capture (MoE serves
         eager above T=1; see the boot guard)."""
+        import numpy as np
         import torch
 
         tiers = self._expert_tiers[moe["group"]]  # this layer's shape group
@@ -3380,7 +3424,9 @@ class EmmyGenRunner:
             batches.setdefault(prog, []).append((e, block, count))
             offsets[e] = block - first
             block += width
-        count_t, offset_t = torch.tensor([counts, offsets], device=xn.device)
+        # The index lists cross without a blocking copy, which would wait for the stream once per layer and keep the
+        # card idle while it does.
+        count_t, offset_t = torch.from_numpy(np.array([counts, offsets])).to(xn.device, non_blocking=True)
         at = torch.arange(start, device=xn.device) + offset_t.repeat_interleave(count_t, output_size=start)
         source = torch.zeros(block, dtype=torch.long, device=xn.device)
         source[at] = take
@@ -3398,7 +3444,7 @@ class EmmyGenRunner:
         if picks:
             # One launch per EXPERT_GROUP blocks, each lent its blocks of the rows and of the output and its experts'
             # entries of the selector; a padding block repeats the program's last expert and lands in rows nothing reads.
-            sel = torch.tensor(picks, dtype=torch.int64, device=xn.device)
+            sel = torch.from_numpy(np.array(picks, dtype=np.int64)).to(xn.device, non_blocking=True)
             for prog, width, first, pick, n in launches:
                 span, name = EXPERT_GROUP * width, prog.output_names[0]
                 runs = [

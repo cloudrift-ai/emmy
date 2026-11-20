@@ -1,8 +1,8 @@
 # Fill the candidate file of a hardware golden on its own card: tune every kernel whose group is under its target, as
-# `emmy candidates build --json` lists them, and return the measurement freeze files the tunes write. Whoever runs
-# this (`emmy bench .github/candidates-fill --filter golden=PATH`, the `refresh-candidates` skill) copies those files
-# into the repository freeze and runs `emmy candidates build` again, which takes their rows. A kernel whose tune
-# froze no row is listed in failed.txt; the run stops starting tunes when `budget_s` is spent.
+# `emmy candidates build --json` lists them, build the file again from the tune DB the tunes wrote, and return it
+# with that tune DB. Whoever runs this (`emmy bench .github/candidates-fill --filter golden=PATH`, the
+# `refresh-candidates` skill) copies the returned file over the repository's. short.json lists the groups still under
+# their target after the fill; the run stops starting tunes when `budget_s` is spent.
 command:
   stage:
     - emmy
@@ -23,29 +23,27 @@ command:
     [ -f venv/.setup-complete ] || make setup || exit 1
     export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_CUBIN_CACHE=$task_dir/cubins
     export CUDA_VISIBLE_DEVICES="$gpu_device_ids"
-    # The tunes freeze their rows here, to be returned; the listing reads no freeze, only the staged candidate file.
-    export EMMY_FREEZE_DIR=$task_dir/freezes EMMY_BENCH_RUN_TIMEOUT_S=$run_limit_s
-    mkdir -p $task_dir/freezes $task_dir/no-freeze
-    : > $task_dir/failed.txt
-    ./venv/bin/emmy candidates build "$golden" --freeze $task_dir/no-freeze --json $task_dir/short.json || exit 1
+    export EMMY_BENCH_RUN_TIMEOUT_S=$run_limit_s
+    # The listing reads no DB, only the staged candidate file.
+    ./venv/bin/emmy candidates build "$golden" --json $task_dir/todo.json || exit 1
     deadline=$$((SECONDS + $budget_s))
-    jq -c '.[]' $task_dir/short.json | while IFS= read -r entry; do
+    jq -c '.[]' $task_dir/todo.json | while IFS= read -r entry; do
       if [ "$$SECONDS" -ge "$$deadline" ]; then
         echo "budget spent; the remaining groups stay under their target"
         break
       fi
       kernel=$$(jq -r .kernel <<< "$$entry")
       pins=$$(jq -r '.pins | to_entries | map("\(.key)=\(if .value == true then 1 elif .value == false then 0 else .value end)") | join(",")' <<< "$$entry")
-      frozen=$$(ls $task_dir/freezes | wc -l)
-      # A tune exits 1 when it flags some rows and still freezes the clean ones: the file it wrote is the test.
+      # A tune exits 1 when it flags some rows and still records the clean ones: the build below is the test.
       env EMMY_KNOBS="$$pins" timeout 3600 ./venv/bin/emmy run --golden "$golden" --kernel "$$kernel" --bench --tune $tune \
         </dev/null >> $task_dir/fill.log 2>&1
-      [ "$$(ls $task_dir/freezes | wc -l)" -gt "$$frozen" ] || echo "$$kernel $$pins" >> $task_dir/failed.txt
     done
+    ./venv/bin/emmy candidates build "$golden" --db $task_dir/autotune.db --json $task_dir/short.json || exit 1
+    cp emmy/compiler/pipeline/search/candidates/records/$$(basename "$golden") $task_dir/candidates.json
   result_files:
-    - freezes/*.json
+    - candidates.json
     - short.json
-    - failed.txt
+    - autotune.db
     - fill.log
   timeout: 9000
 

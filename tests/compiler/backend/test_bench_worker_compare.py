@@ -20,44 +20,30 @@ import time
 
 import pytest
 
+from emmy.compiler.backend.base import BenchmarkResult
 from tests.compiler.helpers import requires_cuda
 
 
-def test_oneshot_compare_wrapper_returns_accuracy_error(monkeypatch) -> None:
-    from emmy.compiler.backend.cuda import program
+def _compare_in_worker(lowered, frontend, backends: str) -> dict:
+    """The greedy-row comparison of ``lowered`` against the Torch twin of ``frontend``, as one job on a bench worker."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    async def _fake_oneshot(request, *, wall_timeout_s):
-        assert request["torch_spec"] == ("frontend_graph", "FE")
-        assert wall_timeout_s == 5.0
-        return {
-            "results": {"Emmy": 2.0},
-            "result": "BENCH",
-            "torch_available": True,
-            "captured": True,
-            "accuracy_error": "wrong-answer: rel err 1.000",
-        }
+    async def job():
+        backend = CudaBackend()
+        try:
+            return await backend.benchmark_compare_async(
+                lowered, torch_spec=("frontend_graph", frontend), bench_backends=backends, wall_timeout_s=180.0, warmup=2, iters=5
+            )
+        finally:
+            await backend.aclose_async_worker()
 
-    monkeypatch.setattr(program, "_run_job_oneshot", _fake_oneshot)
-    result = asyncio.run(
-        program.benchmark_compare_isolated_async(
-            lowered="LOWERED",
-            torch_spec=("frontend_graph", "FE"),
-            bench_backends="emmy",
-            wall_timeout_s=5.0,
-            warmup=1,
-            iters=1,
-            seed=0,
-        )
-    )
-
-    assert result == ({"Emmy": 2.0}, "BENCH", True, True, "wrong-answer: rel err 1.000")
+    return asyncio.run(job())
 
 
 @requires_cuda
 def test_compare_in_worker_returns_torch_and_emmy() -> None:
     from emmy.commands.run import _detect_stage, _passes_after_stage
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.backend.cuda.program import benchmark_compare_isolated_async
     from emmy.compiler.pipeline import Pipeline
 
     # A small torch_ref-runnable op; lowered in-parent (as the per-kernel sweep does), then the
@@ -67,22 +53,13 @@ def test_compare_in_worker_returns_torch_and_emmy() -> None:
     tail = _passes_after_stage(_detect_stage(g))
     lowered = Pipeline.build(tail).run(g) if tail else g
 
-    results, bench, torch_available, _captured, accuracy_error = asyncio.run(
-        benchmark_compare_isolated_async(
-            lowered=lowered,
-            torch_spec=("frontend_graph", fe),
-            bench_backends="eager,emmy",
-            wall_timeout_s=180.0,
-            warmup=2,
-            iters=5,
-            seed=0,
-        )
-    )
-    assert torch_available, "the worker should have rebuilt the torch reference from the frontend graph"
+    response = _compare_in_worker(lowered, fe, "eager,emmy")
+    results = response["results"]
+    assert response["torch_available"], "the worker should have rebuilt the torch reference from the frontend graph"
     assert results.get("Emmy", 0) > 0, f"missing emmy number: {results}"
     assert results.get("Eager PyTorch", 0) > 0, f"missing eager torch number: {results}"
-    assert bench is not None
-    assert accuracy_error is None
+    assert response["result"] is not None
+    assert response["accuracy_error"] is None
 
 
 def _scripted_worker(child_src: str):
@@ -429,7 +406,6 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
     from types import SimpleNamespace
 
     import emmy.commands.compile as compile_mod
-    import emmy.commands.run as run_mod
     import emmy.compiler.backend.cuda.backend as backend_mod
     from emmy.compiler.backend.cuda._bench_worker import _run_job
 
@@ -448,9 +424,9 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
 
     monkeypatch.setattr(compile_mod, "load_or_trace", lambda ns: (None, None, (object(), (), {})))
     monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
-    monkeypatch.setattr(run_mod, "_bind_inputs", lambda g, m, a, k, checkpoint=None: {"x": [0.0]})
-    monkeypatch.setattr(run_mod, "_eager_output", lambda m, a, k: "EAGER")
-    monkeypatch.setattr(run_mod, "bench_full_model_real", _fake_full_model)
+    monkeypatch.setattr("emmy.compiler.loader.binder.bind_inputs", lambda g, m, a, k, checkpoint=None: {"x": [0.0]})
+    monkeypatch.setattr("emmy.compiler.backend.correctness.eager_output", lambda m, a, k: "EAGER")
+    monkeypatch.setattr("emmy.compiler.backend.cuda.compare.bench_full_model_real", _fake_full_model)
 
     req = {
         "graph": "G",
@@ -462,11 +438,11 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
         "want_ref": True,
     }
 
-    monkeypatch.setattr(run_mod, "_check_accuracy", lambda outs, eager: "accuracy check failed vs eager: output n0")
+    monkeypatch.setattr("emmy.compiler.backend.correctness.check_accuracy", lambda outs, eager: "accuracy check failed vs eager: output n0")
     resp = asyncio.run(_run_job(dict(req)))
     assert resp["accuracy_error"] is not None and resp["result"] is None and not benched
 
-    monkeypatch.setattr(run_mod, "_check_accuracy", lambda outs, eager: None)
+    monkeypatch.setattr("emmy.compiler.backend.correctness.check_accuracy", lambda outs, eager: None)
     resp = asyncio.run(_run_job(dict(req)))
     assert resp["accuracy_error"] is None and resp["run_io"] == ({"x": [0.0]}, {"n0": [2.0]})
     assert benched and resp["results"] == {"Emmy": 1.0}
@@ -478,7 +454,6 @@ def test_run_job_trace_args_want_ref_without_eager_accuracy(monkeypatch) -> None
     from types import SimpleNamespace
 
     import emmy.commands.compile as compile_mod
-    import emmy.commands.run as run_mod
     import emmy.compiler.backend.cuda.backend as backend_mod
     from emmy.compiler.backend.cuda._bench_worker import _run_job
 
@@ -494,9 +469,9 @@ def test_run_job_trace_args_want_ref_without_eager_accuracy(monkeypatch) -> None
 
     monkeypatch.setattr(compile_mod, "load_or_trace", lambda ns: (None, None, (object(), (), {})))
     monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
-    monkeypatch.setattr(run_mod, "_bind_inputs", lambda g, m, a, k, checkpoint=None: {"x": [0.0]})
-    monkeypatch.setattr(run_mod, "_eager_output", lambda *args: pytest.fail("eager accuracy must stay disabled"))
-    monkeypatch.setattr(run_mod, "bench_full_model_real", _fake_full_model)
+    monkeypatch.setattr("emmy.compiler.loader.binder.bind_inputs", lambda g, m, a, k, checkpoint=None: {"x": [0.0]})
+    monkeypatch.setattr("emmy.compiler.backend.correctness.eager_output", lambda *args: pytest.fail("eager accuracy must stay disabled"))
+    monkeypatch.setattr("emmy.compiler.backend.cuda.compare.bench_full_model_real", _fake_full_model)
 
     resp = asyncio.run(
         _run_job(
@@ -518,7 +493,8 @@ def test_run_job_trace_args_want_ref_without_eager_accuracy(monkeypatch) -> None
 
 
 def test_run_job_trace_args_strict_accuracy_records_direct_proof(monkeypatch) -> None:
-    """Model-ID runs use the same strict eager proof as runnable frontend IR."""
+    """Model-ID runs use the same strict eager proof as runnable frontend IR, and hand the pinned rows eager's outputs
+    as their reference: a strict row is held to eager directly, not to the greedy pick."""
     from types import SimpleNamespace
 
     from emmy.compiler.backend.cuda import _bench_worker
@@ -528,10 +504,10 @@ def test_run_job_trace_args_strict_accuracy_records_direct_proof(monkeypatch) ->
         "emmy.commands.compile.load_or_trace",
         lambda _args: (object(), "slug", (module, (), {})),
     )
-    monkeypatch.setattr("emmy.commands.run._bind_inputs", lambda *_args, **_kwargs: {"x": [0.0]})
-    monkeypatch.setattr("emmy.commands.run._eager_output", lambda *_args, **_kwargs: {"n0": [2.0]})
+    monkeypatch.setattr("emmy.compiler.loader.binder.bind_inputs", lambda *_args, **_kwargs: {"x": [0.0]})
+    monkeypatch.setattr("emmy.compiler.backend.correctness.eager_output", lambda *_args, **_kwargs: ([9.0],))
     monkeypatch.setattr(
-        "emmy.commands.run._strict_correctness_proof",
+        "emmy.compiler.backend.correctness.strict_correctness_proof",
         lambda outputs, eager: {
             "status": "pass",
             "reference": "eager",
@@ -555,24 +531,24 @@ def test_run_job_trace_args_strict_accuracy_records_direct_proof(monkeypatch) ->
     async def fake_bench(*_args, **_kwargs):
         return {"Eager PyTorch": 2.0, "Emmy": 3.0}, SimpleNamespace(captured=True), True
 
-    monkeypatch.setattr("emmy.commands.run.bench_full_model_real", fake_bench)
-    resp = asyncio.run(
-        _bench_worker._run_job(
-            {
-                "graph": object(),
-                "torch_spec": ("trace_args", {"input": "org/model"}),
-                "strict_accuracy": True,
-                "accuracy": False,
-                "want_ref": False,
-                "warmup": 0,
-                "iters": 1,
-                "bench_backends": "eager,emmy",
-            }
-        )
-    )
+    monkeypatch.setattr("emmy.compiler.backend.cuda.compare.bench_full_model_real", fake_bench)
+    request = {
+        "graph": object(),
+        "torch_spec": ("trace_args", {"input": "org/model"}),
+        "strict_accuracy": True,
+        "accuracy": False,
+        "want_ref": False,
+        "warmup": 0,
+        "iters": 1,
+        "bench_backends": "eager,emmy",
+    }
+    resp = asyncio.run(_bench_worker._run_job(request))
     assert resp["accuracy_error"] is None
     assert resp["correctness"]["status"] == "pass"
     assert resp["results"] == {"Eager PyTorch": 2.0, "Emmy": 3.0}
+    assert resp["run_io"] is None
+    resp = asyncio.run(_bench_worker._run_job({**request, "want_ref": True}))
+    assert resp["run_io"] == ({"x": [0.0]}, {"n0": [9.0]})
 
 
 @pytest.mark.parametrize("strict", [False, True])
@@ -582,7 +558,6 @@ def test_worker_returns_a_throwing_torch_reference_error(monkeypatch, strict) ->
     import numpy as np
     import torch
 
-    from emmy.commands import run as run_mod
     from emmy.compiler.backend import torch_ref
     from emmy.compiler.backend.cuda import _bench_worker
     from emmy.compiler.backend.cuda import backend as backend_mod
@@ -603,10 +578,11 @@ def test_worker_returns_a_throwing_torch_reference_error(monkeypatch, strict) ->
             return SimpleNamespace(outputs={"out": np.ones(3)}, time_ms=1.0), None
 
         async def benchmark_async(self, _graph, **_kwargs):
-            return SimpleNamespace(time_ms=1.0, captured=True)
+            return BenchmarkResult(time_ms=1.0, captured=True)
 
     monkeypatch.setattr(backend_mod, "CudaBackend", FakeBackend)
-    monkeypatch.setattr(run_mod, "_to_cuda_tensor", lambda arr, dtype: torch.as_tensor(arr, dtype=torch_ref.torch_dtype(dtype)))
+    to_cuda = "emmy.compiler.backend.cuda.compare.to_cuda_tensor"
+    monkeypatch.setattr(to_cuda, lambda arr, dtype: torch.as_tensor(arr, dtype=torch_ref.torch_dtype(dtype)))
     response = asyncio.run(
         _bench_worker._run_job(
             {
@@ -628,7 +604,6 @@ def test_worker_returns_a_throwing_torch_reference_error(monkeypatch, strict) ->
 
 def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) -> None:
     """A completed Loop reference remains usable, but its failed greedy timing remains explicit."""
-    from emmy.commands import run as run_mod
     from emmy.compiler.backend.cuda import _bench_worker
     from emmy.compiler.backend.cuda import backend as backend_mod
 
@@ -642,7 +617,7 @@ def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) ->
         raise RuntimeError("repeated greedy timing crossed the watchdog")
 
     monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
-    monkeypatch.setattr(run_mod, "bench_lowered_vs_torch", _reference_then_fail)
+    monkeypatch.setattr("emmy.compiler.backend.cuda.compare.bench_lowered_vs_torch", _reference_then_fail)
     response = asyncio.run(
         _bench_worker._run_job(
             {
@@ -669,7 +644,6 @@ def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) ->
 def test_strict_reference_precision_is_scoped_to_worker_job(monkeypatch, request, strict, fails, initial) -> None:
     import torch
 
-    from emmy.commands import run as run_mod
     from emmy.compiler.backend.cuda import _bench_worker
     from emmy.compiler.backend.cuda import backend as backend_mod
 
@@ -692,7 +666,7 @@ def test_strict_reference_precision_is_scoped_to_worker_job(monkeypatch, request
         return {}, None, True, True, None, None, None
 
     monkeypatch.setattr(backend_mod, "CudaBackend", lambda **_kwargs: object())
-    monkeypatch.setattr(run_mod, "bench_lowered_vs_torch", compare)
+    monkeypatch.setattr("emmy.compiler.backend.cuda.compare.bench_lowered_vs_torch", compare)
     request = {
         "graph": "LOWERED",
         "torch_spec": ("frontend_graph", "FRONTEND"),
@@ -716,7 +690,6 @@ def test_strict_reference_precision_is_scoped_to_worker_job(monkeypatch, request
 def test_frontend_graph_worker_returns_execution_symbolic_environment(monkeypatch) -> None:
     from types import SimpleNamespace
 
-    from emmy.commands import run as run_mod
     from emmy.compiler.backend.cuda import _bench_worker
     from emmy.compiler.backend.cuda import backend as backend_mod
 
@@ -729,7 +702,7 @@ def test_frontend_graph_worker_returns_execution_symbolic_environment(monkeypatc
         return {"Emmy": 1.0}, SimpleNamespace(captured=True), False, True, None
 
     monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
-    monkeypatch.setattr(run_mod, "bench_lowered_vs_torch", _fake_compare)
+    monkeypatch.setattr("emmy.compiler.backend.cuda.compare.bench_lowered_vs_torch", _fake_compare)
 
     response = asyncio.run(
         _bench_worker._run_job(
@@ -816,8 +789,8 @@ def test_compare_times_torch_compile_on_a_quantized_twin_after_emmy() -> None:
     """A twin that rounds a computed value into a quantized format holds torch.compile to no elementwise verdict (two
     correct evaluations land codes apart) and may trip a device-side assert in its quantize: the column is built and
     timed in a window of its own after Emmy's, so a failure there costs the record only that column."""
-    from emmy.commands.run import _detect_stage, _passes_after_stage, _quantized_twin
-    from emmy.compiler.backend.cuda.program import benchmark_compare_isolated_async
+    from emmy.commands.run import _detect_stage, _passes_after_stage
+    from emmy.compiler.backend.correctness import quantized_twin
     from emmy.compiler.dtype import F8E4M3, F16
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
@@ -830,21 +803,12 @@ def test_compare_times_torch_compile_on_a_quantized_twin_after_emmy() -> None:
     g.add_node(ElementwiseOp(op="from_f8e4m3"), ["x_bits"], Tensor("y", (64, 128), F16), node_id="y")
     g.inputs, g.outputs = ["x"], ["y"]
     fe = g.copy()
-    assert _quantized_twin(fe)
+    assert quantized_twin(fe)
     tail = _passes_after_stage(_detect_stage(g))
     lowered = Pipeline.build(tail).run(g) if tail else g
 
-    results, bench, torch_available, _captured, accuracy_error = asyncio.run(
-        benchmark_compare_isolated_async(
-            lowered=lowered,
-            torch_spec=("frontend_graph", fe),
-            bench_backends="eager,tcompile,emmy",
-            wall_timeout_s=180.0,
-            warmup=2,
-            iters=5,
-            seed=0,
-        )
-    )
-    assert torch_available and bench is not None and accuracy_error is None
+    response = _compare_in_worker(lowered, fe, "eager,tcompile,emmy")
+    results = response["results"]
+    assert response["torch_available"] and response["result"] is not None and response["accuracy_error"] is None
     assert results.get("Emmy", 0) > 0 and results.get("Eager PyTorch", 0) > 0, results
     assert results.get("torch.compile", 0) > 0, results

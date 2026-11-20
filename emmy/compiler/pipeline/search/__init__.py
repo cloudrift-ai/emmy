@@ -16,14 +16,13 @@ Op identity and the rewrite-chain walk live on the ops themselves —
 """
 
 from emmy.compiler.pipeline.search.candidate import Candidate, Cursor
-from emmy.compiler.pipeline.search.db import PerfRow, PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import PerfRow, SearchDB
 from emmy.compiler.pipeline.search.policy import greedy_decide
 
 __all__ = [
     "Candidate",
     "Cursor",
     "PerfRow",
-    "PerfStats",
     "SearchDB",
     "greedy_decide",
 ]

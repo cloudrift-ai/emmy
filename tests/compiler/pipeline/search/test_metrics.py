@@ -95,8 +95,8 @@ def test_topk_regret_widens_the_frontier():
 def test_topk_regret_refuses_a_group_it_cannot_discriminate():
     """The guard that matters most. A pool of 5 scored at ``k=10`` has its whole self as its top 10, so
     it returns a perfect 1.00 for a reason that has nothing to do with the model — and averaged into a
-    report it is indistinguishable from a model that genuinely found the optimum. At the measurement
-    freeze's median group size of 5, that describes most of the corpus."""
+    report it is indistinguishable from a model that genuinely found the optimum. At a median group size of 5, that
+    describes most of a corpus."""
     pred, meas = [1.0, 2.0, 3.0], [30.0, 20.0, 10.0]
     assert topk_regret(pred, meas, 3) is None  # k == n: the frontier is the pool
     assert topk_regret(pred, meas, 10) is None

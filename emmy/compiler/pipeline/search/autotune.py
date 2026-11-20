@@ -18,6 +18,7 @@ import re
 
 import numpy as np
 
+from emmy import config
 from emmy.compiler.pipeline.search.features import Featurizer
 
 #: Rows the prior picks before the process has anything to fit.
@@ -29,10 +30,10 @@ _PART = re.compile(r"^([a-z_]*?)(\d+)(?:x(\d+))?$")
 
 def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
     """The one scheduled kernel of ``graph`` and every complete row its forks offer, under the kernel set the greedy
-    compile takes. A program with
+    compile takes, walked on ``EMMY_WORKERS`` processes. A program with
     several scheduled kernels is refused: a bare pin reaches them all."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import parallel_leaf_rows  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.greedy import _schedule_fork, greedy_decide  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
@@ -42,7 +43,8 @@ def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
 
     def decide(fp):
         if _schedule_fork(fp) and fp.node_id not in pools:
-            pools[fp.node_id] = (fp.root_op, [row for leaf in iter_leaves(fp.options) if WORK.name in (row := leaf_knobs(leaf))])
+            rows = parallel_leaf_rows(fp.options, workers=config.workers())
+            pools[fp.node_id] = (fp.root_op, [row for row in rows if WORK.name in row])
         return greedy(fp)
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx, db=db).resolve(graph, decide)
@@ -97,14 +99,27 @@ def _erf(x: np.ndarray) -> np.ndarray:
     return np.sign(x) * y
 
 
+#: The rows one forked worker featurizes at a time.
+_FEATURIZED = 512
+
+
+def _featurize(kernel: tuple, start: int) -> list:
+    featurizer, op, rows = kernel
+    return [featurizer.features(op, row) for row in rows[start : start + _FEATURIZED]]
+
+
 def prior_scores(op, rows: list[dict], ctx) -> list[float]:
-    """The schedule prior's score of every row, lower is better."""
+    """The schedule prior's score of every row, lower is better. The rows are featurized on ``EMMY_WORKERS`` forked
+    processes and scored here."""
+    from emmy.compiler.pipeline.fork import forked  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
-    prior, featurizer = load_prior(), Featurizer.of(ctx)
+    prior = load_prior()
+    chunks = forked(_featurize, range(0, len(rows), _FEATURIZED), config.workers(), shared=(Featurizer.of(ctx), op, rows))
+    features = [f for chunk in chunks for f in chunk]
     scores: list[float] = []
     for i in range(0, len(rows), 4096):
-        scores += prior.mean_scores_features([featurizer.features(op, r) for r in rows[i : i + 4096]])
+        scores += prior.mean_scores_features(features[i : i + 4096])
     return scores
 
 

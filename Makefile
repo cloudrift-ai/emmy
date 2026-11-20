@@ -5,7 +5,7 @@ help:
 	@echo "Server Benchmark Makefile"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  setup          - Create venv, install Python packages, build the Rust extensions, fetch the LFS freeze"
+	@echo "  setup          - Create venv, install Python packages, build the Rust extensions"
 	@echo "  setup-agent    - Create venv and install API-agent workflow dependencies"
 	@echo "  lint           - Run linter and format checks"
 	@echo "  format         - Auto-format code and fix lint violations"
@@ -47,14 +47,8 @@ venv/.setup-agent-complete: $(AGENT_SOURCE)/pyproject.toml
 # cannot leave `make setup` permanently succeeding with an unusable environment.
 # The prerequisites are every input of the install: the package metadata and the Rust
 # sources pip builds into the package, so a dependency or Rust edit refreshes the venv.
-# A git checkout also fetches the one LFS file set the suite reads, the measurement
-# freeze; every other LFS object stays a pointer (tests.yml says why).
 RUST_SOURCES := Cargo.toml Cargo.lock $(shell find crates -name '*.rs' -o -name Cargo.toml)
 venv/.setup-complete: pyproject.toml $(RUST_SOURCES)
-	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
-		git lfs version >/dev/null 2>&1 || { echo "❌ git-lfs is required: sudo apt-get install git-lfs"; exit 1; }; \
-		git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"; \
-	fi
 	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \

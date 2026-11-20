@@ -45,13 +45,13 @@ from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, apply
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
+from emmy.compiler.ir.tile.split import merged, split_axis
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
@@ -60,9 +60,6 @@ from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_nest, reform
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
 
 logger = logging.getLogger(__name__)
-
-_SPLIT = "_ksplit"  # the cross-CTA split grid axis
-
 
 # ---- what a kernel / an axis can carry -------------------------------------------------------- #
 
@@ -90,54 +87,6 @@ def _stream_refusal(node: Fold, k_axis: Axis, width: int) -> str | None:
     if node.carries or node.observe is not None:
         return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is built for a monoid or a twisted carrier"
     return None
-
-
-def _slice_length(k_axis: Axis, width: int):
-    """The positions one partition's slice of the stream spans: ``K/w``, or ``⌈K/w⌉`` of a symbolic stream."""
-    if k_axis.extent.is_static:
-        return Literal(k_axis.extent.as_static() // width, "int")
-    return BinaryExpression("/", BinaryExpression("+", k_axis.extent.expression, Literal(width - 1, "int")), Literal(width, "int"))
-
-
-def _clamped(k_axis: Axis, position):
-    """``position`` as the stream's loads read it: a symbolic stream's overhanging slice reads its last position
-    (:func:`~emmy.compiler.ir.address.clamp_to`, which the gmem-direct fragment loaders read back)."""
-    return position if k_axis.extent.is_static else clamp_to(position, k_axis.extent.expression)
-
-
-def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
-    """``fold`` folding nothing at any ``position`` past a symbolic stream's end, which the last slice overhangs; a
-    static stream's slices tile it exactly. A monoid folds its seed there. A twisted carrier's score takes the
-    pivot's identity, added through the `where` selects a program's own mask spells — the coordinate mask the chunk tier
-    lands — so the carrier past the end weighs its channels by nothing, and an all-overhang slice folds a finite
-    state the combine then scales away."""
-    if k_axis.extent.is_static:
-        return fold
-    end = k_axis.extent.expression
-    stmts: list[Statement] = []
-    if fold.twist is None:
-        inside = BinaryExpression("<", position, end)
-        results = []
-        for name, seed in zip(fold.lift.results, fold.init, strict=True):
-            stmts += [
-                Let(name=f"{name}__seed", value=seed),
-                Select(name=f"{name}__in", branches=(SelectBranch(name, inside), SelectBranch(f"{name}__seed", Literal(True, "bool")))),
-            ]
-            results.append(f"{name}__in")
-    else:
-        score, *channels = fold.lift.results
-        stmts += [
-            Let(name=f"{score}__key", value=position),
-            Let(name=f"{score}__end", value=end),
-            Let(name=f"{score}__keep", value=Literal(0.0, "float")),
-            Let(name=f"{score}__fill", value=Literal(float(fold.init[0]), "float")),
-            Assign(f"{score}__inside", apply("less", f"{score}__key", f"{score}__end")),
-            Assign(f"{score}__mask", apply("where", f"{score}__inside", f"{score}__keep", f"{score}__fill")),
-            Assign(f"{score}__in", apply("add", score, f"{score}__mask")),
-        ]
-        results = [f"{score}__in", *channels]
-    body = Body((*fold.lift.body, *stmts))
-    return fold.replace(lift=Lambda.closing(fold.lift.params, body, tuple(results)))
 
 
 def _direct_atomic_output(outputs) -> str | None:
@@ -852,98 +801,6 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
     return result
 
 
-# ---- slicing the head fold -------------------------------------------------------------------- #
-
-
-def _slice_fold(fold: Fold, axis: Axis, width: int, split: Axis) -> tuple[Axis, Fold]:
-    """``(the sliced axis, the same monoid Fold over one CTA's absolute contiguous slice)`` — the
-    generic (non-contraction) slicer: the whole fold rides ``Fold.rewrite`` under the σ-offset."""
-    b = _slice_length(axis, width)
-    offset = BinaryExpression("+", Var(axis.name), BinaryExpression("*", Var(_SPLIT), b))
-    sigma = Sigma({axis.name: _clamped(axis, offset)})
-    sliced_axis = replace(axis, extent=Dim(b), window=Window(parent=axis.source_axis or axis, partition=True))
-    # RE-DERIVED over a narrower axis, not renamed and not substituted-through: the fold keeps its
-    # own binder (same name, sliced extent) while its operands' coordinates take the σ-offset. A
-    # blanket σ would be refused as capture — this fold BINDS the name σ maps — and rightly so;
-    # what changes here is the axis itself, which only the caller can say.
-    operands = tuple(_sliced_edge(edge, sigma, axis.name, sliced_axis, split) for edge in fold.operands)
-    body = Body(tuple(stmt.substitute(sigma) for stmt in fold.lift.body))
-    # Re-CLOSED, exactly as the contraction slicer closes its own: a lift that reads the reduce
-    # coordinate directly — a causal mask's ``row <= key`` — reads the partition coordinate once the
-    # σ-offset lands, and keeping the original param list leaves it unbound. The cut that mints a
-    # piece whose head IS such a masked reduce makes the split pass offer ``g<n>k`` on it, and greedy
-    # prices a fork by materializing every arm, so merely OFFERING the split raised.
-    lift = Lambda.closing(fold.lift.params, body, fold.lift.results)
-    return sliced_axis, _masked(fold.replace(operands=operands, lift=lift), axis, offset)
-
-
-def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpression]:
-    """Factor a contraction axis into ``ksplit × kslice``. ``ksplit`` (extent ``w``, name
-    ``_<k>_ks``) becomes the partial's lead grid axis, parallelized across CTAs and combined in
-    the finalize; ``kslice`` (extent ``K/w``, or ``⌈K/w⌉`` of a symbolic axis, the ORIGINAL name)
-    is the sliced contraction's. The ``sigma`` maps the original ``k`` to ``ksplit·(K/w) + kslice``,
-    clamped to a symbolic axis's last position (:func:`_clamped`), so the operand loads reconstruct
-    the absolute index, returned last; distinct names are what avoid a double-reduce. The slice
-    carries its parentage: a cross-CTA split is CONSUMED by the rewrite that realizes it, and an
-    axis that is already a partition window is one nothing may partition again."""
-    b = _slice_length(k_axis, w)
-    ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
-    kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))
-    position = BinaryExpression("+", BinaryExpression("*", Var(ksplit.name), b), Var(k_axis.name))
-    return ksplit, kslice, Sigma({k_axis.name: _clamped(k_axis, position)}), position
-
-
-def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | None = None):
-    """An operand edge σ-reindexed to absolute k for a split partition — the SAME rule on either
-    edge. A MATERIALIZED edge rewrites its gmem index; a COMPUTED cone rewrites its per-cell BODY
-    and every K-VARYING producer edge it composes (attention's per-cell score contraction — the
-    slice's own k coordinate reaches gmem through that node, so leaving it unreindexed makes every
-    partition recompute partition 0's scores). The cone's row-invariant prologue (the per-row
-    statistic the K seam reads off the node boundary) spans the whole row and stays FULL-ROW in
-    every partition, each recomputing it — the REDUNDANT-STATISTIC split. That redundancy is what
-    the split trades for parallelism; whether it pays on a given shape is evidence's decision."""
-    if isinstance(edge, Load):
-        return edge.replace(index=tuple(sigma.apply(e) for e in edge.index))
-
-    ops = tuple(_sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
-    body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
-    # Re-CLOSED, like every other σ-reindexed lift here. σ maps one coordinate onto an expression
-    # over TWO (slice and partition), and expanding a param in PLACE shifted the operand
-    # correspondence the prefix carries — by a ``free_vars()`` set order, so which name landed there
-    # moved with the hash seed and ``_prune_unread`` then dropped a param the body still read.
-    # Closing keeps the prefix exactly and appends the partition coordinate where a coordinate sits.
-    lift = Lambda.closing(edge.lift.params, body, edge.lift.results)
-    return edge.replace(operands=ops, lift=lift)
-
-
-def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, Fold]:
-    """``(ksplit, kslice, sliced)`` for a contraction head: the SAME bilinear node a non-split matmul
-    builds, over ``kslice`` with operands σ-reindexed to absolute k, threading the node's OWN
-    semiring (the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}`` is licensed by that
-    ⊕-monoid's associativity). ``Fold.contraction`` regenerates the componentwise ⊕ over the same
-    accumulator names, so the finalize folds the workspace states through the same monoid."""
-    ksplit, kslice, sigma, position = _factor_k(k_axis, w)
-    # Rebuilt DIRECTLY over the σ-reindexed operands, in stored order: the slice is the same term
-    # with a narrower axis, so its monoid and seeds are the node's own — there is nothing for a
-    # former to re-derive, and no role to re-name.
-    operands = tuple(_sliced_edge(edge, sigma, node.axis, kslice, ksplit) for edge in node.operands)
-    # The LIFT takes σ too, per statement so the binder is not shadowed away — the same rule
-    # :func:`_slice_fold` applies on the generic side. A lift that only weighs its operands reads
-    # no k and this changes nothing; one that reads the contraction coordinate DIRECTLY is
-    # comparing against a partition-local index while its operands already reach absolute k.
-    # Causal attention is exactly that lift: its mask is ``row < key``, and left unreindexed every
-    # partition above the first admits keys far above the diagonal. The lift reads the absolute key
-    # UNCLAMPED: only a load needs the clamp, and a mask that compared a clamped key would admit the
-    # overhang as the stream's last position — :func:`_masked` masks it, and the chunk tier reads
-    # the comparison for its stream bounds, which a clamp would hide.
-    # Re-CLOSED, not re-spelled: the head's first param is its iteration binder, which must keep
-    # its position, so the partition coordinate the substituted body now reads joins as a TRAILING
-    # param — where a coordinate already sits, and past the operand correspondence.
-    body = Body(tuple(stmt.substitute(Sigma({node.axis: position})) for stmt in node.lift.body))
-    lift = Lambda.closing(node.lift.params, body, node.lift.results)
-    return ksplit, kslice, _masked(node.replace(operands=operands, lift=lift), k_axis, position)
-
-
 # ---- the piece / fragment builders ------------------------------------------------------------ #
 
 
@@ -1037,22 +894,6 @@ def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple, shapes: dic
     return replace(piece, knobs=consume_kernel_row(piece.knobs))
 
 
-def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...]) -> Fold:
-    """Fold already-reduced state tuples through ``algebra``'s unchanged monoid."""
-    values = tuple(name for load in loads for name in load.defines())
-    return Fold(
-        # The workspace reads are slabs like any other gmem read, over the split axis and the
-        # output coordinates the enclosing placement binds.
-        operands=tuple(Fold.slab(load) for load in loads),
-        lift=Lambda(params=(axis.name, *values), body=Body(), results=values),
-        init=algebra.init,
-        base=algebra.base,
-        # The SAME ⊕ the partials were produced under — but over finished carrier states read out
-        # of the workspace, so there is no per-element contribution left for ψ to be applied to.
-        twist=None if algebra.twist is None else Twist(recipe=algebra.twist.recipe, channels=()),
-    )
-
-
 def _project(fold: Fold, body, axes: tuple) -> Fold:
     """Attach a pure projection body to one Fold, dropping the empty wrapper."""
     body = Body.coerce(body)
@@ -1140,12 +981,9 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     root, region, body, stores, projection_pieces = _split_projection(tile, root, node)
     free = tuple(tile.place.free)
     k_axis = tile.axis_of(node.axis)
-    if node.as_contraction() is not None:
-        split, kslice, partial_fold = _sliced_contraction(node, k_axis, cta)
-    else:
+    if node.as_contraction() is None:
         _enforce(_stream_refusal(node, k_axis, cta))
-        split = Axis(name=_SPLIT, extent=Dim(cta))
-        kslice, partial_fold = _slice_fold(node, k_axis, cta, split)
+    split, kslice, partial_fold = split_axis(node, k_axis, cta)
     axes = _with_axes(tile.axes, split, kslice)  # the pieces' axis table: the slice under its own name
     states = partial_fold.combine.results
     n_comp = len(states)
@@ -1219,7 +1057,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     fin_axis = replace(split, window=Window(parent=split, partition=True))
     other = tuple(f"{nm}__p" for nm in states)
     loads = tuple(Load(names=(other[i],), input=ws_name, index=ws_index(i)) for i in range(n_comp))
-    fin_fold = _state_fold(fin_axis, partial_fold, loads)
+    fin_fold = merged(fin_axis, partial_fold, loads)
     fin_stores = stores
     if not fin_stores:
         # A bare carrier's grid-cell store is materializer glue; the finalize spells it over the

@@ -76,11 +76,7 @@ cannot overwrite newer work. A job whose result depends on only part of the tree
 instead: discovery guards `recipes`, so a compiler change merged during its run is rebased over. Each prior leg
 writes its comparison line to the job output named after its space, which GitHub combines across the matrix for the
 notification job. Each leg also runs `eval prior --json` on the weights it leaves on `main` and appends how many pools
-the prior re-decides as their golden did and the regret of the picks a golden row measured (`prior_picks.jq`); the
-schedule leg adds the regret over the measured pools (`measured_regret.jq`). The schedule leg then folds the files
-tunes wrote beside each card's file into the measurement freeze: the directory alone, imported into a freeze-only DB
-and frozen back, with LFS installed locally so the push uploads the payload; it commits the directory when the bytes
-changed, and every other job tolerates that move.
+the prior re-decides as their golden did and the regret of the picks a golden row measured (`prior_picks.jq`).
 
 The gap job runs `emmy golden list` over the repository goldens and the realization corpus and lists the corpus's
 expected-failure cases; `compiler_gaps.jq` turns them into one line: the rows behind `torch.compile` and the slowest
@@ -95,16 +91,13 @@ hardware golden, which `tests/github/test_golden_fill_recipe.py` keeps whole —
 job copies the returned file over the golden, holds it to `emmy golden check`, and pushes it to `main`, after a
 timed-out fill too, so a large file fills over several nights. The other jobs tolerate the hardware goldens moving on
 `main` while they run. A hardware golden's candidate file copies the golden's tables (GLOSSARY, "Candidate file"), so
-where the filled golden has one the job copies them again with `emmy candidates build`, reading no freeze, and pushes
+where the filled golden has one the job copies them again with `emmy candidates build`, from no tune DB, and pushes
 the two files together.
 
-The freeze job, after the prior job's fold, compiles every row of the measurement freeze and of the candidate files
-under its own schedule and drops the rows the compiler no longer realizes (`emmy golden realize --drop`, `emmy
-candidates realize --drop`), folds the freeze once more and pushes both. It rents nothing.
-
 `.github/candidates-fill/recipe.yaml` is the fill recipe's twin for the candidate files: one row per hardware golden
-on its card, a tune of every kernel `emmy candidates build --json` lists as under its target, and the tunes' freeze
-files returned. No workflow runs it; the `refresh-candidates` skill does, on a rented card or a box handed to it.
+on its card, a tune of every kernel `emmy candidates build --json` lists as under its target, then the candidate file
+built again from the tune DB those tunes wrote, returned with that tune DB. No workflow runs it; the
+`refresh-candidates` skill does, on a rented card or a box handed to it.
 
 The workflow ends with one GitHub-hosted notification job that waits for every other job and posts a single summary to
 #emmy-robots: each job's result, whether the durations changed, each prior's comparison and picks, the compiler gaps,

@@ -38,18 +38,14 @@ relevant `ARCHITECTURE.md` before answering.
   generator. Use the README architecture index for their design.
 - The CUDA toolkit's `ptxas` (on `PATH` or under `CUDA_HOME`), which assembles each kernel's PTX; NVIDIA ships it in
   the `cuda-nvcc` package. nvcc itself is not used.
-- `git-lfs`: the test suite reads the measurement freeze, which git LFS stores
-- `make setup` to create the virtual environment, install dependencies, build both Rust extensions and fetch the
-  freeze; it runs again on its own after a change to `pyproject.toml` or to any Rust source
+- `make setup` to create the virtual environment, install dependencies and build both Rust extensions; it runs again
+  on its own after a change to `pyproject.toml` or to any Rust source
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, compiler stages dump intermediate debug artifacts
   (graphs, each kernel's PTX, execution plans) to this directory. Frontend provenance slices used by `run --bench` stay
   in memory; stable Torch IR is persisted only inside golden files. A kernel's name is `k_` and the first 12 hex digits
   of its exact identity (`k_3f2a1b9c04de`), so it says nothing about the operations the kernel realizes.
-- `EMMY_FREEZE_DIR` environment variable (optional) — the directory a `run --bench --tune N` freezes its rows into as
-  a file beside the card's: the repository freeze of an editable checkout when unset, none when set empty (the test
-  suite), else that directory. README "Keep what a tune measured".
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`), the store of measured kernel rows. `emmy run --bench` writes to it, and a greedy
   `compile` / `run` / `serve` creates it on first use: the golden rows in scope (the live card's repository goldens,
@@ -126,6 +122,25 @@ kernel key, a dataset, the weights, a memo — may hold computed values under a 
 The pipeline `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` pins the golden field lists,
 `tests/compiler/pipeline/test_strategies.py` checks that every op's knobs are decisions, and
 `tests/compiler/pipeline/search/db/test_db.py` pins the identities the tune DB's version was cut at.
+
+## Compiler Invariant: Measured Evidence Is Read From The DB
+
+`SearchDB` is the one representation of what was measured: kernels, the decisions that minted them, and their
+measurements, in one schema, whichever instance holds them (the tune DB, a dataset DB, an in-memory one). The join on
+a kernel's exact identity, its sizes, the card and the regime, the rule for which of two rows stands, and the price of
+a kernel-set decision are written once, there. A golden-shaped file (a golden, a candidate file) is how rows
+are kept in the repository; it becomes evidence through the one importer.
+
+- **A reader that needs a file's measurements imports the file and queries the instance.** Never group a file's rows
+  by identity, sizes or regime in the reader.
+- **Never keep the rows in a second structure beside the tables.** A pick asks the DB per kernel; an in-memory copy of
+  every row is a second evidence index with its own staleness.
+- **A new question about measurements is a `SearchDB` method,** never a walk of golden documents.
+- **Read a file directly only for what it alone holds:** its traced programs, the row names, pins and notes a command
+  lists or replays by, and its own upkeep (check, restamp, realize, a record's write-back).
+
+The pipeline `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` pins the modules that read a
+measurement off a file's row and holds the compile path to the DB.
 
 ## Running Tests
 
@@ -232,17 +247,15 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N` | trace + run the compiler; print or save any IR stage; compile a golden's stored traced program |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy eval {prior,golden} …` | `eval prior DATASET [--pools {golden,measured}]` scores a dataset's pools with the prior of the dataset's space and re-decides each pool with no measurement in scope; `eval golden --golden PATH --serving-config PATH` audits a golden against its serving matrix |
-| `emmy golden {list,check,restamp,realize} [PATH…]` | list measured rows beside `torch.compile`, slowest relative to it first; say what a restamp onto the fresh lowering of a golden's own programs would change; write that rewrite (every repository golden by default); compile every row of the named files under its own schedule and say which the compiler no longer realizes, the check a measurement freeze admits, and with `--drop` write the files back without them |
-| `emmy candidates {build,check,restamp,realize} [PATH…]` | fill each hardware golden's candidate file — a few measured schedules that are not the best known one, per group — from the measurement freeze, and list the groups still under their target (`--json`); check, restamp and prune those files as `emmy golden` does a golden; the `refresh-candidates` skill owns the flow, the card run included |
+| `emmy golden {list,check,restamp,realize} [PATH…]` | list measured rows beside `torch.compile`, slowest relative to it first; say what a restamp onto the fresh lowering of a golden's own programs would change; write that rewrite (every repository golden by default); compile every row of the named files under its own schedule and say which the compiler no longer realizes, and with `--drop` write the files back without them |
+| `emmy candidates {build,check,restamp,realize} [PATH…]` | fill each hardware golden's candidate file — a few measured schedules that are not the best known one, per group — from the tune DB the card's tunes wrote (`--db PATH`), and list the groups still under their target (`--json`); check, restamp and prune those files as `emmy golden` does a golden; the `refresh-candidates` skill owns the flow, the card run included |
 | `emmy fit DATASET WEIGHTS [--folds N]` | fit the prior of a dataset's space from its golden groups and cross-validate it; the whole refit is README's "Fit the priors" |
-| `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line, or every repository golden and the repository freeze (`--repository`; nothing by default, and never the tune DB), each file's rows filed under the identity computed from its stored kernel; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
+| `emmy db {import,export,check} --db PATH …` | fill a DB instance from the golden files and tune DBs named on the command line, or every repository golden (`--repository`; nothing by default, and never the tune DB), each golden's rows filed under the identity computed from its stored kernel; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; check its tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
  Refitting the priors is the commands under README's "Fit the priors". Every path is explicit — the
-DB instance `emmy db import --db PATH` fills (the tune DB's tables in a file of their own, never read by a compile; the
-measurement freeze under `emmy/compiler/pipeline/search/freezes/`, tracked in **git LFS**, is read by `--repository`
-beside the goldens, and a tune DB named on the command line joins them the same way; a `run --bench --tune N` writes
-its rows as a file beside the card's there, committed with the change, and the nightly refresh folds the files into
-each card's — README "Keep what a tune measured"), and the dataset `emmy db export` writes from it (a
+DB instance `emmy db import --db PATH` fills (the tune DB's tables in a file of their own, never read by a compile;
+`--repository` reads the repository goldens, and a tune DB named on the command line joins them with the rows it
+measured itself — README "Keep what a tune measured"), and the dataset `emmy db export` writes from it (a
 `manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
 which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. When a PR must
@@ -265,7 +278,7 @@ Quick test models / scripts (for local iteration):
 
 ## Key Make Targets
 
-- `make setup` — create venv, install dependencies (includes ruff), build the Rust extensions, fetch the LFS freeze
+- `make setup` — create venv, install dependencies (includes ruff), build the Rust extensions
 - `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests, which
   `make bench-kernels` and the golden workflows run)
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a lowering or schedule-codec

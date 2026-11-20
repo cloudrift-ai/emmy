@@ -146,10 +146,9 @@ For the whole-target check, request `--bench-backends eager,tcompile,emmy --stri
 isolated rows are recorded, `--no-record-evidence` keeps that check from replacing their measurements. The
 `--record-greedy` writer copies the picked kernel set from the DB and records a root seed's whole-pick latency beside
 `torch.compile`; each measured row's `tried` is the number of schedules the DB held for that kernel. Missing
-`torch.compile` timing remains a reported gap. A `--tune` run on the card also writes its rows as a file beside the
-card's under `search/freezes/`; copy those files back with the working golden (`scp`, as the golden itself comes
-back) and commit them from the local checkout, where `git lfs install` has run once (README, "Keep what a tune
-measured").
+`torch.compile` timing remains a reported gap. A `--tune` run's rows stay in the card's tune DB. After a hardware
+golden's tunes, copy that DB back with the working golden and fill the golden's candidate file from it
+(`emmy candidates build GOLDEN --db TUNE_DB`; the `refresh-candidates` skill).
 
 Promote the validated entries through `GoldenFile.edit(path)` with `add_kernel`, `add_routing` and `upsert_row`,
 including qualified whole-target latency on its root seed. A canonical file holds the same exact kernel at another
@@ -173,6 +172,16 @@ When the restamp leaves nothing, or drops the kernels a deploy needs (a serving 
   raw axes omit the strides the cut applies). Add cuts one at a time; more cuts are not faster by themselves. Then
   record the kernel set with `--record-greedy` under its pins, and for multi-millisecond pieces pass
   `--warmup 2 --iters 5` so the isolated re-bench stays under the GPU cap.
+- **A cut that now mints another number of pieces** (after a cut-pass change the restamp reports `dropped decision …
+  does not take it the same way` across many programs) — record into a copy of the file from *before* the restamp,
+  so the rows of the pieces that kept their identity stay in scope, and restamp the copy after. Go target by target,
+  narrow to wide, with one tune DB per card. Give a root that has no root row a traced-only row to name; naming a
+  piece's row replays its knobs on every kernel. Bench the root unpinned until a round is clean, then record it with
+  `--record-greedy --strict`. A strict record also compiles the family's narrower targets from evidence, so an
+  unmeasured narrower root stops it, named by a kernel that is not in the target (`-v` prints the realization it
+  was compiling); bench that root first. A re-keyed reduce comes out of the prior on a thread tile, often a hundred
+  times slow: tune it alone (`--kernel NAME --tune N` without `--realization`, which pins the schedule) and record
+  the target again. Keep a record only where the root is no slower than the unchanged compiler on the same card.
 - **No longer relevant** (an experiment's card, a retired quantization) — `git rm` the file and its nodes' entries in
   `tests/durations.json`, and say in the PR what evidence went with it. That call is the author's; propose it, do not
   make it.

@@ -550,7 +550,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   gate only weights the selection), and the runner refuses to route such a layer without them.
   Qwen3.8-Flash-Next's sparse-attention layers get the fork's `Qwen4ExpQSAAttention` the same way: one top-k buffer
   for every layer, and a prefix that keeps the checkpoint's `self_attn` spelling, which its quantization config
-  excludes. Its `q_proj` (query and output gate), `k_proj` and `v_proj` load as the three shards of `qkv_proj`. Its
+  excludes. Its `q_proj` (query and output gate), `k_proj` and `v_proj` load as the three shards of `qkv_proj`. On a
+  step of up to the decode bucket's tokens, each such layer takes its query and key norms and rope from one Emmy
+  program (`qk-norm-rope-sym`, `query_key_graph`) in place of the fork's eager modules, about twenty small kernels
+  per layer: one instance per layer, lent the layer's norm weights and the rotary cache to the model's positions, which
+  the twin traces at a rank's heads (`_emmy_query_key`). A wider step keeps the fork's modules. Its
   Gated DeltaNet layers get vLLM's `QwenGatedDeltaNetAttention`, as the fork's own model builds them: `in_proj_qkv`
   and `in_proj_z` load as the shards of `in_proj_qkvz`, `in_proj_b` and `in_proj_a` as those of `in_proj_ba`. Before
   the checkpoint loads, both kinds of sublayer move their unquantized projections onto the fork's single-token fp16
@@ -980,18 +984,19 @@ Recorded follow-ups, in impact order:
   of the greedy pick records the exact identity it asks for (`policy.greedy.evidence_reads`): the fork's kernel, the
   pieces a priced cut or split leaves, the readers a layout arm settles, the kernels a failure check names. The
   plan template cache keeps those identities with each template and records them again on a hit. The entry keeps
-  them, beside a digest of the golden evidence they reach (`golden.rows_digests`): the live regime's measured rows
-  of those kernels (sizes, schedule row, median), the routing rows stored on them, the same for every piece those
-  routing rows reach, and whether the scope holds any measured row of the live regime at all (a compile with none
-  prices no arm from its pieces, so it looks no piece up). Each file's rows are filed under the identity its stored
-  Loop IR lifts to, as the compile's import files them. So a program's row set is known before it compiles again:
-  its previous compile named it, and the load re-reads those kernels' rows from the files now in scope. A program
+  them, beside a digest of the evidence they reach in the tune DB (`SearchDB.evidence_digest`), where the golden
+  rows in scope are imported beside the rows this machine measured: the live regime's rows of those kernels (sizes,
+  schedule row, status, median), the routing rows stored on them, the same for every piece those routing rows
+  reach, and whether the regime holds any clean row at all (a compile with none prices no arm from its pieces, so
+  it looks no piece up). So a program's row set is known before it compiles again: its previous compile named it,
+  and the load imports the scope now in force and reads those kernels' rows from the DB. A program
   the pack does not hold compiles, as before. The manifest also keeps the card's scope digest (file bytes, no lift):
-  while it holds, the load compares nothing. When it moved, the load lifts every file in scope once — the lift the
-  first compile's import needs anyway — and recomputes each entry's digest. An entry whose digest moved compiles
-  again, and so does every other twin of its wrapper (the programs binding the same checkpoint tensors), because the
+  while it holds, the load compares nothing. When it moved, the load imports the scope into the tune DB — the import
+  the first compile needs anyway, which lifts every file in scope once — and recomputes each entry's digest. An entry
+  whose digest moved compiles again, and so does every other twin of its wrapper (the programs binding the same checkpoint tensors), because the
   first twin built settles each weight's layout for the rest. Every other entry loads; when none moved, the manifest
-  takes the new scope digest. Rows in the box's tune DB stay out of the key, as before. The first boot after this
+  takes the new scope digest. The rows the box itself measured are evidence those compiles read, so they are part of
+  each digest; a change to them alone, with the scope unmoved, is not looked for. The first boot after this
   rule landed misses every existing pack once: the golden digest left the directory name and the card joined it, so
   the boot compiles in full and writes the pack under its new name (delete the old directories). From then on a
   golden edit no longer moves the directory, so copying a pack under a new key and rewriting its digest is never

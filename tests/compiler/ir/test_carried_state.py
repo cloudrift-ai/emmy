@@ -140,7 +140,7 @@ def test_a_carrying_loop_under_an_outer_loop_keeps_that_coordinate_in_its_port()
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
-    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2] and tile.register_program is None
+    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2]
     (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
     assert tuple(dim.as_static() for dim in state.shape) == (STEPS, 2, N, N)
     serial = serial_form(tile, node.id)

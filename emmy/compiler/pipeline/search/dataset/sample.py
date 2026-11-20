@@ -20,6 +20,6 @@ def measured_features(row, kernel) -> dict[str, float]:
     """The feature row of a measured ``perf`` row of ``kernel`` (its op): its schedule row, under its card's
     ``H_*``. A row stores no feature of its own — the ``H_*`` are a function
     of the card and the ``S_*`` of the kernel, both computed here by live code, so a stored row outlives a change
-    to either. Only for rows :func:`~.freeze.freeze_reason` admits (a registry card)."""
+    to either. Only for rows ``db.admission.admission_reason`` admits (a registry card)."""
     ctx = _card_context(row.gpu, row.cc)
     return Featurizer.of(ctx).features(kernel, row.knobs)

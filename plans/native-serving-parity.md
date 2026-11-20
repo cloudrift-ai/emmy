@@ -543,11 +543,71 @@ What the session changes for the milestones:
    - **The plugin's any-width `pre` program is recorded,** the one twin the strict audit failed on when the session
      began.
 
-   Where an 81 ms chunk goes, from the golden's rows: the 48 Gated DeltaNet layers about 51 ms (1.06 ms each), the 64
-   MLPs about 25 ms (0.39 ms each), attention and its projections about 8 ms at a 4,096 window. The 7,680-token cell
-   needs about 45 ms a chunk, so what is left of this milestone is its second piece, the row cost of the Gated
-   DeltaNet layers, and the MLP at 256 rows (its gate and up projection is 3.2x the 64-row kernel for four times the
-   rows).
+   Where an 81 ms chunk goes, read again from the golden's rows on 2026-11-16 (the split written here first counted
+   the MLP twice and used times from before the tune). A Gated DeltaNet layer is 0.86 ms: its FP8 projections
+   0.40 ms (in qkv 149 us, in z 106, out 108, two small ones 35), its MLP 0.29 ms, the recurrence's fourteen
+   kernels 0.16 ms, the rest 0.04 ms. An attention layer is 0.90 ms at a 4,096 window: projections 0.40 ms, MLP
+   0.28 ms, the fold 0.21 ms. Over 48 and 16 layers that is about 55.5 ms of recorded kernel time: FP8 projections
+   25.5 ms, MLPs 18.6 ms, the recurrence 7.4 ms, the fold 3.3 ms. So about 25 ms of the chunk is in no row. The
+   rows are benched alone with their weights already in the card's cache; a served chunk makes about 2,700 launches
+   and reads each layer's weights cold. Which of the two it is has not been measured.
+
+   The 7,680-token cell needs about 45 ms a chunk, so three things are left, largest first:
+
+   - **The 25 ms outside the rows.** One profile of a served 7,680-token prefill on the 256-row pack, kernel by
+     kernel, as 8 did at 64 rows. No fix can be chosen before it.
+   - **The FP8 projections.** #1418 writes every FP8 product through the block-scaled instruction, 1.2 to 1.5 times
+     faster on its tiles; the pack of 2026-11-15 was built before it and these rows keep their old times. At 1.3
+     times that is about 6 ms a chunk for a record run alone.
+   - **The recurrence.** The kernel-gap plan owns it (its R0 to R4). At the reference's 87 us a layer it returns
+     about 3.3 ms a chunk, so at 256 rows it is the smallest of the three; in the verify step it is the largest.
+
+   With all three the recorded kernels come to about 46 ms. The MLP's two products already run near 500 TFLOP/s
+   and have no named lever.
+
+   2026-11-16, second rental (the recipe's DISCOVERY has the table): #1411 made the FP8 projections W8A8 and left
+   this golden without the new programs' rows, so no strict export worked on main and the profile above could not
+   be taken. All 19 roots the fresh trace adds are recorded: a 256-row Gated DeltaNet layer's two new roots take
+   114 and 204 us (216 and 296 as W8A16), attention's `pre` 128 us (290) and its out projection 76 us (108), the
+   verify step's three-row roots 61 and 38 us. Not done: five small recurrence roots that #1411 left as proposals
+   are benched and not recorded (a strict record stops at a piece two routes disagree on), so the export still
+   stops at the 256-row prefill program, and no cell was timed. Next on a card, in this order: record those five
+   with a fresh tune DB, export strictly, time the cells with stock in the same session, then take the profile.
+
+   2026-11-17, third rental: done, all four. Main's golden already held the 256-row Gated DeltaNet program as
+   #1420 traces it, so four roots were left (three of the 16-row program, one of the 64-row one) and are recorded.
+   The 256-row pack exports strictly from the golden alone and the audit passes (80 of 80). Native against stock
+   vLLM 0.32.0 in one session, first token: 0.054 against 0.160 s at 256 tokens, 1.61 against 0.670 s at 7,680,
+   82.4 against 68.3 s at 197,632; TPOT 7.74 / 8.89 / 10.1 ms against 7.34 / 7.96 / 10.05. Every cell is inside
+   the bar but the 7,680-token first token (2.4x stock, the bar 2x: 1.34 s, about 44 ms a chunk). The profile: a
+   chunk is about 53 ms and all of it is kernel time, 40.8 ms in the Gated DeltaNet layers and 11.1 ms in the
+   attention layers, so the three items above reduce to one, the Gated DeltaNet layer at 256 rows (0.85 ms, needs
+   about 0.66). The same trace says the verify step's largest term is the three-row Gated DeltaNet programs,
+   13.2 ms of kernel time a step. GSM8K was not scored on this pack.
+
+   2026-11-18, fourth rental: the 256-row Gated DeltaNet layer tuned (the recipe's DISCOVERY has the table). #1425's
+   matrix-product arm is not offered on this program: the recurrence across chunks also writes a per-step output
+   that reads the state off its own coordinates, so the step is not affine as `Fold.affine` reads it, and #1425's
+   measurements say so wide a step loses anyway. The real lever was the tune #1429 skipped: twenty pieces tuned by
+   name, the MLP's two NVFP4 products over 250 schedules, nine roots recorded alone. The layer's rows sum to 569 us
+   (734 before). Served, strict export, audit 80 of 80: first token 0.044 / 1.344 / 79.9 s at 256 / 7,680 /
+   197,632 tokens. The 7,680-token cell misses the 1.34 s bar by 4 ms (timed twice). The rows promised more than
+   the chunk got: the MLP tune was 58 us a layer in its hot-cache rows and 25 ms of first token, because a served
+   chunk reads each layer's weights cold. Left, for the last 4 ms or more: an MLP schedule ranked cold (nsys over
+   a served chunk, as the decode matmul rows are), the two 6144-wide FP8 products (about 390 TFLOP/s against 515
+   for the qkv one, no faster schedule in 150), and the 24 us recurrence across chunks.
+
+   Fifth rental, the same day: the 7,680-token first token is under the bar (the recipe's DISCOVERY has the
+   tables). The two 6144-wide FP8 products lost to the qkv one on the grid: at 256 rows a 5120- or 6144-wide
+   output gives the qkv product's 128 x 128 block only 80 or 96 blocks on 170 SMs, and per block it runs as fast
+   as the qkv one. The K split `030_cut` already offers fills the card, but a tune by name never measures a
+   kernel-set arm, so no card had timed it. `--ab` rows on the split arms, then a record of the readout root
+   alone: both products take a 4-way split (43.4 -> 34.1 and 43.5 -> 40.7 us), the root 158.8 -> 152.6 us.
+   Served from a strict export, audit 80 of 80, timed alternately with main's pack on one card: first token
+   0.047 / 1.32 / 77.0 s against 0.047 / 1.36 / 78.1 s at 256 / 7,680 / 197,632 tokens. 1.32 s is 1.97x stock,
+   inside 2x. TPOT 8.6 / 8.5 / 9.0 ms, inside the bar; it moves with the tokens greedy decoding takes. GSM8K and
+   draft acceptance were not read on this pack. The gate below (10) re-runs the protocol in one session with
+   stock.
 
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
@@ -556,6 +616,17 @@ What the session changes for the milestones:
     197,632 first-token cell reads as its two terms — chunk <= 20 s (9), attention <= 117 s (5) — so a miss names
     its term. Gate: every 27B bar cell green, or each miss named with its measured kernel-level floor — the owner
     decides the cell's fate here, not at the switch. Needs 2-9.
+
+    Met on 2026-11-19, one rented RTX 5090, native, plugin and stock vLLM 0.32.0 in one session (the 27B
+    DISCOVERY's section of that date has the tables). Every bar cell is green: TPOT 1.07x / 1.12x / 1.14x stock at
+    256 / 7,680 / 197,632 tokens (1.19x on the worst 7,680-token pair), first token 0.23x / 1.83x / 1.22x. Native
+    beats the plugin in every cell. The full window serves (261,632 tokens, 141 s, 9.8 ms), memory at rest is 28.2
+    GiB against stock's 30.5, GSM8K is 0.580 / 0.645 against the plugin's 0.545 / 0.570, and every probe difference
+    is at a top-two near tie. Two things are open. By estimate the chunk term at 197,632 tokens is about 36 s,
+    above the 20 s above, while attention is about 54 s; the cell is inside 2x stock all the same. And both Emmy
+    lanes score about 0.15 lower on GSM8K than on 2026-11-12, level with stock, which did not move. An A/B on one
+    build the same day puts the whole drop on the W8A8 projections (#1411): 0.552 against 0.697 strict on all
+    1,319 questions, W8A8 against W8A16. The concurrency cells are milestones 19-25's.
 
 11. **Qwen3.6: the paging programs' cost out of the decode step.** Milestone 1's split sizes it; the dev-box
     figure is 7.8 ms a step of pager table programs, the decision kernel on one CTA times ~160 paging runs (40

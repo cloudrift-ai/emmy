@@ -126,11 +126,11 @@ class ClassicScheduleCodec:
             nodes[site] = ProjectionSchedule(tile) if reduce is None else ReductionSchedule(tile, reduce)
         # One state takes the row's value; several are kept direct, the only storage a kernel offers them.
         states = {Stage.parse(row[key]) for key in classic_state_keys(self.tile_op)} or {Stage.direct()}
+        geometry = next((row[key] for key in classic_state_tile_keys(self.tile_op)), "")
         if len(states) != 1:
             raise ValueError("a kernel that carries several states keeps each of them direct")
-        spelled = next((row[key] for key in classic_state_tile_keys(self.tile_op)), "")
         return Schedule(
-            KernelSchedule(work, Raster.parse(row["RASTER"]), states.pop(), Tile.parse(spelled, work) if spelled else Tile()),
+            KernelSchedule(work, Raster.parse(row["RASTER"]), states.pop(), Tile.parse(geometry, work) if geometry else Tile()),
             nodes,
             {
                 edge: EdgeSchedule(Stage.parse(row[classic_stage_key(self.tile_op, edge)]))

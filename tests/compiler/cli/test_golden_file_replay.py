@@ -4,12 +4,16 @@ compile picks."""
 
 import asyncio
 import functools
+import logging
 import re
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
+from emmy.commands.compile import CommandError, GoldenSelection, PinnedRow
+from emmy.compiler.backend.base import BenchmarkResult
+from emmy.compiler.backend.cuda import compare as compare_mod
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
@@ -255,6 +259,16 @@ def test_restamp_clears_a_latency_exactly_when_a_kernel_it_names_changes(tmp_pat
         assert not report.cleared_latencies and not report.demoted
 
 
+def _exit_code(run) -> int:
+    """The exit code ``run`` ends with: the code it returns, or the code of the refusal it raises, logged as the
+    command's handler logs it."""
+    try:
+        return int(bool(run()))
+    except CommandError as exc:
+        logging.getLogger("emmy.commands.run").error("%s", exc)
+        return exc.code
+
+
 def _args(path, **overrides):
     values = {
         "realization": "working.relu",
@@ -291,18 +305,16 @@ def test_kernel_selector_reconstructs_only_the_exact_derived_piece(tmp_path, cap
     document.dump(path, overwrite=True)
     args = _args(path, realization=None, kernel=document.kernel(kernel.ref).name)  # a stale body is named by what it now holds
     if corruption:
-        with pytest.raises(SystemExit) as exc:
-            resolve_golden_arg(args)
-        assert exc.value.code == 2
+        assert _exit_code(lambda: resolve_golden_arg(args)) == 2
         assert "no recorded route" in caplog.text if corruption == "missing_route" else "stale recorded route" in caplog.text
         return
 
-    resolve_golden_arg(args)
-    graph = args._golden_graph
+    selection = resolve_golden_arg(args)
+    graph = selection.graph
     [node] = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
     assert node.op.with_io(graph, node).identity_key(structural=False, with_io=True) == kernel.exact_identity
     assert len(graph.outputs) == len(kernel.op().outputs)  # buffer names follow the seam spelling, not the identity
-    assert args._golden_scope == [document]
+    assert selection.scope == [document]
 
 
 def test_isolated_derived_piece_can_take_its_own_cut(tmp_path):
@@ -316,13 +328,13 @@ def test_isolated_derived_piece_can_take_its_own_cut(tmp_path):
     path = tmp_path / "working.json"
     document.dump(path)
     args = _args(path, realization=None, kernel=kernel.name)
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
     taken = []
     watcher = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: taken.append((parent, arm, pieces)))
     pipeline = Pipeline.build(["tile/cut"]).with_strategies(watcher)
     with pinned_knobs({"PLACE": "cut"}):
         Run(pipeline=pipeline, ctx=Context.from_target(tuple(document.compute_cap))).resolve(
-            args._golden_graph, lambda fork: next(fork.leaves())
+            selection.graph, lambda fork: next(fork.leaves())
         )
     assert taken, "the isolated piece must still offer its cut"
     parent, arm, pieces = taken[0]
@@ -344,8 +356,8 @@ def test_isolated_split_piece_keeps_its_partition_receipt(tmp_path):
     document.dump(path)
     for kernel in pieces:
         args = _args(path, realization=None, kernel=kernel.name)
-        resolve_golden_arg(args)
-        graph = args._golden_graph
+        selection = resolve_golden_arg(args)
+        graph = selection.graph
         [node] = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
         assert node.op.with_io(graph, node).identity_key(structural=False, with_io=True) == kernel.exact_identity
         assert any(axis.window is not None and axis.window.partition for axis in node.op.axes), kernel.ref
@@ -372,17 +384,15 @@ def test_kernel_row_selector_requires_one_exact_owned_row(tmp_path, monkeypatch,
         document.dump(path, overwrite=True)
     args = _args(path, realization=name, kernel=kernel.name)
     if selection != "valid":
-        with pytest.raises(SystemExit) as exc:
-            resolve_golden_arg(args)
-        assert exc.value.code == 2
+        assert _exit_code(lambda: resolve_golden_arg(args)) == 2
         return
 
-    resolve_golden_arg(args)
-    assert args._golden_rows == [row] and args.golden_configs == []
-    assert selected_regime(args) == row.pins | precision_pins(row.pins)
-    assert selected_decisions(args) == {"PLACE": "fuse", **row.knobs}
-    with pinned_knobs(selected_regime(args) | selected_decisions(args)):
-        compiled = Pipeline.build(CUDA_PASSES).run(args._golden_graph, ctx=Context.from_target((8, 9)), db=None)
+    selection = resolve_golden_arg(args)
+    assert selection.rows == [row] and selection.pinned == []
+    assert selected_regime(selection) == row.pins | precision_pins(row.pins)
+    assert selected_decisions(args, selection) == {"PLACE": "fuse", **row.knobs}
+    with pinned_knobs(selected_regime(selection) | selected_decisions(args, selection)):
+        compiled = Pipeline.build(CUDA_PASSES).run(selection.graph, ctx=Context.from_target((8, 9)), db=None)
     assert _picked(compiled) == [(kernel.exact_identity, dict(schedule_row_key(row.knobs)))]
 
 
@@ -398,13 +408,13 @@ def test_kernel_row_selector_disambiguates_only_with_explicit_pins(tmp_path, mon
     document.dump(path, overwrite=True)
     with pinned_knobs({"FAST_MATH": True} if kind == "regime" else {"WORK": "w2x1"}):
         args = _args(path, kernel=document.kernel(row.kernel).name)
-        resolve_golden_arg(args)
-        assert args._golden_rows == [other]
-        assert selected_decisions(args) == {"PLACE": "fuse", **other.knobs}
+        selection = resolve_golden_arg(args)
+        assert selection.rows == [other]
+        assert selected_decisions(args, selection) == {"PLACE": "fuse", **other.knobs}
     # Boolean and integer storage spellings must compare through the knob codec.
-    args._golden_rows = [replace(other, knobs={"VECTORIZE_LOADS": False, "LOOPIFY": 0})]
+    selection = replace(selection, rows=[replace(other, knobs={"VECTORIZE_LOADS": False, "LOOPIFY": 0})])
     with pinned_knobs({"VECTORIZE_LOADS": "off", "LOOPIFY": "0"}):
-        assert selected_decisions(args)["VECTORIZE_LOADS"] is False
+        assert selected_decisions(args, selection)["VECTORIZE_LOADS"] is False
 
 
 @pytest.mark.parametrize("flags", [["--record"], ["--record-greedy"]])
@@ -504,14 +514,14 @@ def test_a_specialized_row_uses_its_own_kernels_reference(tmp_path):
     document.dump(path)
 
     args = _args(path, realization="dynamic")
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
     static = document.kernel(next(row.kernel for row in document.rows if row.name.endswith(".m1")))
     assert static.bindings == {"num_tokens": 1}
     x = torch.arange(24).reshape(6, 4)
     first_fn, first_inputs = torch_ref.build_callable(document.reference_program(static), {"x": x})
     with pytest.raises(RuntimeError, match="shape"):
         first_fn(*first_inputs)
-    fn, inputs = torch_ref.build_callable(args._golden_reference, {"x": x})
+    fn, inputs = torch_ref.build_callable(selection.reference, {"x": x})
     assert fn(*inputs).shape == (1, 6, 4)
 
 
@@ -530,9 +540,7 @@ def test_a_name_recorded_on_two_kernels_is_ambiguous(tmp_path, caplog):
     )
     path = tmp_path / "working.json"
     both.dump(path)
-    with pytest.raises(SystemExit) as exc:
-        resolve_golden_arg(_args(path))
-    assert exc.value.code == 2
+    assert _exit_code(lambda: resolve_golden_arg(_args(path))) == 2
     assert "resolves to 2 different kernels" in caplog.text
 
 
@@ -544,11 +552,10 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_unbenched(tmp_path):
     path = tmp_path / "working.json"
     _working_loop(path, state="proposal")
     explicit = _args(path)
-    resolve_golden_arg(explicit)
-    assert [sample.knobs for sample in explicit.golden_configs] == [{"WORK": "w1x1"}]
-    walk = _args(path, _explicit_realization=False)
-    resolve_golden_arg(walk)
-    assert walk.golden_configs == []
+    explicit_selection = resolve_golden_arg(explicit)
+    assert [sample.knobs for sample in explicit_selection.pinned] == [{"WORK": "w1x1"}]
+    walk_selection = resolve_golden_arg(_args(path), explicit=False)
+    assert walk_selection.pinned == []
 
 
 @pytest.mark.parametrize(
@@ -580,15 +587,15 @@ def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path
     document.dump(path, overwrite=True)
     args = _args(path, realization=seed.name)
 
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
 
-    assert bool(args.golden_configs) == automatic
-    assert args._golden_rows == [seed]
-    assert args._golden_scope == [document]
-    assert args._golden_reference is not None
-    assert selected_regime(args) == precision_pins({"FAST_MATH": False})
+    assert bool(selection.pinned) == automatic
+    assert selection.rows == [seed]
+    assert selection.scope == [document]
+    assert selection.reference is not None
+    assert selected_regime(selection) == precision_pins({"FAST_MATH": False})
     if automatic:
-        assert args.golden_configs[0].knobs == (knobs or {})
+        assert selection.pinned[0].knobs == (knobs or {})
 
 
 @pytest.mark.parametrize("whole", [False, True])
@@ -609,10 +616,10 @@ def test_latency_only_selection_pins_the_kernel_set_it_timed(tmp_path, monkeypat
     document.dump(path, overwrite=True)
     args = _args(path, realization=seed.name, pin_route=True)
 
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
 
-    assert args.golden_configs == []
-    selected = selected_decisions(args)
+    assert selection.pinned == []
+    selected = selected_decisions(args, selection)
     split = {key: value for key, value in selected.items() if key.startswith("REDUCE@")}
     assert selected == ({**_routed_cut(document), **split} if whole else {})
     assert list(split.values()) == (["g2k"] if whole else [])
@@ -634,14 +641,14 @@ def test_a_kernel_two_routes_mint_takes_the_route_of_the_set_its_latency_timed(t
     document.rows[document.rows.index(row)] = seed
     document.dump(path, overwrite=True)
     args = _args(path, realization=seed.name, pin_route=True)
-    resolve_golden_arg(args)
-    own = selected_decisions(args)
-    [loaded] = args._golden_scope
+    selection = resolve_golden_arg(args)
+    own = selected_decisions(args, selection)
+    [loaded] = selection.scope
     [split] = [route for route in loaded.routing if route.parent != target.ref]
     other = replace(split, arm={next(iter(split.arm)): "g4k"}, children=(split.children[0], "k_another_route"))
-    args._golden_scope = [replace(loaded, routing=[other, *loaded.routing])]
+    selection = replace(selection, scope=[replace(loaded, routing=[other, *loaded.routing])])
 
-    assert selected_decisions(args) == own
+    assert selected_decisions(args, selection) == own
     assert list(value for key, value in own.items() if key.startswith("REDUCE@")) == ["g2k"]
 
 
@@ -649,9 +656,9 @@ def test_pin_route_without_a_golden_selection_is_empty():
     from emmy.commands.compile import resolve_golden_arg, selected_decisions
 
     args = _args(None, golden=None, realization=None, code="torch.randn(4)", pin_route=True)
-    resolve_golden_arg(args)
-    assert args._golden_scope is None
-    assert selected_decisions(args) == {}
+    selection = resolve_golden_arg(args)
+    assert selection is None
+    assert selected_decisions(args, selection) == {}
 
 
 def test_a_recorded_kernel_set_is_the_evidence_a_compile_cuts_by(tmp_path, monkeypatch):
@@ -677,14 +684,14 @@ def test_a_file_walk_does_not_pin_a_pieces_schedule_across_its_target(tmp_path):
     pieces = [row for row in document.rows if row.measured]
     document = replace(document, rows=[*pieces, replace(pieces[0], name="fast", pins={"FAST_MATH": True})])
     document.dump(path, overwrite=True)
-    args = _args(path, realization=_piece_name(document), _explicit_realization=False)
+    args = _args(path, realization=_piece_name(document))
 
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args, explicit=False)
 
-    assert args.golden_configs == []
-    assert selected_regime(args) == precision_pins({"FAST_MATH": False})
-    assert args._golden_scope == [document]
-    assert args._golden_reference is not None
+    assert selection.pinned == []
+    assert selected_regime(selection) == precision_pins({"FAST_MATH": False})
+    assert selection.scope == [document]
+    assert selection.reference is not None
 
 
 @pytest.mark.parametrize("explicit", [False, True], ids=["ordinary", "explicit"])
@@ -724,15 +731,15 @@ def test_recorded_regime_is_published_whole_and_a_hand_pin_against_it_is_refused
     if override:
         pins[override] = expected[override] = not umbrella
     row = Row(name="recorded", kernel=0, pins=dict(pins))
-    args = SimpleNamespace(_golden_document=GoldenFile(compute_cap=(8, 9), rows=[row]))
-    published = selected_regime(args)
+    selection = GoldenSelection(document=GoldenFile(compute_cap=(8, 9), rows=[row]))
+    published = selected_regime(selection)
     assert published == {**expected, "VECTORIZE_LOADS": False}
     with pinned_knobs(published):
         assert Context.from_target((8, 9)).precision_pins() == expected
     assert row.pins == pins, "publication must not rewrite the stored row's exact matching pins"
-    with pinned_knobs({"FAST_MATH": not umbrella}), pytest.raises(SystemExit) as refused:
-        selected_regime(args)
-    assert refused.value.code == 2 and f"FAST_MATH={umbrella}" in caplog.text and f"FAST_MATH={not umbrella}" in caplog.text
+    with pinned_knobs({"FAST_MATH": not umbrella}), pytest.raises(CommandError) as refused:
+        selected_regime(selection)
+    assert refused.value.code == 2 and f"FAST_MATH={umbrella}" in str(refused.value) and f"FAST_MATH={not umbrella}" in str(refused.value)
 
 
 def test_a_traced_program_or_kernel_takes_the_regime_of_its_own_rows(caplog):
@@ -745,12 +752,12 @@ def test_a_traced_program_or_kernel_takes_the_regime_of_its_own_rows(caplog):
     rows = [Row(name="std", kernel=0, pins={"FAST_MATH": False}), Row(name="fast", kernel=1, pins={"FAST_MATH": True})]
     document = GoldenFile(compute_cap=(8, 9), programs=[{}, {}], kernels=[standard, fast], rows=rows)
 
-    assert selected_regime(SimpleNamespace(_golden_document=document, program=0)) == precision_pins({"FAST_MATH": False})
-    assert selected_regime(SimpleNamespace(_golden_document=document, program=1)) == precision_pins({"FAST_MATH": True})
-    assert selected_regime(SimpleNamespace(_golden_document=document, _golden_kernel=0)) == precision_pins({"FAST_MATH": False})
-    assert selected_regime(SimpleNamespace(_golden_document=document, _golden_kernel=1)) == precision_pins({"FAST_MATH": True})
+    assert selected_regime(GoldenSelection(document=document, program=0)) == precision_pins({"FAST_MATH": False})
+    assert selected_regime(GoldenSelection(document=document, program=1)) == precision_pins({"FAST_MATH": True})
+    assert selected_regime(GoldenSelection(document=document, kernel=0)) == precision_pins({"FAST_MATH": False})
+    assert selected_regime(GoldenSelection(document=document, kernel=1)) == precision_pins({"FAST_MATH": True})
     assert "more than one input regime" not in caplog.text
-    assert selected_regime(SimpleNamespace(_golden_document=document)) == {}
+    assert selected_regime(GoldenSelection(document=document)) == {}
     assert f"takes the live one (FAST_MATH={precision_pin(FAST_MATH)})" in caplog.text
 
 
@@ -759,14 +766,14 @@ def test_equivalent_recorded_defaults_share_a_regime_but_empty_or_mixed_scopes_d
 
     row = Row(name="recorded", kernel=0)
     document = GoldenFile(compute_cap=(8, 9), rows=[row, replace(row, pins={"FAST_MATH": False, "FP8_MMA": False})])
-    args = SimpleNamespace(_golden_document=document)
-    assert selected_regime(args) == precision_pins({"FAST_MATH": False})
+    selection = GoldenSelection(document=document)
+    assert selected_regime(selection) == precision_pins({"FAST_MATH": False})
     document.rows.append(replace(row, pins={"FAST_MATH": False, "FAST_EXP": True}))
     for scope in (
-        args,
-        SimpleNamespace(_golden_document=document, _golden_rows=[]),
-        SimpleNamespace(_golden_document=GoldenFile(compute_cap=(8, 9))),
-        SimpleNamespace(),
+        selection,
+        GoldenSelection(document=document, rows=[]),
+        GoldenSelection(document=GoldenFile(compute_cap=(8, 9))),
+        None,
     ):
         with pinned_knobs({"FAST_MATH": True, "FAST_EXP": False}):
             before = Context.from_target((8, 9))
@@ -777,16 +784,16 @@ def test_equivalent_recorded_defaults_share_a_regime_but_empty_or_mixed_scopes_d
 
 def test_recorded_sample_pins_are_complete_but_ab_pins_remain_partial(tmp_path):
     from emmy.commands.compile import golden_row
-    from emmy.commands.run import _ab_samples, _sample_replay_knobs
+    from emmy.commands.run import _ab_samples
 
     document = _working_loop(tmp_path / "standard.json", pins={"FAST_MATH": False}, state="verified")
     [row] = document.rows
     sample = golden_row(document, row)
     [ab] = _ab_samples(["FAST_MATH=false,WORK=t32"])
     with pinned_knobs({"FAST_MATH": True, "FAST_EXP": True}):
-        with pinned_knobs(_sample_replay_knobs(sample)):
+        with pinned_knobs(sample.replay_knobs()):
             assert Context.from_target((8, 9)).precision_pins() == precision_pins({"FAST_MATH": False})
-        with pinned_knobs(_sample_replay_knobs(ab)):
+        with pinned_knobs(ab.replay_knobs()):
             ctx = Context.from_target((8, 9))
             assert ctx.precision_pins()["FAST_MATH"] is False and ctx.precision_pins()["FAST_EXP"] is True
     assert sample.pins == row.pins == {"FAST_MATH": False}
@@ -796,23 +803,22 @@ def test_a_pieces_row_carries_the_decisions_that_mint_it(tmp_path):
     """A row on a piece replays under the decisions that mint its kernel — its route — beside its own schedule;
     a row on a kernel that ran whole pins the kernel whole."""
     from emmy.commands.compile import resolve_golden_arg
-    from emmy.commands.run import _sample_replay_knobs
 
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
     args = _args(path, realization=_piece_name(document))
-    resolve_golden_arg(args)
-    (sample,) = args.golden_configs
+    selection = resolve_golden_arg(args)
+    (sample,) = selection.pinned
     assert sample.route == _routed_cut(document) and sample.pins == {"FAST_MATH": False}
-    assert _sample_replay_knobs(sample) == {**precision_pins({"FAST_MATH": False}), **_routed_cut(document), **sample.knobs}
+    assert sample.replay_knobs() == {**precision_pins({"FAST_MATH": False}), **_routed_cut(document), **sample.knobs}
 
     whole = tmp_path / "working.json"
     _working_loop(whole, state="verified")
     args = _args(whole)
-    resolve_golden_arg(args)
-    (sample,) = args.golden_configs
+    selection = resolve_golden_arg(args)
+    (sample,) = selection.pinned
     assert sample.route == {"PLACE": "fuse"}
-    assert _sample_replay_knobs(sample) == {**precision_pins({"FAST_MATH": True}), "PLACE": "fuse", "WORK": "w1x1"}
+    assert sample.replay_knobs() == {**precision_pins({"FAST_MATH": True}), "PLACE": "fuse", "WORK": "w1x1"}
 
 
 def test_selected_file_scopes_the_evidence_and_a_split_regime_publishes_nothing(monkeypatch, tmp_path):
@@ -828,21 +834,21 @@ def test_selected_file_scopes_the_evidence_and_a_split_regime_publishes_nothing(
     document.dump(path, overwrite=True)
     args = _args(path)
 
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
 
-    assert [sample.record.pins for sample in args.golden_configs] == [{"FAST_MATH": False}, {"FAST_MATH": True}]
-    assert selected_regime(args) == {}
-    args._golden_rows = args._golden_rows[:1]
-    assert selected_regime(args) == precision_pins({"FAST_MATH": False})
-    assert [len(scope.rows) for scope in args._golden_scope] == [2]
+    assert [sample.record.pins for sample in selection.pinned] == [{"FAST_MATH": False}, {"FAST_MATH": True}]
+    assert selected_regime(selection) == {}
+    selection = replace(selection, rows=selection.rows[:1])
+    assert selected_regime(selection) == precision_pins({"FAST_MATH": False})
+    assert [len(scope.rows) for scope in selection.scope] == [2]
 
     # Without --golden PATH the live card's repository goldens are searched, and a match scopes the compile to its file.
     monkeypatch.setattr(repository, "live_gpu_key", lambda: None)
     monkeypatch.setattr(repository, "repository_documents", lambda *_: [document])
     canonical = _args(path, golden=None)
-    resolve_golden_arg(canonical)
-    assert [sample.name for sample in canonical.golden_configs] == ["working.relu", "working.relu"]
-    assert canonical._golden_scope == [document]
+    canonical_selection = resolve_golden_arg(canonical)
+    assert [sample.name for sample in canonical_selection.pinned] == ["working.relu", "working.relu"]
+    assert canonical_selection.scope == [document]
 
 
 def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_path):
@@ -871,13 +877,13 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(compile_module, "validate_trace_adapter_args", lambda _args: None)
 
-    def record(args, *_):
-        assert [sample.record.pins for sample in args.golden_configs] == [{"FAST_MATH": False}]
+    def record(args, _backend, _dump, selection, *_):
+        assert [sample.record.pins for sample in selection.pinned] == [{"FAST_MATH": False}]
         assert measured_regime_pins()["FAST_MATH"] is False
         record_greedy_pick(path, args.realization, decisions=[], kernels=[(node.op, 1.0, 2.0, None)], reference_backend="same-input-greedy")
 
     monkeypatch.setattr(run_module, "_handle_run_ir", record)
-    run_module._handle_run_once(_args(path, ir=None, ab=[], bench=True, strict_correctness=False, json=None))
+    run_module._handle_run_once(_args(path, ir=None, ab=[], bench=True, bench_backends=None, strict_correctness=False, json=None))
 
     rows = GoldenFile.load(path).rows
     assert sorted((row.pins["FAST_MATH"], row.measurements.emmy_us) for row in rows if row.measured) == [(False, 1.0), (True, 9.0)]
@@ -885,18 +891,17 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
 
 def test_working_verified_row_is_automatically_pinned(tmp_path):
     from emmy.commands.compile import resolve_golden_arg
-    from emmy.commands.run import _sample_replay_knobs
 
     path = tmp_path / "working.json"
     _working_loop(path, state="verified")
     args = _args(path)
 
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
 
-    assert len(args.golden_configs) == 1
-    assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
-    assert args.golden_configs[0].pins == {"FAST_MATH": True}
-    assert _sample_replay_knobs(args.golden_configs[0]) == {**precision_pins({"FAST_MATH": True}), "PLACE": "fuse", "WORK": "w1x1"}
+    assert len(selection.pinned) == 1
+    assert selection.pinned[0].knobs == {"WORK": "w1x1"}
+    assert selection.pinned[0].pins == {"FAST_MATH": True}
+    assert selection.pinned[0].replay_knobs() == {**precision_pins({"FAST_MATH": True}), "PLACE": "fuse", "WORK": "w1x1"}
 
 
 def test_run_replays_embedded_loop_golden_through_structural_stamps(tmp_path):
@@ -906,13 +911,13 @@ def test_run_replays_embedded_loop_golden_through_structural_stamps(tmp_path):
     path = tmp_path / "working.json"
     _working_loop(path)
     args = _args(path)
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
 
-    stage, passes = _replay_stage_and_passes(args._golden_graph, embedded_golden=True)
+    stage, passes = _replay_stage_and_passes(selection.graph, embedded_golden=True)
     assert stage == "golden Loop"
     assert passes == CUDA_PASSES
 
-    stage, passes = _replay_stage_and_passes(args._golden_graph, embedded_golden=False)
+    stage, passes = _replay_stage_and_passes(selection.graph, embedded_golden=False)
     assert stage == "loop"
     assert passes == _passes_after_stage("loop")
     assert passes != CUDA_PASSES
@@ -922,7 +927,7 @@ def test_emmy_only_benchmark_returns_same_input_reference():
     """Embedded Loop replay can return its greedy inputs/outputs without a Torch twin."""
     import numpy as np
 
-    from emmy.commands.run import bench_lowered_vs_torch
+    from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
 
     graph = Graph()
     graph.add_node(ConstantOp(name="y", value=2.0), [], Tensor("y", (1,)), node_id="y")
@@ -934,7 +939,7 @@ def test_emmy_only_benchmark_returns_same_input_reference():
             return SimpleNamespace(outputs=outputs), None
 
         async def benchmark_async(self, *_args, **_kwargs):
-            return SimpleNamespace(time_ms=0.001, captured=True)
+            return BenchmarkResult(time_ms=0.001, captured=True)
 
     refs = []
     asyncio.run(
@@ -972,8 +977,6 @@ def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
     """A reference-free Loop target owns one device input allocation, not a redundant Torch copy."""
     import numpy as np
 
-    from emmy.commands import run as run_module
-
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (8,), "f16"), node_id="x")
     graph.outputs = ["x"]
@@ -984,15 +987,14 @@ def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
             return SimpleNamespace(outputs={"x": np.ones(8, dtype=np.float16)}, time_ms=0.001), None
 
         async def benchmark_async(self, *_args, **_kwargs):
-            return SimpleNamespace(time_ms=0.001, captured=True)
+            return BenchmarkResult(time_ms=0.001, captured=True)
 
     monkeypatch.setattr(
-        run_module,
-        "_to_cuda_tensor",
+        "emmy.compiler.backend.cuda.compare.to_cuda_tensor",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reference-free replay must not make a Torch copy")),
     )
     asyncio.run(
-        run_module.bench_lowered_vs_torch(None, graph, FakeBackend(), seed=0, do_bench=True, warmup=1, iters=1, bench_backends="emmy")
+        compare_mod.bench_lowered_vs_torch(None, graph, FakeBackend(), seed=0, do_bench=True, warmup=1, iters=1, bench_backends="emmy")
     )
 
 
@@ -1028,7 +1030,7 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     path = tmp_path / "working.json"
     _working_loop(path, state="verified")
     args = _run_args(path)
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
 
     reference = ({"x": object()}, {"y": object()})
     returned = {"reference": reference, "greedy_error": None, "reference_run_us": None, "accuracy_error": None}
@@ -1085,18 +1087,16 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     monkeypatch.setattr(run_module, "_bench_golden_variants", fake_pinned)
     monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
 
-    run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+    run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection)
 
     assert seen == {"want_ref": True, "ref": reference}
-    assert scopes == [args._golden_scope]
+    assert scopes == [selection.scope]
 
     args.strict_correctness = True
     returned["accuracy_error"] = "strict eager correctness unavailable: frontend IR is not runnable"
     returned["reference"] = ({"x": [1.0]}, {"y": [1.0]})
     seen.clear()
-    with pytest.raises(SystemExit) as exc:
-        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
-    assert exc.value.code == 1
+    assert _exit_code(lambda: run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection)) == 1
     assert seen == {"want_ref": True, "ref": returned["reference"], "strict_reference": "same-input-greedy"}
 
     args.strict_correctness = False
@@ -1110,9 +1110,7 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     returned["greedy_error"] = "HungKernelError: repeated timing crossed the watchdog"
     returned["reference_run_us"] = 4_000_000.0
     monkeypatch.setattr(run_module, "_bench_greedy_isolated", fail_if_isolated)
-    with pytest.raises(SystemExit) as exc:
-        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
-    assert exc.value.code == 1
+    assert _exit_code(lambda: run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection)) == 1
     assert seen == {"want_ref": True, "ref": reference}
     assert "untimed greedy is ineligible; pinned rows still bench" in caplog.text
 
@@ -1121,9 +1119,7 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     returned["reference_run_us"] = None
     returned["reference"] = None
     monkeypatch.setattr(run_module, "_bench_greedy_isolated", fake_isolated)
-    with pytest.raises(SystemExit) as exc:
-        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
-    assert exc.value.code == 1
+    assert _exit_code(lambda: run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection)) == 1
     assert seen == {"want_ref": True}
     assert "requires same-input greedy outputs" in caplog.text
 
@@ -1138,9 +1134,7 @@ def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, t
     path = tmp_path / "working.json"
     _working_loop(path)
     args = _run_args(path, record_greedy=True)
-    resolve_golden_arg(args)
-    args._explicit_realization = False
-    args.golden_configs = []  # a walk pins a target's measured rows; a trace inventory has none
+    selection = replace(resolve_golden_arg(args), pinned=[])  # a walk pins a target's measured rows; a trace inventory has none
     seen = {}
     returned = {"accuracy_error": None}
 
@@ -1186,7 +1180,7 @@ def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, t
     monkeypatch.setattr(run_module, "_record_greedy_pick", lambda *_args, **_kwargs: seen.__setitem__("recorded", True))
     monkeypatch.setattr(run_module, "_record_bench_evidence", lambda *_args, **_kwargs: None)
 
-    run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+    run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection)
 
     assert seen["want_ref"] is True, "the greedy outputs are the only reference a twinless target has"
     assert seen.get("isolated") is True, "the recorded row's per-kernel timings come from the isolated re-bench"
@@ -1197,9 +1191,7 @@ def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, t
     seen.pop("recorded")
     args.strict_correctness = True
     returned["accuracy_error"] = "strict eager correctness failed: output 'y' exceeds rtol=0.001"
-    with pytest.raises(SystemExit) as exit_code:
-        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
-    assert exit_code.value.code == 1
+    assert _exit_code(lambda: run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection)) == 1
     assert "recorded" not in seen
 
     # A strict file walk also needs the reference when only the cut pieces have measured rows.
@@ -1208,9 +1200,7 @@ def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, t
     args.no_record_evidence = True
     returned["accuracy_error"] = None
     seen.clear()
-    with pytest.raises(SystemExit) as exit_code:
-        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
-    assert exit_code.value.code == 1  # the fake worker has no captured timing
+    assert _exit_code(lambda: run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection)) == 1
     assert seen == {"want_ref": True}
 
 
@@ -1316,7 +1306,7 @@ def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
     assert _picked(again) == _picked(picked)
     assert reloaded.routing[1].arm == {"PLACE": "cut"}, "the child has one site, so its recorded cut is bare"
     samples = [golden_row(reloaded, row) for row in reloaded.rows if row.measured]
-    route = selected_decisions(SimpleNamespace(golden_configs=samples, pin_route=True))
+    route = selected_decisions(SimpleNamespace(pin_route=True), GoldenSelection(pinned=samples))
     with sole_evidence([reloaded]), pinned_knobs({"FAST_MATH": False, **route}), config.strict_evidence_override(True):
         pinned = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((8, 9)), db=None)
     assert _picked(pinned) == _picked(picked), "--pin-route must apply the bare cut to its recorded child"
@@ -1427,7 +1417,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     path = tmp_path / "working-route.json"
     before = _working_placement_route(path)
     args = _run_args(path, realization="working.route", record=False, record_greedy=True, pin_route=True, strict_correctness=False)
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
 
     def launches(graph, ms_per_launch):
         n = len(_cuda_nodes(graph))
@@ -1438,7 +1428,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
             for i in range(n)
         ]
         total = sum(launch.time_ms for launch in per_launch)
-        return SimpleNamespace(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=n, per_launch=per_launch)
+        return BenchmarkResult(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=n, per_launch=per_launch)
 
     class FakeBackend:
         name = "cuda"
@@ -1465,7 +1455,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
             pass
 
     async def fake_isolated(_backend, compiled, *, warmup, iters, ref=None, ref_key=None):
-        sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
+        sample = PinnedRow(name="greedy (isolated)", knobs={})
         return run_module._GoldenBench(sample, compiled, launches(compiled, 0.001), [], "ok")
 
     async def fake_pinned(_backend, _source, _pins, **_kwargs):
@@ -1478,7 +1468,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     monkeypatch.setattr(run_module, "_record_bench_evidence", lambda _args, benches, iso, **_kw: recorded.update(benches=benches, iso=iso))
     target_mod.set_target((8, 9))
     try:
-        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+        run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection)
     finally:
         target_mod.set_target(None)
 
@@ -1498,7 +1488,7 @@ def _timed(graph, ms_per_launch=0.001):
     """A bench of ``graph`` with one per-kernel launch window per CUDA kernel, in launch order."""
     per_launch = [SimpleNamespace(idx=i, time_ms=ms_per_launch * (i + 1), samples=[]) for i in range(len(_cuda_nodes(graph)))]
     total = sum(launch.time_ms for launch in per_launch)
-    return SimpleNamespace(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=len(per_launch), per_launch=per_launch)
+    return BenchmarkResult(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=len(per_launch), per_launch=per_launch)
 
 
 def test_bench_routing_rows_let_strict_evidence_take_a_nested_cut(monkeypatch, tmp_path):
@@ -1588,7 +1578,7 @@ async def _fake_isolated(_backend, compiled, **_kwargs):
     """The greedy pick's isolated re-bench, clean, every kernel timed."""
     from emmy.commands import run as run_module
 
-    sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
+    sample = PinnedRow(name="greedy (isolated)", knobs={})
     return run_module._GoldenBench(sample, compiled, _timed(compiled), [], "ok")
 
 
@@ -1606,7 +1596,7 @@ def test_isolated_record_fills_only_the_named_proposal_without_target_latency(mo
     document.dump(path, overwrite=True)
     before = path.read_bytes()
     args = _run_args(path, kernel=kernel.name, realization=row.name, record=False, record_greedy=True, strict_correctness=False)
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
 
     class Backend(_TimedBackend):
         async def benchmark_compare_async(self, graph, **kwargs):
@@ -1625,13 +1615,11 @@ def test_isolated_record_fills_only_the_named_proposal_without_target_latency(mo
     monkeypatch.setattr(run, "_print_kernel_stats", lambda *_args, **_kwargs: None)
     target.set_target((8, 9))
     try:
-        with pinned_knobs(selected_regime(args)):
+        with pinned_knobs(selected_regime(selection)):
             if failure:
-                with pytest.raises(SystemExit) as exc:
-                    run._handle_run_ir(args, Backend, _FakeDump)
-                assert exc.value.code == 1
+                assert _exit_code(lambda: run._handle_run_ir(args, Backend, _FakeDump, selection)) == 1
             else:
-                run._handle_run_ir(args, Backend, _FakeDump)
+                run._handle_run_ir(args, Backend, _FakeDump, selection)
     finally:
         target.set_target(None)
     if failure:
@@ -1665,7 +1653,7 @@ def test_strict_isolated_record_requires_captured_comparison_before_write(monkey
     document.dump(path, overwrite=True)
     before = path.read_bytes()
     args = _run_args(path, kernel=kernel.name, realization=row.name, record=False, record_greedy=True, strict_correctness=True)
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
 
     class Backend(_TimedBackend):
         async def benchmark_compare_async(self, graph, **kwargs):
@@ -1679,13 +1667,11 @@ def test_strict_isolated_record_requires_captured_comparison_before_write(monkey
     monkeypatch.setattr(run, "_record_bench_evidence", lambda *_args, **_kwargs: None)
     target.set_target((8, 9))
     try:
-        with pinned_knobs(selected_regime(args) | selected_decisions(args)):
+        with pinned_knobs(selected_regime(selection) | selected_decisions(args, selection)):
             if captured:
-                run._handle_run_ir(args, Backend, _FakeDump)
+                run._handle_run_ir(args, Backend, _FakeDump, selection)
             else:
-                with pytest.raises(SystemExit) as exc:
-                    run._handle_run_ir(args, Backend, _FakeDump)
-                assert exc.value.code == 1
+                assert _exit_code(lambda: run._handle_run_ir(args, Backend, _FakeDump, selection)) == 1
     finally:
         target.set_target(None)
     if not captured:
@@ -1723,11 +1709,10 @@ def _bench_fresh_seed(
         record_greedy=record_greedy,
         strict_correctness=failure == "accuracy",
         no_record_evidence=no_record_evidence,
-        _explicit_realization=not whole_file,
     )
     args.warmup = warmup
-    resolve_golden_arg(args)
-    monkeypatch.setattr(compile_module, "selected_decisions", lambda _args: {**_CUT, **_split()})
+    selection = resolve_golden_arg(args, explicit=not whole_file)
+    monkeypatch.setattr(compile_module, "selected_decisions", lambda _args, _selection: {**_CUT, **_split()})
 
     class FakeBackend(_TimedBackend):
         async def benchmark_compare_async(self, graph, **kwargs):
@@ -1756,10 +1741,9 @@ def _bench_fresh_seed(
     target_mod.set_target((8, 9))
     try:
         if failure in {None, "scaled-accuracy"}:
-            run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+            run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection)
         else:
-            with pytest.raises(SystemExit):
-                run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+            assert _exit_code(lambda: run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection))
     finally:
         target_mod.set_target(None)
     return path, db_path, benched
@@ -1770,8 +1754,9 @@ def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_pat
     the kernel-set decisions its greedy compile took into the tune DB beside the greedy re-bench's perf rows."""
     from emmy.compiler.pipeline.search.db import SearchDB
 
-    with pytest.raises(SystemExit):  # the seed, benched as a pinned row, fails; the greedy re-bench is still evidence
-        _bench_fresh_seed(monkeypatch, tmp_path, record_greedy=False)
+    assert _exit_code(
+        lambda: _bench_fresh_seed(monkeypatch, tmp_path, record_greedy=False)
+    )  # the seed, benched as a pinned row, fails; the greedy re-bench is still evidence
     db = SearchDB(tmp_path / "autotune.db")
     try:
         arms = [route.arm for route in db.iter_routing()]
@@ -1897,8 +1882,8 @@ def test_a_kernel_bench_records_a_pieces_own_decision_for_its_parent(monkeypatch
     args = _run_args(
         path, realization=None, kernel=document.kernel(piece).name, record=False, record_greedy=False, strict_correctness=False
     )
-    resolve_golden_arg(args)
-    assert args.golden_configs == [], "a --kernel run has no row to bench beside the greedy pick"
+    selection = resolve_golden_arg(args)
+    assert selection.pinned == [], "a --kernel run has no row to bench beside the greedy pick"
 
     async def no_pinned(*_args, **_kwargs):
         raise AssertionError("a --kernel run benches no pinned row")
@@ -1909,7 +1894,7 @@ def test_a_kernel_bench_records_a_pieces_own_decision_for_its_parent(monkeypatch
     target_mod.set_target((8, 9))
     try:
         with pinned_knobs({"FAST_MATH": False, **split_arm}), mock.patch.object(policy, "_load_placement_prior", lambda: None):
-            run_module._handle_run_ir(args, _TimedBackend, _FakeDump)
+            run_module._handle_run_ir(args, _TimedBackend, _FakeDump, selection)
     finally:
         target_mod.set_target(None)
 
@@ -1931,14 +1916,13 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     from emmy.compiler import target as target_mod
     from emmy.compiler.backend.cuda.program import BenchWorkerJobError
     from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.wire import kernel_bindings
 
     db_path = tmp_path / "autotune.db"
     monkeypatch.setenv("EMMY_TUNE_DB", str(db_path))
     path = tmp_path / "working-route.json"
     _working_placement_route(path)
     args = _run_args(path, realization="working.route", record=False, record_greedy=True, pin_route=True, strict_correctness=False)
-    resolve_golden_arg(args)
+    selection = resolve_golden_arg(args)
     seen = {}
 
     class FakeBackend:
@@ -1962,9 +1946,7 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
     target_mod.set_target((8, 9))
     try:
-        with pytest.raises(SystemExit):
-            run_module._handle_run_ir(args, FakeBackend, _FakeDump)
-        probed = Context.probe()
+        assert _exit_code(lambda: run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection))
     finally:
         target_mod.set_target(None)
 
@@ -1972,16 +1954,13 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     assert len(nodes) >= 2, "the route must hold an innocent kernel beside the culprit"
     db = SearchDB(db_path)
     try:
-        tiles = {n.op.kernel_name: (kernel_tile(n.op), dict(n.op.knobs or {})) for n in nodes}
-        rows = {
-            name: db.lookup_perf(probed, tile.identity_key(structural=False, with_io=True), bindings=kernel_bindings(tile), knobs=knobs)
-            for name, (tile, knobs) in tiles.items()
-        }
+        held = {row.kernel: row for row in db.iter_perf_rows()}
+        rows = {n.op.kernel_name: held.get(kernel_tile(n.op).identity_key(structural=False, with_io=True)) for n in nodes}
     finally:
         db.close()
     filed = {name: row.status for name, row in rows.items() if row is not None}
     assert filed == {nodes[-1].op.kernel_name: "bench_fail"}, "only the kernel the watchdog named is evidence"
-    assert rows[nodes[-1].op.kernel_name].stats.median == pytest.approx(2.0e6), "priced at the run budget's fail sentinel"
+    assert rows[nodes[-1].op.kernel_name].us == pytest.approx(2.0e6), "priced at the run budget's fail sentinel"
 
 
 def test_run_skips_pinned_rebench_of_the_same_election_after_a_greedy_hang(monkeypatch, tmp_path):
@@ -1995,8 +1974,8 @@ def test_run_skips_pinned_rebench_of_the_same_election_after_a_greedy_hang(monke
     path = tmp_path / "working.json"
     _working_loop(path)  # default state: an untuned seed realization with no recorded knobs
     args = _run_args(path, realization="working.relu", record=False, record_greedy=False, strict_correctness=False)
-    resolve_golden_arg(args)
-    assert args.golden_configs and not args.golden_configs[0].knobs, "the seed must carry no knobs"
+    selection = resolve_golden_arg(args)
+    assert selection.pinned and not selection.pinned[0].knobs, "the seed must carry no knobs"
 
     class FakeBackend:
         name = "cuda"
@@ -2039,8 +2018,7 @@ def test_run_skips_pinned_rebench_of_the_same_election_after_a_greedy_hang(monke
     monkeypatch.setattr(run_module, "_bench_greedy_isolated", fail_if_isolated)
     monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(SystemExit):
-        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+    assert _exit_code(lambda: run_module._handle_run_ir(args, FakeBackend, _FakeDump, selection))
 
     assert calls[0] == "record", "the bench_fail row must be recorded before the pinned walk starts"
     assert calls[1] == ("bench_golden_variants", []), "the knob-less seed pin must not be re-compiled and re-benched"
@@ -2057,15 +2035,14 @@ def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
     cut = SimpleNamespace(route=_CUT)
     split = SimpleNamespace(route={**_CUT, "REDUCE": "g2k"})
     fused = SimpleNamespace(route={"PLACE@inner.1/map": "fuse"})
-    assert selected_decisions(SimpleNamespace(golden_configs=[cut, split], pin_route=True)) == {**_CUT, "REDUCE": "g2k"}
-    assert selected_decisions(SimpleNamespace(golden_configs=[cut, split])) == {}
-    assert selected_decisions(SimpleNamespace(golden_configs=[cut, fused], pin_route=True)) == {}
-    assert selected_decisions(SimpleNamespace(golden_configs=[SimpleNamespace(route={})], pin_route=True)) == {}
+    assert selected_decisions(SimpleNamespace(pin_route=True), GoldenSelection(pinned=[cut, split])) == {**_CUT, "REDUCE": "g2k"}
+    assert selected_decisions(SimpleNamespace(), GoldenSelection(pinned=[cut, split])) == {}
+    assert selected_decisions(SimpleNamespace(pin_route=True), GoldenSelection(pinned=[cut, fused])) == {}
+    assert selected_decisions(SimpleNamespace(pin_route=True), GoldenSelection(pinned=[SimpleNamespace(route={})])) == {}
     monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=cut")
-    assert selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True)) == _CUT
+    assert selected_decisions(SimpleNamespace(pin_route=True), GoldenSelection(pinned=[cut])) == _CUT
     monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=fuse")
-    with pytest.raises(SystemExit):
-        selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True))
+    assert _exit_code(lambda: selected_decisions(SimpleNamespace(pin_route=True), GoldenSelection(pinned=[cut])))
 
 
 @pytest.mark.parametrize("bare", (False, True))
@@ -2112,16 +2089,17 @@ def test_recorded_layout_route_preserves_each_source_buffer():
 def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     """An ``--ab`` row under ``--pin-route`` compiles the same kernel set as the greedy it is compared with: the route
     rides every row, and the row's own knobs win where they name the same key."""
-    from emmy.commands.run import _pinned_samples_for_ir, _sample_replay_knobs
+    from emmy.commands.compile import selected_decisions
+    from emmy.commands.run import _ab_samples
 
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
-    route = SimpleNamespace(name="r", pins={"FAST_MATH": False}, route=_CUT, knobs={})
-    args = SimpleNamespace(golden_configs=[route], pin_route=True, ab=["REDUCE=g8k"], dynamic=None)
-    (_, ab) = _pinned_samples_for_ir(args, embedded=object())
-    assert _sample_replay_knobs(ab) == {**_CUT, "REDUCE": "g8k"}
+    selection = GoldenSelection(pinned=[PinnedRow(name="r", pins={"FAST_MATH": False}, route=_CUT)])
+    args = SimpleNamespace(pin_route=True)
+    (ab,) = _ab_samples(["REDUCE=g8k"], route=selected_decisions(args, selection))
+    assert ab.replay_knobs() == {**_CUT, "REDUCE": "g8k"}
     args.pin_route = False
-    (_, ab) = _pinned_samples_for_ir(args, embedded=object())
-    assert _sample_replay_knobs(ab) == {"REDUCE": "g8k"}
+    (ab,) = _ab_samples(["REDUCE=g8k"], route=selected_decisions(args, selection))
+    assert ab.replay_knobs() == {"REDUCE": "g8k"}
 
 
 @pytest.mark.parametrize(
@@ -2259,8 +2237,8 @@ def test_a_kernel_priced_at_two_sizes_keeps_a_row_and_a_realization_at_each(tmp_
     assert len(document.target_rows()) == 2
     long = next(row for row in document.rows if row.bindings["seq"] == 131072)
     args = _args(path, realization=long.name)
-    resolve_golden_arg(args)
-    for graph in (args._golden_graph, args._golden_reference):
+    selection = resolve_golden_arg(args)
+    for graph in (selection.graph, selection.reference):
         assert symbolic_bindings(node.output for node in graph.nodes.values()) == {"seq": 131072}
 
 
@@ -2324,9 +2302,9 @@ def test_a_program_appended_at_two_sizes_replays_at_each(monkeypatch, tmp_path):
     append_trace_inventory(rehint_program(traced, {"seq": 131072}), path, ctx=ctx)
     sizes = []
 
-    def run_once(args):
-        resolve_golden_arg(args)
-        sizes.append(symbolic_bindings(node.output for node in args._golden_graph.nodes.values())["seq"])
+    def run_once(args, *, pins, explicit, document, **_walk):
+        selection = resolve_golden_arg(args, pins=pins, explicit=explicit, document=document)
+        sizes.append(symbolic_bindings(node.output for node in selection.graph.nodes.values())["seq"])
 
     monkeypatch.setattr(run_mod, "_handle_run_once", run_once)
     run_mod._run_golden_targets(_args(path, realization=None, ir=None, json=None))
