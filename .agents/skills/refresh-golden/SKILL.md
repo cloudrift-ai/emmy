@@ -146,10 +146,9 @@ For the whole-target check, request `--bench-backends eager,tcompile,emmy --stri
 isolated rows are recorded, `--no-record-evidence` keeps that check from replacing their measurements. The
 `--record-greedy` writer copies the picked kernel set from the DB and records a root seed's whole-pick latency beside
 `torch.compile`; each measured row's `tried` is the number of schedules the DB held for that kernel. Missing
-`torch.compile` timing remains a reported gap. A `--tune` run on the card also writes its rows as a file beside the
-card's under `search/freezes/`; copy those files back with the working golden (`scp`, as the golden itself comes
-back) and commit them from the local checkout, where `git lfs install` has run once (README, "Keep what a tune
-measured").
+`torch.compile` timing remains a reported gap. A `--tune` run's rows stay in the card's tune DB. After a hardware
+golden's tunes, copy that DB back with the working golden and fill the golden's candidate file from it
+(`emmy candidates build GOLDEN --db TUNE_DB`; README, "Candidate files").
 
 Promote the validated entries through `GoldenFile.edit(path)` with `add_kernel`, `add_routing` and `upsert_row`,
 including qualified whole-target latency on its root seed. A canonical file holds the same exact kernel at another

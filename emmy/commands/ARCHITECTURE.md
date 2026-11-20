@@ -289,24 +289,20 @@ deletes a file: one nothing survives in is left alone and reported. Every comman
 through `GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
 
 `emmy candidates {build,check,restamp,realize}` maintains the candidate files (GLOSSARY, "Candidate file"; the module
-`search/candidates`). `build [GOLDEN…] [--freeze DIR] [--out DIR]` writes each hardware golden's candidate file: the
+`search/candidates`). `build [GOLDEN…] --db PATH [--out DIR]` writes each hardware golden's candidate file: the
 golden's programs, kernels and decisions, the candidate rows the file already holds, and each group topped up to its
-target from the rows the freeze of the same card measured on it — a spread across their latency, never a schedule the
-golden holds. It logs the groups still under their target, which a tune on the card fills, and warns of a candidate
-faster than its golden's row. A card nothing was measured on gets no file. `check`, `restamp` and `realize` are the
+target from the rows the DB instance `--db` names holds of it on the same card — the tune DB the card's tunes wrote —
+a spread across their latency, never a schedule the golden holds. It logs the groups still under their target, which
+a tune on the card fills, and warns of a candidate faster than its golden's row. A card nothing was measured on gets
+no file. `check`, `restamp` and `realize` are the
 `emmy golden` subcommands over the candidate files, every repository candidate file where no path is named.
 
 `emmy golden realize PATH… [--drop] [--jobs N] [--json PATH]` compiles every row that has a schedule under it — the
 row's kernel as the whole program, its regime and schedule pinned, the file the compile's golden evidence, at the file's
 card — and names the rows the compiler no longer realizes: the kernel it built is not the row's, or a knob the row
-spells is not the one the kernel carries (the gate a bench holds a pinned row to before it times it). It is the check a
-measurement freeze admits: a freeze stores no program a restamp could lower afresh, so `check` finds nothing to restamp
-in it. A piece is rebuilt through the route a repository golden of the same card records for the same kernel, and
-through the file's own only when none does: a golden's decisions are held to the fresh lowering, a freeze's go stale
-with it, and a tune of one piece of a golden freezes the piece's rows with no decision at all. `--drop` writes each file
-back without the rows named; the kernels and decisions stay, and a freeze sheds the ones no row is left under when it is
-folded again (`emmy db import --fresh DIR`, `emmy db freeze --out DIR`). The nightly refresh does both over the freeze
-after the fold, commits the files and posts the count per card (`search/golden/realize.py`). A directory argument is
+spells is not the one the kernel carries (the gate a bench holds a pinned row to before it times it). A piece is
+rebuilt through the decisions the file records. `--drop` writes each file back without the rows named; the kernels
+and decisions stay (`search/golden/realize.py`). A directory argument is
 searched for golden files, rows compile `--jobs` at a time (`EMMY_WORKERS` by default), and the exit status is non-zero
 when a row does not realize and was not dropped.
 
@@ -408,11 +404,8 @@ walk with no measured rows: its successful greedy comparison is re-benched in is
 `run --golden PATH` bench also writes, as tune-DB routing rows, the kernel-set decisions its greedy compile took,
 when the same bench measured every piece of the decision; a piece that is itself cut again counts as measured when
 the decision that cuts it is written too. It writes none under `--no-record-evidence`, outside the deployable
-regime, or when the greedy isolated re-bench is not clean or records no perf rows. A `--tune N` run also freezes
-the rows it recorded into one file beside the card's in the freeze directory `EMMY_FREEZE_DIR` names (the repository
-freeze of an editable checkout by default; README "Keep what a tune measured"), off with the same opt-out and never
-a reason for a tune to fail. In a nested cut (a cut one of whose pieces is cut again) the piece cut again never runs
-as a kernel, so only the decision that cuts it gives it a
+regime, or when the greedy isolated re-bench is not clean or records no perf rows. In a nested cut (a cut one of
+whose pieces is cut again) the piece cut again never runs as a kernel, so only the decision that cuts it gives it a
 price. A cut route no golden stores is therefore recorded with no pinned decisions or schedules: `--bench`, then
 `--record-greedy`. A `--record-greedy` run benches no proposal (a row with no schedule and no measurement, such as a
 trace inventory's seed) as a pinned comparison: beside the pick it would compile the arm its route spells (on a
@@ -603,9 +596,8 @@ emmy
 +-- teardown     -- clean up VMs left by bench --no-teardown
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
 +-- db
-|   +-- import    -- fill a DB instance from golden files, freezes and tune DBs, each file's tables row for row
+|   +-- import    -- fill a DB instance from golden files and tune DBs, each source's rows row for row
 |   +-- export    -- write a DB instance's rows as a dataset directory: golden pools, measured pools, provenance
-|   +-- freeze    -- write a DB instance's admitted rows as a measurement freeze, a golden file per card
 |   +-- check     -- count the rows of a DB instance whose tables disagree with themselves
 +-- recipe
 |   +-- list      -- inspect and filter compact recipe metadata
@@ -1003,18 +995,17 @@ on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
 The dataset DB is the tune DB's tables in a file of their own, never read by a compile: the file `--db PATH` names on
 every subcommand — never a default, so nothing here can touch the tune DB (`_data/dataset.db` in the examples, under
 the ignored `_data/`).
-`import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a measurement
-freeze directory, a golden file, or a tune DB file, which is frozen first; `--repository` adds every repository golden
-— the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (README, "Fit the
-priors") — and the measurement freeze kept with the repository (`search/freezes/`) when it holds files, every
-`*.json` in it in name order: the card files, then the files tunes wrote beside them, whose rows therefore win at
-the same schedule; a tune DB is the source to add when the fit needs more, and merging it into that freeze is how
-it stays. A golden file is the DB's shape, so the import goes
-row for row (`golden.evidence.import_file`), each row under the context of its own regime and the exact identity
-computed from its stored kernel (one whose body no longer lowers is skipped with a warning), and its rows are sourced
-by the file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file; a source the
-instance already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the `source` table
-whatever became of its rows, so naming a file again is a no-op and a report can list its sources. `export --db PATH OUT
+`import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a golden file or
+a tune DB file; `--repository` adds every repository golden — the hardware goldens and each maintained recipe's, the
+set the priors are fit on under `--fresh` (README, "Fit the priors"). A golden file is the DB's shape, so the import
+goes row for row (`golden.evidence.import_file`), each row under the context of its own regime and the exact identity
+computed from its stored kernel (one whose body no longer lowers is skipped with a warning). A tune DB is an instance
+of the same schema: the rows it measured itself are copied under the keys it holds them by
+(`SearchDB.import_measured`), which is what gives the dataset its measured pools; a row it imported from a golden
+file stays behind. A source's rows are filed under its kind and digest — `golden:` for a golden file, `tune:` for a
+tune DB; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A held source is
+recorded in the `source` table whatever became of its rows, so naming it again is a no-op and a report can list its
+sources. `export --db PATH OUT
 [--space {schedule,placement}] [--pool-sample N] [--seed N] [--jobs N]` writes the instance's rows as the dataset of
 one space at `OUT` (`search/dataset/document.py` owns the format): the schedule space is every golden pool enumerated
 from its kernel's definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline
@@ -1027,11 +1018,10 @@ sources by digest, the space, the sample and seed, the featurizer version and th
 `eval prior` read that directory and never
 the DB; exporting the same instance twice writes the same bytes. The pools are enumerated, walked and featurized
 `--jobs` at a time, one pool per worker process (default: `EMMY_WORKERS`, one per core) — the export's whole cost; the
-pools are independent and the draw is seeded, so the dataset is the same at any count. `freeze --db PATH --out DIR` writes an instance's
-admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check [--db
-PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits non-zero when
-any do. Every subcommand resolves its instance through `commands/db.db_path`, which refuses a missing one with the
-command that fills it.
+pools are independent and the draw is seeded, so the dataset is the same at any count. `check [--db PATH]` counts
+the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits non-zero when any do. Every
+subcommand resolves its instance through `commands/db.db_path`, which refuses a missing one with the command that
+fills it.
 
 ### `emmy fit`
 Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db

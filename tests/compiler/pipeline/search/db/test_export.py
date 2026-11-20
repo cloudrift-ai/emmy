@@ -311,7 +311,7 @@ def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
     out under their kernel's name rather than enumerated through a body that would make another kernel."""
     db = SearchDB()
     db.record_kernel(kernel_row("twisted", formed=False))
-    db.record_perf_row(perf_row("twisted", us=500.0, source="golden:case"))  # plausible: the freeze admits it
+    db.record_perf_row(perf_row("twisted", us=500.0, source="golden:case"))  # plausible: admitted
     groups, skipped = build_golden_groups(golden_pools(db, lambda row: StubKernel(F16_MATMUL_STAMPS))[0])
     assert groups == [] and skipped == [(GPU_5090, "k_twisted", "kernel formed from no loop op")]
 
@@ -413,3 +413,27 @@ def test_constants_follow_the_input_names_of_the_kernel_copy_the_db_keeps(tmp_pa
     [pool] = placement_pools(db, golden_pools(db)[0])
     assert set(pool.placement_constants) == {"add_c1", "other_wt"}
     assert set(pool.placement_constants) <= set(pool.kernel.program(pool.bindings).inputs)
+
+
+@pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
+def test_golden_pools_keep_an_independent_precision_regime_apart(monkeypatch, name):
+    """A row measured with one precision decision overridden is a pool of its own, in the regime its own decisions
+    spell: the ambient policy of the process that builds the pools is no row's context."""
+    from emmy.compiler.pipeline.search.dataset import regime_of
+    from emmy.compiler.pipeline.search.space import precision_pins
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    monkeypatch.setenv(f"EMMY_{name}", "0")
+    db = tuned_db(None, ("fused/norm-linear-f16-scalar-reduce.json",), source="golden:case", us=500.0)
+    original = list(db.iter_perf_rows())
+    for row in original:
+        db.record_perf_row(replace(row, precision={"FAST_MATH": False, name: True}))
+    rows = list(db.iter_perf_rows())
+    assert len(rows) == 2 * len(original) and {row.precision[name] for row in rows} == {False, True}
+    pools, dropped = golden_pools(db)
+    assert not dropped and len(pools) == len(rows)
+    for pool in pools:
+        ctx = pool_context(pool)
+        assert ctx.precision_pins() == precision_pins(pool.pins)
+        assert sum(row.precision == ctx.precision_pins() and row.cold_cache == ctx.cold_cache for row in rows) == len(original)
+        assert pool.regime == regime_of(ctx.cold_cache, ctx.precision_pins())

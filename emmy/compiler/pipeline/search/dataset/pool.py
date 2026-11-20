@@ -2,8 +2,7 @@
 golden rows measured on it — the supervision a training group is built over.
 
 The regime vocabulary lives here too: :data:`REGIME_PINS` maps arithmetic and cache regimes to golden input pins.
-:func:`regime_of` reads a row's precision decisions and cache mode back to that key. The freeze and export preserve
-it.
+:func:`regime_of` reads a row's precision decisions and cache mode back to that key. The export preserves it.
 """
 
 from __future__ import annotations

@@ -395,6 +395,6 @@ def regime_pins(pins: dict | None = None) -> dict[str, bool]:
 
 #: Retired: the pass that read it (a re-roller of statement runs into ``#pragma unroll`` loops, for listings) is gone
 #: and nothing stamps or reads it. The name stays registered because the rows stored while that pass ran (the
-#: goldens, the freezes, tune DBs) carry ``LOOPIFY: 0``, and a row key no knob declares is a number to the priors'
+#: goldens, the candidate files, tune DBs) carry ``LOOPIFY: 0``, and a row key no knob declares is a number to the priors'
 #: featurizer. It goes with a rewrite of those rows.
 LOOPIFY = Knob("LOOPIFY", KnobType.INT, hints=(0,), help="Retired; stored rows carry its 0.", off=0, unfeatured=True)

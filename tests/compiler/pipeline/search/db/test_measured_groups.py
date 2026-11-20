@@ -68,7 +68,7 @@ def test_the_same_kernel_from_two_sites_is_one_tuning_problem():
     A kernel minted by a cross-CTA split has its own structure, so tuning it is the same
     question as tuning a standalone kernel of that structure: the two share a pool whatever their exact
     identities. Keyed on the site that offered them the two
-    land in different pools and get searched twice: on the RTX 5090 measurement freeze 73 structures
+    land in different pools and get searched twice: among the RTX 5090's measured rows 73 structures
     were fragmented like that, the losing pool's best coming in a median 1.46x behind the winning
     pool's."""
     rows = [
@@ -85,7 +85,7 @@ def test_one_offer_site_over_different_work_is_not_one_group():
     computed, so one site can be realized as a single kernel or as several — and then both rows are honest
     measurements, of a whole op and of a piece of one, while comparing their latencies is not.
 
-    Left merged this cost a real number: nine pools of the RTX 5090 freeze paired a fused rms_norm->linear
+    Left merged this cost a real number: nine pools of the RTX 5090's rows paired a fused rms_norm->linear
     megakernel with one kernel of the same op's unfused realization, and the report priced a 5.9 µs norm
     kernel against a 131 ms whole-op row as a 22 221x miss."""
     shapes = {
@@ -180,13 +180,12 @@ def test_goldens_go_in_as_row_indices_and_come_back_as_row_indices():
     assert GoldenGroup.from_dicts("g/y", "y", "warp", "g", "y", (4, 2, 4), feats).golden_ids == (2, 4)
 
 
-def test_a_row_the_freeze_would_refuse_is_refused_here_too():
-    """Admission is ``freeze_reason``, not a second list of rules — which matters most for the row it adds.
+def test_a_row_the_admission_rule_refuses_is_refused_here():
+    """Admission is ``admission_reason``, not a second list of rules — which matters most for the row it adds.
 
     An implausibly fast row is far worse than the ``bench_fail`` sentinel this module excludes by hand: the
     sentinel makes ONE row rank last, while a phantom optimum becomes the group's ``min`` and makes every
-    other row in the pool look bad. It is invisible on freeze input — a freeze passed this filter at write
-    time — so only an imported tune DB can produce it, and only a test like this one can show it."""
+    other row in the pool look bad. An imported tune DB can hold one, and only a test like this one can show it."""
     rows = [
         _row("honest", us=500.0, knobs=_feats()),
         _row("phantom", us=0.05, knobs=_feats(TILE="f8x8")),

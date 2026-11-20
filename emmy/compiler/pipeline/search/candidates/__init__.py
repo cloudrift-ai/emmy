@@ -11,8 +11,8 @@ kernels and decisions, so it restamps onto a fresh lowering exactly as its golde
 and its rows are the candidates alone: the best row stays in the golden, and the two join on the kernel's exact
 identity, the sizes and the regime.
 
-:func:`build` fills a file from a DB instance the card's measurement freeze was imported into, which is where a
-tune's measured rows end up; a group the freeze does not cover is listed short, for a tune on the card to fill.
+:func:`build` fills a file from a DB instance that holds the card's measurements — the tune DB a tune writes its
+rows into; a group it does not cover is listed short, for a tune on the card to fill.
 """
 
 from __future__ import annotations
@@ -168,8 +168,8 @@ class Report:
 def build(golden: GoldenFile, db: SearchDB, existing: GoldenFile | None = None) -> tuple[GoldenFile, Report]:
     """The candidate file of ``golden``: its programs, kernels and decisions, and for each of its measured groups the
     candidate rows ``existing`` holds, topped up to the group's :func:`target` from the measurements ``db`` holds of
-    the group's kernel on the card, in its regime and at its sizes (``SearchDB.measured``) — an instance the card's
-    freeze was imported into, where a later file's row stands at one schedule. A schedule a golden row of the group
+    the group's kernel on the card, in its regime and at its sizes (``SearchDB.measured``): the tune DB the card's
+    tunes wrote, where the row benched last stands at one schedule. A schedule a golden row of the group
     spells is never a candidate; a row of ``existing`` whose group the golden no longer holds is dropped."""
     document = GoldenFile(
         gpu_name=golden.gpu_name,

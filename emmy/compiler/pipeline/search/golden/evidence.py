@@ -31,7 +31,6 @@ from emmy import config
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.knob import KnobType, family_of, registry
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
-from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
 from emmy.compiler.wire import symbolic_vars
 
 from .format import GoldenFile, Row
@@ -148,8 +147,8 @@ def import_constants(db: SearchDB, document: GoldenFile, rows: Iterable[Row], *,
 
 
 def file_source(kind: str, path: Path | str) -> str:
-    """The ``source`` an import files a file's rows under: what kind of file it is (``freeze`` or ``golden``) and the
-    digest of its own bytes — a re-recorded file is another source, and a dataset holds a file once."""
+    """The ``source`` an import files a file's rows under: what kind of file it is (a ``golden`` file, a ``tune`` DB)
+    and the digest of its own bytes — a re-recorded file is another source, and a dataset holds a file once."""
     return f"{kind}:{hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]}"
 
 
@@ -157,9 +156,7 @@ def import_file(db: SearchDB, path: Path, source: str) -> Counter:
     """Import one golden file into ``db``: every row under the context of its own regime, and the constant inputs its
     targets' programs bind (:func:`import_constants`), filed under ``source`` (:func:`file_source`), which the
     instance then holds (``SearchDB.record_source``) whatever became of the rows. A source the instance already
-    holds is skipped; a git-LFS pointer in the data's place is refused by name. Returns what was written, by kind."""
-    if is_lfs_pointer(path):
-        raise ValueError(f"{path} is a git-LFS pointer, not the data: run `git lfs install && git lfs pull` (in CI, check out with lfs)")
+    holds is skipped. Returns what was written, by kind."""
     if source in db.sources():
         logger.info("%s is already held (%s)", path.name, source)
         return Counter()

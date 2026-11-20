@@ -24,7 +24,7 @@ After that the Parts are largely independent:
 | 3 | The prior and **the deploy evidence hierarchy** | you need to know why a compile picked what it picked |
 | 4 | The driver: the greedy compile through `Run.resolve` | you are tracing control flow through a compile |
 | 5 | Recording evidence: how a measurement reaches the tune DB | you want a bench to decide the next compile |
-| 6 | Persistence: the two identities, the tables, the freeze | you are adding a cache, a table, or a column |
+| 6 | Persistence: the two identities, the tables, the admission rule | you are adding a cache, a table, or a column |
 | 7 | Golden configs and the A/B integrity gates | you are recording or replaying goldens |
 | 8 | Evaluating the prior and the goldens (`emmy eval`) | the prior is picking badly and you want to know where |
 | 9 | Tile lowering, at the pipeline level | you want the pipeline-side view of `tile/` |
@@ -81,7 +81,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 |-------|----------------|------------|--------------|
 | **Golden files** | model goldens under `recipes/<model>/golden/`; hardware goldens under `search/golden/records/` — the tune DB's tables for one card, beside the traced programs (Part 7) | `run --bench --record-greedy` / `--record` into a working golden, reviewed and promoted (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy db import` loads them into the dataset DB, whose export (`emmy db export`) is the dataset `emmy fit` and `emmy eval prior` read |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `routing` rows its rows are of | `run --bench` — every clean pinned row (golden / `--ab` / `--tune`) and the greedy re-bench, per kernel (`search/bench_record.py`, Part 5); the golden import — the golden rows in scope, once per golden digest | greedy compile (measured evidence) |
-| **Dataset DB** | the file `emmy db … --db PATH` names (`_data/dataset.db` in the examples, under the ignored `_data/`; never the tune DB) — the same tables in a file of their own | `emmy db import`, from the freeze directories, golden files and tune DB files named on its command line (the hardware goldens `search/golden/records/*.json` for the offline prior; nothing by default) — each file's tables, its rows filed under the identity computed from each stored kernel, and the constant inputs its programs bind on each target | `emmy db export` and nothing else — **never** a deploy |
+| **Dataset DB** | the file `emmy db … --db PATH` names (`_data/dataset.db` in the examples, under the ignored `_data/`; never the tune DB) — the same tables in a file of their own | `emmy db import`, from the golden files and tune DB files named on its command line (the hardware goldens `search/golden/records/*.json` for the offline prior; nothing by default) — each golden's tables, its rows filed under the identity computed from each stored kernel, and the constant inputs its programs bind on each target; the rows a tune DB measured itself, under the keys it holds them by | `emmy db export` and nothing else — **never** a deploy |
 | **Dataset** | the directory `emmy db export` is given (`_data/dataset` in the examples) — a `manifest.json` beside one matrix file per pool (`search/dataset/document.py`) | `emmy db export`: every golden pool enumerated from its kernel's definition and featurized, every measured pool, the provenance | `emmy eval prior` (both kinds of pool) and `emmy fit` — **never** a deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The tune
@@ -95,7 +95,7 @@ run --bench pinned/golden/--ab rows ──▶ perf table   (autotune.db) ─┐
 golden import (once per digest) ─────▶ perf table   (autotune.db) ─┴──▶ greedy compile: ONE measured-evidence index
                                                                          (perf + golden rows on µs) — schedule AND
                                                                          kernel-set forks
-emmy db import ◀─ freezes, goldens, tune DBs ─▶ dataset DB (_data/dataset.db) ─▶ emmy db export ─▶ dataset (_data/dataset)
+emmy db import ◀─ goldens, tune DBs ─▶ dataset DB (_data/dataset.db) ─▶ emmy db export ─▶ dataset (_data/dataset)
 dataset (manifest.json + one matrix per pool) ─┬▶ emmy eval prior (never a deploy)
   one per space: _data/schedule, _data/placement └▶ emmy fit ─▶ weights/schedule.json, weights/placement.json (repo)
 recorded from those rows ────────────▶ recipe-local / hardware golden file ──▶ greedy compile (golden rows: the
@@ -104,7 +104,7 @@ recorded from those rows ────────────▶ recipe-local / 
 ```
 
 Benchmarks measure the code a deploy runs. Their context distinguishes precision and hot/cold cache regimes:
-a compile reads only matching evidence, and freeze/export preserve the regime. Cold timing fetches weights from
+a compile reads only matching evidence, and the export preserves the regime. Cold timing fetches weights from
 memory before each kernel; it does not predict the partial cache reuse of a complete serving request. The regime a
 compile runs in is declared, never inferred from the rows: a serving config declares its server's cache regime
 (`EMMY_COLD_CACHE` in `SERVE_ENV`), which puts a `COLD_CACHE` pin on every lane's rows, and the server compiles under
@@ -182,7 +182,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/prior/` | The ONE ranking path: the `Prior` ABC (`base.py`) and its one implementation, `OfflinePrior` (`offline.py`), which `load_prior` builds from the weights artifact. `catboost_model.py` holds `CatBoostModel`, the offline prior's scoring function as a value object — the one definition the fitter trains and the deploy path ranks by. `fit/` is the offline fitter, split by responsibility — `catboost.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/dataset/group.Group`, one layer down: a pool is data, not a fitter detail. |
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — every rank and regret metric resolves here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
 | `search/dataset/` | The training data as values and as a document. `Group` (`group.py`) — one candidate pool packed as a matrix plus one label per row; the base says nothing about what the labels mean, which is all a ranking metric needs. `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and it carries the `GoldenPool`s it was built from (`pool.py`: card, regime, sizes, the verified `GoldenRow`s, and the `KernelDef` the pool is enumerated from — `kernel.py`); `MeasuredGroup` is the one whose labels ARE the microseconds. `Dataset` (`document.py`) is the groups as a directory — `manifest.json` beside one `.npy` per group — written by `emmy db export`, read by `emmy fit` and `eval prior`; the leaf values are wire classes. `measured_features` (`sample.py`) is the feature row of a measured `perf` row, computed from the row's kernel, and `ShapeKey` the compact shape key read off a kernel's stamps. Nothing here reads a DB — `db/export.py` builds the groups, the one place the two packages meet — and nothing imports `search/prior/`: a group carries every column it was given, and the model narrows to the ones it wants when it asks for the matrix. |
-| `search/db/` | The SQLite store (`SearchDB`: the kernels, the decisions that minted them, their measurements) and what fills and drains it: `freeze.py`, a DB's admitted rows as a golden file per card (`freeze_reason` is the one admission rule every measured-pool reader applies), and `export.py`, its rows as the dataset (`golden_pools`, `measured_groups`, `export_dataset`) — where `db` rows become `dataset` values, in that one direction. |
+| `search/db/` | The SQLite store (`SearchDB`: the kernels, the decisions that minted them, their measurements) and what drains it: `admission.py`, the one rule for which rows a pool reads (`admission_reason`), and `export.py`, its rows as the dataset (`golden_pools`, `measured_groups`, `export_dataset`) — where `db` rows become `dataset` values, in that one direction. |
 | `search/golden/` | The golden package, one module per job: the file format in the DB's shape (`format`: `GoldenFile`, `Kernel`, `Row`), the import into the DB a compile reads (`evidence`), the repository index and the evidence scope (`repository`), the rewrite onto a fresh lowering (`restamp`: `restamp`, `mint`, `lift_targets`), the working golden's writers (`working`: trace inventories, `record_greedy_pick`, `record_latency`). |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the working golden's per-kernel slices). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
@@ -902,13 +902,14 @@ registered decision knob.
 `SearchDB` is the one representation of what was measured: the kernels, the decisions that minted them and their
 measurements, in one schema, whichever instance holds them — the tune DB, a dataset DB, an in-memory one. Every
 reader asks an instance through `SearchDB`'s methods: the pick (`measured`, `failed`, `priced_arms`), a serving
-pack's key (`evidence_digest`), the candidate build (`measured`), the export and the freeze (`iter_perf_rows`,
-`iter_routing`, `iter_taken`). The join on a kernel's exact identity, its sizes, the card and the regime, the rule
-for which of two rows stands, and the price of a kernel-set decision are each written once, there.
+pack's key (`evidence_digest`), the candidate build (`measured`), the export (`iter_perf_rows`, `iter_taken`). The
+join on a kernel's exact identity, its sizes, the card and the regime, the rule for which of two rows stands, and the
+price of a kernel-set decision are each written once, there.
 
-A golden-shaped file — a golden, a candidate file, a freeze — is how rows are kept in the repository and exchanged.
-It enters an instance through the one importer (`golden/evidence.py`) and leaves one through the freeze; a record
-run writes its file from the kernels and the timings of its own bench. Nothing else reads a file's rows as evidence:
+A golden-shaped file — a golden, a candidate file — is how rows are kept in the repository and exchanged. It enters
+an instance through the one importer (`golden/evidence.py`); a record run writes its file from the kernels and the
+timings of its own bench, and a candidate build from the rows a tune DB holds. Nothing else reads a file's rows as
+evidence:
 
 - **A reader that needs a file's measurements imports the file and queries the instance.** It never groups rows by
   identity, sizes or regime itself.
@@ -937,7 +938,7 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   computed from a kernel is stored — its `S_*` stamps are computed from the wire where a row is featurized. The
   lowering passes take a formed kernel's wire back to the kernel — the lift and the twist give the same tile, so the
   same exact identity and stamps are computed from it (`tests/compiler/ir/test_kernel_wire.py` holds every kind of
-  kernel the corpus mints to it) — which is what a freeze re-lowers. A piece carved from a twisted tree (an attention
+  kernel the corpus mints to it) — which is what an export lowers again. A piece carved from a twisted tree (an attention
   cut or split piece) is formed from no loop op: the lift does not take its derived body back, so its row keeps that
   body, `formed` false — a loop op over it has the kernel's identity and stamps as it stands — and only its parent's
   program reaches it. The fused kernel of a slice and a piece a cut or a split minted are rows alike, so the same
@@ -954,7 +955,7 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   Publishing a recorded regime spells those effective defaults explicitly, so ambient overrides cannot leak in;
   equivalent omitted and explicit defaults share one regime without rewriting the stored row's pins.
   Cold measurements evict L2 and the instruction caches before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
-  regime through import, freeze and export; an omitted pin means hot. Neither regime prices the other's rows.
+  regime through import and export; an omitted pin means hot. Neither regime prices the other's rows.
   The regime knobs are one tuple, `space.REGIME_KNOBS` — the precision-trading family and `COLD_CACHE` — and every
   reader of a regime iterates it through `space.regime_pins`: the live-regime test (`evidence.regime_live`), the
   pins a record writes (`pins.measured_regime_pins`), the dataset's `REGIME_PINS`, and the context a recorded row is
@@ -977,15 +978,14 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   schedule)`: the sizes a dynamic kernel's symbolic dims were benched at (`bindings`, `{}` for a static kernel — the
   identity ignores the hint, so without them one kernel at two sizes would be one row), then `status`, the median
   of its timed launches (`us`), a `bench_fail` row's `error` and `source` (`measured`; `golden:<digest>` or
-  `freeze:<digest>` for an imported row — the digest of the golden scope or the freeze it came from, which is how a
-  re-recorded golden's rows are told from the current file's and let go). The row written last wins: a schedule
+  `tune:<digest>` for an imported row — the digest of the golden scope or file, or of the tune DB, it came from, which
+  is how a re-recorded golden's rows are told from the current file's and let go). The row written last wins: a schedule
   benched again takes the new number, faster or slower. Three rows are never replaced: a row measured here by an
-  import, a golden file's row by a freeze's (the golden readers read `golden:` rows alone, so a freeze repeating a golden's schedule would otherwise
-  take the pool out of the fit), and an `ok` row by a later failure. Failed rows ARE recorded — the next compile
-  disqualifies that arm instead of failing the same way again; a config whose **compile** ran past its budget is
-  not recorded at all, since a stored row would
-  make it a permanent cache hit that is never re-benched (see the two bench budgets in
-  `backend/cuda/ARCHITECTURE.md`). No route rows, no whole-slice totals, no kernel-set verdicts.
+  import, a golden file's row by a tune DB's (the golden readers read `golden:` rows alone, so a tune repeating a
+  golden's schedule would otherwise take the pool out of the fit), and an `ok` row by a later failure. Failed rows ARE
+  recorded — the next compile disqualifies that arm instead of failing the same way again; a config whose **compile**
+  ran past its budget is not recorded at all, since a stored row would make it a permanent cache hit that is never
+  re-benched (see the two bench budgets in `backend/cuda/ARCHITECTURE.md`). No route rows, no whole-slice totals, no kernel-set verdicts.
 - **`constant`** — one row per constant input a golden file's program binds on a target kernel at one set of sizes,
   keyed `(source, kernel, bindings, name)`, holding the constant's wire. `emmy db import` copies them out of the
   file's traced programs (`golden.evidence.import_constants`, through `GoldenFile.executable`, at the sizes the
@@ -997,7 +997,7 @@ tables hold compilable kernels, the decisions that minted them, and measurements
 
 Readers see a FLAT `PerfRow` — the context's columns, the kernel named by its exact identity (`PerfRow.kernel`),
 the sizes, and `knobs`, the schedule row alone. A reader that needs the kernel's features lifts its stored definition
-(`freeze.kernel_ops`: `KernelDef.op` at the row's sizes) and computes them; the joins live in `db.py` and nowhere
+(`admission.kernel_ops`: `KernelDef.op` at the row's sizes) and computes them; the joins live in `db.py` and nowhere
 else.
 
 **Nothing migrates.** A file whose tables have other columns than the DDL was written by another emmy: a writer open
@@ -1010,41 +1010,36 @@ computation moves.
 
 **Drift checks** (`emmy db check`, `SearchDB.drift`). A tune DB is a cache: a row the current code disagrees with
 is re-benched or re-imported, never patched, so the checks are the cheap ones over the tables themselves: every row
-names the rows it references and every CUDA context names a registry card. Nothing decodes a stored wire here. The
-artifact that has to survive a code change is the freeze, which is re-lowered on import.
+names the rows it references and every CUDA context names a registry card. Nothing decodes a stored wire here.
 
-**Measurement freeze** (`db/freeze.py`, written by `emmy db freeze`). The tune DB is a live store, so a model fit or
-evaluated straight from it is not reproducible. A *freeze* is a snapshot written as a golden file per card (Part 7's
-format), the DB's tables with each kernel pointed at by its position in the file: every measured kernel's definition
-with the routing rows that reach it and the parents they reach it from, and a row per measurement — its schedule row,
-its regime as the input pin `FAST_MATH`, its median. A freeze has no traced programs, so it is evidence and training
-data but nothing a restamp can lower again; a compiler change that re-keys a kernel leaves its frozen rows behind.
+**What a dataset reads of an instance** (`db/admission.py`, `db/export.py`). A DB instance holds every row a bench
+wrote, the failed and the implausible among them, so the readers of the measurement data share one admission rule and
+one way in.
 
-- **What freezes** is `freeze_reason(row, shape)`'s call, `shape` being the stamps of the row's kernel, computed
-  from its stored definition (`freeze.kernel_ops`): an `ok` row on a card the GPU registry knows whose kernel still
-  lowers (one that does not is dropped as a stale kernel), that passes the two
-  physical-plausibility checks (`implausible_value_reason`, which reads the row's
-  `bindings` as the size a symbolic axis ran at, and `impossible_kernel_reason`). The effective precision decisions
-  and cache mode define its regime (`regime_of`), including independent overrides. A failed bench is not a
-  measurement (the tune DB keeps it), and a row a compile imported from a golden file is the file's.
-  `measured_groups` inherits the same filter, and keys its pools by regime, so an analysis over a live DB agrees with
-  one over a freeze.
-- **Freezing the same DB twice yields the same bytes**: rows sort by content, and the golden dump is deterministic.
-  A file's identity is its bytes: `emmy db import` sources its rows by the file's kind and digest —
-  `freeze:<sha256[:12]>` for a freeze directory's files, `golden:<sha256[:12]>` for a golden file
-  (`golden.evidence.file_source`) — so a report over an instance names the exact files it was computed over, and
-  naming a file again is a no-op. A held file is a fact of its own (the `source` table, written by the import whatever
-  became of the file's rows), so a golden none of whose rows is a measurement — a restamped one keeps its schedules
-  and loses its microseconds — is held and simply contributes no row.
-- **Importing goes row for row, and computes the key.** `emmy db import` reads freeze directories, golden files and
-  tune DBs (frozen first, so one path serves all) named on its command line, or every repository golden
-  (`--repository`: the hardware goldens and each maintained recipe's, the priors' training set — README, "Fit the priors");
-  nothing by default — and hands each file's tables to the golden importer (`golden.evidence.import_file`) once per
-  regime the file holds: `record_kernel`, `record_routing`, `record_perf`, each under the exact identity computed
-  from the stored kernel's Loop IR, then `record_constants` for each target the rows reach. A stored kernel whose
-  body no longer lowers is skipped with a warning, with its rows; a stale file is a restamp, not an import option. A
-  golden file's rows become, through `emmy db export`, the golden pools `emmy fit` and `eval prior` read (Part 8); a
-  compile never reads this instance, and the tune DB imports the goldens on its own.
+- **What is admitted** is `admission_reason(row, shape)`'s call, `shape` being the stamps of the row's kernel,
+  computed from its stored definition (`admission.kernel_ops`): an `ok` row on a card the GPU registry knows whose
+  kernel still lowers (one that does not is dropped as a stale kernel), that passes the two physical-plausibility
+  checks (`implausible_value_reason`, which reads the row's `bindings` as the size a symbolic axis ran at, and
+  `impossible_kernel_reason`). The effective precision decisions and cache mode define its regime (`regime_of`),
+  including independent overrides. A failed bench is not a measurement (the tune DB keeps it). The golden pools and
+  `measured_groups` apply the same filter and key their pools by regime.
+- **A source's identity is its bytes.** `emmy db import` files a source's rows under its kind and digest —
+  `golden:<sha256[:12]>` for a golden file, `tune:<sha256[:12]>` for a tune DB (`golden.evidence.file_source`) — so
+  a report over an instance names the exact sources it was computed over, and naming one again is a no-op. A held
+  source is a fact of its own (the `source` table, written by the import whatever became of the rows), so a golden
+  none of whose rows is a measurement — a restamped one keeps its schedules and loses its microseconds — is held and
+  simply contributes no row.
+- **Importing goes row for row.** `emmy db import` reads the golden files and tune DBs named on its command line, or
+  every repository golden (`--repository`: the hardware goldens and each maintained recipe's, the priors' training
+  set — README, "Fit the priors"); nothing by default. A golden file goes to the golden importer
+  (`golden.evidence.import_file`) once per regime it holds: `record_kernel`, `record_routing`, `record_perf`, each
+  under the exact identity computed from the stored kernel's Loop IR, then `record_constants` for each target the
+  rows reach. A stored kernel whose body no longer lowers is skipped with a warning, with its rows; a stale file is
+  a restamp, not an import option. A tune DB is an instance of the same schema, so the rows it measured itself are
+  copied under the keys it holds them by (`SearchDB.import_measured`); a row it imported from a golden file is the
+  file's and stays behind. A golden file's rows become, through `emmy db export`, the golden pools `emmy fit` and
+  `eval prior` read, and a tune DB's the measured pools of `eval prior --pools measured` (Part 8); a compile never
+  reads this instance, and the tune DB imports the goldens on its own.
 - **The candidate files** (`search/candidates`, one file per hardware golden under its `records/`) hold measured
   schedules that are not the best known one, for the groups the hardware golden holds: a group is filled to a count
   set by the size of its kernel's schedule space (`candidates.target`: 3 at ten schedules or fewer, 10 at a million or
@@ -1054,23 +1049,10 @@ data but nothing a restamp can lower again; a compiler change that re-keys a ker
   golden's rows on the kernel's exact identity, the sizes and the regime. A candidate is never a schedule its golden
   holds: two rows are one schedule when they agree on every knob that is not at its default or OFF value and is no
   regime knob, since a tune's row spells every knob its kernel carries and a golden row only what its record pinned.
-  `candidates.build` fills a file from a DB instance the freeze was imported into (`SearchDB.measured`, the group's
-  kernel on the card, in its regime and at its sizes) and keeps the rows it already holds. It is not a
-  repository golden: no compile, import, export, fit or gate reads it. It restamps as its golden does, and a change
-  to a hardware golden is followed by a build, which copies the golden's tables again.
-- **The freeze kept with the repository** is the directory `search/freezes/` (`freeze.REPOSITORY_FREEZE`): one
-  file per card, exactly what `emmy db freeze` writes, payload in git LFS and left out of the wheel. `emmy db import
-  --repository` reads it beside the repository goldens, and nothing else does — not a compile, not the reproduction
-  gate, not the placement export, which iterate the golden paths. It grows by the files tunes write: a `run --bench
-  --tune N` that records evidence freezes the same rows into `<card>.r<UTC stamp>.<digest>.json` beside the card's
-  file (`freeze.write_run_freeze`, into the directory `EMMY_FREEZE_DIR` names — the repository freeze of an editable
-  checkout by default, none when set empty, as the test suite sets it), a name that sorts after `<card>.json` and in
-  time order, so the import, which reads a directory in name order, files the tune's rows last and they win at the
-  same schedule. The nightly refresh folds the files into one per card (the directory alone imported, frozen back),
-  which is also the manual merge of a tune DB copied from a machine with no checkout (README, "Keep what a tune
-  measured"); folding the same files again rewrites the same bytes. A row whose kernel no longer lowers drops out at
-  the next import, with a warning per kernel and no count: the measured pools the nightly refresh reports, rows and
-  regret per card, are where a large drop shows.
+  `candidates.build` fills a file from the DB instance the card's tunes wrote (`SearchDB.measured`, the group's
+  kernel on the card, in its regime and at its sizes) and keeps the rows it already holds. It is not a repository
+  golden: no compile, import, export, fit or gate reads it. It restamps as its golden does, and a change to a
+  hardware golden is followed by a build, which copies the golden's tables again.
 
 **Recording benches** is Part 5's subject: a `run --bench` that benched rows with hand-forced knob values (golden or
 `--ab` rows) records each clean measurement — plus the greedy pick, through its comparable `greedy (isolated)`
@@ -1235,14 +1217,10 @@ check and the suite read the restamp's report beside the file: a kernel re-keyed
 equal (a golden stores no identity) while the compile meets an identity the file's rows are not keyed by. The
 realization corpus's staleness test is the same restamp (`tests/compiler/realization/ARCHITECTURE.md`). Both are
 GPU-free; the `refresh-golden` skill is the flow around them, including the record run a demoted row needs.
-A measurement freeze stores no program, so a restamp lowers nothing afresh in it and leaves it as it is; its check is
-`emmy golden realize` (`search/golden/realize.py`): every row compiled under its own schedule, the row's kernel as the
-whole program and the file as the evidence, at the file's card, and the rows the compiler no longer realizes named.
-A piece is rebuilt through the route a repository golden of the same card records for the same kernel, and through
-the file's own only when none does: a golden's decisions are held to the fresh lowering, a freeze's go stale with
-it, and a tune of one piece of a golden freezes the piece's rows with no decision at all. The nightly refresh runs
-the check over the freeze after the fold and drops those rows (`--drop`), then folds once more so each card's file
-sheds the kernels and decisions no row is left under.
+`emmy golden realize` (`search/golden/realize.py`) asks the other question of a file's rows: every row compiled under
+its own schedule, the row's kernel as the whole program and the file as the evidence, at the file's card, a piece
+rebuilt through the decisions the file records, and the rows the compiler no longer realizes named. `--drop` writes
+the file back without them; it is how a candidate file is pruned.
 
 When a row is dropped, restamp rechecks the surviving rows against their remaining siblings until no further row is
 lost. A kernel set missing a member loses its verified state even if it has a stored measurement. Kept and demoted
@@ -1384,9 +1362,9 @@ ten, keep the measured best). This is the half that tracks deployed speed.
 **Every summary publishes what it covered.** Summaries carry the axes they were keyed on as a dict — measured: `gpu`;
 golden: `gpu` × `tier` × pool-size bucket — along with how many pools keyed into them, how many the model
 could not score at all, and — where a metric has a size minimum and so covers fewer pools than the summary holds —
-that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven), so on the RTX
-5090 freeze's 176 pools those counts are 149, 107 and 45. An aggregate that averaged the excluded pools in would be
-reporting mostly arithmetic.
+that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven), so over 176
+measured pools of the RTX 5090 those counts were 149, 107 and 45. An aggregate that averaged the excluded pools in
+would be reporting mostly arithmetic.
 
 **A measured pool is keyed on the KERNEL, not on the site that offered it.** The key digests the `S_*` stamps of
 the kernel the row measured (`export.kernel_sig`, over `features.stamps` of the kernel's stored definition). Two
@@ -1395,7 +1373,7 @@ stricter: it joins on the exact identity, so distinct bodies with equal histogra
 The stamps are a function of the kernel alone — the tile its schedule fork was offered — so nothing a schedule fork
 decides can move an `S_*` value, and sibling schedules cannot be split apart.
 
-Keying on the site that offered the kernel gets it wrong in both directions, and the RTX 5090 freeze shows both. It
+Keying on the site that offered the kernel gets it wrong in both directions, and the RTX 5090's rows showed both. It
 **over-merges**, because that key digests the *pre-descent offer op*: nine pools paired a fused `rms_norm`→linear
 megakernel with a row for just one kernel of the same op's unfused realization — a 5.9 µs norm kernel filed as a
 rival of a 131 ms whole-op row, where the unfused pair actually costs 24–191 µs. And it **fragments**: 73 structures
@@ -1419,8 +1397,8 @@ goldens that real cold deploys missed by 12–29×. Both counts come from ONE co
 the pessimistic rank is the one that gates, and the strictly-better **optimistic** rank is reported beside it in `emmy
 fit`'s metrics file. The gap between them is the width of the tie plateau at the golden's score, and thus an early
 warning that the scores are saturating. **A golden pool is one kernel's schedule space, read from the dataset DB by
-the export.** `db/export.golden_pools` groups the instance's `golden:` rows the freeze admits (`freeze_reason`, the
-one admission rule) by card, regime, kernel (the exact one the rows were measured on — the pool has to be enumerated
+the export.** `db/export.golden_pools` groups the instance's `golden:` rows the admission rule keeps
+(`admission_reason`) by card, regime, kernel (the exact one the rows were measured on — the pool has to be enumerated
 from a definition, which is why it keys on the kernel where the measured pools key on the stamp signature) and sizes,
 beside a count of the rows it dropped, as `measured_groups` does; `ranking.build_golden_groups` enumerates each pool
 from the kernel's own definition (`KernelDef.program`: the stored body at the rows' sizes, through the tile and kernel
@@ -1438,7 +1416,7 @@ seed, and the results are folded in the pools' order, so the groups are the same
 one process (the suite runs its own workers) and the CLI asks for every core. A pool's context is
 `Context.from_target(cap, gpu_name=…, precision=pins)` — the card the rows were measured on with its known SM count
 and smem specs, and the regime its input pins spell (precision decisions and cache mode; the fast-math flag follows
-the decision) — never the host's. Import, freeze and export preserve those decisions; incompatible DB and dataset
+the decision) — never the host's. Import and export preserve those decisions; incompatible DB and dataset
 versions must be rebuilt.
 Offline pools publish every effective precision and cache pin, so ambient overrides cannot change their candidates.
 The host's context makes golden ranks machine-dependent, because the occupancy features then describe tiles for a

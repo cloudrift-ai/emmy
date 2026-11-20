@@ -1,29 +1,25 @@
-"""``emmy db {import,export,freeze,check}`` — the DB instance the offline prior's data passes through: fill it from
-golden-shaped sources, export its rows as a dataset, snapshot it into a measurement freeze, and check that its tables
-agree with themselves.
+"""``emmy db {import,export,check}`` — the DB instance the offline prior's data passes through: fill it from golden
+files and tune DBs, export its rows as a dataset, and check that its tables agree with themselves.
 
 The instance is the tune DB's schema in a file of its own, the one ``--db PATH`` names on every subcommand — never a
 default, so a refit can never touch the tune DB a compile reads. The README's examples put it at ``_data/dataset.db``
 beside the exported dataset, under ``_data/`` where git ignores it, so both are there to inspect and neither is a
 commit away from the repository. No compile ever reads it, so what is imported into it cannot change a deploy.
 
-- ``import SOURCES…`` loads golden-shaped sources: measurement freeze directories, golden files, and tune DB files,
-  which are frozen first (the way a card's measurements from a rented GPU reach the dataset). Nothing is loaded by
-  default: the sources are named on the command line, or ``--repository`` names the repository goldens and the
-  freeze kept with the repository (``search/freezes/``), the README's "Fit the priors" workflow. A golden file is
-  the DB's shape, so the import is a copy (``golden.evidence.import_file``); a stale file is what ``emmy golden
-  check`` names. A file's rows are sourced by its kind and digest
-  (``freeze:`` for a freeze directory's files, ``golden:`` for a golden file), and a file the instance already holds
-  is skipped: ``--fresh`` rebuilds from nothing.
+- ``import SOURCES…`` loads golden files and tune DB files (the way a card's measurements from a rented GPU reach the
+  dataset). Nothing is loaded by default: the sources are named on the command line, or ``--repository`` names the
+  repository goldens, the README's "Fit the priors" workflow. A golden file is the DB's shape, so the import is a copy
+  (``golden.evidence.import_file``); a stale file is what ``emmy golden check`` names. A tune DB is an instance of
+  the same schema, so the rows it measured itself are copied row for row (``SearchDB.import_measured``). A source's
+  rows are filed under its kind and digest (``golden:`` for a golden file, ``tune:`` for a tune DB), and one the
+  instance already holds is skipped: ``--fresh`` rebuilds from nothing.
 - ``export OUT`` writes the instance's rows as a dataset directory (``search/dataset``): every golden pool
   enumerated from its kernel's definition and packed, every measured pool, and the provenance; the placement space
   reads the constants the import filed beside the rows, so it opens no golden file. ``emmy fit`` and ``emmy eval
   prior`` read the dataset directory, never the DB.
-- ``freeze`` writes an instance's admitted rows as a directory of golden files, one per card — the artifact that
-  gets checked in, so a reported number is one anyone can reproduce.
-- ``check`` counts the rows of an instance whose tables disagree with themselves (a knob row's digest, a reference,
-  a card, the two knob vocabularies). A DB is a cache: a row the current code disagrees with is re-tuned or
-  re-imported, so nothing here decodes what the compiler wrote.
+- ``check`` counts the rows of an instance whose tables disagree with themselves (a reference, a card). A DB is a
+  cache: a row the current code disagrees with is benched or imported again, so nothing here decodes what the
+  compiler wrote.
 
 :func:`db_path` is every subcommand's way in: the instance ``--db`` names, refused when missing with the command that
 fills it.
@@ -33,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import tempfile
 from pathlib import Path
 
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
@@ -42,22 +37,19 @@ logger = logging.getLogger(__name__)
 
 
 def register_db_command(subparsers) -> None:
-    parser = subparsers.add_parser(
-        "db", help="Fill a DB from golden files, freezes and tune DBs; export it as a dataset; freeze or check it"
-    )
+    parser = subparsers.add_parser("db", help="Fill a DB from golden files and tune DBs; export it as a dataset; check it")
     sub = parser.add_subparsers(dest="db_target", required=True)
     db_help = "DB instance file, e.g. _data/dataset.db (git ignores _data/); never the tune DB a compile reads."
 
-    pi = sub.add_parser("import", help="Import golden files, measurement freezes and tune DBs into a DB instance")
-    pi.add_argument("sources", nargs="*", help="Freeze directories, golden files and tune DB files to import; nothing by default.")
+    pi = sub.add_parser("import", help="Import golden files and tune DBs into a DB instance")
+    pi.add_argument("sources", nargs="*", help="Golden files and tune DB files to import; nothing by default.")
     pi.add_argument("--db", required=True, help=db_help)
     pi.add_argument("--fresh", action="store_true", help="Delete the DB first, so it holds exactly these sources.")
     pi.add_argument(
         "--repository",
         action="store_true",
         help="Also import every repository golden — the hardware goldens and each maintained recipe's — the set the priors are "
-        "fit on and the reproduction gate holds them to, and the measurement freeze kept with the repository "
-        "(README, 'Fit the priors').",
+        "fit on and the reproduction gate holds them to (README, 'Fit the priors').",
     )
     pi.set_defaults(func=handle_db_import)
 
@@ -89,11 +81,6 @@ def register_db_command(subparsers) -> None:
     )
     pe.set_defaults(func=handle_db_export)
 
-    pf = sub.add_parser("freeze", help="Write a DB instance's admitted rows as a measurement freeze: a golden file per card")
-    pf.add_argument("--db", required=True, help=db_help)
-    pf.add_argument("--out", required=True, help="Freeze directory to write (an existing freeze there is replaced).")
-    pf.set_defaults(func=handle_db_freeze)
-
     pc = sub.add_parser("check", help="Count the rows of a DB instance whose tables disagree with themselves")
     pc.add_argument("--db", required=True, help=db_help)
     pc.set_defaults(func=handle_db_check)
@@ -101,25 +88,21 @@ def register_db_command(subparsers) -> None:
 
 def handle_db_import(args) -> None:
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db.freeze import write_freeze  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file  # noqa: PLC0415
 
     path = Path(args.db).expanduser()
     sources = [Path(s).expanduser() for s in args.sources]
     if getattr(args, "repository", False):
-        from emmy.compiler.pipeline.search.db.freeze import REPOSITORY_FREEZE  # noqa: PLC0415
         from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
 
         with repository_golden_paths() as paths:
             sources.extend(sorted(paths))
-        if any(REPOSITORY_FREEZE.glob("*.json")):  # nothing where no freeze is checked in
-            sources.append(REPOSITORY_FREEZE)
     if not sources:
         logger.error("nothing to import: name a source, or --repository")
         sys.exit(2)
     for src in sources:
-        if not src.exists():
-            logger.error("no freeze directory, golden file or tune DB at %s", src)
+        if not src.is_file():
+            logger.error("no golden file or tune DB at %s", src)
             sys.exit(2)
     if args.fresh:
         for suffix in ("", "-wal", "-shm"):
@@ -127,27 +110,20 @@ def handle_db_import(args) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     db = SearchDB(path)
     try:
-        with tempfile.TemporaryDirectory() as scratch:
-            for n, src in enumerate(sources):
-                # A file is a golden file; a directory is a freeze; a tune DB is frozen first, so what reaches the
-                # dataset is what a freeze of it would hold.
-                if src.suffix == ".json":
-                    files = [(src, file_source("golden", src))]
-                else:
-                    frozen = src
-                    if not src.is_dir():
-                        frozen = Path(scratch) / str(n)
-                        write_freeze(src, frozen)
-                    files = [(file, file_source("freeze", file)) for file in sorted(frozen.glob("*.json"))]
-                    if not files:
-                        logger.error("no golden files in %s", src)
-                        sys.exit(2)
-                for file, source in files:
+        for src in sources:
+            try:
+                if src.suffix == ".json":  # a golden file; anything else is a tune DB
+                    import_file(db, src, file_source("golden", src))
+                elif (source := file_source("tune", src)) not in db.sources():
+                    tune = SearchDB.open_readonly(src)
                     try:
-                        import_file(db, file, source)
-                    except ValueError as exc:
-                        logger.error("%s", exc)
-                        sys.exit(2)
+                        with db.transaction():
+                            logger.info("imported %s as %s: %d perf rows", src.name, source, db.import_measured(tune, source))
+                    finally:
+                        tune.close()
+            except (ValueError, RuntimeError) as exc:
+                logger.error("%s", exc)
+                sys.exit(2)
     finally:
         db.close()
     logger.info("DB: %s", path)
@@ -175,17 +151,6 @@ def handle_db_export(args) -> None:
         len(dataset.measured),
         len(dataset.skipped),
     )
-
-
-def handle_db_freeze(args) -> None:
-    from emmy.compiler.pipeline.search.db.freeze import write_freeze  # noqa: PLC0415
-
-    path = db_path(args.db)
-    out = Path(args.out).expanduser()
-    digests = write_freeze(path, out)
-    for name, digest in digests.items():
-        logger.info("froze %s (sha256 %s)", name, digest)
-    logger.info("%d file(s) from %s -> %s/", len(digests), path, out)
 
 
 def handle_db_check(args) -> None:

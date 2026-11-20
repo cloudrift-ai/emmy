@@ -16,7 +16,7 @@ GPU/tier/pool-size cell before qualifying a candidate at the requested median-ra
 
 **Two questions, and they are not interchangeable.**
 
-- A MEASURED pool (:class:`~..data.group.MeasuredGroup`: freeze or tune-DB rows, every candidate benched) can
+- A MEASURED pool (:class:`~..data.group.MeasuredGroup`: tune-DB rows, every candidate benched) can
   answer what a wrong pick COST. That is :func:`measured_summaries` — Spearman over the pool and regret at the top
   of the ranking — and it is the question that tracks deployed speed.
 - A GOLDEN pool (:class:`~..data.group.GoldenGroup`: an enumeration with a verified-optimum row marked) can only
@@ -33,10 +33,10 @@ pool buckets onto measured summaries and guarantee empty rows, so each builder d
 
 **Every summary publishes what it was computed over.** ``groups`` is how many pools keyed into it. The measured
 metrics each add their OWN group count, because they have different minimums: regret needs a pool of at least two
-rows (a one-row pool is trivially perfect) and Spearman at least :data:`MIN_SPEARMAN_ROWS`. On the v3 freeze's 336
-pools that is 297 and 216 — so an aggregate that quietly averaged the excluded pools in would be reporting mostly
+rows (a one-row pool is trivially perfect) and Spearman at least :data:`MIN_SPEARMAN_ROWS`. Over 336 measured
+pools that was 297 and 216 — so an aggregate that quietly averaged the excluded pools in would be reporting mostly
 arithmetic. ``regret@10`` is the strictest:
-it needs eleven rows, which 90 pools have, so at the freeze's median pool size of seven it still excludes most of
+it needs eleven rows, which 90 pools had, so at a median pool size of seven it still excludes most of
 the corpus. The rank metrics have no minimum, so they carry no count of their own.
 
 Polarity is handled once, here. ``score`` returns ranking QUALITY (higher = predicted faster, the
@@ -62,7 +62,7 @@ from emmy.compiler.pipeline.search.metrics import best_dual_rank, spearman, topk
 # Deliberately below the deploy gate's :data:`~.base._CALIBRATION_MIN_GROUP` (8), which is the same statistic on
 # a different job. That one decides whether a model may own deploys, over the model's OWN reservoir, where more
 # rows are always available and a false pass is expensive. This one describes an external corpus of fixed size:
-# raising it to 8 would drop the freeze well below its 216 measurable pools and report a card as unmeasured
+# raising it to 8 dropped a 336-pool corpus well below its 216 measurable pools and reported a card as unmeasured
 # rather than measured noisily.
 MIN_SPEARMAN_ROWS = 5
 
