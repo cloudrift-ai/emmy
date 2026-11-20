@@ -330,6 +330,77 @@ jobs:
           fi
           echo "summary=$summary" >> "$GITHUB_OUTPUT"
 
+  # Every row of the candidate files compiled under its own schedule, on the files the fill job left on main. A
+  # candidate the compiler no longer realizes is dropped; a tune on the card refills its group.
+  candidates:
+    needs: fill
+    if: always()
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      summary: ${{ steps.summary.outputs.summary }}
+    env:
+      CANDIDATES: emmy/compiler/pipeline/search/candidates/records
+      # The other jobs may land their files on main while this job compiles; any other move stops the push, so rows
+      # realized under one compiler are never dropped from under another.
+      TOLERATED_PATHS: >-
+        tests/durations_cpu.json
+        emmy/compiler/pipeline/search/prior/weights/schedule.json
+        emmy/compiler/pipeline/search/prior/weights/placement.json
+        emmy/compiler/pipeline/search/golden/records/*.json
+        recipes/*/recipe.yaml
+        recipes/*/DISCOVERY.md
+    steps:
+      # The branch's tip, not the commit the run started on: the fill may have landed a candidate file since.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-emmy
+
+      - name: Drop the rows the compiler no longer realizes
+        id: drop
+        run: |
+          mkdir -p _data
+          ./venv/bin/emmy candidates realize "$CANDIDATES" --drop --json _data/realize.json
+          if [ -n "$(git status --porcelain -- "$CANDIDATES")" ]; then
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit the candidate files to main
+        if: steps.drop.outputs.updated == 'true' && github.ref == 'refs/heads/main'
+        id: commit
+        uses: ./.github/actions/push-to-main
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          message: "compiler: drop the candidate rows the compiler no longer realizes"
+          paths: emmy/compiler/pipeline/search/candidates/records
+
+      # Runs after a failed step too, so the message carries what the job finished.
+      - name: Summarize the realization
+        id: summary
+        if: always()
+        env:
+          DROPPED: ${{ steps.commit.outcome }}
+        run: |
+          summary="No report; open the run."
+          if [ -f _data/realize.json ]; then
+            summary=$(jq -r -f .github/workflows/scripts/candidates_realized.jq _data/realize.json)
+          fi
+          if [ "$DROPPED" = success ]; then
+            summary="$summary. Dropped the rows not realized on main"
+          fi
+          echo "$summary"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+
   discover:
     runs-on:
       group: agent-runners
@@ -579,7 +650,7 @@ jobs:
 
   notify:
     name: Notify Discord
-    needs: [durations, prior, gaps, fill, discover]
+    needs: [durations, prior, gaps, fill, candidates, discover]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -596,6 +667,8 @@ jobs:
       GAPS_RESULT: ${{ needs.gaps.result }}
       FILL_RESULT: ${{ needs.fill.result }}
       GOLDEN_FILL: ${{ needs.fill.outputs.summary }}
+      CANDIDATES_RESULT: ${{ needs.candidates.result }}
+      CANDIDATES_REALIZED: ${{ needs.candidates.outputs.summary }}
       COMPILER_GAPS: ${{ needs.gaps.outputs.summary }}
       DISCOVER_RESULT: ${{ needs.discover.result }}
       DISCOVER_PARTIAL: ${{ needs.discover.outputs.partial }}
