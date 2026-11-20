@@ -53,7 +53,6 @@ mod tests {
         "for a0 in 0..seq~128 unroll=true seed=false:",
         "for a0 in 0..seq * 2~64:",
         "for kb in 0..16 window(parent=ko in 0..32 window(parent=k in 0..64), partition=true):",
-        "for kb in 0..16 window(base=a0, bound=a0 + 1):",
         "for kb in 0..16 window():",
         "for k in t..64 step 32:\n  y[k] = v",
         "for k in 0..64 step 8 until k_end unroll=true:",

@@ -242,8 +242,6 @@ impl Line {
             self.parser.require("=")?;
             match &*key {
                 "parent" => window.parent = Some(self.whole_axis()?),
-                "base" => window.base = Some(self.parser.expression()?),
-                "bound" => window.bound = Some(self.parser.expression()?),
                 "partition"
                     if self.parser.at_word("true", 0) || self.parser.at_word("false", 0) =>
                 {

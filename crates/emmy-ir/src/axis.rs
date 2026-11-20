@@ -79,8 +79,6 @@ impl Hash for Dim {
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Window {
     pub parent: Option<Arc<Axis>>,
-    pub base: Option<Expression>,
-    pub bound: Option<Expression>,
     pub partition: bool,
 }
 
@@ -143,8 +141,6 @@ impl Axis {
                 });
                 Window {
                     parent,
-                    base: window.base.as_ref().map(|e| e.rename(rename)),
-                    bound: window.bound.as_ref().map(|e| e.rename(rename)),
                     partition: window.partition,
                 }
             });
@@ -182,9 +178,7 @@ impl Axis {
             && match (&self.window, &other.window) {
                 (None, None) => true,
                 (Some(a), Some(b)) => {
-                    a.base == b.base
-                        && a.bound == b.bound
-                        && a.partition == b.partition
+                    a.partition == b.partition
                         && match (&a.parent, &b.parent) {
                             (None, None) => true,
                             (Some(p), Some(q)) => p.exact_eq(q),
@@ -203,8 +197,6 @@ impl Axis {
             None => false.hash(state),
             Some(window) => {
                 true.hash(state);
-                window.base.hash(state);
-                window.bound.hash(state);
                 window.partition.hash(state);
                 match &window.parent {
                     None => false.hash(state),
@@ -368,12 +360,6 @@ pub fn spell_window(window: Option<&Window>) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(parent) = &window.parent {
         parts.push(format!("parent={}", spell_axis(parent, None)?));
-    }
-    if let Some(base) = &window.base {
-        parts.push(format!("base={}", base.try_text()?));
-    }
-    if let Some(bound) = &window.bound {
-        parts.push(format!("bound={}", bound.try_text()?));
     }
     if window.partition {
         parts.push("partition=true".into());

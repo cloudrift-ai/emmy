@@ -79,7 +79,6 @@ STATEMENTS = [
         Loop(Axis("kb", 16, window=Window(parent=Axis("ko", 32, window=Window(parent=K)), partition=True)), ()),
         "for kb in 0..16 window(parent=ko in 0..32 window(parent=k in 0..64), partition=true):",
     ),
-    (Loop(Axis("kb", 16, window=Window(base=A0, bound=A0 + ONE)), ()), "for kb in 0..16 window(base=a0, bound=a0 + 1):"),
     (Loop(Axis("kb", 16, window=Window()), ()), "for kb in 0..16 window():"),
     (
         StridedLoop(K, Var("t"), Literal(32, "int"), (Write("y", (Var("k"),), ("v",)),)),
