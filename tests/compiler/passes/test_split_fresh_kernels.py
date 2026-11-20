@@ -558,8 +558,9 @@ def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None
     assert _folds_on_the_chunk_tier(partial), "the partial folds its key slice on the chunk tier"
     # The mask is a predicate over each element's coordinates: its key is the chunk's column past the slice's base.
     masks = [text(Body([apply])) for apply in statements(partial, FragmentApply) if any(arg.kind == "coord" for arg in apply.args)]
-    absolute = all(re.search(r"__frow < 256 \* _a\d+_ks \+ __fcol", mask) and re.search(r"col_base=a\d+__ck", mask) for mask in masks)
-    assert masks and absolute, "the mask compares the slice's absolute key, 256 keys per partition"
+    # 128 queries fold no key past the first 128 of the 512, so the key axis is 128 long and a partition holds 64.
+    absolute = all(re.search(r"__frow < 64 \* _a\d+_ks \+ __fcol", mask) and re.search(r"col_base=a\d+__ck", mask) for mask in masks)
+    assert masks and absolute, "the mask compares the slice's absolute key, 64 keys per partition"
 
 
 @pytest.mark.parametrize(

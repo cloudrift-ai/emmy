@@ -177,6 +177,59 @@ def test_a_block_of_a_split_walks_the_part_of_the_folds_range_inside_it(monkeypa
     np.testing.assert_allclose(env["O"], (env["X"] * inside) @ env["Y"], rtol=1e-4, atol=1e-4)
 
 
+def _attention(queries: int, keys: int, **attrs) -> Graph:
+    """``softmax(q kᵀ / sqrt(d)) v`` for two heads of ``queries`` rows over ``keys`` keys of width 8."""
+    from emmy.compiler.ir.frontend.ir import SdpaOp  # noqa: PLC0415
+
+    graph = Graph()
+    for name, rows in (("q", queries), ("k", keys), ("v", keys)):
+        graph.add_node(InputOp(), [], Tensor(name, (1, 2, rows, 8)), node_id=name)
+    graph.add_node(SdpaOp(**attrs), ["q", "k", "v"], Tensor("o", (1, 2, queries, 8)), node_id="o")
+    graph.inputs, graph.outputs = ["q", "k", "v"], ["o"]
+    return graph
+
+
+def _masked_attention(data: dict[str, np.ndarray], keep: np.ndarray) -> np.ndarray:
+    scores = np.where(keep, data["q"] @ data["k"].transpose(0, 1, 3, 2) / np.sqrt(8.0), -np.inf)
+    weights = np.exp(scores - scores.max(-1, keepdims=True))
+    return (weights / weights.sum(-1, keepdims=True)) @ data["v"]
+
+
+@pytest.mark.parametrize(
+    ("queries", "keys", "attrs", "walked"),
+    [
+        (16, 16, {"is_causal": True}, ("0", "a1 + 1")),
+        (16, 16, {"is_causal": True, "sliding_window": 4}, ("maximum(0, a1 - 3)", "a1 + 1")),
+        (8, 16, {"is_causal": True}, ("0", "a1 + 1")),
+    ],
+    ids=["causal", "window", "fewer_queries_than_keys"],
+)
+def test_an_attention_folds_each_rows_keys_over_a_range(queries: int, keys: int, attrs: dict, walked: tuple[str, str]) -> None:
+    """Causal attention is a range of the key axis, the keys at or before the row, and a sliding window starts it
+    ``window`` keys back. Fusion keeps the range on the loops it merges, the softmax fuses with its product where
+    both walk the same range, and the carrier keeps it. A tier reads one additive mask for each bound. A row that
+    folds no key past the queries leaves the key axis that short."""
+    from emmy.compiler.ir.loop.runner import execute_loop_op_cpp  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES  # noqa: PLC0415
+
+    fused = Pipeline.build(LOOP_PASSES).run(_attention(queries, keys, **attrs))
+    (kernel,) = (node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
+    assert "mask" not in " ".join(kernel.inputs), "no fill constant is an input"
+    tile = Pipeline.build(["tile/lift"]).run(fused).nodes["o"].op
+    carrier = head(tile.op)
+    assert carrier.twist is not None and tuple(str(bound) for bound in carrier.range) == walked
+    assert tile.axis_of(carrier.axis).extent.as_static() == min(queries, keys)
+    masks = [stmt for stmt in head(tile.masked().op).lift.body if str(getattr(stmt, "value", "")).startswith("where(")]
+    assert len(masks) == 1 + ("sliding_window" in attrs)
+
+    data = _data({"q": (1, 2, queries, 8), "k": (1, 2, keys, 8), "v": (1, 2, keys, 8)})
+    got = execute_loop_op_cpp(kernel, {name: data[name] for name in kernel.inputs}, {"o": (1, 2, queries, 8)})
+    row, key = np.arange(queries)[:, None], np.arange(keys)[None, :]
+    keep = (key <= row) & (key > row - attrs.get("sliding_window", keys))
+    np.testing.assert_allclose(got, _masked_attention(data, keep), rtol=1e-4, atol=1e-4)
+
+
 def test_a_value_defined_once_is_the_kernel_that_computes_it_at_each_read() -> None:
     shapes = {"K": (4, 16), "W": (4,)}
     defined, copied = _tile(DEFINED, shapes, (4, 16)), _tile(COPIED, shapes, (4, 16))
