@@ -156,21 +156,24 @@ def _spread(rows: list[tuple[dict, dict, float]], count: int) -> list[tuple[dict
 
 @dataclass
 class Report:
-    """What a build left: the groups and the candidate rows, the groups under their target as ``(name, held,
-    target)``, and the candidates faster than every golden row of their group as ``(name, candidate µs, golden µs)``."""
+    """What a build left: the groups and the candidate rows, the groups under their target — each the kernel
+    (its name), the golden row it is named by, the regime and the sizes a tune of it runs at, and the candidates it
+    holds beside its target — and the candidates faster than every golden row of their group as ``(name, candidate
+    µs, golden µs)``."""
 
     groups: int = 0
     rows: int = 0
-    short: list[tuple[str, int, int]] = field(default_factory=list)
+    short: list[dict] = field(default_factory=list)
     faster: list[tuple[str, float, float]] = field(default_factory=list)
 
 
-def build(golden: GoldenFile, db: SearchDB, existing: GoldenFile | None = None) -> tuple[GoldenFile, Report]:
+def build(golden: GoldenFile, db: SearchDB | None = None, existing: GoldenFile | None = None) -> tuple[GoldenFile, Report]:
     """The candidate file of ``golden``: its programs, kernels and decisions, and for each of its measured groups the
     candidate rows ``existing`` holds, topped up to the group's :func:`target` from the measurements ``db`` holds of
     the group's kernel on the card, in its regime and at its sizes (``SearchDB.measured``): the tune DB the card's
-    tunes wrote, where the row benched last stands at one schedule. A schedule a golden row of the group
-    spells is never a candidate; a row of ``existing`` whose group the golden no longer holds is dropped."""
+    tunes wrote, where the row benched last stands at one schedule. With no ``db`` nothing is added: the file takes
+    its golden's tables again and keeps its rows. A schedule a golden row of the group spells is never a candidate; a
+    row of ``existing`` whose group the golden no longer holds is dropped, as is one that holds no measurement."""
     document = GoldenFile(
         gpu_name=golden.gpu_name,
         compute_cap=golden.compute_cap,
@@ -193,12 +196,13 @@ def build(golden: GoldenFile, db: SearchDB, existing: GoldenFile | None = None) 
         wanted = target(size)
         if 0 < size <= WALKED:
             wanted = min(wanted, _others(pool, taken))
-        kept = [row for row in _of_group(held, key) if _schedule(row) not in taken]
+        # A candidate is a measurement: a row a restamp left with a schedule and no time is dropped, and a tune refills.
+        kept = [row for row in _of_group(held, key) if row.measured and _schedule(row) not in taken]
         taken.update(_schedule(row) for row in kept)
         # One measurement per schedule the group does not hold yet. A golden row that records no sizes counts at every
         # size of its kernel, and a candidate taken for it names the sizes it was measured at.
         ctx, fresh = regime_context(golden, head.pins), {}
-        for sizes in [head.bindings] if head.bindings else db.sizes(ctx, identity):
+        for sizes in [] if db is None else [head.bindings] if head.bindings else db.sizes(ctx, identity):
             for knobs, us in db.measured(ctx, identity, bindings=sizes):
                 if _key(knobs) not in taken:
                     fresh.setdefault(_key(knobs), (sizes, knobs, us))
@@ -223,7 +227,16 @@ def build(golden: GoldenFile, db: SearchDB, existing: GoldenFile | None = None) 
         report.groups += 1
         report.rows += len(group)
         if size and len(group) < wanted:
-            report.short.append((head.name, len(group), wanted))
+            report.short.append(
+                {
+                    "kernel": golden.kernel(head.kernel).name,
+                    "row": head.name,
+                    "pins": dict(head.pins),
+                    "bindings": dict(head.bindings),
+                    "held": len(group),
+                    "target": wanted,
+                }
+            )
         report.faster.extend(
             (row.name, row.measurements.emmy_us, head.measurements.emmy_us)
             for row in group
