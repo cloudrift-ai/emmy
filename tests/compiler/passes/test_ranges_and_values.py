@@ -122,14 +122,16 @@ def test_a_tier_reads_a_range_as_the_mask_it_stands_for() -> None:
     assert masked.masked() is masked, "a tree without a range is itself"
 
 
-def test_a_range_that_starts_past_zero_walks_from_zero_and_clamps_what_it_reads() -> None:
+def test_a_range_that_starts_past_zero_is_a_mask_at_its_start() -> None:
+    """No end lies a fixed way past the start, so leaving from the start would shorten nothing: the tier walks the
+    axis from zero, reads the position itself and folds the seed ahead of the start."""
     tile = _tile(FROM_THE_ROW, {"X": (8, 8), "Y": (8, 8)}, (8, 8))
     assert [str(bound) for bound in tile.op.range] == ["a0", "8"]
     masked = tile.masked()
     (mask,) = [stmt for stmt in masked.op.lift.body if isinstance(stmt, Select)]
-    assert str(mask.branches[0].select) == "a0 + a2 < 8"
+    assert str(mask.branches[0].select) == "a0 <= a2"
     loads = [str(edge.as_slab().load) for edge in masked.op.operands if edge.as_slab() is not None]
-    assert all("a0 + a2 < 8 ? a0 + a2 : 7" in load for load in loads), loads
+    assert all("?" not in load for load in loads), loads
 
 
 @pytest.mark.parametrize(("text", "expected"), [(MASKED, np.tril), (FROM_THE_ROW, np.triu)], ids=["masked", "from_the_row"])

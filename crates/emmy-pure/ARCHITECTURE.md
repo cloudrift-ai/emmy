@@ -56,12 +56,12 @@ and a view are values: they compare by what they hold.
   term read along a range counts for the coordinates the range's start reads: it is evaluated at `start + trip`, so
   the nest is ordered as it would be were the start written into every index.
 - `range.rs` — `Fold::masked`: the tree with every range spelled as a kernel tier reads it. A term that walks a
-  range walks from zero, reads its axis as `start + axis`, clamps what it reads below it to the last position in
-  range, and folds each value selected against its seed past the end; a twisted carrier adds the pivot's seed to its
-  score through the `where` a program's own mask spells. An axis whose range fixes its trips takes them as its
-  extent in the axis table returned. A range starts at the greatest of its starts and ends at the least of its ends;
-  the walk leaves from the start some end lies a fixed way past, so a block of a split leaves from the block's start
-  and takes the block's length, and every other bound is a mask.
+  range folds each value selected against its seed where the position is outside the range; a twisted carrier adds
+  the pivot's seed to its score through the `where` a program's own mask spells. A range starts at the greatest of
+  its starts and ends at the least of its ends. Where some end lies a fixed way past a start (a block of a split),
+  the walk leaves from that start: the axis takes that distance as its extent in the axis table returned, reads its
+  axis as `start + axis`, and clamps what it reads below it onto the range. Any other range is walked over the whole
+  axis from zero, and every bound is a mask.
 
 ## Memos
 

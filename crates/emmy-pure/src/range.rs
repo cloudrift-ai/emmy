@@ -1,12 +1,14 @@
 //! `Fold::masked`: a tree with every range spelled as a kernel tier reads it.
 //!
 //! A tensor-core block is a rectangle and a cooperative lane a strided walk, so a tier covers an axis from zero to
-//! a number of trips and masks what the range leaves out. This is the one place that turns a range into that form:
-//! the axis walks from zero, every read of it is `start + axis`, and each value the term folds is selected against
-//! the fold's seed under `start + axis < end`. A read below the term clamps to the last position in range, so no
-//! masked trip reads past a buffer. A bound the trips already hold states no mask. A twisted carrier has no value to
-//! select against: its score takes the pivot's seed added through the `where` a program's own mask spells, which is
-//! the coordinate mask the chunk tier lands. Loop IR's normal form reads a mask back as the range it came from.
+//! a number of trips and masks what the range leaves out. This is the one place that turns a range into that form.
+//! Each value the term folds is selected against the fold's seed where the position is outside the range, and a
+//! bound the trips already hold states no mask. A range some end lies a fixed way past the start of (a block of a
+//! split) is walked from that start: the axis takes the fixed distance as its trips, every read of it is `start +
+//! axis`, and a read below the term clamps onto the range, so no masked trip reads past a buffer. Any other range
+//! is walked over the whole axis, and the position is the axis. A twisted carrier has no value to select against:
+//! its score takes the pivot's seed added through the `where` a program's own mask spells, which is the coordinate
+//! mask the chunk tier lands. Loop IR's normal form reads a mask back as the range it came from.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -84,7 +86,8 @@ struct Walk {
 impl Walk {
     /// A range starts at the greatest of its starts and ends at the least of its ends. The walk leaves from the
     /// start some end lies a fixed way past, the shortest way first: a block of a split leaves from the block's
-    /// start and takes the block's length, whatever range the fold walked before the split.
+    /// start and takes the block's length, whatever range the fold walked before the split. With no such start
+    /// it covers the axis from zero, and each start is a mask like each end.
     fn of(axis: Name, start: &Expression, end: &Expression, axes: &[Arc<Axis>]) -> Result<Walk> {
         let (mut lows, mut highs) = (Vec::new(), Vec::new());
         chain(start, Operation::Maximum, &mut lows);
@@ -113,7 +116,12 @@ impl Walk {
                 }
             }
         }
-        let base = lows.remove(from.map_or(0, |(index, _)| index));
+        // No end a fixed way past any start: the walk covers the axis from zero and every start is a mask.
+        let base = match from {
+            Some((index, _)) => lows.remove(index),
+            None => Expression::int(0),
+        };
+        lows.retain(|low| low.int_literal() != Some(0) || base.int_literal() != Some(0));
         let rebased = base.int_literal() != Some(0);
         let position = if rebased {
             Expression::binary(Operation::Add, base.clone(), Expression::var(&axis))
