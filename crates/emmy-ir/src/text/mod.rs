@@ -55,7 +55,7 @@ mod tests {
         "for kb in 0..16 window(parent=ko in 0..32 window(parent=k in 0..64), partition=true):",
         "for kb in 0..16 window():",
         "for k in t..64 step 32:\n  y[k] = v",
-        "for k in 0..64 step 8 until k_end unroll=true:",
+        "for k in 0..k_end of 64 step 8 unroll=true:",
         "if a0 < 1:\n  y[a0] = v\nelse:\n  y[a0] = w",
         "if a0 < 1:",
         "SetMaxNReg(count=232, direction=inc)",
@@ -177,7 +177,6 @@ mod tests {
             ),
             ("y[a0] = v\nv1 = multiply(a, b", 2, "expected"),
             ("v = select:\n  x where a0 < 1", 2, "expected 'when'"),
-            ("for a0 in 2..4:", 1, "names its step"),
             ("else:", 1, "expected"),
             (
                 "a, b = multiply(x, y)",

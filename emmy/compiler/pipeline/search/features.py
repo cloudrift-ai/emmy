@@ -1051,10 +1051,8 @@ def _serial_cell_work(body: Body) -> float:
     enclosing reduce is priced by the trips a thread actually serializes (DeepSeek-V4
     ``post4096``'s elected consumer piece recomputed a 16384-step statistics contraction inside a
     4096-step reduce: flat product 2^36-blind, nest product the honest 2^30). Free and sweep
-    loops are excluded (grid-distributed / conservative), a symbolic extent contributes no
-    factor, and so does a ``StridedLoop`` (like everywhere else in this feature block — a
-    strided respelling can therefore evade the count, in the conservative direction), so the
-    value is a lower bound; saturates at the largest finite float."""
+    loops are excluded (grid-distributed / conservative) and a symbolic extent contributes no
+    factor, so the value is a lower bound; saturates at the largest finite float."""
     best = 1.0
     for s in body:
         if isinstance(s, Loop):
@@ -1072,7 +1070,7 @@ def _serial_cell_work(body: Body) -> float:
 def _trips(body: Body) -> float:
     """The statement executions ``body`` performs: every leaf statement once per trip of the static loops around it,
     free and reduce alike, so a cone recomputed inside an output loop is counted once per output. A symbolic extent
-    counts one trip, a ``StridedLoop`` its body once (as in :func:`_serial_cell_work`), so the value is a lower bound;
+    counts one trip, so the value is a lower bound;
     saturates at the largest finite float. Where :func:`_serial_cell_work` says how long one thread's cell takes,
     this says how much work the kernel does in all, which is what a cut that computes a cone once instead of per
     output removes."""
@@ -1094,7 +1092,7 @@ def _varying_trips(body: Body) -> float:
     so a contraction that sits inside an output loop it does not read is a matrix of work per step there and a row
     here. That is what tells a recurrence whose step is a rank-one update from one whose step is a dense product:
     their loop nests agree, and composing the first costs a matrix product where its walk paid a row. Symbolic
-    extents and strided loops count as in :func:`_trips`."""
+    extents count as in :func:`_trips`."""
     depends = body.axis_dependencies
 
     def walk(stmts: Body, around: tuple[tuple[str, float, bool], ...]) -> float:

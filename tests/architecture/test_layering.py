@@ -200,7 +200,7 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     import emmy.compiler.ir.stmt as stmt
 
     statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
-    statement_types += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
+    statement_types += ["ZeroPrologue", "Loop", "Cond"]
     containers = ["Body", "Identity", "OutputSpec"]
     functions = ["canonicalize_identity", "free_names", "exposed_defines"]
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]

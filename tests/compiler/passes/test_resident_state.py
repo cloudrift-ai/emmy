@@ -11,7 +11,7 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.kernel.ir import FragmentApply, MmaSyncPtx, RegStore
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import StridedLoop, Write, parse_body
+from emmy.compiler.ir.stmt import Loop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._resident import Unresident, resident_walk
@@ -97,7 +97,7 @@ def test_the_steps_run_as_one_loop_and_the_state_has_no_store():
     with pinned_knobs(_row(n)):
         compiled, kernels = compile_with_kernels(_graph(n), ctx=Context.from_target((12, 0)))
     (kernel,) = kernels.values()
-    (loop,) = [stmt for stmt in statements(kernel, StridedLoop) if stmt.axis.name == "a0"]
+    (loop,) = [stmt for stmt in statements(kernel, Loop) if stmt.axis.name == "a0"]
     assert not kernel.serial and not statements(kernel, Write)
     assert {store.dst_buffer for store in statements(kernel, RegStore)} == {"out"}
     assert isinstance(loop.body[-1], FragmentApply) and loop.body[-1].in_place, "the state's fragments are overwritten last"

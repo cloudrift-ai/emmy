@@ -9,7 +9,7 @@ indices differ by 0, 1, ..., N-1. The CUDA backend can emit those as one
 
 ## What the pass does
 
-For each ``Body`` (every nested Tile / Loop / StridedLoop / Cond body,
+For each ``Body`` (every nested Tile / Loop / Cond body,
 post-order):
 
 1. Take the scalar ``Write``s of each output buffer and their complete flat addresses, outer row strides and

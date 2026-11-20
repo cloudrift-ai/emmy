@@ -21,7 +21,7 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Let, Load, Select, Statement, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Let, Load, Select, Statement, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._unroll import unroll_where
 
@@ -45,7 +45,7 @@ def _copies(stmt: Statement, trips: tuple[int, int] | None) -> int | None:
     """The trips of a short lane loop, or ``None`` when it is not one this pass unrolls. A loop already ``unrolled``
     (the kernel unroll passes stepped it) is taken no further, so a finished kernel the session cache replays comes
     out of this pass as it went in."""
-    if trips is None or not isinstance(stmt, StridedLoop) or stmt.unrolled:
+    if trips is None or stmt.step is None or stmt.unrolled:
         return None
     if not all(isinstance(s, _FLAT) and not s.nested() for s in stmt.body):
         return None

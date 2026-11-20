@@ -8,7 +8,7 @@ import pytest
 from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Body, Select, StridedLoop, parse_body
+from emmy.compiler.ir.stmt import Body, Select, parse_body
 
 guard = import_module("emmy.compiler.pipeline.passes.lowering.kernel.090_guard_reductions")
 
@@ -17,7 +17,7 @@ def _body(*, extra_use=False, overlapping=False, strided=False) -> Body:
     return parse_body(
         f"""
         for i in 0..6:
-            for k in {"1..7 step 2 until 6" if strided else "0..7"}:
+            for k in {"1..6 of 7 step 2" if strided else "0..7"}:
                 value = load x[i, k]
                 sum <- add(sum, value)
             other = load fallback[i]
@@ -52,10 +52,10 @@ def test_coordinate_demand_preserves_values_and_skips_only_unused_iterations(str
     if extra_use:
         assert reduction == body[0].body[0], "one unmasked reader requires every original iteration"
     else:
-        assert isinstance(reduction, StridedLoop)
+        assert reduction.step is not None
         needed_rows = 2 if overlapping else 4
         for i in range(6):
-            assert reduction.end.eval({"i": i}) == ((6 if strided else 7) if i < needed_rows else 0)
+            assert reduction.walk()[1].eval({"i": i}) == ((6 if strided else 7) if i < needed_rows else 0)
     for actual, expected in zip(_run(changed, extra_use=extra_use), _run(body, extra_use=extra_use), strict=True):
         np.testing.assert_array_equal(actual, expected)
 

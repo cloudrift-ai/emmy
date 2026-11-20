@@ -14,7 +14,6 @@ use std::collections::{HashMap, HashSet};
 pub fn seeded_accumulators(stmt: &Statement) -> Vec<Name> {
     let (body, seed) = match stmt {
         Statement::Loop(l) => (&l.body, l.seed),
-        Statement::StridedLoop(l) => (&l.body, l.seed),
         _ => return vec![],
     };
     if !seed || !body.carries().is_empty() {
@@ -89,6 +88,11 @@ impl Loop {
         }
     }
 
+    /// How far the axis moves each trip: the step, one when the loop states none.
+    pub fn stride(&self) -> Expression {
+        self.step.clone().unwrap_or_else(|| Expression::int(1))
+    }
+
     /// The one value the axis takes when the loop is known to take exactly one trip: `0` for a loop of extent one
     /// without a range, the start of a range whose end is one past it. `None` for any other loop.
     pub fn one_trip(&self) -> Option<Expression> {
@@ -111,15 +115,6 @@ impl Loop {
             .iter()
             .any(|s| matches!(**s, Statement::Accum(_)))
             || !self.carries().is_empty()
-    }
-}
-
-impl StridedLoop {
-    pub fn is_reduce(&self) -> bool {
-        self.body
-            .stmts()
-            .iter()
-            .any(|s| matches!(**s, Statement::Accum(_)))
     }
 }
 

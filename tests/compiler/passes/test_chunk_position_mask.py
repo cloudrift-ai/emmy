@@ -19,7 +19,7 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import refusals
 from emmy.compiler.ir.schedule.staging import chunk_slab_dtype, chunk_slab_pad
-from emmy.compiler.ir.stmt import Body, StridedLoop
+from emmy.compiler.ir.stmt import Body, Loop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._split import split_forks
@@ -258,11 +258,11 @@ def test_the_folded_attention_matches_the_twin_over_the_causal_prefix(cell, head
         compiled, kernels = compile_with_kernels(graph)
     assert len(kernels) == (2 if split else 1), "the chunk tier's one kernel, or the split's partial and finalize"
     kernel = next(iter(kernels.values()))
-    chunks = [loop for loop in statements(kernel, StridedLoop) if "__ck" in loop.axis.name]
+    chunks = [loop for loop in statements(kernel, Loop) if "__ck" in loop.axis.name]
     assert statements(kernel, MmaSyncPtx) and chunks, "the chunk tier folds the stream, or each slice of it"
     if stage is not None:
         assert bool(statements(kernel, CpAsyncCopy)) == bool(stage), "an FP8 cache stages exactly when its row spells a transport"
-    bounded = any(loop.end is not None for loop in chunks)
+    bounded = any(loop.walk()[1] != loop.axis.extent_expression() for loop in chunks)
     assert bounded == (heads == WIDE), "the position bounds the stream on a launch of more than one wave"
     rng = np.random.default_rng(7)
     query = torch.from_numpy(rng.normal(size=(ROWS, heads * D)).astype(np.float32)).to(torch.bfloat16)

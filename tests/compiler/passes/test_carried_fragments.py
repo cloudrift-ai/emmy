@@ -11,7 +11,7 @@ from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.kernel.ir import LdmatrixLoad, MmaSyncPtx, Sync
-from emmy.compiler.ir.stmt import Body, StridedLoop
+from emmy.compiler.ir.stmt import Body, Loop
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import compile_with_kernels, requires_cuda
@@ -29,7 +29,7 @@ def _split_at_chunk_loop(k: int, stage: str, ctx: Context) -> tuple[list, list]:
     with pinned_knobs({**_TILE, "STAGE": stage}):
         _, kernels = compile_with_kernels(graph, ctx=ctx)
     ((grid,),) = [kernel.body for kernel in kernels.values()]
-    at = next(i for i, stmt in enumerate(grid.body) if isinstance(stmt, StridedLoop) and stmt.axis.name == "_ks")
+    at = next(i for i, stmt in enumerate(grid.body) if isinstance(stmt, Loop) and stmt.axis.name == "_ks")
     return list(Body(grid.body[:at]).iter()), list(Body(grid.body[at:]).iter())
 
 

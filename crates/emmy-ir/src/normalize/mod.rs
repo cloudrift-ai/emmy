@@ -47,8 +47,10 @@ pub fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<SimplifyCtx> {
 /// `ctx` inside `stmt`'s child bodies: under the ranges of the axes it binds for them. A loop that walks a range
 /// binds its axis to that range, with the comparisons it states.
 pub fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
+    // A loop that steps is a kernel's, whose builder wrote its body under the axis's extent: it is analysed so.
     if let Statement::Loop(l) = stmt
         && l.range.is_some()
+        && l.step.is_none()
     {
         return l.walk().extend(ctx, l.axis.name, &l.axis.extent);
     }
@@ -854,7 +856,6 @@ pub(crate) mod testing {
     pub(crate) fn axis(stmt: &Statement) -> &str {
         match stmt {
             Statement::Loop(l) => &l.axis.name,
-            Statement::StridedLoop(l) => &l.axis.name,
             _ => panic!("not a loop: {}", stmt.ty()),
         }
     }

@@ -87,7 +87,6 @@ from emmy.compiler.ir.stmt import (
     Select,
     SelectBranch,
     Statement,
-    StridedLoop,
     Write,
     exposed_defines,
     free_names,
@@ -479,7 +478,7 @@ def _staged_inner_atom_loop(
     producer filled the (plain row-major, NONE-swizzle) slab; ``mn`` is the ``(m, n)`` :class:`Side`
     pair.
 
-    ``reg_depth == 1`` (default): one ``StridedLoop`` over the ``bk`` atom-K steps, fragment-load-then-mma
+    ``reg_depth == 1`` (default): one loop over the ``bk`` atom-K steps, fragment-load-then-mma
     inline (the operand fragments ``_a{i}``/``_b{j}`` reused every step). ``reg_depth >= 2`` (the
     ``STAGE`` ``/p<n>`` smem→register double-buffer): the loop is **fully unrolled** into a software
     pipeline that ldmatrixes the next atom-K step into an alternate fragment slot (``_a{i}_s{slot}``)
@@ -643,7 +642,7 @@ def _staged_inner_atom_loop(
     if reg_depth < 2 or n_steps < 2:  # single-buffer: the inline fragment-load → mma loop
         body = ldms(Var(ki), "") + mmas("")
         return [
-            StridedLoop(
+            Loop.strided(
                 axis=Axis(name=ki, extent=bk_elems),
                 start=Literal(0, "int"),
                 step=Literal(atom_k, "int"),
@@ -1946,7 +1945,7 @@ def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
     ``(row, col)`` pair into its accumulator, then wrap the whole body in the reduce loop. The only
     per-atom variation is the four leaf constructors (the "atom factory"): ``read_row`` / ``read_col``
     build the operand read (a fragment load vs scalar ``Load``), ``contract`` the ⊗+accumulate
-    (``MmaSyncPtx`` vs ``Assign``+``Accum``), ``wrap`` the K-loop (``StridedLoop`` step ``atom_k`` vs a
+    (``MmaSyncPtx`` vs ``Assign``+``Accum``), ``wrap`` the K-loop (a loop of step ``atom_k`` vs a
     unit ``Loop``). Returns ``(pre_decls, kloop_stmts)`` — no pre-decls here (accumulators ride
     ``state``).
 
@@ -2424,7 +2423,7 @@ class _MmaOps(_AtomOps):
 
     def gmem_leaves(self, offset, mn):
         """The gmem-direct mma leaf constructors: ``ldmatrix`` each operand fragment straight from
-        gmem, ``mma.sync`` every cell, the K-loop a ``StridedLoop`` of step ``atom_k`` (a symbolic /
+        gmem, ``mma.sync`` every cell, the K-loop a loop of step ``atom_k`` (a symbolic /
         non-divisible K zero-fills the masked-K tail via the ``k_zero`` helper variants — canonical
         and transposed-B both have gmem-direct K zero-fill helpers)."""
         c = self.c
@@ -2550,7 +2549,7 @@ class _MmaOps(_AtomOps):
                 tail = promotes
             return [
                 *pre,
-                StridedLoop(axis=k_axis, start=Literal(0, "int"), step=step, body=Body(tuple(stmts)), unroll=unroll_ok(k_axis.extent)),
+                Loop.strided(axis=k_axis, start=Literal(0, "int"), step=step, body=Body(tuple(stmts)), unroll=unroll_ok(k_axis.extent)),
                 *tail,
             ]
 
@@ -3245,7 +3244,7 @@ class _FlashOps(_MmaOps):
         if streams is None:
             gmem = Body(tuple(stmt for stmts, _ in chunk_segments((None,)) for stmt in stmts))
             start = k_first if k_first is not None else Literal(0, "int")
-            loop = StridedLoop(axis=chunk, start=start, step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
+            loop = Loop.strided(axis=chunk, start=start, step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
             return pre, [loop]
         # The staged form is the same body under the shared fill→drain skeleton, with the chunk loop
         # built by it: one operand group per staged operand, the score and the expectation as the

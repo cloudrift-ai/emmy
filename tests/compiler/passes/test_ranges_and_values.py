@@ -238,7 +238,7 @@ def test_a_tier_reads_a_range_or_takes_its_mask() -> None:
     a plain sum alike. A cooperative reduce strides every position of its axis: it says so, and the kernel is
     lowered from its masked form instead."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import StridedLoop, pretty_body  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Loop, pretty_body  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from tests.compiler.helpers import compile_with_kernels, statements  # noqa: PLC0415
 
@@ -248,16 +248,16 @@ def test_a_tier_reads_a_range_or_takes_its_mask() -> None:
         (kernel,) = kernels.values()
         return kernel, "\n".join(pretty_body(kernel.body))
 
-    def walks(kernel) -> list[tuple[str, str, str]]:
-        return [(str(loop.start), str(loop.step), str(loop.end)) for loop in statements(kernel, StridedLoop) if loop.end is not None]
+    def walks(kernel) -> list[tuple[str, ...]]:
+        return [tuple(map(str, loop.walk())) for loop in statements(kernel, Loop) if loop.range is not None]
 
     attention = _attention(16, 16, is_causal=True)
     scalar, text = lowered(attention, WORK="", REDUCE="")
-    assert walks(scalar) == [("0", "1", "a1 + 1")]
+    assert walks(scalar) == [("0", "a1 + 1", "1")]
     assert "where(" not in text and "select" not in text
 
     triangle, text = lowered(_graph(MASKED, {"X": (8, 8), "Y": (8, 8)}, (8, 8)), WORK="", REDUCE="")
-    assert walks(triangle) == [("0", "1", "a0 + 1")]
+    assert walks(triangle) == [("0", "a0 + 1", "1")]
     assert "select" not in text
 
     _, text = lowered(attention, WORK="t32", REDUCE="coop")

@@ -31,7 +31,6 @@ Loop = _ir.Loop
 Pre = _ir.Pre
 Select = _ir.Select
 SelectBranch = _ir.SelectBranch
-StridedLoop = _ir.StridedLoop
 Subroutine = _ir.Subroutine
 Write = _ir.Write
 ZeroPrologue = _ir.ZeroPrologue
@@ -78,7 +77,6 @@ __all__ = [
     "Select",
     "SelectBranch",
     "Statement",
-    "StridedLoop",
     "Subroutine",
     "Write",
     "ZeroPrologue",

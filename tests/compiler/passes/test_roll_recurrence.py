@@ -19,7 +19,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Loop, StridedLoop
+from emmy.compiler.ir.stmt import Loop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
@@ -302,7 +302,7 @@ def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
     ((node_id, step),) = ((node_id, node.op) for node_id, node in lowered.nodes.items() if isinstance(node.op, CudaOp) and node.op.serial)
     ((axis, launches),) = step.serial
     assert launches == 3 and axis in step.runtime_args
-    assert not [loop for loop in statements(kernels[node_id], Loop, StridedLoop) if loop.axis.name == axis]
+    assert not [loop for loop in statements(kernels[node_id], Loop) if loop.axis.name == axis]
     assert axis in text(kernels[node_id]), "the body reads the step it runs"
     assert f"0 < {axis} ? {axis} - 1 : 0" in text(kernels[node_id])  # the comparison in its canonical form
 

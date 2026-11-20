@@ -2,8 +2,7 @@
 //! (`deps`, `defines`, the buffers, the expressions, the axes, the child bodies) and their rebuilding halves
 //! (`with_bodies`, `map_expressions`, `rename_buffers`, and `rewrite` behind `rename` and `substitute`). The few
 //! members no role gives are stated here by statement type: an `Accum`'s reduced axes follow a substitution that
-//! splits an axis, a `Let` and a `Call` read buffers their fields do not name, a `StridedLoop` with an `end` binds one
-//! more name than its axis.
+//! splits an axis, a `Let` and a `Call` read buffers their fields do not name.
 
 pub mod checks;
 pub mod shared;
@@ -953,8 +952,7 @@ mod tests {
         "out[i] = x",
         "m = select:\n  x when i < 2\n  y when 1",
         "zero out words=16",
-        "for k in 0..8:\n  x = load a[k]\n  s <- add(s, x)",
-        "for k in 0..8 step 2 until n:\n  x = load a[k]",
+        "for k in 0..n of 8 step 2:\n  x = load a[k]\n  s <- add(s, x)",
         "if i < 2:\n  out[] = x\nelse:\n  out[] = y",
         "sub row_sum(row in 0..4) -> s:\n  for k in 0..8:\n    x = load a[row, k]\n    s <- add(s, x)\nr = call row_sum[a](i)",
         "Smem(name=s, extents=(16, 16))",

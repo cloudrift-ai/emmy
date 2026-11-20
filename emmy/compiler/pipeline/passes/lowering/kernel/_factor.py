@@ -59,7 +59,7 @@ from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.schedule.classic.schedule import binds_root
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Statement, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Statement, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.ir import observed_result_names
@@ -516,19 +516,6 @@ def _ranged(op) -> bool:
     return False
 
 
-def _walked(stmts) -> list[Statement]:
-    """``stmts`` with every reduce loop that states a range as the kernel loop that walks it: from the range's start,
-    one position a trip, until its end. A scalar walk takes exactly the trips of the range, and nothing is masked."""
-
-    def walk(stmt: Statement) -> Statement:
-        if not isinstance(stmt, Loop) or stmt.range is None:
-            return stmt
-        start, end = stmt.range
-        return StridedLoop(axis=stmt.axis, start=start, step=Literal(1, "int"), body=stmt.body, end=end, seed=stmt.seed, unroll=stmt.unroll)
-
-    return list(Body(tuple(stmts)).map(walk))
-
-
 def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "") -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
@@ -662,7 +649,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             # kernel's identity (``TileOp.loop_body``) already reads.
             axes = ctx.sched.tile.axes
             bound = frozenset(axis.name for axis in (*ctx.grid, *ctx.sched.tile.place.serial))
-            placed = _walked(op.lower(bound, output_specs, axes) if output_specs else op.lower(axes=axes))
+            placed = op.lower(bound, output_specs, axes) if output_specs else op.lower(axes=axes)
             body = _one_value_per_name(dict.fromkeys([*placed, *tail]))
             # A kernel whose only work is a FREE output sweep — the elementwise half a placement
             # cut leaves behind a reduction — distributes that sweep across threads exactly as a
@@ -719,7 +706,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
 # A PLANAR / TWISTED monoid reduce (sum / max / mean / RMSNorm / softmax / the coop-KV TWISTED flash
 # reduce) partitions the reduce axis ``coop`` ways across the CTA's threads (cooperation) and ``reg``
 # ways across per-thread register accumulators (ILP). The serial reduce ``Loop`` becomes a
-# :class:`StridedLoop` of step ``coop·reg``; for ``reg > 1`` its body is replicated ``reg`` times
+# loop of step ``coop·reg``; for ``reg > 1`` its body is replicated ``reg`` times
 # (each copy offset by ``r·coop`` and folding its own accumulator). After the loop: the REG tree
 # folds the ``reg`` accumulators into one (:meth:`Fold.merge`), then — if ``coop > 1`` — the
 # cross-thread combine (:func:`emit_combine`), then the projection. The op tree + ``lower`` are
@@ -983,7 +970,8 @@ def _tile_reduce_axis_transposed(
     if GUARD_REDUCTIONS.narrow((True,))[0]:
         guarded = _guard_reductions._guard(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in (*grid, *ctx.serial)))
         candidate = guarded[len(hoisted)]
-    predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpression) else None
+    stops = candidate.walk()[1]
+    predicate = stops.cond if isinstance(stops, TernaryExpression) else None
 
     def uniform_parts(expression):
         if isinstance(expression, BinaryExpression) and expression.op == "&&":
@@ -1127,9 +1115,9 @@ def _register_copies(op: Fold, rloop, count: int, unit: int, masked: bool, prote
     return [stmt for r in range(count) for stmt in _replicate(rloop.body, r, unit, rloop.axis, masked, protected, stream_identity)]
 
 
-def _interleaved(axis: Axis, start, stride: int, body) -> StridedLoop:
+def _interleaved(axis: Axis, start, stride: int, body) -> Loop:
     """The loop over every ``stride``-th position of ``axis`` from ``start``: one lane's share of an interleaved split."""
-    return StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(body)), unroll=_lane_unroll(axis, stride))
+    return Loop.strided(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(body)), unroll=_lane_unroll(axis, stride))
 
 
 def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Statement]:
@@ -1267,7 +1255,7 @@ def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Statemen
     body.append(WarpBroadcast(state=state, length=width))
     return [
         *(Init(name=name, identity=seed, dtype=F32) for name, seed in zip(state, op.init, strict=True)),
-        StridedLoop(
+        Loop.strided(
             axis=chunk,
             start=Literal(0, "int"),
             step=Literal(width, "int"),

@@ -32,7 +32,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.kernel.ir import FragmentApply, MmaSyncPtx
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Body, Loop, StridedLoop, parse_body
+from emmy.compiler.ir.stmt import Body, Loop, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import OutputSpec, Placement
 from emmy.compiler.ir.tile.ir import TileOp
@@ -50,7 +50,7 @@ _CTX = Context.from_target((12, 0))
 def _folds_on_the_chunk_tier(kernel) -> bool:
     """Whether ``kernel`` folds a chunked stream with the ``m16n8k16`` product: products under a chunk loop."""
     products = [mma for mma in statements(kernel, MmaSyncPtx) if tuple(mma.shape) == (16, 8, 16)]
-    return bool(products) and any("__ck" in loop.axis.name for loop in statements(kernel, StridedLoop))
+    return bool(products) and any("__ck" in loop.axis.name for loop in statements(kernel, Loop))
 
 
 def _matmul(m: int = 128, k: int = 512, n: int = 128, *, out_dtype=F16) -> Graph:
