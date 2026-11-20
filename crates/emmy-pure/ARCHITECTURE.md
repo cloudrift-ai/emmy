@@ -52,12 +52,16 @@ and a view are values: they compare by what they hold.
 - `tree.rs` — the tree-wide canonical forms (`Fold::normalized`): the pass-through dissolve, the per-state split, the
   unread-component prune and the cone sharing, to a fixpoint remembered on the result per stored set.
 - `lower.rs` — the one lowering to Loop IR (`Fold::lower`), whose result kernel identity digests, and the demand walk
-  under it (`read_components`).
+  under it (`read_components`). The free loops open outermost the coordinate the most terms are evaluated over, and a
+  term read along a range counts for the coordinates the range's start reads: it is evaluated at `start + trip`, so
+  the nest is ordered as it would be were the start written into every index.
 - `range.rs` — `Fold::masked`: the tree with every range spelled as a kernel tier reads it. A term that walks a
   range walks from zero, reads its axis as `start + axis`, clamps what it reads below it to the last position in
   range, and folds each value selected against its seed past the end; a twisted carrier adds the pivot's seed to its
   score through the `where` a program's own mask spells. An axis whose range fixes its trips takes them as its
-  extent in the axis table returned.
+  extent in the axis table returned. A range starts at the greatest of its starts and ends at the least of its ends;
+  the walk leaves from the start some end lies a fixed way past, so a block of a split leaves from the block's start
+  and takes the block's length, and every other bound is a mask.
 
 ## Memos
 

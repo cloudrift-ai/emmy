@@ -492,7 +492,8 @@ reading then names the tensor's trailing extent as `ldm` and calls the operand N
 reduction axis. Both are wrong, the fragment reads the wrong elements, and nothing raises. `_direct_operand` takes both
 from the operand's FLAT address — each dim's addends scaled by that dim's element stride and simplified — so a reshape
 that splits one coordinate across dims (`x[m / 2, (m % 2) * 128 + k]`) still reads as the `128·m + k` it sums to.
-A split piece reaches a symbolic stream through a clamp onto its last position (`address.clamp_to`), which is no
+A split piece, read through the masked form, reaches a symbolic stream through a clamp onto its last position
+(`address.clamp_to`), which is no
 stride: the loader reads the leading dimension off the position itself and bounds its lanes by the clamp's extent,
 so the overhang zero-fills instead of stepping by the buffer's trailing extent.
 The flash tier's gmem reads take theirs the same way — the hoisted query fragments and the unstaged key and value:

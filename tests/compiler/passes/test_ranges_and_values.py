@@ -146,10 +146,10 @@ def test_the_masked_form_computes_what_the_range_means(text: str, expected) -> N
     np.testing.assert_allclose(got, expected(data["X"]) @ data["Y"], rtol=1e-4, atol=1e-4)
 
 
-def test_a_split_states_a_folds_range_inside_each_block(monkeypatch) -> None:
-    """A range bounds the position on the whole axis, and a block of a cross-CTA split reads it as
-    ``length * block + k``: the piece's fold walks the range moved back by the block's start. The partial and the
-    finalize, run in order on the Loop IR runner, compute the masked product."""
+def test_a_block_of_a_split_walks_the_part_of_the_folds_range_inside_it(monkeypatch) -> None:
+    """A block of a cross-CTA split walks ``length * block .. length * (block + 1)``, and a fold that walked a range
+    before the split walks what the two share. A tier leaves from the block's start and masks at the fold's own
+    end. The partial and the finalize, run in order on the Loop IR runner, compute the masked product."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.loop.runner import execute_loop_op_cpp  # noqa: PLC0415
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
@@ -162,7 +162,7 @@ def test_a_split_states_a_folds_range_inside_each_block(monkeypatch) -> None:
     run = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0)))
     out, _ = run.resolve(_graph(text, shapes, (16, 16)), lambda fork: next(fork.leaves()))
     assert {"O", "O__partial"} <= set(out.nodes)
-    assert "a3 < 4 * a1 - 32 * a0 + 4" in str(out.nodes["O__partial"].op.loop_body), "the bound inside the block"
+    assert "32 * a0 + a3 < 4 * a1 + 4" in str(out.nodes["O__partial"].op.loop_body), "the fold's own end, read from the block's start"
     env = _data(shapes)
     for nid in out.topological_order():
         node = out.nodes[nid]

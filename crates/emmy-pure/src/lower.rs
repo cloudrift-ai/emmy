@@ -746,6 +746,23 @@ impl Fold {
         Ok(body)
     }
 
+    /// For each axis a term of this tree walks from a start other than zero, the names that start reads.
+    fn range_origins(&self) -> HashMap<Name, HashSet<Name>> {
+        let mut origins: HashMap<Name, HashSet<Name>> = HashMap::new();
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut pending = vec![self.clone()];
+        while let Some(term) = pending.pop() {
+            if !seen.insert(term.address()) {
+                continue;
+            }
+            if let (Some(axis), Some((start, _))) = (term.axis(), term.range()) {
+                origins.entry(axis).or_default().extend(start.free_vars());
+            }
+            pending.extend(term.operands().iter().cloned());
+        }
+        origins
+    }
+
     fn lower_fresh(
         &self,
         bound: Option<&HashSet<Name>>,
@@ -777,6 +794,7 @@ impl Fold {
         let mut readers: HashMap<Name, usize> = HashMap::new();
         let mut origin: HashMap<Name, (usize, Kind)> = HashMap::new();
         let mut terms: HashMap<usize, Fold> = HashMap::new();
+        let origins = self.range_origins();
         let mut seen: HashSet<usize> = HashSet::new();
         let mut pending = vec![self.clone()];
         while let Some(term) = pending.pop() {
@@ -799,8 +817,14 @@ impl Fold {
                     internal.extend(edge.free_axes().iter().copied());
                 }
             }
-            for name in term.free_axes() {
-                *readers.entry(*name).or_default() += 1;
+            // A term read along a range is evaluated at `start + trip`: over the coordinates the start reads too, as
+            // it would be were the start written into its index.
+            let mut over: HashSet<Name> = term.free_axes().clone();
+            for axis in term.free_axes() {
+                over.extend(origins.get(axis).into_iter().flatten().copied());
+            }
+            for name in over {
+                *readers.entry(name).or_default() += 1;
             }
             match term.base() {
                 None => {
