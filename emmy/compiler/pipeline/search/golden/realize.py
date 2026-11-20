@@ -6,9 +6,8 @@ bench holds a pinned row to) — is evidence no compile can take; ``emmy golden 
 
 With a PTX directory the compile of each row also writes the code it built (:func:`ptx_path`): its instructions
 without the comments, the kernel named alike in every file, so that a kernel whose identity or spelling moved and
-whose code did not compares equal. A row's time was measured on that code: :func:`carried` gives a restamped file
-back with the time of every row whose code is the baseline's, byte for byte, and without the time of every row whose
-code is not."""
+whose code did not compares equal. A row's time was measured on that code, which is what a restamp given such a
+baseline decides it by (``restamp.carried``)."""
 
 from __future__ import annotations
 
@@ -134,48 +133,3 @@ def _collect(files: list[tuple[Realization, GoldenFile, list[int]]], reasons: It
             kept = [row for index, row in enumerate(document.rows) if index not in unrealized]
             replace(document, rows=kept).dump(report.file, overwrite=True)
         yield report
-
-
-def carried(
-    path: Path, document: GoldenFile, fresh: GoldenFile, report, baseline: Path, *, jobs: int | None = None
-) -> tuple[GoldenFile, list[str]]:
-    """``fresh``, the restamp of ``document`` already written to ``path``, with every time decided by the code: a row
-    whose kernel compiles under the row's schedule to the PTX ``baseline`` holds for it keeps the measurement
-    ``document`` has, whether or not the restamp re-keyed its kernel; a row whose PTX differs, or that no longer
-    realizes, loses it. A row the baseline holds no PTX for stays as the restamp left it. A whole-target latency is
-    kept when every kernel it timed still stands and every measured row of those kernels kept its code; a kernel of
-    it with no such row decides by the restamp's own rule (re-keyed or not). The second value names each row whose
-    code changed."""
-    import tempfile  # noqa: PLC0415
-
-    with tempfile.TemporaryDirectory() as scratch:
-        realize([path], jobs=jobs, ptx=Path(scratch))
-        _DOCUMENTS.pop(str(path), None)
-        verdict: dict[int, bool] = {}  # a fresh row's index -> whether its code is the baseline's
-        for index, source in enumerate(report.sources):
-            before = ptx_path(baseline, path, source)
-            if before.exists():
-                after = ptx_path(Path(scratch), path, index)
-                verdict[index] = after.exists() and after.read_bytes() == before.read_bytes()
-    same_code: dict[int, bool] = {}  # a fresh kernel's ref -> whether every measured row of it kept its code
-    for index, same in verdict.items():
-        if document.rows[report.sources[index]].measurements is not None:
-            ref = fresh.rows[index].kernel
-            same_code[ref] = same_code.get(ref, True) and same
-    rows, changed = [], []
-    for index, row in enumerate(fresh.rows):
-        old = document.rows[report.sources[index]]
-        if index in verdict and old.measurements is not None:
-            row = replace(row, measurements=old.measurements if verdict[index] else None)
-            if not verdict[index]:
-                changed.append(row.name)
-        latencies = {}
-        for card, latency in (old.latency or {}).items():
-            kernels = [report.stored_as.get(ref) for ref in latency.kernels]
-            kept = (row.latency or {}).get(card)
-            if latency.kernels and None not in kernels and all(same_code.get(ref, kept is not None) for ref in kernels):
-                latencies[card] = replace(latency, kernels=tuple(dict.fromkeys(kernels)))
-            elif kept is not None and all(same_code.get(ref, True) for ref in kept.kernels):
-                latencies[card] = kept
-        rows.append(replace(row, latency=latencies or None))
-    return replace(fresh, rows=rows), changed

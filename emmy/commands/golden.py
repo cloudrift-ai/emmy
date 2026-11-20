@@ -124,7 +124,7 @@ def handle_golden_check(args) -> None:
 
 def handle_golden_restamp(args) -> None:
     from emmy.compiler.pipeline.search.golden import GoldenFile, restamp  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.realize import carried  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.restamp import carried  # noqa: PLC0415
 
     baseline = Path(args.ptx_baseline) if getattr(args, "ptx_baseline", None) else None
     failed = False

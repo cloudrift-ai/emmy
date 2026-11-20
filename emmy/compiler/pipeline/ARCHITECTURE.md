@@ -1219,7 +1219,7 @@ realization corpus's staleness test is the same restamp (`tests/compiler/realiza
 GPU-free; the `refresh-golden` skill is the flow around them, including the record run a demoted row needs.
 A row's time was measured on its kernel's code, and the identity is only what names the kernel. So a restamp given a
 PTX baseline (`emmy golden restamp --ptx-baseline DIR`, the baseline written by `emmy golden realize --ptx DIR` on the
-tree before the change) decides each time by the code (`realize.carried`): every row of the restamped file is
+tree before the change) decides each time by the code (`restamp.carried`): every row of the restamped file is
 compiled under its own schedule, and it keeps its measurement exactly when the instructions are the baseline's, byte
 for byte with the comments left out, whether or not its kernel was re-keyed. A row whose code changed, or that no
 longer realizes, becomes a proposal and is named. A change that re-spells kernels without changing what they compile
