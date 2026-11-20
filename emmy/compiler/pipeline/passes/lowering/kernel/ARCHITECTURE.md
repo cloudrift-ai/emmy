@@ -712,15 +712,17 @@ row pair into a fragment and takes the same fragment store, which is what lets t
 (`REDUCE@map.1/twist=g<n>k`, FlashAttention-2's split-KV) keep the chunk tier for its partial: decode's few query
 rows then spread over `n` times the CTAs, and the finalize folds the per-cell states through the recipe's merge.
 
-A causal or a sliding-window attention states the keys a row folds as the carrier's RANGE, and the tier reads the
-range itself. The materializer lowers a kernel with each twisted carrier's range left on it (`TileOp.scheduled`), and
-`_outside` turns the range into one comparison for each bound, where the carrier folds nothing: `row < key` past the
-causal end, `key < row − W + 1` ahead of a window's start. The chunk tier reads those twice: for the chunks every row
-of the CTA skips (`_mask_key_bounds`), and as one coordinate-masking `FragmentApply` per bound on each score fragment,
-the fill the pivot's identity. A scalar walk reads the same range as its loop's bounds (`_factor._walked`) and masks
-nothing. A tier that folds every position of its axis — a cooperative reduce, a tiled contraction that is no chunk
-tier — raises `NeedsMask`, and the materializer lowers the kernel from its masked form (`TileOp.masked`), where each
-bound is a comparison and a `where` added to the score.
+A term that walks a RANGE reaches the lowering with the range on it (`TileOp.scheduled`), and a tier reads the range
+itself. A causal or a sliding-window attention states the keys a row folds as its carrier's range: `_outside` turns
+it into one comparison for each bound, where the carrier folds nothing — `row < key` past the causal end, `key < row
+− W + 1` ahead of a window's start — and the chunk tier reads those twice: for the chunks every row of the CTA skips
+(`_mask_key_bounds`), and as one coordinate-masking `FragmentApply` per bound on each score fragment, the fill the
+pivot's identity. A scalar walk reads a range, a carrier's or a plain fold's, as its loop's bounds
+(`_factor._walked`) and masks nothing. A tier that folds every position of its axis — a cooperative reduce, a tiled
+contraction that is no chunk tier — raises `NeedsMask`, and the materializer lowers the kernel from its masked form
+(`TileOp.masked`): a select against the seed for a plain fold, a comparison and a `where` added to the score for a
+carrier. A reduce loop that still states a range after the lowering is taken the same way, so no range is dropped
+unread.
 
 The score's own PREFIX — the carrier's lift cut to its score role — is where a mask a PROGRAM wrote arrives, and it
 takes two readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand

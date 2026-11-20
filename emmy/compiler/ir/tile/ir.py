@@ -627,6 +627,10 @@ class TileOp(Op):
         view = node.as_contraction()
         if view is None or not node.tiles_whole():
             return False
+        # A tile folds a rectangle of every position. The chunk tier alone reads a range, as the chunks it walks
+        # and the mask of the block a bound cuts; any other contraction that walks one is no tile site.
+        if node.range is not None and not node.chunked():
+            return False
         mn = self.grid_sched._mn_for(node)
         if (
             mn is not None
@@ -823,21 +827,28 @@ class TileOp(Op):
         return frozenset(name for dim in dims for name in dim.expression.free_vars())
 
     def masked(self) -> TileOp:
-        """This kernel as a kernel tier reads it: no range left in its tree (``Fold.masked``). A term that walks a
-        range walks from zero, reads its axis as ``start + axis``, and selects each value it folds against its seed
-        past the end; an axis whose range fixes its trips takes them as its extent in the axis table. The kernel
-        itself when its tree states no range. A schedule that realizes the kernel through this form does not change
-        which kernel it is (``wire.kernel_tile``)."""
+        """This kernel with no range left in its tree (``Fold.masked``): what a tier that folds every position of
+        its axis lowers. A term that walks a range walks from zero, reads its axis as ``start + axis``, and selects
+        each value it folds against its seed outside the range; an axis whose range fixes its trips takes them as
+        its extent in the axis table. The kernel itself when its tree states no range. A schedule attached to the
+        kernel addresses the masked tree alike: masking adds no site it names."""
         if self.op is None:
             return self
         op, axes = self.op.masked(self.axes)
-        return self if op is self.op else replace(self, op=op, axes=axes)
+        if op is self.op:
+            return self
+        if self.schedule is None:
+            return replace(self, op=op, axes=axes)
+        # The tree is put in its canonical form before the schedule is attached again.
+        formed = replace(self, op=op, axes=axes, schedule=None, materialization=None)
+        return replace(formed, schedule=self.schedule, materialization=self.materialization)
 
     def scheduled(self) -> TileOp:
-        """This kernel as the kernel lowering takes it (``Fold.scheduled``): :meth:`masked`, except that a twisted
-        carrier keeps its range, stated of its axis as the tier walks it. The tier that folds a carrier reads the
-        range itself: the chunk tier as the chunks it walks and the mask of the block a bound cuts, a scalar walk as
-        its loop's bounds."""
+        """This kernel as the classic schedule addresses it and the kernel lowering takes it (``Fold.scheduled``):
+        a block of a partition walks from zero, and every term keeps its range, stated of its axis as a tier walks
+        it. A tier reads the range itself: the chunk tier as the chunks it walks and the mask of the block a bound
+        cuts, a scalar walk as its loop's bounds. A tier that folds every position of its axis takes
+        :meth:`masked`. Neither form changes which kernel this is (``wire.kernel_tile``)."""
         if self.op is None:
             return self
         op, axes = self.op.scheduled(self.axes)

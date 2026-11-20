@@ -218,11 +218,11 @@ impl Fold {
         self.walked(axes, true)
     }
 
-    /// This tree as the kernel tiers take it, and the axis table it then reads. A tier that folds a twisted
-    /// carrier reads the carrier's range itself, as the bounds of its walk and as the mask of the block a bound
-    /// cuts, so a carrier keeps its range, stated of the axis as the tier walks it: a block of a partition walks
-    /// from zero, and its range is what the fold's own bounds leave of the block. Every other term is masked
-    /// ([`Fold::masked`]): a tensor-core contraction and a cooperative reduce fold a rectangle.
+    /// This tree as the schedule and the kernel tiers take it, and the axis table it then reads. A tier reads a
+    /// term's range itself, as the bounds of its walk and as the mask of the block a bound cuts, so every term
+    /// keeps its range, stated of the axis as the tier walks it: a block of a partition walks from zero, and its
+    /// range is what the fold's own bounds leave of the block. A tier that folds a rectangle of every position
+    /// takes the tree masked instead ([`Fold::masked`]).
     pub fn scheduled(&self, axes: &[Arc<Axis>]) -> Result<(Fold, Vec<Arc<Axis>>)> {
         self.walked(axes, false)
     }
@@ -236,11 +236,12 @@ impl Fold {
         }
     }
 
-    fn walked(&self, axes: &[Arc<Axis>], carriers: bool) -> Result<(Fold, Vec<Arc<Axis>>)> {
+    /// `as_mask` says whether a range becomes a mask (the masked form) or stays on its term (the scheduled one).
+    fn walked(&self, axes: &[Arc<Axis>], as_mask: bool) -> Result<(Fold, Vec<Arc<Axis>>)> {
         let mut taken = self.names();
         let mut table = axes.to_vec();
         let mut done = HashMap::new();
-        let walked = self.masked_in(axes, &mut table, &mut taken, &mut done, carriers)?;
+        let walked = self.masked_in(axes, &mut table, &mut taken, &mut done, as_mask)?;
         Ok((walked, table))
     }
 
@@ -250,7 +251,7 @@ impl Fold {
         table: &mut Vec<Arc<Axis>>,
         taken: &mut Vec<Name>,
         done: &mut HashMap<usize, Fold>,
-        carriers: bool,
+        as_mask: bool,
     ) -> Result<Fold> {
         if let Some(found) = done.get(&self.address()) {
             return Ok(found.clone());
@@ -258,7 +259,7 @@ impl Fold {
         let operands = self
             .operands()
             .iter()
-            .map(|edge| edge.masked_in(axes, table, taken, done, carriers))
+            .map(|edge| edge.masked_in(axes, table, taken, done, as_mask))
             .collect::<Result<Vec<_>>>()?;
         let same = operands
             .iter()
@@ -272,7 +273,7 @@ impl Fold {
                 Fold::formed(parts)
             }
             (Some((start, end)), _) => {
-                self.masking(operands, same, start, end, axes, table, taken, carriers)?
+                self.masking(operands, same, start, end, axes, table, taken, as_mask)?
             }
         };
         done.insert(self.address(), out.clone());
@@ -289,19 +290,19 @@ impl Fold {
         axes: &[Arc<Axis>],
         table: &mut [Arc<Axis>],
         taken: &mut Vec<Name>,
-        carriers: bool,
+        as_mask: bool,
     ) -> Result<Fold> {
         let axis = self
             .axis()
             .ok_or_else(|| Error::Value("a range is a reduce axis's".into()))?;
-        if self.observe().is_some() || self.carries() {
+        // A term a tier reads the range of keeps it. One that walks from zero is the term it was.
+        let kept = !as_mask;
+        if !kept && (self.observe().is_some() || self.carries()) {
             return Err(Error::NotImplemented(format!(
                 "no tier masks the range of '{axis}': the term is observed or carries a state"
             )));
         }
         let walk = Walk::of(axis, start, end, axes)?;
-        // A carrier a tier reads the range of keeps it. One that walks from zero is the term it was.
-        let kept = self.twist().is_some() && !carriers;
         if kept && walk.base.is_none() {
             if same {
                 return Ok(self.clone());

@@ -1064,9 +1064,10 @@ def serial_form(tile: TileOp, prefix: str) -> TileOp:
 
 def scheduled_form(tile: TileOp, prefix: str) -> TileOp:
     """The term the classic schedule addresses and the kernel lowering reads: the serial form of a kernel that
-    carries a state (:func:`serial_form`, its buffers named under ``prefix``), with no range left in its tree
-    (``TileOp.masked``). Every reader of a kernel's schedule sites takes the kernel through here."""
-    return (serial_form(tile, prefix) if tile.carries else tile).masked()
+    carries a state (:func:`serial_form`, its buffers named under ``prefix``), each block of a partition walking
+    from zero and each range stated of the axis as a tier walks it (``TileOp.scheduled``). Every reader of a
+    kernel's schedule sites takes the kernel through here."""
+    return (serial_form(tile, prefix) if tile.carries else tile).scheduled()
 
 
 __all__ = [

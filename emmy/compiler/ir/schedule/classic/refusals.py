@@ -302,6 +302,10 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
             or any(not branch.select.free_vars() <= coord_axes | uniform for branch in stmt.branches)
         ):
             return "the score's coordinate Select does not form a cell-uniform additive mask"
+    # The carrier's own range lands the same way, one coordinate mask for each bound: over the row, the key and the
+    # values one CTA holds, like a mask's predicate.
+    if node.range is not None and any(not bound.free_vars() <= coord_axes | uniform for bound in node.range):
+        return "the carrier's range reads a coordinate the chunk tier holds neither per element nor per CTA"
     leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & set(prefix.params)]
     if any(node.axis in edge.free_axes for edge in leaves):
         return "the score's prefix reads an operand that varies over the chunk"

@@ -64,9 +64,9 @@ and a view are values: they compare by what they hold.
   the start some end lies a fixed way past: the axis takes that distance as its extent in the axis table returned and
   reads its axis as `start + axis`. Only the last block of a symbolic stream can run past the stream, and there a read
   below the term clamps onto its last position. Any other range is walked over the whole axis from zero, and every
-  bound is a mask. `Fold::scheduled` is the same tree with each twisted carrier's range left on it, stated of the axis
-  as the tier walks it, for the tier that folds the carrier to read; `Fold::block_start` names the start a block
-  leaves from, which the lowering's nest order and the tile's shared coordinates read too.
+  bound is a mask. `Fold::scheduled` is the same tree with each range left on its term, stated of the axis as a tier
+  walks it: what the schedule addresses and a tier that reads a range lowers. `Fold::block_start` names the start a
+  block leaves from, which the lowering's nest order and the tile's shared coordinates read too.
 
 ## Memos
 

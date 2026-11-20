@@ -157,8 +157,9 @@ def classic_forks(
             state_stages += (Stage(transport="smem"),)
         if state_tiles:
             state_stages += (Stage(transport="reg"),)
-    # The tiers cover an axis from zero to its extent: a range reaches them as the mask it stands for.
-    tile = tile.masked()
+    # A block of a partition walks from zero, and each range is stated of the axis as a tier walks it. A tier that
+    # cannot read a range lowers the kernel masked (``010_materialize``).
+    tile = tile.scheduled()
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band). A finalize that cannot take that row keeps its own

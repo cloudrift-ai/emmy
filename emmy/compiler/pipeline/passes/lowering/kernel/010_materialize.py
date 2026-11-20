@@ -31,12 +31,11 @@ from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, THREAD_COORDS
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Write, exposed_defines, free_names
+from emmy.compiler.ir.stmt import Body, Load, Loop, Write, exposed_defines, free_names
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import NeedsMask, UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
-from emmy.compiler.wire import kernel_tile
 
 PATTERN = [Pattern("root", TileOp)]
 
@@ -53,20 +52,17 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
 
         tile = serial_form(tile, root.id)
-    tile = tile.masked()
+    # The schedule addressed the kernel with each range left on its term (``TileOp.scheduled``), and a tier that reads
+    # a range lowers it so. A tier that folds every position of its axis says so, and takes the kernel masked.
+    tile = tile.scheduled()
     rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
-        # A tier that folds a twisted carrier reads the carrier's range itself, so the kernel is lowered first with
-        # each carrier's range left on it; a tier that folds every position of its axis says so, and takes the mask.
-        ranged = _with_ranges(tile)
         try:
-            lowered = ranged if ranged is not None else tile
-            materialized = _pointwise_strip(lowered, factorize(lowered, root, sm_count=getattr(ctx, "sm_count", 0)))
+            materialized = _lowered(tile, root, ctx)
         except NeedsMask:
-            lowered = tile
-            materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
-        tile = lowered
+            tile = tile.masked()
+            materialized = _lowered(tile, root, ctx)
         body = Body((materialized,))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
@@ -85,19 +81,13 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
 
 
-def _with_ranges(tile: TileOp) -> TileOp | None:
-    """``tile``, scheduled on its masked form, over the tree that leaves each twisted carrier's range on it
-    (``TileOp.scheduled``): the same sites, so the schedule addresses it alike. ``None`` when no carrier of the kernel
-    walks a range, or the kernel is realized through another term (a carried state's serial form)."""
-    source = kernel_tile(tile)
-    if source is None or source is tile or source.op is None or source.carries or tile.schedule is None:
-        return None
-    ranged = source.scheduled()
-    if not any(site.node.range is not None for site in ranged.sites):
-        return None
-    if [site.path for site in ranged.sites] != [site.path for site in tile.sites]:
-        return None
-    return replace(tile, op=ranged.op, axes=ranged.axes)
+def _lowered(tile: TileOp, root: Node, ctx):
+    """``tile`` lowered to its kernel statement. A reduce loop that still states a range after the lowering was put
+    there by a tier that does not read one, and the backend would walk its whole axis: the kernel takes its mask."""
+    materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
+    if any(isinstance(stmt, Loop) and stmt.range is not None for stmt in Body((materialized,)).iter()):
+        raise NeedsMask(f"a loop of kernel {tile.name!r} states a range no tier read")
+    return materialized
 
 
 def _resident(match: Match, root: Node, tile: TileOp):
