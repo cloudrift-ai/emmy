@@ -379,7 +379,7 @@ class TileOp(Op):
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
         if len(self.place.free) > 1:
             view = normalized.as_contraction()
-            if view is None or view.left_axes or view.shared_axes:
+            if view is None or view.left_axes or self.batch_axes(normalized):
                 unit_row = None
         if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
             object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
@@ -428,7 +428,7 @@ class TileOp(Op):
         if self.place.is_mapped and (not self.place.grid or self.place.grid[-1].name != free[-1].name):
             return
         roots = kernel_roots(self.op)
-        if not roots or not all(self._vector_against_matrix(root.as_contraction()) for root in roots):
+        if not roots or not all(self._vector_against_matrix(root) for root in roots):
             return
         unit = Axis("_um", Dim(1))
         grid = self.place.grid
@@ -436,17 +436,29 @@ class TileOp(Op):
             grid = (*grid[:-1], unit, grid[-1])
         object.__setattr__(self, "place", replace(self.place, free=(*free[:-1], unit, free[-1]), grid=grid))
 
-    def _vector_against_matrix(self, view) -> bool:
-        """Whether contraction ``view`` has one empty operand role, the other role owning the trailing free axis, and
-        the free axes are that role's axes, one dense column every boundary store writes, or shared batch coordinates
-        beside a column. The physical matrix pair then puts the unit coordinate in the empty role."""
+    def batch_axes(self, node: Fold) -> frozenset[str]:
+        """The coordinates both operands of the contraction ``node`` ride besides the reduction: the ones both read,
+        and the block coordinate of a split, which moves the positions both are read at. A tier reads such a block
+        with the coordinate in both indices (``Fold.masked``), so the two spellings of one kernel answer alike."""
+        view = node.as_contraction()
+        shared = frozenset(view.shared_axes) if view is not None else frozenset()
+        axis = next((axis for axis in self.axes if axis.name == node.axis), None)
+        if node.range is None or axis is None or axis.window is None or not axis.window.partition:
+            return shared
+        return shared | (frozenset(node.range[0].free_vars()) & {axis.name for axis in self.place.free})
+
+    def _vector_against_matrix(self, node: Fold) -> bool:
+        """Whether the contraction ``node`` reads as has one empty operand role, the other role owning the trailing
+        free axis, and the free axes are that role's axes, one dense column every boundary store writes, or shared
+        batch coordinates beside a column. The physical matrix pair then puts the unit coordinate in the empty role."""
         free = self.place.free
+        view = node.as_contraction()
         if view is None or (view.left_axes and view.right_axes):
             return False
         role = view.left_axes | view.right_axes
         if free[-1].name not in role:
             return False
-        if view.shared_axes:
+        if self.batch_axes(node):
             return len(free) >= 2
         if len(free) == 1:
             return all(_dense_axis_suffix(spec.write.index, free[0].name) for spec in self.output_specs)

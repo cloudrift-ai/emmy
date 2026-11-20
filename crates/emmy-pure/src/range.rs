@@ -3,10 +3,10 @@
 //! A tensor-core block is a rectangle and a cooperative lane a strided walk, so a tier covers an axis from zero to
 //! a number of trips and masks what the range leaves out. This is the one place that turns a range into that form.
 //! Each value the term folds is selected against the fold's seed where the position is outside the range, and a
-//! bound the trips already hold states no mask. A range some end lies a fixed way past the start of (a block of a
-//! split) is walked from that start: the axis takes the fixed distance as its trips, every read of it is `start +
-//! axis`, and a read below the term clamps onto the range, so no masked trip reads past a buffer. Any other range
-//! is walked over the whole axis, and the position is the axis. A twisted carrier has no value to select against:
+//! bound the trips already hold states no mask. A block of a split (an axis whose window is a partition) is walked
+//! from the block's start, the start some end lies a fixed way past: the axis takes that distance as its trips,
+//! every read of it is `start + axis`, and a read below the term clamps onto the range, so no masked trip reads
+//! past a buffer. Any other range is walked over the whole axis, and the position is the axis. A twisted carrier has no value to select against:
 //! its score takes the pivot's seed added through the `where` a program's own mask spells, which is the coordinate
 //! mask the chunk tier lands. Loop IR's normal form reads a mask back as the range it came from.
 
@@ -84,10 +84,10 @@ struct Walk {
 }
 
 impl Walk {
-    /// A range starts at the greatest of its starts and ends at the least of its ends. The walk leaves from the
-    /// start some end lies a fixed way past, the shortest way first: a block of a split leaves from the block's
-    /// start and takes the block's length, whatever range the fold walked before the split. With no such start
-    /// it covers the axis from zero, and each start is a mask like each end.
+    /// A range starts at the greatest of its starts and ends at the least of its ends. A block of a partition
+    /// (the axis's window says so) leaves from the start some end lies a fixed way past, the shortest way first:
+    /// the block's start, and it takes the block's length, whatever range the fold walked before the split. Any
+    /// other walk covers the axis from zero, and each start is a mask like each end.
     fn of(axis: Name, start: &Expression, end: &Expression, axes: &[Arc<Axis>]) -> Result<Walk> {
         let (mut lows, mut highs) = (Vec::new(), Vec::new());
         chain(start, Operation::Maximum, &mut lows);
@@ -99,8 +99,12 @@ impl Walk {
             affine_sum(affine_terms(&apart, ExprClass::Index), &|_| unranked())
                 .simplify(&SimplifyCtx::empty())
         };
+        let stated = axes.iter().find(|known| known.name == axis);
+        // Only a block of a partition leaves from its own start: the block coordinate is one value for a whole
+        // launch block, where a start that moves with a row would give every row of a tile its own positions.
+        let block = stated.is_some_and(|known| known.window.as_ref().is_some_and(|w| w.partition));
         let mut from: Option<(usize, Option<i64>)> = None;
-        for (index, low) in lows.iter().enumerate() {
+        for (index, low) in lows.iter().enumerate().filter(|_| block) {
             for high in &highs {
                 let room = room(low, high)?;
                 if room.free_vars().iter().any(coordinate) {
@@ -137,7 +141,6 @@ impl Walk {
             .iter()
             .filter(|room| !room.free_vars().iter().any(coordinate))
             .collect();
-        let stated = axes.iter().find(|known| known.name == axis);
         let trips: Option<Expression> = if !rebased {
             stated.map(|known| known.extent.expression.clone())
         } else {
