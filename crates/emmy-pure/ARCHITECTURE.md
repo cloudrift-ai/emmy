@@ -48,7 +48,8 @@ and a view are values: they compare by what they hold.
 - `rewrite.rs` — `Fold::rewrite`: a term renamed, substituted and axis-mapped the way a statement is, the
   substitution hygienic about the axis each term binds and folded under a range context when it carries one.
 - `fuse.rs` — `Fold::fuse`: the one generic algorithm over the recipes. It finds the pivot among the term's operands,
-  matches the score cone and a channel's pattern by canonical form, and instantiates the recipe by renaming.
+  matches the score cone and a channel's pattern by canonical form, and instantiates the recipe by renaming. Two
+  folds fuse where they walk the same range of the axis, and the fused fold keeps it.
 - `tree.rs` — the tree-wide canonical forms (`Fold::normalized`): the pass-through dissolve, the per-state split, the
   unread-component prune and the cone sharing, to a fixpoint remembered on the result per stored set.
 - `lower.rs` — the one lowering to Loop IR (`Fold::lower`), whose result kernel identity digests, and the demand walk
@@ -57,11 +58,13 @@ and a view are values: they compare by what they hold.
   nest is ordered as it would be were the start written into every index.
 - `range.rs` — `Fold::masked`: the tree with every range spelled as a kernel tier reads it. A term that walks a
   range folds each value selected against its seed where the position is outside the range; a twisted carrier adds
-  the pivot's seed to its score through the `where` a program's own mask spells. A range starts at the greatest of
-  its starts and ends at the least of its ends. A block of a split (an axis whose window is a partition) leaves from
-  the block's start, the start some end lies a fixed way past: the axis takes that distance as its extent in the axis
-  table returned, reads its axis as `start + axis`, and clamps what it reads below it onto the range. Any other range
-  is walked over the whole axis from zero, and every bound is a mask.
+  the pivot's seed to its score through the `where` a program's own mask spells, one for each bound, which is how a
+  causal or a sliding-window attention reaches the chunk tier. A range starts at the greatest of its starts and ends
+  at the least of its ends. A block of a split (an axis whose window is a partition) leaves from the block's start,
+  the start some end lies a fixed way past: the axis takes that distance as its extent in the axis table returned and
+  reads its axis as `start + axis`. Only the last block of a symbolic stream can run past the stream, and there a read
+  below the term clamps onto its last position. Any other range is walked over the whole axis from zero, and every
+  bound is a mask.
 
 ## Memos
 

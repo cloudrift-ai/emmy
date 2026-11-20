@@ -81,6 +81,8 @@ struct Walk {
     ends: Vec<Expression>,
     /// The trips, where the range fixes them apart from the extent the axis table states.
     trips: Option<Dim>,
+    /// The axis's extent, where a walk that leaves from a block's start may run past it.
+    overrun: Option<Expression>,
 }
 
 impl Walk {
@@ -159,11 +161,16 @@ impl Walk {
             })
             .map(|(bound, _)| bound)
             .collect();
+        let ends: Vec<Expression> = ends;
+        let overrun = stated
+            .map(|known| known.extent.expression.clone())
+            .filter(|extent| rebased && ends.contains(extent));
         Ok(Walk {
             position,
             starts: lows,
             ends,
             trips: trips.filter(|_| rebased).map(|trips| Dim::new(trips, None)),
+            overrun,
         })
     }
 
@@ -181,25 +188,17 @@ impl Walk {
             .reduce(|so_far, holds| Expression::binary(Operation::LogicalAnd, so_far, holds))
     }
 
-    /// The position a read below the term takes: clamped onto the first or the last position in range where a
-    /// trip may leave it, so the read stays inside its buffer and the fold masks what it folds there.
+    /// The position a read below the term takes. A walk that leaves from a block's start can run past the end
+    /// of a symbolic stream, whose last block is short: there the read clamps onto the stream's last position, so
+    /// it stays inside its buffer and the fold masks what it folds. No other bound moves a read: a block of a
+    /// static stream lies inside it, and a walk from zero stays inside the axis.
     fn read(&self) -> Expression {
-        let least = |a, b| Expression::apply(Operation::Minimum, vec![a, b]);
-        let greatest = |a, b| Expression::apply(Operation::Maximum, vec![a, b]);
-        let below = match self.ends.iter().cloned().reduce(least) {
+        match &self.overrun {
             None => self.position.clone(),
-            Some(end) => Expression::new(Expr::Ternary(
-                Expression::binary(Operation::Less, self.position.clone(), end.clone()),
+            Some(extent) => Expression::new(Expr::Ternary(
+                Expression::binary(Operation::Less, self.position.clone(), extent.clone()),
                 self.position.clone(),
-                Expression::binary(Operation::Subtract, end, Expression::int(1)),
-            )),
-        };
-        match self.starts.iter().cloned().reduce(greatest) {
-            None => below,
-            Some(start) => Expression::new(Expr::Ternary(
-                Expression::binary(Operation::Less, self.position.clone(), start.clone()),
-                start,
-                below,
+                Expression::binary(Operation::Subtract, extent.clone(), Expression::int(1)),
             )),
         }
     }
@@ -327,49 +326,64 @@ impl Fold {
         match walk.inside() {
             None => {}
             Some(_) if self.twist().is_some() => {
-                // The score, less the pivot's seed past the end: `score + where(key < end, 0, seed)`.
+                // The score, less the pivot's seed outside the range: one `score + where(inside, 0, seed)` for
+                // each bound, the additive coordinate mask a program's own mask spells. The chunk tier reads each
+                // for the chunks it may skip.
                 let score = results[0];
                 let name =
                     |part: &str, taken: &mut Vec<Name>| fresh(&format!("{score}__{part}"), taken);
-                let (key, end_, keep, fill) = (
-                    name("key", taken),
-                    name("end", taken),
-                    name("keep", taken),
-                    name("fill", taken),
-                );
-                let (inside, mask, masked) = (
-                    name("inside", taken),
-                    name("mask", taken),
-                    name("in", taken),
-                );
-                let end = walk
+                let var = |name: &Name| Expression::var(name);
+                let key = name("key", taken);
+                body.push(bind(key, walk.position.clone()));
+                // An end one past a coordinate is that coordinate, held inclusively: `key <= row` is one
+                // comparison per element where `key < row + 1` is a sum and a comparison.
+                let inclusive = |end: &Expression| match end.as_binary() {
+                    Some((Operation::Add, last, one)) if one.int_literal() == Some(1) => {
+                        (last.clone(), Operation::LessEqual)
+                    }
+                    _ => (end.clone(), Operation::Less),
+                };
+                let ends: Vec<(Name, Operation)> = walk
                     .ends
                     .iter()
-                    .cloned()
-                    .reduce(|a, b| Expression::apply(Operation::Minimum, vec![a, b]))
-                    .unwrap_or_else(|| end.clone());
-                let var = |name: &Name| Expression::var(name);
-                body.extend([
-                    bind(key, walk.position.clone()),
-                    bind(end_, end),
-                    bind(keep, Expression::float(0.0)),
-                    bind(fill, Expression::float(seed(0)?)),
-                    assign(
-                        inside,
-                        Expression::binary(Operation::Less, var(&key), var(&end_)),
-                    ),
-                    assign(
-                        mask,
-                        Expression::apply(
-                            Operation::Where,
-                            vec![var(&inside), var(&keep), var(&fill)],
+                    .map(|end| (inclusive(end), "end"))
+                    .chain(
+                        walk.starts
+                            .iter()
+                            .map(|start| ((start.clone(), Operation::GreaterEqual), "start")),
+                    )
+                    .map(|((bound, holds), part)| {
+                        let held = name(part, taken);
+                        body.push(bind(held, bound));
+                        (held, holds)
+                    })
+                    .collect();
+                let (keep, fill) = (name("keep", taken), name("fill", taken));
+                body.push(bind(keep, Expression::float(0.0)));
+                body.push(bind(fill, Expression::float(seed(0)?)));
+                let mut masked = score;
+                for (bound, holds) in ends {
+                    let (inside, mask, sum) = (
+                        name("inside", taken),
+                        name("mask", taken),
+                        name("in", taken),
+                    );
+                    body.extend([
+                        assign(inside, Expression::binary(holds, var(&key), var(&bound))),
+                        assign(
+                            mask,
+                            Expression::apply(
+                                Operation::Where,
+                                vec![var(&inside), var(&keep), var(&fill)],
+                            ),
                         ),
-                    ),
-                    assign(
-                        masked,
-                        Expression::binary(Operation::Add, var(&score), var(&mask)),
-                    ),
-                ]);
+                        assign(
+                            sum,
+                            Expression::binary(Operation::Add, var(&masked), var(&mask)),
+                        ),
+                    ]);
+                    masked = sum;
+                }
                 results[0] = masked;
             }
             Some(condition) => {
