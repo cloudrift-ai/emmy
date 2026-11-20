@@ -1681,6 +1681,12 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                 hidden = self.act_fn(gate) * up
                 return torch.matmul(_picked(w_down, sel), hidden.unsqueeze(-1)).squeeze(-1) * expert_scaling_factor
 
+            def slots_sum(self, x, sel, scores, shared, w_gate_up, w_down):
+                # Each row's picks weighted by its router scores and summed, plus the shared expert's output: the
+                # layer's routed sum in the model dtype, in the program.
+                picks = self.slots(x, sel, w_gate_up, w_down)
+                return torch.matmul(scores.to(x.dtype).unsqueeze(-2), picks).reshape(shared.shape) + shared
+
             def blocks(self, x, sel, w_gate_up, w_down):
                 gate, up = torch.matmul(x, _picked(w_gate_up, sel).transpose(-1, -2)).chunk(2, dim=-1)
                 if limit is not None:

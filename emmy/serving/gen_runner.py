@@ -1802,17 +1802,20 @@ class EmmyGenRunner:
                         else None,
                         "weight_inputs": ind_names,
                     }
-                    wrapper = build_moe_slots_wrapper(expert_w)
                     # One row's k picks; on experts sliced across ranks (resident, in the ``F.linear`` form) also
                     # several rows at once, each against its own picks, at every slot width up to the decode bucket: a
                     # decode step of several tokens then runs one launch set, of the narrowest program that holds it,
-                    # instead of one per row.
+                    # instead of one per row. A Qwen4Exp program also takes the router's scores and the shared
+                    # expert's output and returns the layer's routed sum (``ExpertFFN.slots_sum``).
                     sliced = expert_slices > 1 and paging is None and not transposed
                     widths = (1, *slot_widths(decode_bucket or 0)) if sliced else (1,)
+                    summed = getattr(text_config, "model_type", None) == "qwen4_exp_text"
+                    wrapper = build_moe_slots_wrapper(expert_w, "slots_sum" if summed else "slots")
                     for rows in widths:
                         name = pre + ("slots" if rows == 1 else f"slots{rows}")
                         picks = (moe_top_k,) if rows == 1 else (rows, moe_top_k)
-                        slot_examples = [torch.zeros(rows, hidden, dtype=dtype), torch.zeros(picks, dtype=torch.int64), *stacked_w]
+                        sums = [torch.zeros(picks), torch.zeros(rows, hidden, dtype=dtype)] if summed else []
+                        slot_examples = [torch.zeros(rows, hidden, dtype=dtype), torch.zeros(picks, dtype=torch.int64), *sums, *stacked_w]
                         try:
                             with evidence_reads() as read:
                                 _, slot_plan = _compile_split(
@@ -2725,7 +2728,7 @@ class EmmyGenRunner:
                         self._slot_rows_sel = torch.zeros(max(widths), k, dtype=torch.int64, device="cuda")
                         self._slot_rows_partials = torch.empty(max(widths), k, h, dtype=partial_dtype, device="cuda")
                         shared += [(rows, self._slot_rows_sel[:rows], self._slot_rows_partials[:rows]) for rows in sorted(widths)]
-                    for m in self._moe:
+                    for layer, m in enumerate(self._moe):
                         if m is None:
                             continue
                         m["slot_rows"] = {}
@@ -2749,7 +2752,13 @@ class EmmyGenRunner:
                             )
                             p = prog.program
                             p.alias_buffer("sel", sel)
-                            p.alias_buffer(prog.output_names[0], partials)
+                            if "scores" not in prog.input_names:
+                                p.alias_buffer(prog.output_names[0], partials)
+                            elif self._post_decode is not None and len((post := self._post_decode[layer]).output_names) == 4:
+                                # The routed input and the shared expert's output are the post twin's own buffers:
+                                # under a step's capture the program reads them where the twin wrote them.
+                                for name, out in (("x", post.output_names[1]), ("shared", post.output_names[3])):
+                                    p.alias_buffer(name, post.program.buffer_view(out)[:rows])
                             if "paging" in m:
                                 pager = emmy_runtime.Pager()
                                 for name, (on_device, raw, _) in m["inputs"].items():
@@ -3104,11 +3113,11 @@ class EmmyGenRunner:
         dispatch per expert. A ``shared`` expert output (this rank's slice of it) is added ahead of
         the reduction, so one all-reduce sums both."""
         if xn.shape[0] <= self.moe_slot_width:
-            routed = self._moe_combine_slots(moe, xn, token_ids)
+            routed = self._moe_combine_slots(moe, xn, token_ids, shared)
         else:
             routed = self._moe_combine(moe, xn, token_ids)
-        if shared is not None:
-            routed += shared
+            if shared is not None:
+                routed += shared
         if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
             routed = reduce_routed(routed)
         return routed
@@ -3216,10 +3225,11 @@ class EmmyGenRunner:
                 accumulate_float32=moe.get("accumulate_float32", False),
             )
 
-    def _moe_combine_slots(self, moe, xn, token_ids=None):
+    def _moe_combine_slots(self, moe, xn, token_ids=None, shared=None):
         """Fixed-slot combine for a decode step, one row at a time — the capture-legal twin of
-        :meth:`_moe_combine`. The routing stays data-dependent in VALUES only: one fixed-shape write
-        per row puts its top-k indices into the persistent selector — no ``unique()``, no
+        :meth:`_moe_combine`, with the ``shared`` expert's output added. A program that takes the router's scores
+        weights, sums and adds ``shared`` itself: its output is the routed sum. The routing stays data-dependent in
+        VALUES only: one fixed-shape write per row puts its top-k indices into the persistent selector — no ``unique()``, no
         ``.tolist()``, no host sync — and the layer's fixed-slot program computes the k experts at
         once, gathering their weights by those indices (through the page tables, with the paging
         program ahead of it, when the experts are paged); each row's partials combine through one
@@ -3235,53 +3245,68 @@ class EmmyGenRunner:
         gated = self._route(moe, xn, token_ids)
         scores, indices = gated[-2], gated[-1]  # [T, k] each
         self._record_routing(moe, indices)
-        capturing = torch.cuda.is_current_stream_capturing()
-        stream = torch.cuda.current_stream()
         t = xn.shape[0]
         if t > 1 and (width := min((rows for rows in moe.get("slot_rows", ()) if rows >= t), default=0)):
             # Every row's picks at once through the narrowest slot program that holds the step: the rows past this
             # step's keep the picks and inputs of an earlier one, whose partials no row reads.
-            p = moe["slot_rows"][width].program
+            slots = moe["slot_rows"][width]
             with gpu_lock():
                 self._slot_rows_sel[:t].copy_(indices)
-                with p.on_stream(stream):
-                    p.upload_prefix_device({"x": xn.detach().contiguous()})
-                    if capturing:
-                        p.run_once()
-                    else:
-                        p.capture_program_graph()
-                        p.replay_program_graph()
-                # [T, 1, k] @ [T, k, H] — each row's weighted combine, one batched product.
-                return _combine_slot_partials(
-                    scores.unsqueeze(1),
-                    self._slot_rows_partials[:t],
-                    xn.dtype,
-                    accumulate_float32=moe.get("accumulate_float32", False),
-                ).squeeze(1)
+                routed = self._run_slots(slots, xn, scores, shared, t)
+                if routed is None:
+                    # [T, 1, k] @ [T, k, H] — each row's weighted combine, one batched product.
+                    routed = _combine_slot_partials(
+                        scores.unsqueeze(1),
+                        self._slot_rows_partials[:t],
+                        xn.dtype,
+                        accumulate_float32=moe.get("accumulate_float32", False),
+                    ).squeeze(1)
+                    if shared is not None:
+                        routed += shared
+                return routed
         combined = []
-        p = moe["slots"].program
         with gpu_lock():
             # Row by row through the one selector and partials pair: a row's combine is queued on
             # this stream before the next row's launches overwrite them.
-            for row in range(xn.shape[0]):
+            for row in range(t):
                 self._slot_sel.copy_(indices[row])
-                with p.on_stream(stream):
-                    p.upload_prefix_device({"x": xn[row : row + 1].detach().contiguous()})
-                    if capturing:
-                        p.run_once()
-                    else:
-                        p.capture_program_graph()  # static program → one cached graph per layer
-                        p.replay_program_graph()
-                # [1, k] @ [k, H] — the fixed-shape weighted combine.
-                combined.append(
-                    _combine_slot_partials(
-                        scores[row : row + 1],
-                        self._slot_partials,
-                        xn.dtype,
-                        accumulate_float32=moe.get("accumulate_float32", False),
+                rows = slice(row, row + 1)
+                routed = self._run_slots(moe["slots"], xn[rows], scores[row], None if shared is None else shared[rows], 1)
+                if routed is None:
+                    # [1, k] @ [k, H] — the fixed-shape weighted combine.
+                    routed = _combine_slot_partials(
+                        scores[rows], self._slot_partials, xn.dtype, accumulate_float32=moe.get("accumulate_float32", False)
                     )
-                )
+                    if shared is not None:
+                        routed += shared[rows]
+                elif t > 1 and torch.cuda.is_current_stream_capturing():
+                    routed = routed.clone()  # the next row's launches overwrite the program's output
+                combined.append(routed)
         return combined[0] if len(combined) == 1 else torch.cat(combined)
+
+    def _run_slots(self, slots, xn, scores, shared, t):
+        """Run one fixed-slot program on the step's first ``t`` rows, its selector already written. Returns the
+        routed sum of a program that takes the router's scores and the shared expert's output, a view of its output
+        under a capture and a copy otherwise; ``None`` for a program that leaves the picks' partials to combine."""
+        import torch
+
+        p = slots.program
+        summed = "scores" in slots.input_names
+        inputs = {"x": xn.detach().contiguous()}
+        if summed:
+            inputs |= {"scores": scores.float(), "shared": shared.contiguous()}
+        capturing = torch.cuda.is_current_stream_capturing()
+        with p.on_stream(torch.cuda.current_stream()):
+            p.upload_prefix_device(inputs)
+            if capturing:
+                p.run_once()
+            else:
+                p.capture_program_graph()  # static program → one cached graph per layer
+                p.replay_program_graph()
+        if not summed:
+            return None
+        out = p.buffer_view(slots.output_names[0])[:t]
+        return out if capturing else out.clone()
 
     def _record_routing(self, moe, indices) -> None:
         """Count routed rows per persistent E-leading input slice on the current device.
