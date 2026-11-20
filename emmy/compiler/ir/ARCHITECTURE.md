@@ -650,7 +650,7 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 
 | Symbol                       | Role                                                                                                              |
 |------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `Axis`                       | Named iteration variable (`name`, `extent`). Defined in `ir/axis.py`, re-exported here. Carries an optional `window` (`Window` — the `parent` axis this one is a slice of, and whether the slice is a cross-CTA `partition`; its `base` / `bound` are declared but unused, kept only because recorded split identities spell them): the ONE windowing concept, and never a range — a loop's data-independent `start` / `end` is the kernel loop's own (`StridedLoop`), derived where it opens; `source_axis` is the derived compat read (`window.parent`). Excluded from equality / hashing. |
+| `Axis`                       | Named iteration variable (`name`, `extent`). Defined in `ir/axis.py`, re-exported here. Carries an optional `window` (`Window` — the `parent` axis this one is a slice of, and whether the slice is a cross-CTA `partition`): the ONE windowing concept, and never a range — a reduce states the range it walks on its own loop or fold, and a kernel loop's data-independent `start` / `end` is its own (`StridedLoop`), derived where it opens; `source_axis` is the derived compat read (`window.parent`). Excluded from equality / hashing. |
 | `LoopOp`                     | One kernel. Stored field: `body` (nested `Loop` tree). Computed: `axes`, `loads`, `accums`.                       |
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
 | `Assign`                     | The one scalar definition: `name = value`, `value` one operation over names and literals (`exp(x)`, `2 * x - y`: an affine region is one node), with an optional `dtype`. |
@@ -897,7 +897,7 @@ from that CSE form. Subroutine boundaries never limit fusion.
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Scalar
   accumulators bind beside their own reduction loop, without exporting a nested loop's private state into its
   ancestors. Conditions and unseeded loops preserve the state they update, including an explicit enclosing seed.
-  Axis renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
+  Axis renames reach conditions, reduction metadata, and a `Window`'s parent as well as indices; a
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
   so indirect indices cannot be renamed twice. The order reads a scope lexically: two bindings of one name, which
   motion can produce, keep their source order and a read binds the one before it (or the first, where none precedes:

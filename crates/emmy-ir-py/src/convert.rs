@@ -168,23 +168,11 @@ pub fn axis_from_py(value: &Bound<'_, PyAny>, depth: usize) -> PyResult<Arc<Axis
         None
     } else {
         let parent = window.getattr("parent")?;
-        let base = window.getattr("base")?;
-        let bound = window.getattr("bound")?;
         Some(Window {
             parent: if parent.is_none() {
                 None
             } else {
                 Some(axis_from_py(&parent, depth + 1)?)
-            },
-            base: if base.is_none() {
-                None
-            } else {
-                Some(expression_from_any(&base)?)
-            },
-            bound: if bound.is_none() {
-                None
-            } else {
-                Some(expression_from_any(&bound)?)
             },
             partition: window.getattr("partition")?.extract()?,
         })
@@ -214,22 +202,6 @@ pub fn axis_to_py<'py>(py: Python<'py>, axis: &Axis) -> PyResult<Bound<'py, PyAn
                     .parent
                     .as_ref()
                     .map(|parent| axis_to_py(py, parent))
-                    .transpose()?,
-            )?;
-            kwargs.set_item(
-                "base",
-                window
-                    .base
-                    .as_ref()
-                    .map(|e| PyExpression::wrap(py, e))
-                    .transpose()?,
-            )?;
-            kwargs.set_item(
-                "bound",
-                window
-                    .bound
-                    .as_ref()
-                    .map(|e| PyExpression::wrap(py, e))
                     .transpose()?,
             )?;
             kwargs.set_item("partition", window.partition)?;

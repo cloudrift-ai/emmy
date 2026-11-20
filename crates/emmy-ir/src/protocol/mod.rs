@@ -832,11 +832,6 @@ impl Statement {
                 for source in axis.sources() {
                     self.0.push(source.name);
                 }
-                if let Some(window) = &axis.window {
-                    for e in [&window.base, &window.bound].into_iter().flatten() {
-                        e.collect_free_vars(&mut self.0);
-                    }
-                }
             }
             fn body(&mut self, _roles: Roles, body: &Body) {
                 for stmt in body.stmts() {

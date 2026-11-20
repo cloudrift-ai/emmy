@@ -41,13 +41,8 @@ class Window(Wire):
     factorization, the scope-walk origin derivation) group surrounding axes by that identity
     instead of by name-suffix convention.
 
-    ``base`` / ``bound`` were declared as a cross-CTA slice's absolute start / end in the parent's
-    coordinates. No pass writes or reads them: an axis walks its local ``[0, extent)``, a slice
-    rebases through its partition coordinate, and a data-independent early stop or late start is
-    the kernel loop's own ``start`` / ``end`` (``StridedLoop``), derived where that loop opens from
-    the mask in the body. They stay declared because every recorded identity that holds a window
-    spells its fields structurally (``structural.form``): dropping them would re-key every stored
-    cross-CTA split row, which is a re-record, not a cleanup.
+    Where an axis walks is not the window's to say: an axis's extent bounds its coordinate, a reduce states the
+    range it walks on its own loop or fold, and a kernel loop its own ``start`` / ``end`` (``StridedLoop``).
 
     ``partition`` marks the one window a CROSS-CTA SPLIT produced: this axis is one CTA's share of
     a reduce stream, not a tile of an iteration space. Every other window — the partition planner's
@@ -58,8 +53,6 @@ class Window(Wire):
     """
 
     parent: Axis | None = None
-    base: Expression | None = None
-    bound: Expression | None = None
     partition: bool = False
 
 
