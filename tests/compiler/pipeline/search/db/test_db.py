@@ -11,16 +11,12 @@ from dataclasses import replace
 import pytest
 
 from emmy.compiler.context import Context
-from emmy.compiler.pipeline.search.db import PerfStats, RoutingRow, SearchDB, knobs_json
+from emmy.compiler.pipeline.search.db import PerfRow, RoutingRow, SearchDB, knobs_json
 from tests.compiler.pipeline.search.helpers import kernel_row, perf_row
 
 _5090 = "NVIDIA GeForce RTX 5090"
 _PRO_6000 = "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
 _ROW = {"WORK": "t16"}
-
-
-def _stats(us: float) -> PerfStats:
-    return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
 
 
 def _ctx(gpu_name: str, *, fast_math: bool = False) -> Context:
@@ -37,7 +33,13 @@ def _db(*kernels: str, **symbolic: tuple[str, ...]) -> SearchDB:
 
 def _record(db: SearchDB, ctx: Context, kernel: str, us: float, *, bindings: dict | None = None, knobs: dict | None = None, **kw) -> None:
     kw.setdefault("status", "ok")
-    db.record_perf(ctx, kernel, bindings=bindings or {}, knobs=_ROW if knobs is None else knobs, stats=_stats(us), **kw)
+    db.record_perf(ctx, kernel, bindings=bindings or {}, knobs=_ROW if knobs is None else knobs, us=us, **kw)
+
+
+def _held(db: SearchDB, ctx: Context, kernel: str, *, bindings: dict, knobs: dict) -> PerfRow | None:
+    """The row ``db`` holds of this kernel variant under ``ctx``'s card and regime, whatever its status."""
+    want = (ctx.hardware_id(), ctx.arch(), ctx.cold_cache, ctx.precision_pins(), kernel, bindings, knobs)
+    return next((r for r in db.iter_perf_rows() if (r.gpu, r.arch, r.cold_cache, r.precision, r.kernel, r.bindings, r.knobs) == want), None)
 
 
 def test_a_re_measurement_replaces_the_row_and_a_failure_does_not() -> None:
@@ -46,25 +48,10 @@ def test_a_re_measurement_replaces_the_row_and_a_failure_does_not() -> None:
     db, ctx = _db("k"), _ctx(_5090)
     _record(db, ctx, "k", 100.0)
     _record(db, ctx, "k", 120.0)
-    assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW).stats.median == 120.0
+    assert _held(db, ctx, "k", bindings={}, knobs=_ROW).us == 120.0
     _record(db, ctx, "k", 1.0, status="bench_fail", error="timeout")
-    row = db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW)
-    assert (row.status, row.stats.median) == ("ok", 120.0)
-
-
-def test_a_freeze_repeating_a_golden_decision_leaves_it_the_golden_s() -> None:
-    """A placement pool is labelled by the decisions a golden took. A freeze that records the same cut on the same
-    kernel, imported after the golden, would otherwise take the decision's source over, and the pool would lose its
-    label: one RTX 5090 cut of a GDN dense linear did, once the normal form gave the freeze's kernel the golden's
-    identity. Another golden, or a freeze recording a decision no golden took, still writes its own."""
-    db, ctx = _db("k"), _ctx(_5090)
-    arm = {"PLACE@map.1/inner": "cut"}
-    db.record_taken(ctx, "k", bindings={}, arm=arm, source="golden:a")
-    db.record_taken(ctx, "k", bindings={}, arm=arm, source="freeze:b")
-    assert [decision[-1] for decision in db.iter_taken()] == ["golden:a"]
-    db.record_taken(ctx, "k", bindings={}, arm=arm, source="golden:c")
-    db.record_taken(ctx, "k", bindings={}, arm={"PLACE@map.2/inner": "cut"}, source="freeze:b")
-    assert sorted(decision[-1] for decision in db.iter_taken()) == ["freeze:b", "golden:c"]
+    row = _held(db, ctx, "k", bindings={}, knobs=_ROW)
+    assert (row.status, row.us) == ("ok", 120.0)
 
 
 def test_two_cards_sharing_a_capability_keep_their_own_rows() -> None:
@@ -76,9 +63,9 @@ def test_two_cards_sharing_a_capability_keep_their_own_rows() -> None:
     _record(db, a, "k", 100.0)
     _record(db, b, "k", 80.0)
 
-    assert db.lookup_perf(a, "k", bindings={}, knobs=_ROW).stats.median == 100.0
-    assert db.lookup_perf(b, "k", bindings={}, knobs=_ROW).stats.median == 80.0
-    assert [r.stats.median for r in db.iter_perf(a)] == [100.0]
+    assert _held(db, a, "k", bindings={}, knobs=_ROW).us == 100.0
+    assert _held(db, b, "k", bindings={}, knobs=_ROW).us == 80.0
+    assert db.measured(a, "k", bindings={}) == [(_ROW, 100.0)]
     rows = {r.gpu: r for r in db.iter_perf_rows()}
     assert set(rows) == {_5090, _PRO_6000}
     assert (rows[_5090].cc, rows[_5090].backend) == (120, "cuda")
@@ -89,11 +76,11 @@ def test_the_regime_is_its_precision_decisions() -> None:
     implies, spelled one by one, are one context."""
     db = _db("k")
     _record(db, _ctx(_5090), "k", 100.0)
-    assert db.lookup_perf(_ctx(_5090, fast_math=True), "k", bindings={}, knobs=_ROW) is None
+    assert _held(db, _ctx(_5090, fast_math=True), "k", bindings={}, knobs=_ROW) is None
     _record(db, _ctx(_5090, fast_math=True), "k", 90.0)
     spelled = Context.from_target((12, 0), gpu_name=_5090, precision={"FAST_MATH": True, "FLUSH_TO_ZERO": True})
     assert spelled.structural_key() == _ctx(_5090, fast_math=True).structural_key()
-    assert db.lookup_perf(spelled, "k", bindings={}, knobs=_ROW).stats.median == 90.0
+    assert _held(db, spelled, "k", bindings={}, knobs=_ROW).us == 90.0
     assert {r.precision["FAST_MATH"] for r in db.iter_perf_rows()} == {False, True}
     assert db._conn.execute("SELECT COUNT(*) FROM context").fetchone() == (2,)
 
@@ -104,9 +91,9 @@ def test_one_dynamic_kernel_benched_at_two_sizes_is_two_rows() -> None:
     db, ctx = _db("k"), _ctx(_5090)
     _record(db, ctx, "k", 100.0, bindings={"seq_len": 512})
     _record(db, ctx, "k", 800.0, bindings={"seq_len": 4096})
-    assert db.lookup_perf(ctx, "k", bindings={"seq_len": 512}, knobs=_ROW).stats.median == 100.0
-    assert db.lookup_perf(ctx, "k", bindings={"seq_len": 4096}, knobs=_ROW).stats.median == 800.0
-    assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW) is None
+    assert _held(db, ctx, "k", bindings={"seq_len": 512}, knobs=_ROW).us == 100.0
+    assert _held(db, ctx, "k", bindings={"seq_len": 4096}, knobs=_ROW).us == 800.0
+    assert _held(db, ctx, "k", bindings={}, knobs=_ROW) is None
 
 
 def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
@@ -115,17 +102,17 @@ def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
     cold = replace(hot, cold_cache=True)
     assert hot.structural_key() != cold.structural_key()
     _record(db, hot, "k", 10.0)
-    assert db.lookup_perf(cold, "k", bindings={}, knobs=_ROW) is None
+    assert _held(db, cold, "k", bindings={}, knobs=_ROW) is None
     assert not db.has_perf(cold)
     _record(db, cold, "k", 30.0)
     for ctx, latency in ((hot, 10.0), (cold, 30.0)):
-        row = db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW)
-        assert row.stats.median == latency
+        row = _held(db, ctx, "k", bindings={}, knobs=_ROW)
+        assert row.us == latency
         assert row.cold_cache == ctx.cold_cache
-        assert [r.stats.median for r in db.iter_perf(ctx)] == [latency]
-        assert db.perf_sources(ctx) == {"measured": 1}
-    assert db.forget_perf(cold, "measured") == 1
-    assert db.lookup_perf(hot, "k", bindings={}, knobs=_ROW).stats.median == 10.0
+        assert db.measured(ctx, "k", bindings={}) == [(_ROW, latency)]
+    db.forget(cold, "measured")
+    assert _held(db, cold, "k", bindings={}, knobs=_ROW) is None
+    assert _held(db, hot, "k", bindings={}, knobs=_ROW).us == 10.0
 
 
 @pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA"])
@@ -151,27 +138,27 @@ def test_independent_precision_regimes_never_replace_or_price_each_other(name, u
     _record(db, override, "k", 2.0)
     for ctx, us in ((ordinary, 1.0), (override, 2.0)):
         assert db.best_per_op_time(ctx, "k", bindings={}) == us
-        assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW).stats.median == us
-        assert [r.precision for r in db.iter_perf(ctx)] == [ctx.precision_pins()]
-        assert db.perf_sources(ctx) == {"measured": 1}
-    assert db.forget_perf(override, "measured") == 1
+        assert _held(db, ctx, "k", bindings={}, knobs=_ROW).us == us
+    db.forget(override, "measured")
+    assert db.best_per_op_time(override, "k", bindings={}) is None
     assert db.best_per_op_time(ordinary, "k", bindings={}) == 1.0
 
 
-def test_a_schedule_row_is_shared_and_a_read_row_holds_it_alone() -> None:
-    """Two measurements taken with the same choices share one schedule row, whatever kernel they are
-    of. A read row names its kernel by exact identity and holds the schedule row and nothing else: the
-    kernel's stamps are computed from its definition where a row is featurized, never stored beside it."""
+def test_a_read_row_holds_its_schedule_row_alone() -> None:
+    """A read row names its kernel by exact identity and holds the schedule row and nothing else: the kernel's stamps
+    are computed from its definition where a row is featurized, never stored beside it. A knob's value is its
+    spelling, so a row written with a number and read by its text is one row."""
     db, ctx = _db("a", "b"), _ctx(_5090)
     _record(db, ctx, "a", 100.0)
     _record(db, ctx, "b", 200.0)
-    assert db._conn.execute("SELECT COUNT(*) FROM schedule").fetchone() == (1,)
-    assert db._conn.execute("SELECT COUNT(*) FROM schedule_knob").fetchone() == (1,)
-    rows = {r.kernel: r.knobs for r in db.iter_perf_rows()}
+    _record(db, ctx, "b", 300.0, knobs={"RASTER": 4})
+    _record(db, ctx, "b", 250.0, knobs={"RASTER": "4"})
+    assert db.measured(ctx, "b", bindings={}) == [({"RASTER": "4"}, 250.0), (_ROW, 200.0)]
+    rows = {r.kernel: r.knobs for r in db.iter_perf_rows() if r.knobs == _ROW}
     assert rows == {"a": {"WORK": "t16"}, "b": {"WORK": "t16"}}
     # The empty row is a schedule too: a forkless kernel's one measurement.
     _record(db, ctx, "a", 50.0, knobs={})
-    assert db.lookup_perf(ctx, "a", bindings={}, knobs={}).stats.median == 50.0
+    assert _held(db, ctx, "a", bindings={}, knobs={}).us == 50.0
 
 
 def test_a_placement_knob_is_refused_as_a_measurement() -> None:
@@ -183,7 +170,7 @@ def test_a_placement_knob_is_refused_as_a_measurement() -> None:
     with pytest.raises(ValueError, match="placement knob"):
         _record(db, ctx, "k", 1.0, knobs={"REDUCE": "g2k"})
     _record(db, ctx, "k", 1.0, knobs={"REDUCE": "coop"})
-    assert db.lookup_perf(ctx, "k", bindings={}, knobs={"REDUCE": "coop"}) is not None
+    assert _held(db, ctx, "k", bindings={}, knobs={"REDUCE": "coop"}) is not None
 
 
 def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
@@ -209,7 +196,7 @@ _PINNED_IDENTITIES = {
 def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at() -> None:
     """A kernel row's key is computed from its Loop IR by live code, and a tune DB keeps the keys it was written
     with. So a change to that computation leaves every stored key naming nothing — silently, since the columns do
-    not change. Changed computation requires a ``db._VERSION`` bump before re-pinning. When a corpus body changed,
+    not change. Changed computation requires a ``db.VERSION`` bump before re-pinning. When a corpus body changed,
     first verify its prior wire still computes the old identity; then re-pin that input without a version bump."""
     from emmy.compiler.pipeline.search.golden import GoldenFile
     from tests.compiler.realization import helpers as corpus
@@ -245,13 +232,13 @@ def test_context_keys_match_the_db_version_and_ignore_later_ambient_pins(monkeyp
 def test_a_file_written_under_another_version_is_re_created(tmp_path) -> None:
     """The columns of a file an older identity computation wrote are this DDL's, so only the version tells it
     apart: a writer re-creates it, a reader refuses it."""
-    from emmy.compiler.pipeline.search.db import _VERSION
+    from emmy.compiler.pipeline.search.db import VERSION
 
     path = tmp_path / "autotune.db"
     db = SearchDB(path)
     db.record_kernel(kernel_row("k"))
     db.record_perf_row(perf_row("k", us=60.0))
-    db._conn.execute(f"PRAGMA user_version = {_VERSION - 1}")
+    db._conn.execute(f"PRAGMA user_version = {VERSION - 1}")
     db.close()
 
     with pytest.raises(RuntimeError, match="written by another emmy"):
@@ -308,7 +295,7 @@ def test_a_nested_cut_prices_through_its_pieces_and_the_cut_piece_needs_no_row()
     assert db.best_per_op_time(ctx, "c2", bindings={}) == 15.0
     assert db.best_per_op_time(ctx, "p", bindings={}) == 45.0
     assert db.priced_arms(ctx, "p", bindings={}) == [({"PLACE@map.1/inner": "cut"}, 45.0)]
-    assert db.lookup_perf(ctx, "c2", bindings={}, knobs=_ROW) is None, "the cut piece has no row of its own"
+    assert _held(db, ctx, "c2", bindings={}, knobs=_ROW) is None, "the cut piece has no row of its own"
 
 
 def test_a_knob_row_has_one_spelling_and_no_lossy_fallback() -> None:
@@ -339,6 +326,7 @@ def _write_older_emmy_file(path) -> None:
         "INSERT INTO perf VALUES ('g', 'ctx', 'k', 'cuda', 'ok', 50.0, 50.0, 50.0, 50.0, 0.0, 30, '2026-01-01T00:00:00+00:00', '{}', 1)"
     )
     old.execute("CREATE TABLE kernel_set (parent TEXT, decision TEXT, children TEXT)")
+    old.execute("CREATE TABLE schedule_knob (schedule INTEGER, name TEXT, value TEXT)")  # a knob row was rows of its own
     old.execute("CREATE TABLE cuda_op (key TEXT PRIMARY KEY, kernel_source TEXT NOT NULL)")
     old.commit()
     old.close()
@@ -377,27 +365,15 @@ def test_a_file_another_emmy_wrote_is_re_created_whole_by_a_writer_and_refused_b
     db = SearchDB(path)
     assert list(db.iter_perf_rows()) == []
     tables = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert tables == {
-        "source",
-        "kernel",
-        "context",
-        "schedule",
-        "schedule_knob",
-        "placement",
-        "placement_knob",
-        "routing",
-        "taken",
-        "constant",
-        "perf",
-    }
+    assert tables == {"source", "kernel", "context", "routing", "taken", "constant", "perf"}
     with pytest.raises(sqlite3.IntegrityError):
         db.record_perf_row(perf_row("ghost", us=1.0))  # no kernel row behind it
     db.record_kernel(kernel_row("k"))
-    db.record_perf_row(perf_row("k", us=60.0, captured=True))
+    db.record_perf_row(perf_row("k", us=60.0))
     db.close()
 
     ro = SearchDB.open_readonly(path)
-    assert [(r.stats.median, r.knobs["WORK"]) for r in ro.iter_perf_rows()] == [(60.0, "w1x8")]
+    assert [(r.us, r.knobs["WORK"]) for r in ro.iter_perf_rows()] == [(60.0, "w1x8")]
     ro.close()
 
 
@@ -434,3 +410,75 @@ def test_a_transaction_commits_its_writes_together_or_none(tmp_path) -> None:
         raise RuntimeError("the import failed")
     assert db.sources() == {"golden:a", "golden:b"}
     assert SearchDB(tmp_path / "tune.db").sources() == {"golden:a", "golden:b"}
+
+
+def test_a_kernel_is_read_at_the_sizes_a_compile_binds_it_at() -> None:
+    """A compile reads a kernel's clean rows at its own sizes, and a row that names no size at every size; a row at
+    another size, a failed row and a row with no time are not what it deploys."""
+    db, ctx = _db("k"), _ctx(_5090)
+    _record(db, ctx, "k", 100.0, bindings={"seq_len": 512})
+    _record(db, ctx, "k", 800.0, bindings={"seq_len": 4096}, knobs={"WORK": "t32"})
+    _record(db, ctx, "k", 300.0, knobs={"WORK": "t8"})
+    _record(db, ctx, "k", 0.0, bindings={"seq_len": 512}, knobs={"WORK": "t4"})
+    _record(db, ctx, "k", 2e6, bindings={"seq_len": 512}, knobs={"WORK": "t2"}, status="bench_fail")
+    assert db.measured(ctx, "k", bindings={"seq_len": 512}) == [(_ROW, 100.0), ({"WORK": "t8"}, 300.0)]
+    assert db.measured(ctx, "k", bindings={"seq_len": 4096}) == [({"WORK": "t32"}, 800.0), ({"WORK": "t8"}, 300.0)]
+    assert db.sizes(ctx, "k") == [{"seq_len": 4096}, {"seq_len": 512}, {}], "the sizes it ran clean at, by their text"
+    assert db.measured(_ctx(_PRO_6000), "k", bindings={"seq_len": 512}) == []
+
+
+def test_failed_names_the_kernels_whose_every_measured_variant_failed() -> None:
+    """One clean row means a kernel is realizable and merely has bad rows; a kernel with none is disqualified, in
+    the regime that measured it."""
+    db, ctx = _db("bad", "mixed", "good"), _ctx(_5090)
+    _record(db, ctx, "bad", 2e6, status="bench_fail")
+    _record(db, ctx, "mixed", 2e6, status="bench_fail")
+    _record(db, ctx, "mixed", 5.0, knobs={"WORK": "t32"})
+    _record(db, ctx, "good", 5.0)
+    assert db.failed(ctx) == {"bad"}
+    assert db.failed(_ctx(_5090, fast_math=True)) == set()
+
+
+def test_a_forgotten_scope_takes_what_it_imported_and_leaves_what_a_bench_recorded() -> None:
+    """What a golden scope imported under one card and regime goes with it: its rows, the decisions it took there and
+    the note that it was imported. The routing rows it stored go once no regime holds the scope any more — except a
+    decision a bench here recorded, which stays measured whatever imports it again."""
+    db, plain, fast = _db("p", "q", "c1", "c2"), _ctx(_5090), _ctx(_5090, fast_math=True)
+    cut, split = {"PLACE@map.1/inner": "cut"}, {"REDUCE": "g2k"}
+    db.record_routing(RoutingRow("q", cut, ("c2",)))  # a bench here took this cut before any import
+    for ctx in (plain, fast):
+        db.record_routing(RoutingRow("p", cut, ("c1", "c2")), source="golden:a")
+        db.record_routing(RoutingRow("p", split, ("c1",)), source="golden:a")
+        db.record_routing(RoutingRow("q", cut, ("c1", "c2")), source="golden:a")
+        _record(db, ctx, "c1", 1.0, source="golden:a")
+        db.record_taken(ctx, "p", bindings={}, arm=cut, source="golden:a")
+        db.record_source("golden:a", ctx)
+    db.record_routing(RoutingRow("p", split, ("c2",)))  # and this split after it
+
+    db.forget(plain, "golden:")
+    assert (db.sources(plain), db.sources(fast), db.sources()) == (set(), {"golden:a"}, set())
+    assert _held(db, plain, "c1", bindings={}, knobs=_ROW) is None and _held(db, fast, "c1", bindings={}, knobs=_ROW) is not None
+    assert len(list(db.iter_routing())) == 3, "the other regime still holds the scope"
+
+    db.forget(fast, "golden:")
+    assert [(r.parent, r.arm, r.children) for r in db.iter_routing()] == [("p", split, ("c2",)), ("q", cut, ("c1", "c2"))]
+    assert list(db.iter_taken()) == [] and list(db.iter_perf_rows()) == []
+
+
+def test_an_evidence_digest_moves_with_what_a_compile_can_read() -> None:
+    """A compile's picks depend on the rows of the kernels it read, the decisions stored on them and the pieces those
+    reach, in its own regime — and on whether the regime holds any clean measurement at all."""
+    db, ctx = _db("p", "c1", "c2", "other"), _ctx(_5090)
+    db.record_routing(RoutingRow("p", {"PLACE@map.1/inner": "cut"}, ("c1", "c2")))
+    _record(db, ctx, "c1", 30.0)
+    before = db.evidence_digest(ctx, ["p"])
+    _record(db, ctx, "other", 1.0)
+    _record(db, _ctx(_5090, fast_math=True), "c1", 1.0)
+    assert db.evidence_digest(ctx, ["p"]) == db.evidence_digest(ctx, ("p",)) == before
+    _record(db, ctx, "c2", 50.0)
+    assert db.evidence_digest(ctx, ["p"]) != before
+
+    empty = _db("k", "z")
+    cold = empty.evidence_digest(ctx, ["k"])
+    _record(empty, ctx, "z", 1.0)
+    assert empty.evidence_digest(ctx, ["k"]) != cold

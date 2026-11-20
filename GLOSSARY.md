@@ -411,31 +411,21 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Dataset DB** — A database with the tuning database's tables in a file of its own — the file
   every `emmy db` command names (`_data/dataset.db` in the examples), never the tuning database a compile reads —
-  filled by `emmy db import` from measurement freezes, the golden files and tuning databases, and exported by `emmy db
-  export` as the dataset the measurement-data readers (`emmy eval prior`, `emmy fit`) read. No compile reads either,
+  filled by `emmy db import` from the golden files and tuning databases, and exported by `emmy db export` as the dataset the measurement-data readers (`emmy eval prior`, `emmy fit`) read. No compile reads either,
   so what is imported into it can never change a deploy.
 - **Dataset** — The training data as a directory (`_data/schedule` and `_data/placement` in the examples): a
   `manifest.json` carrying each candidate pool's identity, labels, feature names and the export's provenance, beside
   one matrix file per pool. A dataset holds one space — the schedule rows of each golden kernel, or the arms of each
   structural fork — and its manifest names it. `emmy db export` writes it from the dataset DB; `emmy fit` and `emmy
   eval prior` read it and nothing else.
-- **Measurement freeze** — A fixed snapshot of collected measurements, written as a golden file per GPU: each
-  kernel's definition and its measured schedule rows, with the regime each was measured under and its median, and
-  no traced program. The tuning database is local to one machine and is rewritten as benches continue,
-  so a number computed over it cannot be checked by anyone else. A freeze is identical wherever
-  it is read, which is what makes two models' scores a fair comparison and a reported score something a reader can
-  reproduce.
-  The one kept with the repository (`search/freezes/`, a file per card) is what `emmy db import --repository` reads
-  beside the repository goldens; a tune writes its rows as one more file there, beside the card's, and the nightly
-  refresh folds those files into each card's, then compiles every row under its own schedule and drops the rows the
-  compiler no longer realizes (`emmy golden realize --drop`).
 - **Candidate file** — A few measured schedules that are not the best known one, for each group a hardware golden
   holds (one kernel, at one set of sizes, in one input regime): 3 where the kernel's schedule space is small, up to 10
   where it is large, spread across their latency. It is written in the golden file format and carries its hardware
   golden's traced programs, kernels and decisions, so it is checked against a fresh lowering, restamped and pruned as
   a golden is (`emmy candidates {check,restamp,realize}`). It is never a golden: a golden's row is the best known for
   its kernel, a candidate is not, and no compile reads a candidate file as evidence. One file per hardware golden,
-  under `search/candidates/records/`; `emmy candidates build` fills it from the measurement freeze.
+  under `search/candidates/records/`; `emmy candidates build` fills it from the tuning database the card's tunes
+  wrote.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the tune database's rows, the golden rows in scope imported among them, the fastest compatible
   row winning — then the prior's prediction, and last the rule's own first option. A structural

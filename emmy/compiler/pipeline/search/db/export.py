@@ -27,7 +27,7 @@ from emmy.compiler.pipeline.search.dataset import (
     repo_commit,
 )
 from emmy.compiler.pipeline.search.db import PerfRow, SearchDB, knobs_json
-from emmy.compiler.pipeline.search.db.freeze import freeze_reason, kernel_ops, shape_of
+from emmy.compiler.pipeline.search.db.admission import admission_reason, kernel_ops, shape_of
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, STRUCT_PREFIX, stamps
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups
 from emmy.compiler.structural import digest
@@ -38,12 +38,12 @@ logger = logging.getLogger(__name__)
 def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[GoldenPool], dict[str, int]]:
     """The golden rows of ``db`` as pools — one per card, regime, kernel and sizes that holds at least one row a
     golden file sourced (``golden:`` — a repository golden the import filed, or the golden scope a compile imported
-    into a tune DB) and the freeze admits (:func:`~.freeze.freeze_reason`, the one admission rule every measured-pool
+    into a tune DB) and the admission rule keeps (:func:`~.admission.admission_reason`, the one rule every pool
     reader applies) — beside a count of the golden rows dropped, by reason, as :func:`measured_groups` returns its
     own. The kernel is the exact one the rows were measured on: a golden pool has to be enumerated from a
     definition, which is why it does not key on the stamp signature the measured pools share across bodies. In
     content order, so a report reads the same on every machine. ``kernel_op`` gives a row its kernel's op
-    (:func:`~.freeze.kernel_ops`, built here when not handed in), whose stamps the admission rule reads."""
+    (:func:`~.admission.kernel_ops`, built here when not handed in), whose stamps the admission rule reads."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
     kernel_op = kernel_op or kernel_ops(db)
     dropped: dict[str, int] = defaultdict(int)
@@ -51,7 +51,7 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
     for row in db.iter_perf_rows(backend="cuda"):
         if not row.source.startswith("golden:"):
             continue
-        reason = freeze_reason(row, shape_of(kernel_op(row)))
+        reason = admission_reason(row, shape_of(kernel_op(row)))
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
@@ -60,7 +60,7 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
     pools = []
     for (gpu, cap, regime, identity, _bindings), rows in sorted(buckets.items()):
         rows.sort(key=lambda r: knobs_json(r.knobs))
-        golden = tuple(GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.stats.median, row.source) for row in rows)
+        golden = tuple(GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.us, row.source) for row in rows)
         pools.append(GoldenPool(gpu, cap, regime, kernels[identity], dict(rows[0].bindings), golden))
     return pools, dict(dropped)
 
@@ -121,24 +121,22 @@ def measured_groups(rows, kernel_op: Callable, *, jobs: int = 1) -> tuple[list[M
     - **The kernel's own structural signature** (:func:`kernel_sig`). Two kernels of the same structure
       on the same card are ONE tuning problem whatever produced them, so their rows rank in one pool.
       Keying on where a decision was OFFERED instead gets it wrong in both directions: a site realized
-      as several kernels files a piece beside the whole (the RTX 5090 freeze once paired a 5.9 µs norm
+      as several kernels files a piece beside the whole (the RTX 5090's rows once paired a 5.9 µs norm
       kernel with a 131 ms whole-op row), and one kernel reached from two sites is tuned twice.
     - **The precision regime and cache mode.** The regimes must not pool: fast math changes the code a kernel
       runs as, and a cold-cache launch times other memory traffic.
     - **``gpu``.** Cards never pool.
 
-    Admission is :func:`~.freeze.freeze_reason`, the rule a freeze is written under, failures excluded
-    among the rest: the watchdog sentinel is a huge positive that any model gets right for free and that
-    inflates every correlation over the pool.
+    Admission is :func:`~.admission.admission_reason`, failures excluded among the rest: the watchdog sentinel is
+    a huge positive that any model gets right for free and that inflates every correlation over the pool.
 
     The counts are returned rather than logged because a report has to publish them: "Spearman 0.6 over
     340 groups" means something different when 143 rows were dropped than when none were. Reasons are
-    keyed by their leading clause, the same normalization ``write_freeze`` counts its own drops by, so
-    the two publish one vocabulary."""
+    keyed by their leading clause, as :func:`golden_pools` keys its own, so the two publish one vocabulary."""
     dropped: dict[str, int] = defaultdict(int)
     buckets: dict[tuple, list] = defaultdict(list)
     for r in rows:
-        reason = freeze_reason(r, shape_of(kernel_op(r)))
+        reason = admission_reason(r, shape_of(kernel_op(r)))
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
@@ -156,7 +154,7 @@ def measured_groups(rows, kernel_op: Callable, *, jobs: int = 1) -> tuple[list[M
     groups = []
     for (gpu, sig, regime), group_feats in zip(keys, feats, strict=True):
         key = f"{gpu}/{sig}" + (f" {regime}" if regime else "")
-        groups.append(MeasuredGroup.from_measured(key, gpu, sig, [r.stats.median for r in buckets[gpu, sig, regime]], group_feats))
+        groups.append(MeasuredGroup.from_measured(key, gpu, sig, [r.us for r in buckets[gpu, sig, regime]], group_feats))
     return groups, dict(dropped)
 
 

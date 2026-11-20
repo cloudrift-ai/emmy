@@ -566,7 +566,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
         grid = (unit, *grid)
     place = replace(formed.place, free=grid)
     # The loop op the piece was formed from rides as its ``source``, as a fused kernel's does: the body a
-    # kernel row stores and a freeze re-lowers is the one the lift was given.
+    # kernel row stores and an export lowers again is the one the lift was given.
     loop = LoopOp(body=body)
     return replace(
         piece, op=rewrite_twisted(formed.op, formed.axes), place=place, axes=formed.axes, output_specs=formed.output_specs, source=loop

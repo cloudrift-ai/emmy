@@ -30,7 +30,6 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
-FREEZE_DIR = "EMMY_FREEZE_DIR"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 GOLDEN_FILE = "EMMY_GOLDEN_FILE"
 STRICT_EVIDENCE = "EMMY_STRICT_EVIDENCE"
@@ -165,16 +164,6 @@ def tune_db_path() -> Path:
     advisory — the engine only opens it when the file exists."""
     override = os.environ.get(TUNE_DB)
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
-
-
-def freeze_dir(default: Path | None) -> Path | None:
-    """The directory a tune writes the freeze of its run into, ``EMMY_FREEZE_DIR``: a path; ``""`` — set but
-    empty — for none, which the test suite sets as it points ``EMMY_TUNE_DB`` at a fresh DB; unset → ``default``,
-    the repository freeze when the checkout holds one (``search.db.freeze.run_freeze_dir``)."""
-    raw = os.environ.get(FREEZE_DIR)
-    if raw is None:
-        return default
-    return Path(raw).expanduser() if raw else None
 
 
 def golden_scope() -> str | None:
@@ -450,7 +439,7 @@ def gen_decode_bucket(default: int = 16) -> int:
 def bench_backends_raw(cli_value: str | None, *, default: str = "eager,emmy") -> str:
     """Raw comma-separated bench-backend selection. Precedence: ``cli_value`` >
     ``EMMY_BENCH_BACKENDS`` > ``default`` (normally ``"eager,emmy"``). Backend-key
-    normalization stays at the call site (``run.py:_resolve_backends``)."""
+    normalization stays at the call site (``backend/cuda/compare.resolve_backends``)."""
     return cli_value or os.environ.get(BENCH_BACKENDS) or default
 
 

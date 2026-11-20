@@ -115,6 +115,28 @@ class BenchmarkResult:
     e2e_ms: float | None = None
     e2e_min_ms: float | None = None
 
+    @property
+    def launch_sum_us(self) -> float:
+        """The per-launch windows summed, in microseconds, each launch at its fastest sample."""
+        return (self.min_ms if self.min_ms is not None else self.time_ms) * 1000
+
+    @property
+    def total_us(self) -> float:
+        """The program's headline microseconds: its fastest whole-program replay when the bench captured one, else
+        :attr:`launch_sum_us`. A stored latency and a reported one are this number."""
+        return self.e2e_min_ms * 1000 if self.e2e_min_ms is not None else self.launch_sum_us
+
+    @property
+    def timing_semantics(self) -> str:
+        """What :attr:`total_us` timed."""
+        if self.e2e_min_ms is not None:
+            return "whole_program_e2e"
+        return "single_launch" if (self.num_launches or len(self.per_launch or [])) <= 1 else "per_launch_sum"
+
+    def launch_us(self) -> dict[int, float]:
+        """Each launch's fastest sample in microseconds, by launch index."""
+        return {lt.idx: (min(lt.samples) if lt.samples else lt.time_ms) * 1000 for lt in self.per_launch or []}
+
 
 class Backend(ABC):
     """Abstract backend: Graph → compiled artifact → run."""

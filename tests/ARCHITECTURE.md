@@ -205,7 +205,7 @@ the shared module already provides.
 ## Running
 
 Cold-cache coverage lives with backend program tests, CLI recording tests and the search DB/pin tests. CPU tests
-check both directions of regime isolation, freeze/export retention, worker propagation and eviction ordering.
+check both directions of regime isolation, export retention, worker propagation and eviction ordering.
 The CUDA program tests compare hot timing against a single replay after eviction: one streams float buffers smaller
 than L2, and its kernel processes every allocated element; the other runs 32 KB of straight-line code, which a
 repeated launch finds in the instruction cache.
