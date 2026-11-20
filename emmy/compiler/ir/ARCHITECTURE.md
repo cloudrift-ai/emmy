@@ -43,7 +43,7 @@ The invariant is what stops facts from acquiring a second home. A term that rend
 no private spelling of anything the statements already carry:
 
 - the neutral elements come from `Accum.op.identity` through the ONE identity placement
-  (`Loop`'s render / `StridedLoop`'s render), so no `identities` field rides on the term and no
+  (`Loop`'s render), so no `identities` field rides on the term and no
   `Init` seed is emitted beside it;
 - the rescale temps arrive as ordinary `Assign`s, so the generic SSA rename, liveness and read
   counters see them with no special `deps()` channel to keep complete.
@@ -186,14 +186,14 @@ kernel it produced went on to read.
 - **Tile → kernel** (after `lowering/kernel`): `TileOp` materialized to
   `KernelOp` whose body is a `Tile` (the thread-grid decode) over the
   lowered op tree. A cooperative `Reduce` lowers the reduce as a
-  `StridedLoop` (lane-strided fold) + the derived algebra-generic
+  `Loop` with a `step` (lane-strided fold) + the derived algebra-generic
   cross-thread combine (`_factor.emit_combine`, reading the fold node's
   stored combine → `WarpShuffle` /
   `Smem`+`Sync`+`TreeHalve`, multi-component for a twisted fold) +
   the projection (a full-row output sweep distributed across the coop
   lanes, a scalar output guarded to lane 0); the `Tile` gains the coop
   lane axis and `block_threads = coop`. A **symbolic reduce axis**
-  (dynamic `seq_len`) is supported — the `StridedLoop`'s `< seq_len`
+  (dynamic `seq_len`) is supported — the strided `Loop`'s `< seq_len`
   bound is the runtime-extent mask (idle lanes fold the identity; no
   ceil-div / clamp) and the `Dim` name is threaded as a runtime `int`
   arg. Cross-CTA reduction splits are structural choices in `030_cut`. A symbolic FREE axis
@@ -242,7 +242,7 @@ lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrou
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and nothing
 else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`, `check_input`),
+`ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`, `check_input`),
 the text form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own
 (`one_operation_per_definition`, `simplify_body`, `prepare_body`), the lambda normalization (`normalize_lambda_body`),
 the two statement types fusion's body assembly in `ir/loop/`
@@ -292,10 +292,9 @@ expressions mention are names the statement reads (a `Load`'s index, a `Select`'
 number where a name, a buffer or an expression is expected is plain data (a constant stride, a literal seed).
 
 The shared statement types and the Kernel IR statement types are all declared, in one list. A statement type whose
-member the roles cannot give is a missing role, not a hand-written member; the shared statement types state four, which
-`test_protocol.py` pins: an `Accum`'s reduced axes follow a substitution that splits an axis, a `Let` and a `Call` read
-buffers their fields do not name (inside an expression, through the subroutine), and a `StridedLoop` with an `end` binds
-one more name than its axis.
+member the roles cannot give is a missing role, not a hand-written member; the shared statement types state three, which
+`test_protocol.py` pins: an `Accum`'s reduced axes follow a substitution that splits an axis, and a `Let` and a `Call`
+read buffers their fields do not name (inside an expression, through the subroutine).
 
 Behaviour that is not on this list lives outside the module as a function over statements. The Loop IR runner's
 host C++ is the main case: `ir/loop/render.py` holds the render context, the index flattening and one render
@@ -371,7 +370,7 @@ them.
 
 Shared expression sublanguage used by every IR layer: `Load.index`,
 `Write.index`, `SelectBranch.select`, `IndexMapOp.coord_map`,
-`StridedLoop.start`/`step`, `Cond.cond`, etc. Imports nothing from
+`Loop.range`/`step`, `Cond.cond`, etc. Imports nothing from
 other IR files.
 
 An expression has one text, `str(expression)`, and `parse` reads it back to an equal expression: C-like, parenthesized
@@ -651,7 +650,7 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 
 | Symbol                       | Role                                                                                                              |
 |------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `Axis`                       | Named iteration variable (`name`, `extent`). Defined in `ir/axis.py`, re-exported here. Carries an optional `window` (`Window` — the `parent` axis this one is a slice of, and whether the slice is a cross-CTA `partition`): the ONE windowing concept, and never a range — a reduce states the range it walks on its own loop or fold, and a kernel loop's data-independent `start` / `end` is its own (`StridedLoop`), derived where it opens; `source_axis` is the derived compat read (`window.parent`). Excluded from equality / hashing. |
+| `Axis`                       | Named iteration variable (`name`, `extent`). Defined in `ir/axis.py`, re-exported here. Carries an optional `window` (`Window` — the `parent` axis this one is a slice of, and whether the slice is a cross-CTA `partition`): the ONE windowing concept, and never a range — a reduce states the range it walks on its own loop or fold, and a kernel loop its own range and step, derived where it opens; `source_axis` is the derived compat read (`window.parent`). Excluded from equality / hashing. |
 | `LoopOp`                     | One kernel. Stored field: `body` (nested `Loop` tree). Computed: `axes`, `loads`, `accums`.                       |
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
 | `Assign`                     | The one scalar definition: `name = value`, `value` one operation over names and literals (`exp(x)`, `2 * x - y`: an affine region is one node), with an optional `dtype`. |
@@ -662,8 +661,7 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 | `Let`                        | Pure binding of one `Expression` to a name: a scalar literal (the twisted carrier's injected `1`), a precomputed integer index, a `FlatIndex` offset. Scoped like an `Assign`; legal inside a stored `Lambda`. |
 | `Write`                      | Write an SSA value to output at `index`.                                                                          |
 | `Select` + `SelectBranch`    | Coord-predicated binding (replaces the old Mux).                                                                  |
-| `Loop`                       | Serial iteration block: `axis` + nested `body`, and the `range` the axis walks when that is not `0..extent`.      |
-| `StridedLoop`                | Strided iteration (`start`, `step`) — cooperative thread-stride loop reused by Tile/Kernel IR.                    |
+| `Loop`                       | Iteration block: `axis` + nested `body`, the `range` the axis walks when that is not `0..extent`, and the `step` it takes when that is not one (a kernel's lane-strided or chunked loop). |
 | `Cond`                       | If/else block over an `Expression` predicate.                                                                           |
 | `Statement`                       | Base class — every body statement subclasses it. Leaves and control-flow nodes live in `ir/stmt/`.               |
 
@@ -1175,7 +1173,7 @@ row-reduce masks). The table also counts a fragment's registers, so no statement
 | `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `shfl.sync.bfly` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
 | `FragmentRepack`   | Convert C fragments into a 16-bit operand in registers. The m16n8k16 f16 B form exchanges packed column pairs across the warp; the A form uses the existing lane layout. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects a four-column A slice or four-row B slice from one logical 16×16 C fragment with warp shuffles of packed FP16 pairs. |
 | `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure term over the projection tail's own `Load` / `Assign` / `Select` stmts, stored as its body with the names bound to the store's fragments and the name of the stored value; it is evaluated at each element's own coordinates. The type pass types it over f32 params: a floating load widens to f32 by a conversion of its own, while an integer load keeps its type so shifts and bitwise operations on packed codes stay integer operations. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
-| Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
+| Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
 
 A fragment load reads the elements of a register in one access where they stand in memory in a row, as the register
 holds them, and the address is provably aligned; otherwise it gathers them one by one. The PTX compiler decides this

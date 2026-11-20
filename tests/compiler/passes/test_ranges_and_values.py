@@ -1,8 +1,8 @@
 """A range and a value defined once, from the Loop IR body to the kernel a tier compiles.
 
 A reduction masked to a triangle reaches the term as a range on the fold's axis, and the classic schedule and the
-kernel lowering read it as the mask it stands for (``TileOp.masked``). A value the body defines once and reads by
-index lifts as the kernel that computes it at each read. Both are held to numpy on the CPU backend, which compiles
+kernel lowering read the range itself (``TileOp.scheduled``). A value the body defines once and reads by index
+lifts as the kernel that computes it at each read. Both are held to numpy on the CPU backend, which compiles
 the lowered kernel.
 """
 
