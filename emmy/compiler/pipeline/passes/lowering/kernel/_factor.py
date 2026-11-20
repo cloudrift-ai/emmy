@@ -63,7 +63,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, S
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.ir import observed_result_names
-from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_members, projection_regions, sched_of, tiled_edges
+from emmy.compiler.ir.tile.ops import NeedsMask, UnbindableProjection, chain_members, projection_regions, sched_of, tiled_edges
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     copy_cell,
     reduce_codegen,
@@ -502,6 +502,33 @@ def _inner_site(c, ctx: Ctx) -> tuple | None:
     return None if producer is None else (producer, ctx.sched.tile_of(producer))
 
 
+def _ranged(op) -> bool:
+    """Whether a term of ``op``'s tree walks a range."""
+    seen, pending = set(), [op]
+    while pending:
+        term = pending.pop()
+        if id(term) in seen or not isinstance(term, Fold):
+            continue
+        seen.add(id(term))
+        if term.range is not None:
+            return True
+        pending.extend(term.operands)
+    return False
+
+
+def _walked(stmts) -> list[Statement]:
+    """``stmts`` with every reduce loop that states a range as the kernel loop that walks it: from the range's start,
+    one position a trip, until its end. A scalar walk takes exactly the trips of the range, and nothing is masked."""
+
+    def walk(stmt: Statement) -> Statement:
+        if not isinstance(stmt, Loop) or stmt.range is None:
+            return stmt
+        start, end = stmt.range
+        return StridedLoop(axis=stmt.axis, start=start, step=Literal(1, "int"), body=stmt.body, end=end, seed=stmt.seed, unroll=stmt.unroll)
+
+    return list(Body(tuple(stmts)).map(walk))
+
+
 def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "") -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
@@ -548,6 +575,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         if below and ctx.sched.get("STAGE", site.node) is not None:
             raise UnbindableProjection(f"lowering of {root_site.path} cannot realize STAGE at {site.path}")
     if tiled:
+        # Of the tiled tiers the chunk tier alone reads a range: its key bounds and the mask of the block a bound cuts.
+        if _ranged(c) and not (tile.is_warp and c.chunked() and c.range is not None):
+            raise NeedsMask(f"the tiled lowering of {root_site.path} folds every position of its axis")
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, c.exposes[0])
@@ -617,6 +647,8 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             for member in (*members, op)
             if (p := ctx.sched.get("REDUCE", member)) is not None and (p.coop > 1 or p.reg > 1) and not p.coop_transposed
         )
+        if (parts or not (plan is None or (plan.coop <= 1 and plan.reg <= 1))) and _ranged(op):
+            raise NeedsMask(f"the partitioned reduce of {root_site.path} strides every position of its axis")
         if parts:
             state, fold, close, lane = _tile_reduce_axis(op, parts, ctx, tail, out_val, output_specs)
             t = replace(t, axes=(lane,)) if lane is not None else t
@@ -628,7 +660,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             # kernel's identity (``TileOp.loop_body``) already reads.
             axes = ctx.sched.tile.axes
             bound = frozenset(axis.name for axis in (*ctx.grid, *ctx.sched.tile.place.serial))
-            placed = op.lower(bound, output_specs, axes) if output_specs else op.lower(axes=axes)
+            placed = _walked(op.lower(bound, output_specs, axes) if output_specs else op.lower(axes=axes))
             body = _one_value_per_name(dict.fromkeys([*placed, *tail]))
             # A kernel whose only work is a FREE output sweep — the elementwise half a placement
             # cut leaves behind a reduction — distributes that sweep across threads exactly as a

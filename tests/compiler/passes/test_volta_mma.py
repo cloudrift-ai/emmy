@@ -521,12 +521,13 @@ def test_sm70_attention_uses_the_volta_fragment_layout(monkeypatch) -> None:
 def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch) -> None:
     _pin_sdpa(monkeypatch)
     kernel, _, src = _source(_sdpa_graph(d=256, causal=True, dynamic=True), Context(compute_capability=(7, 0)))
-    (bias,) = [apply for apply in statements(kernel, FragmentApply) if apply.op.name == "add"]
-    fragment = bias.out
+    # The tier reads the carrier's range: no zero is added to the score first, the mask is the whole of it.
+    assert not [apply for apply in statements(kernel, FragmentApply) if apply.op.name == "add"]
     # The causal mask compares the fragment element's query row with its key column; the key's bound masks it too.
     masks = {str(apply.args[0].expressions[0]): apply for apply in statements(kernel, FragmentApply) if apply.op.name == "where"}
     assert set(masks) == {"__frow < __fcol", "seq_len <= __fcol"}
-    assert all(mask.out == fragment and mask.layout == "m8n8k4" for mask in masks.values())
+    (fragment,) = {mask.out for mask in masks.values()}
+    assert all(mask.layout == "m8n8k4" for mask in masks.values())
     causal, bound = masks["__frow < __fcol"], masks["seq_len <= __fcol"]
     assert causal.row_base is not None and causal.col_base == bound.col_base, "both read the same key column"
     assert {repack.fragment_layout for repack in statements(kernel, FragmentRepack)} == {"m8n8k4"}

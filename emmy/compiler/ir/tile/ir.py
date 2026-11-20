@@ -442,10 +442,8 @@ class TileOp(Op):
         with the coordinate in both indices (``Fold.masked``), so the two spellings of one kernel answer alike."""
         view = node.as_contraction()
         shared = frozenset(view.shared_axes) if view is not None else frozenset()
-        axis = next((axis for axis in self.axes if axis.name == node.axis), None)
-        if node.range is None or axis is None or axis.window is None or not axis.window.partition:
-            return shared
-        return shared | (frozenset(node.range[0].free_vars()) & {axis.name for axis in self.place.free})
+        start = node.block_start(self.axes) if node.range is not None else None
+        return shared if start is None else shared | (frozenset(start.free_vars()) & {axis.name for axis in self.place.free})
 
     def _vector_against_matrix(self, node: Fold) -> bool:
         """Whether the contraction ``node`` reads as has one empty operand role, the other role owning the trailing
@@ -833,6 +831,16 @@ class TileOp(Op):
         if self.op is None:
             return self
         op, axes = self.op.masked(self.axes)
+        return self if op is self.op else replace(self, op=op, axes=axes)
+
+    def scheduled(self) -> TileOp:
+        """This kernel as the kernel lowering takes it (``Fold.scheduled``): :meth:`masked`, except that a twisted
+        carrier keeps its range, stated of its axis as the tier walks it. The tier that folds a carrier reads the
+        range itself: the chunk tier as the chunks it walks and the mask of the block a bound cuts, a scalar walk as
+        its loop's bounds."""
+        if self.op is None:
+            return self
+        op, axes = self.op.scheduled(self.axes)
         return self if op is self.op else replace(self, op=op, axes=axes)
 
     def axis_of(self, name: str) -> Axis:

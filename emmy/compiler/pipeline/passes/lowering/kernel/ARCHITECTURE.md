@@ -715,16 +715,23 @@ row pair into a fragment and takes the same fragment store, which is what lets t
 (`REDUCE@map.1/twist=g<n>k`, FlashAttention-2's split-KV) keep the chunk tier for its partial: decode's few query
 rows then spread over `n` times the CTAs, and the finalize folds the per-cell states through the recipe's merge.
 
-The score's own PREFIX — the carrier's lift cut to its score role — is where an attention's mask arrives. A causal or
-a sliding-window attention states the keys a row folds as the carrier's range, and the masked form
-(`Fold.masked`) spells each bound of it there as a comparison and a `where` added to the score: `key <= row` for the
-causal end, `row − W + 1 <= key` for a window's start, the fill the pivot's seed. The prefix takes two readings the
-tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand that feeds one needs no
-gmem address at all, and only the pivot source and the streamed value are ever asked for a slab. And a mask on the
-score fragment's OWN coordinates — the row the carrier folds and the chunk it folds over — is per ELEMENT, not
-cell-uniform, so `_residence` lands it as a coordinate-masking `FragmentApply` under the same coordinate substitution
-the boundary mask performs. A program that spells its own mask as a comparison and a `where` — native's causal
-attention, `key − row <= position` with the
+A causal or a sliding-window attention states the keys a row folds as the carrier's RANGE, and the tier reads the
+range itself. The materializer lowers a kernel with each twisted carrier's range left on it (`TileOp.scheduled`), and
+`_outside` turns the range into one comparison for each bound, where the carrier folds nothing: `row < key` past the
+causal end, `key < row − W + 1` ahead of a window's start. The chunk tier reads those twice: for the chunks every row
+of the CTA skips (`_mask_key_bounds`), and as one coordinate-masking `FragmentApply` per bound on each score fragment,
+the fill the pivot's identity. A scalar walk reads the same range as its loop's bounds (`_factor._walked`) and masks
+nothing. A tier that folds every position of its axis — a cooperative reduce, a tiled contraction that is no chunk
+tier — raises `NeedsMask`, and the materializer lowers the kernel from its masked form (`TileOp.masked`), where each
+bound is a comparison and a `where` added to the score.
+
+The score's own PREFIX — the carrier's lift cut to its score role — is where a mask a PROGRAM wrote arrives, and it
+takes two readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand
+that feeds one needs no gmem address at all, and only the pivot source and the streamed value are ever asked for a
+slab. And a mask on the score fragment's OWN coordinates — the row the carrier folds and the chunk it folds over — is
+per ELEMENT, not cell-uniform, so `_residence` lands it as a coordinate-masking `FragmentApply` under the same
+coordinate substitution the boundary mask performs. A program that spells its mask as a comparison and a `where` —
+native's causal attention, `key − row <= position` with the
 position loaded from memory — reaches the tier with its row index as a `Let` alias of the coordinate, hoisted with
 the position and the fill constants into a leaf over the row axis; `select_masks` (`ir/schedule/mask.py`) folds the
 aliases into the predicate and spells the `where` as that same `Select`, the uniform position a free variable the

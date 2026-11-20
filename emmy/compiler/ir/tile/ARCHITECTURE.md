@@ -106,7 +106,11 @@ independent. An unmapped classic fallback takes the same serial form during mate
 kernel's schedule sites takes the kernel through one more step, `TileOp.masked` (`scheduled_form`): a term that walks
 a range reaches the tiers as the walk from zero that folds its seed past the end, since a tensor-core block is a
 rectangle and a cooperative lane a strided walk. Like the serial form it is a realization of the kernel, and the
-kernel keeps the identity of the tile its fork was offered. Re-lifting a stored
+kernel keeps the identity of the tile its fork was offered. The schedule is enumerated on that form. The kernel
+lowering then takes `TileOp.scheduled`, which masks every term but a twisted carrier and leaves the carrier's range
+for its tier to read: the chunk tier as the chunks it walks and the mask of the block a bound cuts, a scalar walk as
+its loop's bounds. A block of a split walks from zero in both forms, and `Fold.block_start` is the one place that
+says which coordinate moves it; the lowering's nest order and the tile's shared coordinates (`batch_axes`) ask it. Re-lifting a stored
 kernel reuses the state ports it already owns. The state's port, added at the lift for the classic realization,
 disappears during materialization,
 and externally read snapshots remain global outputs. A state the term itself stores every step, beside its `Carry`,
