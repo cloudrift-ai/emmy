@@ -15,7 +15,6 @@ from frozendict import frozendict
 from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
-from emmy.compiler.ir.expression import Expression, Literal, Var, affine_terms
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule.catalog import (
     WARP_LANES,
@@ -29,7 +28,7 @@ from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage,
 from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Select, Statement, Write, mask_select_predicate
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Select, Write
 
 from .schedule import NodeSchedule, binds_root, node_id_spelling, packed_works
 
@@ -289,29 +288,21 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     prefix = node.applied.cone(node.roles[0])
     coord_axes = {node.axis, *node.as_contraction().left_axes}
     uniform = cell_uniform(tile.axes, node, coord_axes)
+    # The keys a row folds are the carrier's range: a mask the program wrote over the coordinates was read as one
+    # (``TileOp.scheduled``). A mask the range could not take is still in the prefix, as is any other value computed
+    # from a coordinate, and no per-fragment evaluation places either.
     aliases = coordinate_aliases((*prefix.body, *(stmt for edge in node.operands[1:] for stmt in edge.lift.body)), coord_axes, uniform)
     body = select_masks(prefix.body, aliases, uniform, coord_axes)
-    if body is None:
-        return "the score's prefix reads a coordinate outside an additive mask"
-    if any(not isinstance(stmt, (Assign, Let, Load, Select)) for stmt in body):
+    if body is None or any(isinstance(stmt, Select) for stmt in body):
+        return "the score's prefix reads a coordinate its range does not state"
+    if any(not isinstance(stmt, (Assign, Let, Load)) for stmt in prefix.body):
         return "the score's own prefix holds more than a straight-line program"
-    # A predicate reads the coordinates and the uniform values, never the chunk's own values; a branch is a uniform
-    # value or a literal the prefix binds.
-    scalars = {stmt.name for stmt in body if isinstance(stmt, Let) and isinstance(stmt.value, Literal)}
-    for stmt in (stmt for stmt in body if isinstance(stmt, Select)):
-        consumers = [consumer for consumer in body if _adds(consumer, stmt.name)]
-        if (
-            mask_select_predicate(stmt) is None
-            or len(consumers) != 1
-            or not {branch.value for branch in stmt.branches} <= uniform | scalars
-            or any(not branch.select.free_vars() <= coord_axes | uniform for branch in stmt.branches)
-        ):
-            return "the score's coordinate Select does not form a cell-uniform additive mask"
-    # The carrier's own range lands the same way, one coordinate mask for each bound: over the row, the key and the
-    # values one CTA holds, like a mask's predicate.
-    if node.range is not None and any(not bound.free_vars() <= coord_axes | uniform for bound in node.range):
+    # The range lands as one coordinate mask for each bound: over the row, the key and the values one CTA holds.
+    walked = node.applied_range or ()
+    if any(not bound.free_vars() <= coord_axes | uniform for bound in walked):
         return "the carrier's range reads a coordinate the chunk tier holds neither per element nor per CTA"
-    leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & set(prefix.params)]
+    ranged = {name for bound in walked for name in bound.free_vars()}
+    leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & (set(prefix.params) | ranged)]
     if any(node.axis in edge.free_axes for edge in leaves):
         return "the score's prefix reads an operand that varies over the chunk"
     # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
@@ -726,19 +717,14 @@ def _wgmma_register_refusal(node: Fold, plan: Tile) -> str | None:
     )
 
 
-def _adds(consumer: Statement, name: str) -> bool:
-    """Whether ``consumer`` adds the value ``name`` to something: a sum with it as a unit term."""
-    return isinstance(consumer, Assign) and Var(name) in _unit_terms(consumer.value)
-
-
-def _unit_terms(expression: Expression) -> list[Expression]:
-    """The terms a sum adds with coefficient one, read off its affine form."""
-    return [term for coefficient, term in affine_terms(expression)[0] if coefficient == 1]
-
-
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
 
+    if node.range is not None and not plan.is_warp:
+        # A scalar tile's thread folds its register cells in one loop, which walks one range: its own cell's.
+        reads = {name for bound in node.range for name in bound.free_vars()}
+        if any(side is not None and side.reg > 1 and side.axis.name in reads for side in placed.mn):
+            return "a scalar tile's loop walks one range, so it holds one register cell along an axis the range reads"
     refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan) or _wgmma_register_refusal(node, plan)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal

@@ -686,7 +686,7 @@ the fragment seam already ties the two together — the score's N tile must equa
 wide (`_fragment_agreements`), which is exactly FlashAttention's shape — so the enumeration needed no rule of its own
 and the tier realizes the agreement rather than assuming it. The chunk contains at least one complete logical C
 fragment, which lets the WEIGHT reach the expectation's `mma.sync` through `FragmentRepack`, in registers, with no
-shared-memory round trip. And `_residence` evaluates a recipe pattern, coordinate mask, merge, and projection
+shared-memory round trip. And `_residence` evaluates a recipe pattern, merge, and projection
 epilogue at whatever residence each value has — a C fragment, the per-lane registers a row rides in, or cell-uniform
 — so none is written for one atom family; the atom's fragment-layout descriptor supplies the element, row, and
 shuffle geometry.
@@ -726,34 +726,29 @@ cell each lane owns, and takes one column on a fold that walks one. A tile folds
 no tile is offered on a term that walks a range beside the chunk tier's carrier (`TileOp.contracts`,
 `_chunk_refusal`), and a register-held recurrence refuses a product that walks one.
 
-The score's own PREFIX — the carrier's lift cut to its score role — is where a mask a PROGRAM wrote arrives, and it
-takes two readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand
-that feeds one needs no gmem address at all, and only the pivot source and the streamed value are ever asked for a
-slab. And a mask on the score fragment's OWN coordinates — the row the carrier folds and the chunk it folds over — is
-per ELEMENT, not cell-uniform, so `_residence` lands it as a coordinate-masking `FragmentApply` under the same
-coordinate substitution the boundary mask performs. A program that spells its mask as a comparison and a `where` —
-native's causal attention, `key − row <= position` with the
-position loaded from memory — reaches the tier with its row index as a `Let` alias of the coordinate, hoisted with
-the position and the fill constants into a leaf over the row axis; `select_masks` (`ir/schedule/mask.py`) folds the
-aliases into the predicate and spells the `where` as that same `Select`, the uniform position a free variable the
-predicate keeps, so the gate and the emission read one form. A key split's piece binds the absolute key as an
-expression over its partition coordinate, uniform per CTA like the batch axes and the symbolic extents
-(`cell_uniform`), so its mask lands the same way with the partition in the predicate. The same `Select`s are also read
-ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`); on a split piece the bound carries
-the partition, so each slice stops at the block end plus the position minus its own base. Expression normalization
-may reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. It also
-orders a sum's terms by coefficient, which can put two masks ahead of a scaled score; the tier adds the masks last,
-each to the value it masks. A mask that scales the key against the row (native's decode and verify steps, whose rows
-fold a group of query heads) bounds no stream: it is masked per element alone. A mask whose
-masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every
-row the CTA holds, so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every
-key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
+The score's own PREFIX — the carrier's lift cut to its score role — reads no coordinate. Its LEAVES are read once
+ahead of the chunk loop, so an operand that feeds one needs no gmem address at all, and only the pivot source and the
+streamed value are ever asked for a slab. A mask a PROGRAM wrote over the coordinates never reaches it: native's
+causal attention spells `key − row <= position` as a comparison and a `where` added to the score, the position
+loaded from memory, and the form every tier takes reads that mask as the carrier's range (`keys_ranged` in
+`ir/schedule/mask.py`, called by `TileOp.scheduled`). It folds the `Let` aliases of the coordinates into the
+predicate, takes the bound the predicate states of the key (`0 .. min(window, row + position + 1)`), and drops the
+mask's statements from the lift; the position stays an operand's value, which the range reads and the lowering
+places ahead of the loop. A fill above `-1e4`, or a predicate that scales the key, is not read: that mask stays
+arithmetic in the lift, and the chunk tier's gate refuses a prefix that still reads a coordinate. A key split's
+piece binds the absolute key as an expression over its partition coordinate, uniform per CTA like the batch axes and
+the symbolic extents (`cell_uniform`), so its range carries the partition. The range's bounds are also read ONCE,
+ahead of the loop, for what they say about whole chunks (`_key_bounds`); on a split piece the bound carries the
+partition, so each slice stops at the block end plus the position minus its own base. A bound that divides the row
+(native's verify step, whose rows fold a group of query heads) bounds no stream: it masks per element alone. A range
+whose outside reads `key > row + c` (or `>=`) with `c ≥ 0` leaves out every key from the CTA's block end onward for
+every row the CTA holds, so the chunk loop stops there; one whose outside reads `key < row − c` (or `<=`) leaves out
+every key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
 skeleton's `k_first` / `k_end`, CTA-uniform in the grid var alone, bit-identical because a masked chunk folds the carrier
 identity exactly — and derived here, stored nowhere. The skeleton binds `k_end` as one value ahead of the chunk loop
 (a `Let`); the loop stops at it and the prefetch clamps read it, so the bound is evaluated once and the body's normal
-form carries it like any value. The mask `Select` in the body is the bound's one source: an
-axis's domain is its extent in the kernel's axis table, and a row-dependent bound is a relation between two axes
-that only becomes a range once widened to the CTA's rows, so neither the term, the loop IR nor the axis carries it.
+form carries it like any value. The carrier's range is the bound's one source: a row-dependent bound is a relation
+between two axes that only becomes a chunk range once widened to the CTA's rows.
 A causal stream gets about half its work back that way, a banded one its band — on a launch of more CTAs than the
 card has SMs. A launch that fits in one wave takes as long as its longest CTA whatever the others skip, and the
 dynamic trip count alone cost 9% at the 128-CTA head-width-256 shape, so `_factor` marks it (`launch_ctas` against

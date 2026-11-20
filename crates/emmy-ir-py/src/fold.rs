@@ -952,6 +952,24 @@ impl PyFold {
             .transpose()
     }
 
+    /// The range applied to the operands, as `applied` is the lift: a value of an operand spelled as the operand
+    /// result it is (`Fold::applied_range`). What the lowering writes on the loop and a tier reads.
+    #[getter]
+    fn applied_range<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        self.fold
+            .applied_range()
+            .map(|(start, end)| {
+                PyTuple::new(
+                    py,
+                    [
+                        PyExpression::wrap(py, &start)?,
+                        PyExpression::wrap(py, &end)?,
+                    ],
+                )
+            })
+            .transpose()
+    }
+
     /// The name of the axis this term binds, or `None` for a zero-axis term.
     #[getter]
     fn axis<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyString>> {

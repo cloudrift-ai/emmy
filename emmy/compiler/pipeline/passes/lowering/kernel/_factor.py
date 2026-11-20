@@ -548,11 +548,18 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         if below and ctx.sched.get("STAGE", site.node) is not None:
             raise UnbindableProjection(f"lowering of {root_site.path} cannot realize STAGE at {site.path}")
     if tiled:
-        # A tile folds a rectangle of every position. Of the tiled tiers the chunk tier alone reads a range, and only
-        # its carrier's: the key bounds and the mask of the block a bound cuts. The schedule offers no other tile on a
-        # term that walks one (``TileOp.contracts``, ``_chunk_refusal``).
-        if (c.range is not None and not (tile.is_warp and c.chunked())) or (inner is not None and inner[0].range is not None):
-            raise UnbindableProjection(f"the tiled lowering of {root_site.path} folds every position of an axis that walks a range")
+        # A tensor-core tile folds a rectangle of every position, so of the warp tiers the chunk tier alone reads a
+        # range, and only its carrier's: the key bounds and the mask of the block a bound cuts. A scalar tile's thread
+        # walks the range of its own cell, so it holds one register cell along each axis the range reads. The schedule
+        # offers no other tile on a term that walks one (``TileOp.contracts``, ``_chunk_refusal``,
+        # ``_plan_node_refusal``).
+        if c.range is not None:
+            reads = {name for bound in c.range for name in bound.free_vars()}
+            one_cell = all(side is None or side.reg == 1 or side.axis.name not in reads for side in tile.mn)
+            if not (c.chunked() and (tile.is_warp or one_cell)):
+                raise UnbindableProjection(f"the tiled lowering of {root_site.path} folds every position of an axis that walks a range")
+        if inner is not None and inner[0].range is not None:
+            raise UnbindableProjection(f"the chunk of {root_site.path} covers a score that walks a range")
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, c.exposes[0])

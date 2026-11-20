@@ -43,6 +43,9 @@ and a view are values: they compare by what they hold.
   observer, a lift that applies). Then the reads every pass asks: `exposes`, `bindings`, `applied`, `axis`,
   `free_axes`, `carries`, `combine`, `canonical`. A reducing term may state the `range` its axis walks; the
   coordinates the range reads join the lift's trailing params, so they are part of what the term is evaluated over.
+  A range may also read the value of an operand that is one value for the whole walk, spelled as the lift's param
+  for it (`applied_range` spells it as the operand result, as `applied` does the lift): the tree's pruning and the
+  lowering's demand walk count that read, so the operand stays bound and is placed ahead of the loop.
 - `readings.rs` — the derived readings: `exposing`, `based`, `roles`, the bilinear channels and the contraction they
   read as, `tiles_whole`, `chunked`, `per_state`, the reduction, slab and affine readings, `merge`, `step`.
 - `rewrite.rs` — `Fold::rewrite`: a term renamed, substituted and axis-mapped the way a statement is, the

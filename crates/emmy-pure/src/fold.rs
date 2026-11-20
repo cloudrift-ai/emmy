@@ -452,8 +452,9 @@ fn check_reduce(parts: &Parts, lift: &Lambda, base: &Lambda) -> Result<()> {
 
 /// `lift` with every coordinate the term's range reads among its trailing params, in sorted order after the ones it
 /// has: the range is evaluated where the term is, so what it reads is part of what the term is evaluated over. A
-/// range is a reduce axis's. It reads the coordinates around the term and the values of operands that do not ride
-/// the axis, each one value for the whole walk; it reads neither the axis nor a value that moves along it.
+/// range is a reduce axis's. It reads the coordinates around the term and the values of operands, each one value
+/// for the whole walk (which its writer sees to: an operand's coordinates are its own names here); it does not
+/// read the axis itself.
 fn over_range(parts: &Parts, lift: Lambda) -> Result<Lambda> {
     let Some((start, end)) = &parts.range else {
         return Ok(lift);
@@ -463,24 +464,14 @@ fn over_range(parts: &Parts, lift: Lambda) -> Result<Lambda> {
             "a range is where a reduce axis walks: a zero-axis term has none".into(),
         ));
     }
-    let axis = lift.params().first().copied();
-    let bindings = bindings_of(&parts.operands, lift.params(), true);
     let mut read: Vec<Name> = start.free_vars();
     read.extend(end.free_vars());
     read.sort();
     read.dedup();
-    for name in &read {
-        let moves = match bindings.iter().find(|binding| binding.param == *name) {
-            Some(binding) => {
-                axis.is_some_and(|axis| parts.operands[binding.operand].free_axes().contains(&axis))
-            }
-            None => Some(*name) == axis,
-        };
-        if moves {
-            return Err(Error::Value(format!(
-                "a range reads what is one value for its whole walk, and '{name}' is the term's own axis or moves along it"
-            )));
-        }
+    if let Some(axis) = lift.params().first().filter(|axis| read.contains(axis)) {
+        return Err(Error::Value(format!(
+            "a range reads the coordinates around its term, and '{axis}' is the term's own axis"
+        )));
     }
     let missing: Vec<Name> = read
         .into_iter()
@@ -705,9 +696,25 @@ impl Fold {
         self.0.observe.as_ref()
     }
 
-    /// Where the axis this term binds walks, when the term states it: `None` is the whole axis.
+    /// Where the axis this term binds walks, when the term states it: `None` is the whole axis. A value of an
+    /// operand it reads is spelled as the lift's param for it.
     pub fn range(&self) -> Option<&(Expression, Expression)> {
         self.0.range.as_ref()
+    }
+
+    /// [`Fold::range`] APPLIED to the operands, as [`Fold::applied`] is the lift: a value of an operand spelled as
+    /// the operand result it is. What the lowering writes on the loop, and what a tier reads.
+    pub fn applied_range(&self) -> Option<(Expression, Expression)> {
+        let (start, end) = self.0.range.as_ref()?;
+        let applied = |bound: &Expression| {
+            bound.rename(&mut |name| {
+                self.bindings()
+                    .iter()
+                    .find(|binding| binding.param == name)
+                    .map(|binding| self.0.operands[binding.operand].exposes()[binding.component])
+            })
+        };
+        Some((applied(start), applied(end)))
     }
 
     fn structural_hash(&self) -> u64 {

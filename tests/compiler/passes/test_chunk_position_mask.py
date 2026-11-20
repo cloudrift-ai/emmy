@@ -77,7 +77,8 @@ def _attention(cache=torch.bfloat16, heads=HEADS, offset=0, row=D, query=None):
 
 
 def _twist(graph):
-    """The lifted kernel's graph node, the context and its twisted carrier."""
+    """The lifted kernel's graph node, the context, and the kernel as the schedule addresses it with its twisted
+    carrier: the mask the program wrote read as the carrier's range."""
     ctx = Context.from_target((12, 0))
     tiled = Pipeline.build(["tile/lift"]).run(Pipeline.build(LOOP_PASSES).run(graph), ctx=ctx)
     (root,) = [node for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
@@ -85,25 +86,28 @@ def _twist(graph):
     def folds(node):
         return [node, *(f for e in node.operands for f in folds(e))] if isinstance(node, Fold) else []
 
-    (twist,) = [f for f in folds(root.op.op) if f.twist is not None]
-    return root, ctx, twist
+    tile = root.op.scheduled()
+    (twist,) = [f for f in folds(tile.op) if f.twist is not None]
+    return root, ctx, twist, tile
 
 
 def test_the_position_mask_is_a_coordinate_select_the_chunk_tier_takes() -> None:
     """The twin's mask hoists its row alias and the position into a leaf over the row axis; that leaf is uniform to
     the tier, so the expectation is bilinear, the carrier chunks, and the tensor-core atom is offered."""
     _, graph = _attention()
-    root, ctx, twist = _twist(graph)
+    _, ctx, twist, tile = _twist(graph)
     assert twist.chunked(), "the value expectation must join the twist as its one bilinear channel"
-    assert refusals._chunk_refusal(root.op, twist) is None
-    assert refusals._warp_atoms(root.op, ctx, twist) == ("mma_m16n8k16_bf16_f32",)
+    assert [str(bound) for bound in twist.range] == ["0", "minimum(cache_tokens, a1 + in0 + 1)"]
+    assert "where" not in str(twist.lift.body), "the mask is gone from the lift"
+    assert refusals._chunk_refusal(tile, twist) is None
+    assert refusals._warp_atoms(tile, ctx, twist) == ("mma_m16n8k16_bf16_f32",)
 
 
 def test_the_key_split_is_offered_across_the_symbolic_window() -> None:
     """The window's length is symbolic, so the last slice overhangs it: a twisted carrier masks the overhang through its
     score, as a monoid folds its seed there, and the split offers every width it has."""
     _, graph = _attention()
-    root, _, _ = _twist(graph)
+    root, *_ = _twist(graph)
     offered = {spelling for fork in split_forks(None, root) for spelling in fork.knobs.values()}
     assert {"", SPLIT, "g8k", "g32k"} <= offered, offered
 
@@ -113,10 +117,10 @@ def test_an_fp8_cache_takes_a_16_bit_cell_whose_value_load_converts() -> None:
     in its fragment load, so the 16-bit families are offered. On cp.async the cache also stages, its key and value
     copied into byte slabs whose rows take the 16-byte pad; a blocking copy or a TMA box takes no byte slab."""
     _, graph = _attention(torch.float8_e4m3fn)
-    root, ctx, twist = _twist(graph)
+    root, ctx, twist, scheduled = _twist(graph)
     assert twist.chunked()
-    assert refusals._node_refusal(root.op, ctx, twist, True) is None
-    assert set(refusals._warp_atoms(root.op, ctx, twist)) >= {cell for _cache, cell, _stage in CELLS.values()}
+    assert refusals._node_refusal(scheduled, ctx, twist, True) is None
+    assert set(refusals._warp_atoms(scheduled, ctx, twist)) >= {cell for _cache, cell, _stage in CELLS.values()}
     tile, inputs = Tile.parse("mma_m16n8k16_f16_f16/f1x16/k4", Work.parse("w4x1")), root.op.inputs
     assert chunk_slab_dtype(tile, Stage.parse(BYTES), inputs, "keys") == F8E4M3
     assert chunk_slab_pad(tile, Stage.parse(BYTES), F8E4M3) == 16
@@ -242,28 +246,11 @@ def test_a_warp_group_score_takes_a_query_slice_only_on_the_16_byte_grid(query, 
     assert bool(statements(kernel, WgmmaMma)) is wgmma
 
 
-@requires_cuda
-@pytest.mark.parametrize("split", ["", SPLIT], ids=["whole", "split"])
-@pytest.mark.parametrize("heads", [HEADS, WIDE], ids=["one-wave", "wide"])
-@pytest.mark.parametrize("cell", CELLS)
-def test_the_folded_attention_matches_the_twin_over_the_causal_prefix(cell, heads, split) -> None:
-    """One tensor-core kernel at the symbolic window, or a partial per key slice and its finalize, at every position and
-    window a step can set, one the slices overhang included: the keys past a row's own position never reach the
-    output, whatever the cache stores and whether or not the stream stops early."""
+def _matches_the_twin(module, compiled, cache, heads: int) -> None:
+    """The compiled attention against its torch twin at every position and window a step can set, one the key
+    slices of a split overhang included."""
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
-    cache, atom, stage = CELLS[cell]
-    module, graph = _attention(cache, heads)
-    with pinned_knobs(_flash(atom, stage, split)):
-        compiled, kernels = compile_with_kernels(graph)
-    assert len(kernels) == (2 if split else 1), "the chunk tier's one kernel, or the split's partial and finalize"
-    kernel = next(iter(kernels.values()))
-    chunks = [loop for loop in statements(kernel, Loop) if "__ck" in loop.axis.name]
-    assert statements(kernel, MmaSyncPtx) and chunks, "the chunk tier folds the stream, or each slice of it"
-    if stage is not None:
-        assert bool(statements(kernel, CpAsyncCopy)) == bool(stage), "an FP8 cache stages exactly when its row spells a transport"
-    bounded = any(loop.walk()[1] != loop.axis.extent_expression() for loop in chunks)
-    assert bounded == (heads == WIDE), "the position bounds the stream on a launch of more than one wave"
     rng = np.random.default_rng(7)
     query = torch.from_numpy(rng.normal(size=(ROWS, heads * D)).astype(np.float32)).to(torch.bfloat16)
     stored = torch.from_numpy(rng.normal(size=(2, CONTEXT, KV, D)).astype(np.float32)).to(cache)
@@ -287,3 +274,41 @@ def test_the_folded_attention_matches_the_twin_over_the_causal_prefix(cell, head
                 actual = decode_bf16(program.outputs()[compiled.outputs[0]]).reshape(ROWS, heads * D)
                 expected = module(query, stored[0][:span], stored[1][:span], torch.tensor([position])).float().numpy()
                 np.testing.assert_allclose(actual, expected, rtol=3e-2, atol=3e-2)
+
+
+@requires_cuda
+@pytest.mark.parametrize(("work", "reduce"), [("", ""), ("t32", "coop")], ids=["scalar", "cooperative"])
+def test_off_the_tensor_cores_the_carrier_walks_the_causal_prefix(work, reduce) -> None:
+    """A scalar walk and a cooperative reduce read the same range the chunk tier does: the loop over the keys stops
+    one past the row's own position, the position a value the kernel loads, and no key past it is folded or masked."""
+    module, graph = _attention()
+    with pinned_knobs({"PLACE": "fuse", "TILE": "", "STAGE": "", "WORK": work, "REDUCE": reduce}):
+        compiled, kernels = compile_with_kernels(graph)
+    (kernel,) = kernels.values()
+    ends = [str(loop.walk()[1]) for loop in statements(kernel, Loop) if loop.range is not None]
+    assert ends and all("in0" in end for end in ends), ends
+    assert "where(" not in text(kernel)
+    _matches_the_twin(module, compiled, torch.bfloat16, HEADS)
+
+
+@requires_cuda
+@pytest.mark.parametrize("split", ["", SPLIT], ids=["whole", "split"])
+@pytest.mark.parametrize("heads", [HEADS, WIDE], ids=["one-wave", "wide"])
+@pytest.mark.parametrize("cell", CELLS)
+def test_the_folded_attention_matches_the_twin_over_the_causal_prefix(cell, heads, split) -> None:
+    """One tensor-core kernel at the symbolic window, or a partial per key slice and its finalize, at every position and
+    window a step can set, one the slices overhang included: the keys past a row's own position never reach the
+    output, whatever the cache stores and whether or not the stream stops early."""
+    cache, atom, stage = CELLS[cell]
+    module, graph = _attention(cache, heads)
+    with pinned_knobs(_flash(atom, stage, split)):
+        compiled, kernels = compile_with_kernels(graph)
+    assert len(kernels) == (2 if split else 1), "the chunk tier's one kernel, or the split's partial and finalize"
+    kernel = next(iter(kernels.values()))
+    chunks = [loop for loop in statements(kernel, Loop) if "__ck" in loop.axis.name]
+    assert statements(kernel, MmaSyncPtx) and chunks, "the chunk tier folds the stream, or each slice of it"
+    if stage is not None:
+        assert bool(statements(kernel, CpAsyncCopy)) == bool(stage), "an FP8 cache stages exactly when its row spells a transport"
+    bounded = any(loop.walk()[1] != loop.axis.extent_expression() for loop in chunks)
+    assert bounded == (heads == WIDE), "the position bounds the stream on a launch of more than one wave"
+    _matches_the_twin(module, compiled, cache, heads)
