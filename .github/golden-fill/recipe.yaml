@@ -81,6 +81,10 @@ matrices:
     deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
     deploy.gpu_count: 1
     budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/rtxpro6000_se_sm120.json
+    deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    deploy.gpu_count: 1
+    budget_s: 7200
   - golden: emmy/compiler/pipeline/search/golden/records/rtxpro6000_ws_sm120.json
     deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
     deploy.gpu_count: 1
