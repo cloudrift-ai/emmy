@@ -1,5 +1,28 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## GSM8K under W8A8 and W8A16 on one build (2026-11-19)
+
+One rented RTX 5090 (vast.ai; 600 W cap, driver 620.70.06, CUDA 13.0 toolkit), the gate's tree (main at
+`5096d52a4`). Two native 256-row packs from one build: A as the gate exported it, under strict evidence; B with the
+loader reading the checkpoint's FP8 activations as dynamic, as it did before #1411, so its attention and Gated
+DeltaNet projections run with 16-bit activations. B has no rows in the golden, so the priors pick its schedules
+where the golden's rows do not reach. The loader switch was a local edit, never committed. Same GSM8K harness as
+the gate (lm-eval 0.4.13, five-shot, seed 0).
+
+| | A: W8A8 (main) | B: W8A16 |
+|---|---|---|
+| GSM8K strict / flexible, first 200 | 0.580 / 0.645 (standard error 0.035) | 0.705 / 0.740 (0.032) |
+| GSM8K strict / flexible, all 1,319 | 0.552 / 0.598 (0.014) | 0.697 / 0.724 (0.013) |
+
+- **W8A8 is the whole drop.** On the full set B scores 0.145 strict and 0.126 flexible above A, about seven standard
+  errors. B is back at the W8A16 scores of 2026-11-01 to 2026-11-15 (0.69 to 0.73 on the first 200), and A matches
+  the gate's 0.580 / 0.645 exactly.
+- **A is the checkpoint's own arithmetic.** W8A8 encodes each projection's input at the calibrated static scale the
+  checkpoint stores, which is what stock vLLM does; stock scores 0.55 to 0.59 on the first 200 in every session.
+  The 16-bit activations kept more precision than the checkpoint was calibrated for, and the model was more accurate
+  for it. Whether to serve W8A16 for accuracy, at the speed W8A8 bought (#1411), is a decision this section leaves
+  open.
+
 ## The gate of milestone 10: native, plugin and stock in one session (2026-11-19)
 
 The protocol of the 2026-10-25 section, all three lanes, one session on one rented RTX 5090 (vast.ai; PCIe Gen4 x16,
@@ -63,8 +86,8 @@ Against the bar, every cell is green:
   ratio stays inside the bar.
 - **GSM8K fell on both Emmy lanes since 2026-11-12, and stock did not move.** Native scored 0.725 / 0.755 then and the
   plugin 0.720 / 0.770 on 2026-11-01; both now score with stock (0.55 / 0.605 here, 0.585 / 0.640 on 2026-11-01). The
-  FP8 projections became W8A8 in between (#1411), which quantizes their activations as stock's FP8 kernels do; that
-  change was not separated from the others, so this is a likely cause, not a measured one.
+  FP8 projections became W8A8 in between (#1411), which quantizes their activations as stock's FP8 kernels do. The
+  section below measures it: W8A8 is the whole drop.
 - **The plugin decodes slower than on 2026-11-01**: 14.5 against 10.3 ms a token at 256 tokens, 15.0 against 10.4 at
   7,680; its first token is faster (3.6 against 5.1 s at 7,680). Not investigated; native beats it in every cell.
 
