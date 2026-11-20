@@ -1,10 +1,9 @@
 //! What the shared statement types answer beyond their fields: the states a loop carries, a reduction's seed, a
-//! sum's terms and its binary form, a select's mask, the literal a statement binds.
+//! sum's terms and its binary form, the literal a statement binds.
 
 use crate::Name;
 use crate::axis::Range;
 use crate::body::Body;
-use crate::elementwise::Operation;
 use crate::expr::Expression;
 use crate::field::{AxisRef, NumOr};
 use crate::statement::*;
@@ -130,35 +129,6 @@ impl Accum {
     pub fn init(&self) -> Expression {
         Expression::float(self.op.seed().unwrap_or(0.0))
     }
-}
-
-/// The mask branch of an ordered two-way comparison, or `None` for another `Select` form.
-pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
-    if select.branches.len() != 2 {
-        return None;
-    }
-    let (keep, mask) = (&select.branches[0], &select.branches[1]);
-    let (Some((keep_op, keep_left, keep_right)), Some((mask_op, mask_left, mask_right))) =
-        (keep.select.as_binary(), mask.select.as_binary())
-    else {
-        return None;
-    };
-    let (mut op, mut left, mut right) = (mask_op, mask_left.clone(), mask_right.clone());
-    if *keep_left == right && *keep_right == left {
-        op = op.mirror()?;
-        std::mem::swap(&mut left, &mut right);
-    }
-    if *keep_left != left || *keep_right != right {
-        return None;
-    }
-    use Operation::{Greater, GreaterEqual, Less, LessEqual};
-    if !matches!(
-        (keep_op, op),
-        (Less, GreaterEqual) | (LessEqual, Greater) | (Greater, LessEqual) | (GreaterEqual, Less)
-    ) {
-        return None;
-    }
-    Some(mask.select.clone())
 }
 
 /// The axis a plain Loop IR coordinate expression names, when it is one variable.

@@ -49,7 +49,6 @@ inline_values = _ir.inline_values
 prepare_body = _ir.prepare_body
 free_names = _ir.free_names
 exposed_defines = _ir.exposed_defines
-mask_select_predicate = _ir.mask_select_predicate
 ordering_constraints = _ir.ordering_constraints
 dtype_promote = _ir.dtype_promote
 
@@ -87,7 +86,6 @@ __all__ = [
     "one_operation_per_definition",
     "free_names",
     "inline_values",
-    "mask_select_predicate",
     "normalize_body",
     "normalize_lambda_body",
     "optimize_body",

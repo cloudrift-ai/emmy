@@ -65,9 +65,10 @@ def _attention(rows, cache=torch.bfloat16, grouped=True):
 
 
 def _lifted(graph, ctx=CTX):
-    """The lifted kernel and its twisted carrier."""
+    """The lifted kernel as the schedule addresses it, the mask its program wrote read as its carrier's range, and
+    that twisted carrier."""
     tiled = Pipeline.build(["tile/lift"]).run(Pipeline.build(LOOP_PASSES).run(graph), ctx=ctx)
-    (root,) = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
+    (root,) = [node.op.scheduled() for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
 
     def folds(node):
         return [node, *(f for e in node.operands for f in folds(e))] if isinstance(node, Fold) else []

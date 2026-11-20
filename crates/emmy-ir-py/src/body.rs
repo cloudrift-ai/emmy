@@ -15,7 +15,7 @@ use crate::convert::{
     IntoPyErr, PyField, Slots, cached, located, name_from_py, slots, statement_from_py, str_tuple,
     translate,
 };
-use crate::expression::{PyExpression, renames_from_py};
+use crate::expression::renames_from_py;
 use crate::statement::{PyStatement, statement_type_of, statements_from_py, wrap_statement};
 
 /// The wrappers a body's statements hand back, so a statement read twice is one object however many wrappers the body
@@ -968,21 +968,6 @@ pub fn exposed_defines_py<'py>(
     PySet::new(py, names.iter().map(|name| PyString::new(py, name)))
 }
 
-/// The mask branch of an ordered two-way comparison, or `None`.
-#[pyfunction]
-pub fn mask_select_predicate<'py>(
-    py: Python<'py>,
-    select: &Bound<'py, PyAny>,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let stmt = statement_from_py(select)?;
-    let Statement::Select(select) = &*stmt else {
-        return Err(PyTypeError::new_err("expected a Select"));
-    };
-    emmy_ir::protocol::mask_select_predicate(select)
-        .map(|e| PyExpression::wrap(py, &e))
-        .transpose()
-}
-
 /// Dependency and, when requested, effect predecessors for one lexical scope.
 #[pyfunction]
 #[pyo3(signature = (body, *, effects))]
@@ -1032,7 +1017,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reduce_strength, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
-    m.add_function(wrap_pyfunction!(mask_select_predicate, m)?)?;
     m.add_function(wrap_pyfunction!(ordering_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_promote, m)?)?;
     Ok(())

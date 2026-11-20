@@ -470,7 +470,7 @@ impl Lowering<'_> {
             unroll: false,
             seed: true,
             unrolled: false,
-            range: term.range().cloned(),
+            range: term.applied_range(),
             step: None,
         })));
         self.attach(term, Kind::State, target, &here, &scope, nest, None)
@@ -699,6 +699,14 @@ impl Fold {
                 Some(narrowed) => {
                     let mut read = narrowed.step()?.ssa_uses().clone();
                     read.extend(narrowed.exposes().iter().copied());
+                    // A range is evaluated where its term is, so an operand value it reads is taken too.
+                    for bound in narrowed
+                        .applied_range()
+                        .iter()
+                        .flat_map(|(start, end)| [start, end])
+                    {
+                        read.extend(bound.free_vars());
+                    }
                     read
                 }
                 None => HashSet::new(),

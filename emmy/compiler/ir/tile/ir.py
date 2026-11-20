@@ -42,6 +42,7 @@ from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, Sim
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.mask import keys_ranged
 from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.views import (
     ContractionFacts,
@@ -839,11 +840,14 @@ class TileOp(Op):
         a block of a partition walks from zero, and every term keeps its range, stated of its axis as a tier walks
         it. A tier reads the range itself: a scalar walk and a cooperative reduce as their loop's bounds, the chunk
         tier as the chunks it walks and the mask of the block a bound cuts. A tile, which folds a rectangle of every
-        position, is offered on no other term that walks one (:meth:`contracts`). The form does not change which
-        kernel this is (``wire.kernel_tile``)."""
+        position, is offered on no other term that walks one (:meth:`contracts`). A softmax carrier whose score a
+        program masked by the coordinates walks the range that mask states, the mask gone from its lift
+        (``schedule.mask.keys_ranged``), so a tier reads one thing whichever way the program said which keys a row
+        attends. The form does not change which kernel this is (``wire.kernel_tile``)."""
         if self.op is None:
             return self
         op, axes = self.op.scheduled(self.axes)
+        op = keys_ranged(op, axes)
         return self if op is self.op else replace(self, op=op, axes=axes)
 
     def axis_of(self, name: str) -> Axis:
