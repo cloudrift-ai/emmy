@@ -1398,6 +1398,37 @@ impl PyFold {
         Ok((PyFold::wrap(py, &masked)?, PyTuple::new(py, table)?))
     }
 
+    /// This tree as the kernel tiers take it, and the axis table it then reads: `masked`, except that a twisted
+    /// carrier keeps its range for the tier that folds it to read (`Fold::scheduled`).
+    fn scheduled<'py>(
+        &self,
+        py: Python<'py>,
+        axes: &Bound<'py, PyAny>,
+    ) -> PyResult<(Bound<'py, PyFold>, Bound<'py, PyTuple>)> {
+        let axes = axes_from_py(Some(axes))?;
+        let (scheduled, table) = self.fold.scheduled(&axes).py()?;
+        let table = table
+            .iter()
+            .map(|axis| crate::convert::axis_to_py(py, axis))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok((PyFold::wrap(py, &scheduled)?, PyTuple::new(py, table)?))
+    }
+
+    /// The start a block of a partition leaves from, for a term that walks such a block; `None` for any other
+    /// term (`Fold::block_start`).
+    fn block_start<'py>(
+        &self,
+        py: Python<'py>,
+        axes: &Bound<'py, PyAny>,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let axes = axes_from_py(Some(axes))?;
+        self.fold
+            .block_start(&axes)
+            .py()?
+            .map(|start| PyExpression::wrap(py, &start))
+            .transpose()
+    }
+
     /// This term with some of its parts replaced, formed and checked like any other.
     #[pyo3(signature = (**changes))]
     fn replace<'py>(

@@ -230,6 +230,30 @@ def test_an_attention_folds_each_rows_keys_over_a_range(queries: int, keys: int,
     np.testing.assert_allclose(got, _masked_attention(data, keep), rtol=1e-4, atol=1e-4)
 
 
+def test_a_tier_reads_a_carriers_range_or_takes_its_mask() -> None:
+    """The lowering takes a kernel with each carrier's range left on it. A scalar walk opens its loop over the
+    range, so it takes the range's trips and masks nothing. A cooperative reduce strides every position of its axis:
+    it says so, and the kernel is lowered from its masked form instead."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import StridedLoop, pretty_body  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+    from tests.compiler.helpers import compile_with_kernels, statements  # noqa: PLC0415
+
+    def lowered(**pins):
+        with pinned_knobs({"PLACE": "fuse", "TILE": "", "STAGE": "", **pins}):
+            _, kernels = compile_with_kernels(_attention(16, 16, is_causal=True), ctx=Context.from_target((12, 0)), db=None)
+        (kernel,) = kernels.values()
+        return kernel, "\n".join(pretty_body(kernel.body))
+
+    scalar, text = lowered(WORK="", REDUCE="")
+    (walk,) = [loop for loop in statements(scalar, StridedLoop) if loop.end is not None]
+    assert (str(walk.start), str(walk.step), str(walk.end)) == ("0", "1", "a1 + 1")
+    assert "where(" not in text and "select" not in text
+
+    _, text = lowered(WORK="t32", REDUCE="coop")
+    assert "where(" in text, "the mask the range stands for"
+
+
 def test_a_value_defined_once_is_the_kernel_that_computes_it_at_each_read() -> None:
     shapes = {"K": (4, 16), "W": (4,)}
     defined, copied = _tile(DEFINED, shapes, (4, 16)), _tile(COPIED, shapes, (4, 16))

@@ -461,6 +461,12 @@ def projection_tail(tile) -> list[Statement]:
     return apply_output_specs(body, tile.output_specs)
 
 
+class NeedsMask(ValueError):
+    """A tier met a term that walks a range and reads none. The scheduled form leaves a twisted carrier's range for
+    the tier that folds it to read (``TileOp.scheduled``); a tier that folds a rectangle of every position takes the
+    kernel masked instead (``TileOp.masked``), which is what the materializer lowers when this is raised."""
+
+
 class UnbindableProjection(ValueError):
     """The projection's outputs do not partition by producing root, so the multi-root binding has
     no realization for this row — a legality fact about the OFFERED row, not a malformed tree.
@@ -799,6 +805,7 @@ def reduce_plan(tile):
 __all__ = [
     "Sched",
     "axis_names",
+    "NeedsMask",
     "carries_partition",
     "cone_stat_dtypes",
     "edge_dtypes",

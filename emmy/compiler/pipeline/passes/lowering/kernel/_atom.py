@@ -93,7 +93,7 @@ from emmy.compiler.ir.stmt import (
     free_names,
     mask_select_predicate,
 )
-from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
+from emmy.compiler.ir.tile.ops import NeedsMask, cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
@@ -1615,11 +1615,36 @@ def _mask_affine(predicate: BinaryExpression, names: frozenset[str]) -> tuple[di
     return None if form is None else (form[1], form[0])
 
 
+def _outside(walked: tuple[Expression, Expression] | None, key: Axis) -> tuple[BinaryExpression, ...]:
+    """Where a carrier that walks the range ``walked`` of ``key`` folds nothing, one comparison for each bound: a key
+    before a start, a key at or past an end. A start at zero and an end at the axis's own extent bound nothing the
+    walk does not already hold."""
+    if walked is None:
+        return ()
+
+    def chain(expression: Expression, name: str) -> list[Expression]:
+        if expression.operation is not None and expression.operation.name == name:
+            return [part for operand in expression.operands for part in chain(operand, name)]
+        return [expression]
+
+    def past(bound: Expression) -> BinaryExpression:
+        # An end one past a coordinate is that coordinate, compared strictly: one comparison per element, no sum.
+        if isinstance(bound, BinaryExpression) and bound.op == "+" and bound.right == Literal(1, "int"):
+            return BinaryExpression(">", position, bound.left)
+        return BinaryExpression(">=", position, bound)
+
+    start, end = walked
+    position = Var(key.name)
+    before = [BinaryExpression("<", position, bound) for bound in chain(start, "maximum") if bound != Literal(0, "int")]
+    return (*(past(bound) for bound in chain(end, "minimum") if bound != key.extent_expression()), *before)
+
+
 def _mask_key_bounds(
-    stmts, held: str, key: Axis, row: str, offset, bk: int, uniform: frozenset[str] = frozenset()
+    stmts, held: str, key: Axis, row: str, offset, bk: int, uniform: frozenset[str] = frozenset(), outside: tuple = ()
 ) -> tuple[Expression | None, Expression | None]:
     """The chunk range outside which every key is masked for every row of this CTA — the stream's
-    ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side.
+    ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side. ``outside`` holds the comparisons
+    a carrier's range states (:func:`_outside`): where it folds nothing, read like a mask's masked branch.
 
     The masks are the coordinate ``Select`` statements the prefix adds to the score (the pairs
     :func:`_residence` turns into a coordinate mask), each read ONCE, ahead of the loop, for what
@@ -1636,11 +1661,13 @@ def _mask_key_bounds(
     fragments = {held}  # the score and every value the prefix derives from it (its scaling, say)
     first: Expression | None = None
     end: Expression | None = None
+    predicates: list = []
     for stmt in _one_operation(stmts):  # a mask added inside a sum is one operation of its spelling
         if isinstance(stmt, Assign) and stmt.value.free_vars() & fragments:
             fragments.add(stmt.name)
         masked = _mask_add(stmt, selects, fragments)
-        predicate = mask_select_predicate(masked[0]) if masked is not None else None
+        predicates.append(mask_select_predicate(masked[0]) if masked is not None else None)
+    for predicate in (*predicates, *outside):
         affine = _mask_affine(predicate, frozenset({key.name, row})) if predicate is not None else None
         if affine is not None and affine[0] == {key.name: -1, row: 1}:
             swapped = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
@@ -3067,7 +3094,13 @@ class _FlashOps(_MmaOps):
         # CTA, which walks the whole stream there, and the dynamic trip count only costs (9%
         # measured at the 128-CTA head-width-256 shape). Bounded at both ends, every CTA shortens.
         scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
-        k_first, k_end = _mask_key_bounds(prefix_body, scored_name, key, m.axis.name, offset[0], bk, uniform)
+        # A carrier that walks a range of its keys (a causal or a sliding-window attention) states where it folds
+        # nothing. The tier reads that twice: here, for the chunks every row of the CTA skips, and below, as the mask
+        # of the elements a bound cuts.
+        outside = _outside(self.c.range, key)
+        if any(not predicate.free_vars() <= {key.name, m.axis.name} | uniform for predicate in outside):
+            raise NeedsMask(f"the range of {key.name!r} reads a coordinate the chunk tier holds neither per element nor per CTA")
+        k_first, k_end = _mask_key_bounds(prefix_body, scored_name, key, m.axis.name, offset[0], bk, uniform, outside)
         if self.one_wave and (k_first is None or k_end is None):
             k_first = k_end = None
 
@@ -3116,6 +3149,21 @@ class _FlashOps(_MmaOps):
                     )
                     body += stmts
                     scored[i, j] = frags[self.c.roles[0]]
+                    for predicate in outside:
+                        body.append(
+                            FragmentApply(
+                                out=scored[i, j],
+                                op=ElementwiseImpl("where"),
+                                args=fragment_args(
+                                    (select_sigma.apply(predicate), Literal(float(self.c.base.components()[0].identity)), scored[i, j]),
+                                    (COORD, UNIFORM, FRAG),
+                                ),
+                                in_place=True,
+                                layout=layout,
+                                row_base=offset[0].base(i),
+                                col_base=BinaryExpression("+", base, Literal(j * atom.atom_n, "int")),
+                            )
+                        )
                     if bound is not None:
                         body.append(
                             FragmentApply(

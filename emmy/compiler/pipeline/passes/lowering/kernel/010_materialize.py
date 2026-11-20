@@ -13,7 +13,8 @@ reads the node kind + role + reduce plan off ``tile.op`` and picks the tier:
   ``Reduce`` carries a BLOCK ``coop`` and/or a REG ``reg`` stage: the reduce axis is partitioned
   ``coop`` ways across the CTA's threads (cooperation) and ``reg`` ways across per-thread register
   accumulators (ILP), then a REG-tree fold, the cross-thread combine, and the projection.
-- **Scalar tier** — one thread per output cell (``op.lower()`` + an output-store glue).
+- **Scalar tier** — one thread per output cell (``op.lower()`` + an output-store glue). A reduce loop that
+  states a range becomes the kernel loop that walks it.
 
 The op tree + ``lower`` are shared across kinds; only the schedule's partition changes — the
 article's "schedule separate from combine" thesis. The tier machinery all lives in ``_factor``.
@@ -32,9 +33,10 @@ from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write, exposed_defines, free_names
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
+from emmy.compiler.ir.tile.ops import NeedsMask, UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
+from emmy.compiler.wire import kernel_tile
 
 PATTERN = [Pattern("root", TileOp)]
 
@@ -55,7 +57,16 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
-        materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
+        # A tier that folds a twisted carrier reads the carrier's range itself, so the kernel is lowered first with
+        # each carrier's range left on it; a tier that folds every position of its axis says so, and takes the mask.
+        ranged = _with_ranges(tile)
+        try:
+            lowered = ranged if ranged is not None else tile
+            materialized = _pointwise_strip(lowered, factorize(lowered, root, sm_count=getattr(ctx, "sm_count", 0)))
+        except NeedsMask:
+            lowered = tile
+            materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
+        tile = lowered
         body = Body((materialized,))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
@@ -72,6 +83,21 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         # realization corpus pins that — and the compile declines it here: the skip is recorded,
         # the node stays a TileOp, and the greedy blocklist retry resolves onto the next row.
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
+
+
+def _with_ranges(tile: TileOp) -> TileOp | None:
+    """``tile``, scheduled on its masked form, over the tree that leaves each twisted carrier's range on it
+    (``TileOp.scheduled``): the same sites, so the schedule addresses it alike. ``None`` when no carrier of the kernel
+    walks a range, or the kernel is realized through another term (a carried state's serial form)."""
+    source = kernel_tile(tile)
+    if source is None or source is tile or source.op is None or source.carries or tile.schedule is None:
+        return None
+    ranged = source.scheduled()
+    if not any(site.node.range is not None for site in ranged.sites):
+        return None
+    if [site.path for site in ranged.sites] != [site.path for site in tile.sites]:
+        return None
+    return replace(tile, op=ranged.op, axes=ranged.axes)
 
 
 def _resident(match: Match, root: Node, tile: TileOp):

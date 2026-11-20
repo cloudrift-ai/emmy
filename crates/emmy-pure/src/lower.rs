@@ -746,15 +746,9 @@ impl Fold {
         Ok(body)
     }
 
-    /// For each axis of `axes` that is a block of a partition and that a term of this tree walks a range of, the
-    /// names the range's start reads: the block's coordinate.
-    fn range_origins(&self, axes: &[Arc<Axis>]) -> HashMap<Name, HashSet<Name>> {
-        let block = |name: Name| {
-            axes.iter()
-                .rev()
-                .find(|axis| axis.name == name)
-                .is_some_and(|axis| axis.window.as_ref().is_some_and(|w| w.partition))
-        };
+    /// For each axis a term of this tree walks as a block of a partition, the names the block's start reads
+    /// ([`Fold::block_start`]): the block's coordinate.
+    fn range_origins(&self, axes: &[Arc<Axis>]) -> Result<HashMap<Name, HashSet<Name>>> {
         let mut origins: HashMap<Name, HashSet<Name>> = HashMap::new();
         let mut seen: HashSet<usize> = HashSet::new();
         let mut pending = vec![self.clone()];
@@ -762,14 +756,12 @@ impl Fold {
             if !seen.insert(term.address()) {
                 continue;
             }
-            if let (Some(axis), Some((start, _))) = (term.axis(), term.range())
-                && block(axis)
-            {
+            if let (Some(axis), Some(start)) = (term.axis(), term.block_start(axes)?) {
                 origins.entry(axis).or_default().extend(start.free_vars());
             }
             pending.extend(term.operands().iter().cloned());
         }
-        origins
+        Ok(origins)
     }
 
     fn lower_fresh(
@@ -803,7 +795,7 @@ impl Fold {
         let mut readers: HashMap<Name, usize> = HashMap::new();
         let mut origin: HashMap<Name, (usize, Kind)> = HashMap::new();
         let mut terms: HashMap<usize, Fold> = HashMap::new();
-        let origins = self.range_origins(axes);
+        let origins = self.range_origins(axes)?;
         let mut seen: HashSet<usize> = HashSet::new();
         let mut pending = vec![self.clone()];
         while let Some(term) = pending.pop() {

@@ -71,8 +71,17 @@ fn assign(name: Name, value: Expression) -> Arc<Statement> {
     }))
 }
 
+/// How far `high` lies past `low`, like terms merged: a block's end less its start is the block's length.
+fn room(low: &Expression, high: &Expression) -> Result<Expression> {
+    let apart = Expression::binary(Operation::Subtract, high.clone(), low.clone());
+    affine_sum(affine_terms(&apart, ExprClass::Index), &|_| unranked())
+        .simplify(&SimplifyCtx::empty())
+}
+
 /// What a term's range comes to once its axis walks from zero.
 struct Walk {
+    /// The start the walk leaves from, where that is not zero: the start of a block of a partition.
+    base: Option<Expression>,
     /// The axis as the body reads it: `start + axis`, or the axis itself where the walk leaves from zero.
     position: Expression,
     /// The starts the walk does not leave from, each a bound `position` stays at or past.
@@ -95,12 +104,6 @@ impl Walk {
         chain(start, Operation::Maximum, &mut lows);
         chain(end, Operation::Minimum, &mut highs);
         let coordinate = |name: &Name| axes.iter().any(|known| known.name == *name);
-        // How far `high` lies past `low`, like terms merged: a block's end less its start is the block's length.
-        let room = |low: &Expression, high: &Expression| {
-            let apart = Expression::binary(Operation::Subtract, high.clone(), low.clone());
-            affine_sum(affine_terms(&apart, ExprClass::Index), &|_| unranked())
-                .simplify(&SimplifyCtx::empty())
-        };
         let stated = axes.iter().find(|known| known.name == axis);
         // Only a block of a partition leaves from its own start: the block coordinate is one value for a whole
         // launch block, where a start that moves with a row would give every row of a tile its own positions.
@@ -166,6 +169,7 @@ impl Walk {
             .map(|known| known.extent.expression.clone())
             .filter(|extent| rebased && ends.contains(extent));
         Ok(Walk {
+            base: rebased.then_some(base),
             position,
             starts: lows,
             ends,
@@ -211,10 +215,33 @@ impl Fold {
     /// extent in the table returned. A term without a range, over operands without one, is the term itself, so
     /// sharing is kept.
     pub fn masked(&self, axes: &[Arc<Axis>]) -> Result<(Fold, Vec<Arc<Axis>>)> {
+        self.walked(axes, true)
+    }
+
+    /// This tree as the kernel tiers take it, and the axis table it then reads. A tier that folds a twisted
+    /// carrier reads the carrier's range itself, as the bounds of its walk and as the mask of the block a bound
+    /// cuts, so a carrier keeps its range, stated of the axis as the tier walks it: a block of a partition walks
+    /// from zero, and its range is what the fold's own bounds leave of the block. Every other term is masked
+    /// ([`Fold::masked`]): a tensor-core contraction and a cooperative reduce fold a rectangle.
+    pub fn scheduled(&self, axes: &[Arc<Axis>]) -> Result<(Fold, Vec<Arc<Axis>>)> {
+        self.walked(axes, false)
+    }
+
+    /// The start a block of a partition leaves from, for a term that walks such a block ([`Walk::of`]); `None`
+    /// for any other term. The one place that says which coordinate moves a block.
+    pub fn block_start(&self, axes: &[Arc<Axis>]) -> Result<Option<Expression>> {
+        match (self.axis(), self.range()) {
+            (Some(axis), Some((start, end))) => Ok(Walk::of(axis, start, end, axes)?.base),
+            _ => Ok(None),
+        }
+    }
+
+    fn walked(&self, axes: &[Arc<Axis>], carriers: bool) -> Result<(Fold, Vec<Arc<Axis>>)> {
         let mut taken = self.names();
         let mut table = axes.to_vec();
-        let masked = self.masked_in(axes, &mut table, &mut taken, &mut HashMap::new())?;
-        Ok((masked, table))
+        let mut done = HashMap::new();
+        let walked = self.masked_in(axes, &mut table, &mut taken, &mut done, carriers)?;
+        Ok((walked, table))
     }
 
     fn masked_in(
@@ -223,6 +250,7 @@ impl Fold {
         table: &mut Vec<Arc<Axis>>,
         taken: &mut Vec<Name>,
         done: &mut HashMap<usize, Fold>,
+        carriers: bool,
     ) -> Result<Fold> {
         if let Some(found) = done.get(&self.address()) {
             return Ok(found.clone());
@@ -230,7 +258,7 @@ impl Fold {
         let operands = self
             .operands()
             .iter()
-            .map(|edge| edge.masked_in(axes, table, taken, done))
+            .map(|edge| edge.masked_in(axes, table, taken, done, carriers))
             .collect::<Result<Vec<_>>>()?;
         let same = operands
             .iter()
@@ -243,20 +271,25 @@ impl Fold {
                 parts.operands = operands;
                 Fold::formed(parts)
             }
-            (Some((start, end)), _) => self.masking(operands, start, end, axes, table, taken)?,
+            (Some((start, end)), _) => {
+                self.masking(operands, same, start, end, axes, table, taken, carriers)?
+            }
         };
         done.insert(self.address(), out.clone());
         Ok(out)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn masking(
         &self,
         operands: Vec<Fold>,
+        same: bool,
         start: &Expression,
         end: &Expression,
         axes: &[Arc<Axis>],
         table: &mut [Arc<Axis>],
         taken: &mut Vec<Name>,
+        carriers: bool,
     ) -> Result<Fold> {
         let axis = self
             .axis()
@@ -267,6 +300,16 @@ impl Fold {
             )));
         }
         let walk = Walk::of(axis, start, end, axes)?;
+        // A carrier a tier reads the range of keeps it. One that walks from zero is the term it was.
+        let kept = self.twist().is_some() && !carriers;
+        if kept && walk.base.is_none() {
+            if same {
+                return Ok(self.clone());
+            }
+            let mut parts = self.parts();
+            parts.operands = operands;
+            return Ok(Fold::formed(parts));
+        }
         if let Some(trips) = &walk.trips
             && let Some(slot) = table.iter_mut().find(|known| known.name == axis)
         {
@@ -305,6 +348,41 @@ impl Fold {
                 .iter()
                 .map(|stmt| Statement::substitute(stmt, &sigma))
                 .collect();
+        }
+        if let (true, Some(base)) = (kept, &walk.base) {
+            // What the fold's own bounds leave of the block, stated of the axis as it now walks from zero.
+            let least = |a, b| Expression::apply(Operation::Minimum, vec![a, b]);
+            let greatest = |a, b| Expression::apply(Operation::Maximum, vec![a, b]);
+            let from: Vec<Expression> = walk
+                .starts
+                .iter()
+                .map(|start| room(base, start))
+                .collect::<Result<_>>()?;
+            let to: Vec<Expression> = walk
+                .ends
+                .iter()
+                .map(|end| room(base, end))
+                .collect::<Result<_>>()?;
+            let whole = walk
+                .trips
+                .as_ref()
+                .map(|trips| trips.expression.clone())
+                .ok_or_else(|| Error::Value("a block of a partition has a length".into()))?;
+            let mut parts = self.parts();
+            parts.operands = operands;
+            parts.lift = Some(Lambda::closing(
+                lift.params()[..1 + self.bindings().len()].to_vec(),
+                &Body::new(body),
+                lift.results().to_vec(),
+            )?);
+            // Inside the block on both sides: a bound past the block's end, or ahead of its start, cuts nothing.
+            parts.range = (!from.is_empty() || !to.is_empty()).then(|| {
+                (
+                    from.into_iter().fold(Expression::int(0), greatest),
+                    to.into_iter().fold(whole, least),
+                )
+            });
+            return Fold::new(parts);
         }
         let lead = 1 + self.bindings().len();
         let mut params = lift.params()[..lead].to_vec();
