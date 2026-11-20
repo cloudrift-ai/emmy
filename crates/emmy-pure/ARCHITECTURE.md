@@ -56,17 +56,13 @@ and a view are values: they compare by what they hold.
   under it (`read_components`). The free loops open outermost the coordinate the most terms are evaluated over, and a
   term read along a block of a partition counts for the block's coordinate (`Fold::block_start`): it is evaluated at
   `start + trip`, so the nest is ordered as it would be were the start written into every index.
-- `range.rs` — `Fold::masked`: the tree with every range spelled as a kernel tier reads it. A term that walks a
-  range folds each value selected against its seed where the position is outside the range; a twisted carrier adds
-  the pivot's seed to its score through the `where` a program's own mask spells, one for each bound, which is how a
-  causal or a sliding-window attention reaches the chunk tier. A range starts at the greatest of its starts and ends
-  at the least of its ends. A block of a split (an axis whose window is a partition) leaves from the block's start,
-  the start some end lies a fixed way past: the axis takes that distance as its extent in the axis table returned and
-  reads its axis as `start + axis`. Only the last block of a symbolic stream can run past the stream, and there a read
-  below the term clamps onto its last position. Any other range is walked over the whole axis from zero, and every
-  bound is a mask. `Fold::scheduled` is the same tree with each range left on its term, stated of the axis as a tier
-  walks it: what the schedule addresses and a tier that reads a range lowers. `Fold::block_start` names the start a
-  block leaves from, which the lowering's nest order and the tile's shared coordinates read too.
+- `range.rs` — `Fold::scheduled`: the tree as the schedule addresses it and a kernel tier lowers it. A tier reads
+  a term's range itself, so every term keeps its range. A range starts at the greatest of its starts and ends at
+  the least of its ends. A block of a split (an axis whose window is a partition) leaves from the start some end
+  lies a fixed way past: the axis takes that distance as its trips, every read of it is `start + axis`, the term
+  keeps what its own bounds leave of the block as its range, and a read below the term clamps onto the last
+  position of a symbolic stream, whose last block may run past it. Any other term is the term it was.
+  `Fold::block_start` names the start a block leaves from, the one place that says which coordinate moves a block.
 
 ## Memos
 

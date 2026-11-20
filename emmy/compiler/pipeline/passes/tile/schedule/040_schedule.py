@@ -35,7 +35,7 @@ from emmy.compiler.ir.schedule.classic import (
     materialize_classic,
 )
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
+from emmy.compiler.ir.tile.ops import merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork, exact_schedule_leaf, iter_leaves
 
@@ -144,7 +144,7 @@ def classic_forks(
     kernel's graph node id, which names the buffer a carried state's serial form keeps it in."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
-    row = pin_row(tile.name, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
+    row = pin_row(tile.name, split_consumed=tile.split_taken, published=published)
     catalog = () if published else ("catalog",)  # a pool without the published pins is another pool
     # A kernel that carries a state has a ``STAGE`` site for it. Direct is the serial form: a buffer in global
     # memory, one launch per step. ``d1/smem`` runs the steps of that form inside one launch; ``d1/reg`` keeps the
@@ -157,8 +157,7 @@ def classic_forks(
             state_stages += (Stage(transport="smem"),)
         if state_tiles:
             state_stages += (Stage(transport="reg"),)
-    # A block of a partition walks from zero, and each range is stated of the axis as a tier walks it. A tier that
-    # cannot read a range lowers the kernel masked (``010_materialize``).
+    # A block of a partition walks from zero, and each range is stated of the axis as a tier walks it.
     tile = tile.scheduled()
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the

@@ -97,12 +97,15 @@ def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
         )
     transposed_ok = _transposed_reduction_ok(tile) and is_root
     lanes = (32, 8) if target.compute_capability == (7, 0) else (32,)
+    # A transposed band folds the columns a lane owns in one loop, so a fold that walks a range takes one column:
+    # its range may differ from one column to the next.
+    columns_ok = node.range is None
     return (
         Reduce(),
         *(
             choice
             for choice in coop_reduce_moves(transposed_lanes=lanes)
-            if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok)
+            if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok and (columns_ok or choice.coop_columns == 1))
         ),
     )
 
@@ -276,6 +279,8 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # so a symbolic extent there has no step count to hold them at.
     if score is not None and not tile.axis_of(score.axis).extent.is_static:
         return "the chunk tier covers the score's contraction in one pass, so its extent must be static"
+    if score is not None and score.range is not None:
+        return "the chunk tier covers the score's contraction in one pass, and it walks a range"
     if any(edge.as_slab() is None for edge in reads):
         return "the chunk tier reads its score operands and its streamed value as slabs"
     # The score's own PREFIX is the CARRIER's lift cut to its score role — A is the score

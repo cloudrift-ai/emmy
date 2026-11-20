@@ -452,7 +452,8 @@ fn check_reduce(parts: &Parts, lift: &Lambda, base: &Lambda) -> Result<()> {
 
 /// `lift` with every coordinate the term's range reads among its trailing params, in sorted order after the ones it
 /// has: the range is evaluated where the term is, so what it reads is part of what the term is evaluated over. A
-/// range is a reduce axis's, and reads neither that axis nor a value the term binds.
+/// range is a reduce axis's. It reads the coordinates around the term and the values of operands that do not ride
+/// the axis, each one value for the whole walk; it reads neither the axis nor a value that moves along it.
 fn over_range(parts: &Parts, lift: Lambda) -> Result<Lambda> {
     let Some((start, end)) = &parts.range else {
         return Ok(lift);
@@ -462,18 +463,24 @@ fn over_range(parts: &Parts, lift: Lambda) -> Result<Lambda> {
             "a range is where a reduce axis walks: a zero-axis term has none".into(),
         ));
     }
-    let lead = 1 + bindings_of(&parts.operands, lift.params(), true).len();
+    let axis = lift.params().first().copied();
+    let bindings = bindings_of(&parts.operands, lift.params(), true);
     let mut read: Vec<Name> = start.free_vars();
     read.extend(end.free_vars());
     read.sort();
     read.dedup();
-    if let Some(bound) = read
-        .iter()
-        .find(|name| lift.params()[..lead.min(lift.params().len())].contains(name))
-    {
-        return Err(Error::Value(format!(
-            "a range reads the coordinates around its term, and '{bound}' is the term's own axis or a value it binds"
-        )));
+    for name in &read {
+        let moves = match bindings.iter().find(|binding| binding.param == *name) {
+            Some(binding) => {
+                axis.is_some_and(|axis| parts.operands[binding.operand].free_axes().contains(&axis))
+            }
+            None => Some(*name) == axis,
+        };
+        if moves {
+            return Err(Error::Value(format!(
+                "a range reads what is one value for its whole walk, and '{name}' is the term's own axis or moves along it"
+            )));
+        }
     }
     let missing: Vec<Name> = read
         .into_iter()

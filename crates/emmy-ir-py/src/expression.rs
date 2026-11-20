@@ -402,6 +402,23 @@ impl PyExpression {
         Ok(Some(op_to_py(py, op)?.unbind()))
     }
 
+    /// The operands of the chain of the operation `name` this node heads, in order (`Expression::chain`): the
+    /// starts of a range's `maximum` chain, the ends of its `minimum` chain, the node itself where it is no such chain.
+    fn chain<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyTuple>> {
+        let op = Operation::ALL
+            .iter()
+            .copied()
+            .find(|op| op.text() == name)
+            .ok_or_else(|| PyValueError::new_err(format!("no operation named {name:?}")))?;
+        let items: PyResult<Vec<Bound<'py, PyAny>>> = self
+            .expr
+            .chain(op)
+            .iter()
+            .map(|e| PyExpression::wrap(py, e))
+            .collect();
+        PyTuple::new(py, items?)
+    }
+
     /// The operands of an operation node, in order; empty for any other node.
     #[getter]
     fn operands<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {

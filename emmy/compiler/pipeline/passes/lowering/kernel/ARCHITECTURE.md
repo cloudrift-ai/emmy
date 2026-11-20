@@ -720,12 +720,14 @@ itself. A causal or a sliding-window attention states the keys a row folds as it
 it into one comparison for each bound, where the carrier folds nothing — `row < key` past the causal end, `key < row
 − W + 1` ahead of a window's start — and the chunk tier reads those twice: for the chunks every row of the CTA skips
 (`_mask_key_bounds`), and as one coordinate-masking `FragmentApply` per bound on each score fragment, the fill the
-pivot's identity. A scalar walk reads a range, a carrier's or a plain fold's, as its loop's bounds
-(`_factor._walked`) and masks nothing. A tier that folds every position of its axis — a cooperative reduce, a tiled
-contraction that is no chunk tier — raises `NeedsMask`, and the materializer lowers the kernel from its masked form
-(`TileOp.masked`): a select against the seed for a plain fold, a comparison and a `where` added to the score for a
-carrier. A reduce loop that still states a range after the lowering is taken the same way, so no range is dropped
-unread.
+pivot's identity. A scalar walk reads a range, a carrier's or a plain fold's, as its loop's bounds and masks
+nothing: the reduce loop the term lowers to states the range, and the kernel's one loop statement carries it to the
+PTX compiler. A cooperative reduce reads it the same way: each lane takes every `coop`-th position from its own
+start past the range's start to the range's end, an ILP copy past the end is masked as a ragged tail always was
+(`_register_copies`), and a prefix scan covers the range in lane groups. A transposed band walks the range at the
+cell each lane owns, and takes one column on a fold that walks one. A tile folds a rectangle of every position, so
+no tile is offered on a term that walks a range beside the chunk tier's carrier (`TileOp.contracts`,
+`_chunk_refusal`), and a register-held recurrence refuses a product that walks one.
 
 The score's own PREFIX — the carrier's lift cut to its score role — is where a mask a PROGRAM wrote arrives, and it
 takes two readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand

@@ -1,10 +1,9 @@
 """The additive coordinate mask the chunk tier lands, read off a score's prefix however the program spelled it.
 
 A program that masks with ``where(key - row <= position, 0, fill)`` lowers to a comparison and a ``where`` added to
-the score, over values that alias the coordinates (``Let v = a1``) and the uniform values it reads; the masked form
-of a carrier that walks a range (``Fold.masked``) spells each bound the same way. ``select_masks`` spells either as a
-coordinate ``Select`` whose predicate compares the key and the row, so the tier's gate and its emission read one
-form. A carrier whose range the tier reads itself (``TileOp.scheduled``) brings no mask here.
+the score, over values that alias the coordinates (``Let v = a1``) and the uniform values it reads. ``select_masks``
+spells it as a coordinate ``Select`` whose predicate compares the key and the row, so the tier's gate and its
+emission read one form. A carrier that walks a range brings no mask here: the tier reads the range itself.
 
 A key split's piece reads the absolute key through its partition (``Let v = ks * b + a2``): an alias is any ``Let``
 over the coordinates and the uniform values, folded into the predicate as the expression it binds.

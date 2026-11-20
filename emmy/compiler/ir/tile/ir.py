@@ -52,7 +52,7 @@ from emmy.compiler.ir.schedule.views import (
 from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, OutputSpec, Statement, Write
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
-from emmy.compiler.ir.tile.ops import Sched, chain_members, kernel_roots, refused_roots
+from emmy.compiler.ir.tile.ops import Sched, carries_partition, chain_members, kernel_roots, refused_roots
 from emmy.compiler.ir.tile.path import Site, sites
 
 
@@ -439,7 +439,7 @@ class TileOp(Op):
     def batch_axes(self, node: Fold) -> frozenset[str]:
         """The coordinates both operands of the contraction ``node`` ride besides the reduction: the ones both read,
         and the block coordinate of a split, which moves the positions both are read at. A tier reads such a block
-        with the coordinate in both indices (``Fold.masked``), so the two spellings of one kernel answer alike."""
+        with the coordinate in both indices (``Fold.scheduled``), so the two spellings of one kernel answer alike."""
         view = node.as_contraction()
         shared = frozenset(view.shared_axes) if view is not None else frozenset()
         start = node.block_start(self.axes) if node.range is not None else None
@@ -461,6 +461,14 @@ class TileOp(Op):
         if len(free) == 1:
             return all(_dense_axis_suffix(spec.write.index, free[0].name) for spec in self.output_specs)
         return {axis.name for axis in free} == role
+
+    @cached_property
+    def split_taken(self) -> bool:
+        """Whether the split question is answered for this kernel, the one reading of its two records: the flag
+        (:attr:`split_consumed`: the split was declined, or the kernel is a piece with no sliced axis), and the
+        receipt the kernel's own IR keeps and a stored kernel reads back, a partition window on a sliced axis
+        (``ops.carries_partition``)."""
+        return self.split_consumed or carries_partition(self)
 
     @cached_property
     def carries(self) -> bool:
@@ -826,29 +834,13 @@ class TileOp(Op):
         )
         return frozenset(name for dim in dims for name in dim.expression.free_vars())
 
-    def masked(self) -> TileOp:
-        """This kernel with no range left in its tree (``Fold.masked``): what a tier that folds every position of
-        its axis lowers. A term that walks a range walks from zero, reads its axis as ``start + axis``, and selects
-        each value it folds against its seed outside the range; an axis whose range fixes its trips takes them as
-        its extent in the axis table. The kernel itself when its tree states no range. A schedule attached to the
-        kernel addresses the masked tree alike: masking adds no site it names."""
-        if self.op is None:
-            return self
-        op, axes = self.op.masked(self.axes)
-        if op is self.op:
-            return self
-        if self.schedule is None:
-            return replace(self, op=op, axes=axes)
-        # The tree is put in its canonical form before the schedule is attached again.
-        formed = replace(self, op=op, axes=axes, schedule=None, materialization=None)
-        return replace(formed, schedule=self.schedule, materialization=self.materialization)
-
     def scheduled(self) -> TileOp:
         """This kernel as the classic schedule addresses it and the kernel lowering takes it (``Fold.scheduled``):
         a block of a partition walks from zero, and every term keeps its range, stated of its axis as a tier walks
-        it. A tier reads the range itself: the chunk tier as the chunks it walks and the mask of the block a bound
-        cuts, a scalar walk as its loop's bounds. A tier that folds every position of its axis takes
-        :meth:`masked`. Neither form changes which kernel this is (``wire.kernel_tile``)."""
+        it. A tier reads the range itself: a scalar walk and a cooperative reduce as their loop's bounds, the chunk
+        tier as the chunks it walks and the mask of the block a bound cuts. A tile, which folds a rectangle of every
+        position, is offered on no other term that walks one (:meth:`contracts`). The form does not change which
+        kernel this is (``wire.kernel_tile``)."""
         if self.op is None:
             return self
         op, axes = self.op.scheduled(self.axes)

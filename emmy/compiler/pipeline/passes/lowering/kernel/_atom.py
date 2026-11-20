@@ -92,7 +92,7 @@ from emmy.compiler.ir.stmt import (
     free_names,
     mask_select_predicate,
 )
-from emmy.compiler.ir.tile.ops import NeedsMask, cone_stat, cone_stat_dtypes
+from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
@@ -1618,17 +1618,10 @@ def _mask_affine(predicate: BinaryExpression, names: frozenset[str]) -> tuple[di
     return None if form is None else (form[1], form[0])
 
 
-def _outside(walked: tuple[Expression, Expression] | None, key: Axis) -> tuple[BinaryExpression, ...]:
+def _outside(walked: tuple[Expression, Expression] | None, key: Axis, ragged: bool) -> tuple[BinaryExpression, ...]:
     """Where a carrier that walks the range ``walked`` of ``key`` folds nothing, one comparison for each bound: a key
-    before a start, a key at or past an end. A start at zero and an end at the axis's own extent bound nothing the
-    walk does not already hold."""
-    if walked is None:
-        return ()
-
-    def chain(expression: Expression, name: str) -> list[Expression]:
-        if expression.operation is not None and expression.operation.name == name:
-            return [part for operand in expression.operands for part in chain(operand, name)]
-        return [expression]
+    before a start, a key at or past an end. A start at zero bounds nothing. The axis's own extent is an end like
+    any other where the chunks do not tile it (``ragged``): the last chunk then overhangs the stream."""
 
     def past(bound: Expression) -> BinaryExpression:
         # An end one past a coordinate is that coordinate, compared strictly: one comparison per element, no sum.
@@ -1636,10 +1629,12 @@ def _outside(walked: tuple[Expression, Expression] | None, key: Axis) -> tuple[B
             return BinaryExpression(">", position, bound.left)
         return BinaryExpression(">=", position, bound)
 
-    start, end = walked
+    extent = key.extent_expression()
+    start, end = walked if walked is not None else (Literal(0, "int"), extent)
     position = Var(key.name)
-    before = [BinaryExpression("<", position, bound) for bound in chain(start, "maximum") if bound != Literal(0, "int")]
-    return (*(past(bound) for bound in chain(end, "minimum") if bound != key.extent_expression()), *before)
+    before = [BinaryExpression("<", position, bound) for bound in start.chain("maximum") if bound != Literal(0, "int")]
+    ends = [bound for bound in end.chain("minimum") if bound != extent]
+    return (*(past(bound) for bound in (*ends, *((extent,) if ragged else ()))), *before)
 
 
 def _mask_key_bounds(
@@ -3100,9 +3095,15 @@ class _FlashOps(_MmaOps):
         # A carrier that walks a range of its keys (a causal or a sliding-window attention) states where it folds
         # nothing. The tier reads that twice: here, for the chunks every row of the CTA skips, and below, as the mask
         # of the elements a bound cuts.
-        outside = _outside(self.c.range, key)
-        if any(not predicate.free_vars() <= {key.name, m.axis.name} | uniform for predicate in outside):
-            raise NeedsMask(f"the range of {key.name!r} reads a coordinate the chunk tier holds neither per element nor per CTA")
+        # A key extent the chunk does not tile — a symbolic stream, or a static one with a remainder — leaves the
+        # last chunk ragged. Its overhanging columns are outside like any other: they fill with the pivot ⊕'s
+        # identity, so the pivot ignores them and every channel's pattern folds a zero weight through them; the
+        # loads that reach past the extent clamp and zero the same way every gmem-direct fragment loader already does.
+        ragged = not key.extent.is_static or key.extent.as_static() % bk
+        outside = _outside(self.c.range, key, bool(ragged))
+        assert all(predicate.free_vars() <= {key.name, m.axis.name} | uniform for predicate in outside), (
+            "the carrier's range reads the row, the key and the values one CTA holds — the gate's own reading (``_chunk_refusal``)"
+        )
         k_first, k_end = _mask_key_bounds(prefix_body, scored_name, key, m.axis.name, offset[0], bk, uniform, outside)
         if self.one_wave and (k_first is None or k_end is None):
             k_first = k_end = None
@@ -3110,12 +3111,6 @@ class _FlashOps(_MmaOps):
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
         select_sigma = Sigma({m.axis.name: Var(FRAG_ROW), key.name: Var(FRAG_COL)})
-        # A key extent the chunk does not tile — a symbolic stream, or a static one with a
-        # remainder — leaves the last chunk ragged. Its overhanging columns fill with the pivot ⊕'s
-        # identity, so the pivot ignores them and every channel's pattern folds a zero weight
-        # through them; the loads that reach past the extent clamp and zero the same way every
-        # gmem-direct fragment loader already does.
-        ragged = not key.extent.is_static or key.extent.as_static() % bk
         bound = key.extent_expression() if ragged else None
 
         streams = self._streams(mn, bk)
@@ -3163,25 +3158,7 @@ class _FlashOps(_MmaOps):
                                 ),
                                 in_place=True,
                                 layout=layout,
-                                row_base=offset[0].base(i),
-                                col_base=BinaryExpression("+", base, Literal(j * atom.atom_n, "int")),
-                            )
-                        )
-                    if bound is not None:
-                        body.append(
-                            FragmentApply(
-                                out=scored[i, j],
-                                op=ElementwiseImpl("where"),
-                                args=fragment_args(
-                                    (
-                                        BinaryExpression(">=", Var(FRAG_COL), bound),
-                                        Literal(float(self.c.base.components()[0].identity)),
-                                        scored[i, j],
-                                    ),
-                                    (COORD, UNIFORM, FRAG),
-                                ),
-                                in_place=True,
-                                layout=layout,
+                                row_base=offset[0].base(i) if m.axis.name in predicate.free_vars() else None,
                                 col_base=BinaryExpression("+", base, Literal(j * atom.atom_n, "int")),
                             )
                         )

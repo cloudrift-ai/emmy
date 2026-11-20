@@ -50,11 +50,13 @@ def test_a_symbolic_stream_splits_into_blocks_that_end_where_the_stream_does() -
     assert [bound.eval({"keys": 37, block: 3}) for bound in (start, end)] == [30, 37]
     assert not any(isinstance(stmt, Select) for stmt in fold.lift.body)
     assert all(not isinstance(position, TernaryExpression) for load in partial.loop_body.loads for position in load.index)
-    # A tier walks ⌈keys / 4⌉ positions from zero and keeps a position only inside the stream.
-    tier = partial.masked()
+    # A tier walks the block from zero: ⌈keys / 4⌉ positions at most, and what the stream leaves of the last block.
+    tier = partial.scheduled()
     extent = tier.axis_of(fold.axis).extent
     assert not extent.is_static and extent.expression.eval({"keys": 37}) == 10
-    assert any(isinstance(stmt, Select) for stmt in head(tier.op).lift.body)
+    start, end = head(tier.op).range
+    assert [bound.eval({"keys": 37, block: 3}) for bound in (start, end)] == [0, 7]
+    assert not any(isinstance(stmt, Select) for stmt in head(tier.op).lift.body)
 
 
 @requires_cuda
