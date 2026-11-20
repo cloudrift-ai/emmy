@@ -624,8 +624,9 @@ What the session changes for the milestones:
     GiB against stock's 30.5, GSM8K is 0.580 / 0.645 against the plugin's 0.545 / 0.570, and every probe difference
     is at a top-two near tie. Two things are open. By estimate the chunk term at 197,632 tokens is about 36 s,
     above the 20 s above, while attention is about 54 s; the cell is inside 2x stock all the same. And both Emmy
-    lanes score about 0.15 lower on GSM8K than on 2026-11-12, level with stock, which did not move: likely the W8A8
-    projections (#1411), not separated. The concurrency cells are milestones 19-25's.
+    lanes score about 0.15 lower on GSM8K than on 2026-11-12, level with stock, which did not move. An A/B on one
+    build the same day puts the whole drop on the W8A8 projections (#1411): 0.552 against 0.697 strict on all
+    1,319 questions, W8A8 against W8A16. The concurrency cells are milestones 19-25's.
 
 11. **Qwen3.6: the paging programs' cost out of the decode step.** Milestone 1's split sizes it; the dev-box
     figure is 7.8 ms a step of pager table programs, the decision kernel on one CTA times ~160 paging runs (40
