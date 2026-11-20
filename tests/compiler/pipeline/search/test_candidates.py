@@ -1,5 +1,5 @@
 """Candidate files: a few measured schedules that are not the best known one, for the groups a hardware golden
-holds — how many a group is filled to, what a build takes from a freeze and keeps, and the repository's files held to
+holds — how many a group is filled to, what a build takes from a DB and keeps, and the repository's files held to
 their goldens and to the fresh lowering of their own programs."""
 
 from __future__ import annotations
@@ -37,29 +37,29 @@ def test_a_group_is_filled_by_the_size_of_its_schedule_space() -> None:
 
 
 def _measured(golden: GoldenFile, head: Row, times: list[float], *, also: tuple[Row, ...] = ()) -> SearchDB:
-    """A DB instance holding a freeze of ``golden``'s card: ``head``'s kernel measured at one made-up schedule per
+    """A DB instance holding tunes on ``golden``'s card: ``head``'s kernel measured at one made-up schedule per
     time, and the rows ``also``."""
     rows = [
-        replace(head, name=f"freeze.{n}", knobs={**head.knobs, "WORK": f"w{n + 100}x1"}, measurements=Measurements(emmy_us=us))
+        replace(head, name=f"tune.{n}", knobs={**head.knobs, "WORK": f"w{n + 100}x1"}, measurements=Measurements(emmy_us=us))
         for n, us in enumerate(times)
     ]
-    freeze = GoldenFile(gpu_name=golden.gpu_name, compute_cap=golden.compute_cap, kernels=list(golden.kernels), rows=[*rows, *also])
+    tuned = GoldenFile(gpu_name=golden.gpu_name, compute_cap=golden.compute_cap, kernels=list(golden.kernels), rows=[*rows, *also])
     db = SearchDB()
-    import_rows(db, regime_context(freeze, head.pins), freeze, freeze.rows, source="freeze:test")
+    import_rows(db, regime_context(tuned, head.pins), tuned, tuned.rows, source="measured")
     return db
 
 
-def test_a_build_takes_a_spread_of_the_freeze_and_keeps_what_the_file_holds(monkeypatch) -> None:
-    """A group takes its target of the freeze's rows across their latency, never a schedule its golden holds; a second
+def test_a_build_takes_a_spread_of_the_measured_rows_and_keeps_what_the_file_holds(monkeypatch) -> None:
+    """A group takes its target of the DB's rows across their latency, never a schedule its golden holds; a second
     build keeps those rows and adds none; a row whose group the golden dropped goes."""
     golden = GoldenFile.load(_RECORDS_DIR / "rtx4080_sm89.json")
     monkeypatch.setattr(candidates, "space_size", lambda pool: 1287)
     wanted = target(1287)
     head = next(row for row in golden.rows if row.measured and row.knobs)
     own = replace(head, name="the golden's own schedule", measurements=Measurements(emmy_us=1.0))
-    freeze = _measured(golden, head, [float(us) for us in range(10, 40)], also=(own,))
+    db = _measured(golden, head, [float(us) for us in range(10, 40)], also=(own,))
 
-    document, report = build(golden, freeze)
+    document, report = build(golden, db)
     assert (document.programs, document.kernels, document.routing) == (golden.programs, golden.kernels, golden.routing)
     taken = [row.measurements.emmy_us for row in document.rows]
     assert len(taken) == wanted and taken[0] == 10.0 and taken[-1] == 39.0 and taken == sorted(taken)

@@ -1,9 +1,9 @@
 """Shared row builders for the search-package tests.
 
-The dicts here are PHYSICS-CALIBRATED against the freeze's plausibility predicates, which
-``freeze_reason`` composes: a row is kept or dropped by the same predicates every measured-pool
-reader applies, so these spellings must track the featurizer vocabulary and the GPU registry
-or the freeze suite silently stops exercising the real filter.
+The dicts here are PHYSICS-CALIBRATED against the admission rule's plausibility predicates, which
+``admission_reason`` composes: a row is kept or dropped by the same predicates every pool reader
+applies, so these spellings must track the featurizer vocabulary and the GPU registry or the
+admission tests silently stop exercising the real filter.
 """
 
 from __future__ import annotations

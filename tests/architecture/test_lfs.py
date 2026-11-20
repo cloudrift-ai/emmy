@@ -2,9 +2,8 @@
 payload.
 
 ``.gitattributes`` names the filter; only ``git lfs install`` wires it, on the machine that runs ``git add``. A
-freeze file a tune wrote on a rented card, copied back and added where the install never ran, would land in history
-as a plain blob — hundreds of kilobytes a clone carries forever, and a pull that LFS never serves. Git only, no GPU,
-no fixtures."""
+result archive copied back from a rented card and added where the install never ran would land in history as a plain
+blob — megabytes a clone carries forever, and a pull that LFS never serves. Git only, no GPU, no fixtures."""
 
 from __future__ import annotations
 

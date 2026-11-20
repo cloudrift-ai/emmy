@@ -39,8 +39,8 @@ Tables (the DDL is the reference):
   placement export walks the forks a deploy sees without re-opening the file. A compile never writes or reads it.
 - ``perf`` — one measurement per COMPILABLE kernel variant per context: the kernel, the sizes its symbolic
   dims were benched at (``bindings``, ``{}`` static), its schedule row, ``status``, the median of its timed
-  launches (``us``), a ``bench_fail`` row's ``error`` and ``source`` (``measured``, or the golden file or freeze
-  it was imported from, ``golden:<digest>`` / ``freeze:<digest>``). No route rows, no whole-slice totals, no
+  launches (``us``), a ``bench_fail`` row's ``error`` and ``source`` (``measured``, or the golden file or tune DB
+  it was imported from, ``golden:<digest>`` / ``tune:<digest>``). No route rows, no whole-slice totals, no
   kernel-set verdicts.
 - ``source`` — one row per import this instance holds: a golden-shaped file ``emmy db import`` read (under context
   ``0``), or the golden scope a compile imported under one context. What an import asks before it reads a file
@@ -68,7 +68,7 @@ import logging
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -361,15 +361,14 @@ class SearchDB:
         or mutates the file. The read methods work; any write raises (the connection is ``?mode=ro``).
         Raises ``sqlite3.OperationalError`` if the file is absent. A non-sqlite file fails HERE with a
         named reason (sqlite itself defers header validation to the first query, which would surface as a
-        bare ``DatabaseError`` deep inside a PRAGMA) — the foreseeable case being a measurement freeze
-        directory's file handed over by mistake. A file whose tables another emmy wrote is refused too: a
-        reader cannot re-create them."""
+        bare ``DatabaseError`` deep inside a PRAGMA) — the foreseeable case being a golden file handed over by
+        mistake. A file whose tables another emmy wrote is refused too: a reader cannot re-create them."""
         p = Path(path)
         if p.is_file():
             with p.open("rb") as fh:
                 magic = fh.read(16)
             if magic and magic != b"SQLite format 3\x00":  # empty file = valid empty DB
-                raise RuntimeError(f"{p} is not a sqlite database — a measurement freeze is read by `emmy db import`")
+                raise RuntimeError(f"{p} is not a sqlite database — a golden file is read by `emmy db import`")
         self = cls.__new__(cls)
         self._path = p
         self._conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
@@ -460,15 +459,9 @@ class SearchDB:
             yield RoutingRow(parent=parent, arm=json.loads(arm), children=tuple(children))
 
     def record_taken(self, ctx: Context, kernel: str, *, bindings: dict, arm: dict, source: str) -> None:
-        """Mark ``arm`` as a kernel-set decision ``source`` took on ``kernel`` under ``ctx`` at ``bindings``. A golden
-        file's decision stays the file's: a freeze repeating it never takes it over, as with a schedule row
-        (:meth:`record_perf`), since only a golden's decisions label the placement pools."""
+        """Mark ``arm`` as a kernel-set decision the golden ``source`` took on ``kernel`` under ``ctx`` at
+        ``bindings``: the label the placement pools read. Of two files that took it, the later import names it."""
         key = (self._context_of(ctx, create=True), kernel, knobs_json(bindings), row_text(arm))
-        existing = self._conn.execute(
-            "SELECT source FROM taken WHERE context = ? AND kernel = ? AND bindings = ? AND arm = ?", key
-        ).fetchone()
-        if existing is not None and existing[0].startswith("golden:") and source.startswith("freeze:"):
-            return
         self._conn.execute("INSERT OR REPLACE INTO taken (context, kernel, bindings, arm, source) VALUES (?, ?, ?, ?, ?)", (*key, source))
 
     def iter_taken(self) -> Iterator[tuple[str, int, str, dict, dict, bool, dict, str]]:
@@ -550,8 +543,8 @@ class SearchDB:
         wins: a schedule benched again takes the new number, faster or slower, and of two imports holding
         the same key the later one's row stays. Three rows are never replaced: a row measured here
         (``source`` ``measured``) by an imported one — the import is a cache fill, and the local row is the
-        one copy of what this machine measured; a golden file's row by a freeze's — the golden readers read
-        ``golden:`` rows alone, so a freeze repeating a golden's schedule would otherwise take the pool out
+        one copy of what this machine measured; a golden file's row by a tune DB's — the golden readers read
+        ``golden:`` rows alone, so a tune repeating a golden's schedule would otherwise take the pool out
         of the fit; and a clean row by a ``bench_fail`` — a failure is a flag, not a measurement. The kernel
         must be a ``kernel`` row already. The row's ``precision`` enters as the regime it spells, every
         decision written (``space.precision_pins``)."""
@@ -566,8 +559,8 @@ class SearchDB:
             prev_status, prev_source = existing
             if prev_source == "measured" and row.source != "measured":
                 return  # an import never replaces a measurement taken here
-            if prev_source.startswith("golden:") and row.source.startswith("freeze:"):
-                return  # a golden file's row is the file's; a freeze repeating its schedule never displaces it
+            if prev_source.startswith("golden:") and row.source.startswith("tune:"):
+                return  # a golden file's row is the file's; a tune DB repeating its schedule never displaces it
             if prev_status == "ok" and row.status != "ok":
                 return  # a failure never replaces a clean measurement
         self._conn.execute(
@@ -578,6 +571,21 @@ class SearchDB:
     # ------------------------------------------------------------------
     # Imports
     # ------------------------------------------------------------------
+
+    def import_measured(self, other: SearchDB, source: str) -> int:
+        """File under ``source`` the rows the instance ``other`` measured itself — a tune DB's ``measured`` rows; one
+        it imported from a golden file is the file's — each with its kernel's definition, and note the import
+        (:meth:`record_source`). The rows keep the keys ``other`` filed them under: both instances are of one
+        version. Returns the rows written."""
+        kernels = {kernel.exact_identity: kernel for kernel in other.iter_kernels()}
+        written = 0
+        for row in other.iter_perf_rows(backend=None):
+            if row.source == "measured":
+                self.record_kernel(kernels[row.kernel])
+                self.record_perf_row(replace(row, source=source))
+                written += 1
+        self.record_source(source)
+        return written
 
     def record_source(self, name: str, ctx: Context | None = None) -> None:
         """Note that this instance holds the import ``name``: a golden-shaped file the import has read, whatever

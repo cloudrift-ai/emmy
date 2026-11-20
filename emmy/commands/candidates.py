@@ -1,8 +1,9 @@
 """``emmy candidates {build,check,restamp,realize}`` — the candidate files: a few measured schedules that are not the
 best known one, for each group a hardware golden holds (``search/candidates``).
 
-``build`` fills each hardware golden's candidate file from the measurement freeze of the same card, keeping the rows
-the file already holds, and says which groups are still under their target — what a tune on the card must fill.
+``build`` fills each hardware golden's candidate file from the measurements a DB instance holds on the same card —
+the tune DB of the machine the tunes ran on — keeping the rows the file already holds, and says which groups are still
+under their target: what a tune on the card must fill.
 ``check``, ``restamp`` and ``realize`` are ``emmy golden``'s, over the candidate files: a candidate file is in the
 golden file format and carries its golden's programs, so it is checked against a fresh lowering, restamped onto it and
 pruned of the rows the compiler no longer realizes exactly as a golden is. All four are GPU-free.
@@ -26,9 +27,9 @@ def register_candidates_command(subparsers) -> None:
     sub = parser.add_subparsers(dest="candidates_target", required=True)
     files = "Candidate files, or directories searched for them. Default: every repository candidate file."
 
-    pb = sub.add_parser("build", help="Fill each hardware golden's candidate file from the measurement freeze of its card")
+    pb = sub.add_parser("build", help="Fill each hardware golden's candidate file from the measurements a DB holds on its card")
     pb.add_argument("goldens", nargs="*", help="Hardware goldens to build candidate files for. Default: every hardware golden.")
-    pb.add_argument("--freeze", help="Measurement freeze directory the candidates are taken from. Default: the repository freeze.")
+    pb.add_argument("--db", required=True, help="DB instance the candidates are taken from: the tune DB the card's tunes wrote.")
     pb.add_argument("--out", help="Directory the candidate files are written to. Default: the repository's candidate files.")
     pb.set_defaults(func=handle_candidates_build)
 
@@ -62,22 +63,19 @@ def _over_candidates(handler):
 
 
 def handle_candidates_build(args) -> None:
+    from emmy.commands.db import db_path  # noqa: PLC0415
     from emmy.compiler.pipeline.search.candidates import RECORDS, build  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db.freeze import REPOSITORY_FREEZE  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GoldenFile, file_source, import_file  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.repository import hardware_golden_paths  # noqa: PLC0415
 
     goldens = [Path(path).expanduser() for path in args.goldens] or hardware_golden_paths()
     out = Path(args.out).expanduser() if args.out else RECORDS
-    # The freeze as a DB instance, a file's rows read in name order so a later tune's row stands at one schedule.
-    db = SearchDB()
-    for path in sorted((Path(args.freeze).expanduser() if args.freeze else REPOSITORY_FREEZE).glob("*.json")):
-        try:
-            import_file(db, path, file_source("freeze", path))
-        except ValueError as exc:
-            logger.error("%s", exc)
-            sys.exit(2)
+    try:
+        db = SearchDB.open_readonly(db_path(args.db))
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        sys.exit(2)
     for path in goldens:
         golden = GoldenFile.load(path)
         target = out / path.name
