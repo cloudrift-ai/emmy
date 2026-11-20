@@ -150,8 +150,9 @@ def test_the_masked_form_computes_what_the_range_means(text: str, expected) -> N
 
 def test_a_block_of_a_split_walks_the_part_of_the_folds_range_inside_it(monkeypatch) -> None:
     """A block of a cross-CTA split walks ``length * block .. length * (block + 1)``, and a fold that walked a range
-    before the split walks what the two share. A tier leaves from the block's start and masks at the fold's own
-    end. The partial and the finalize, run in order on the Loop IR runner, compute the masked product."""
+    before the split walks what the two share. The schedule addresses the block from zero, with what the fold's own
+    end leaves of it as the range. The partial and the finalize, run in order on the Loop IR runner, compute the
+    masked product."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.loop.runner import execute_loop_op_cpp  # noqa: PLC0415
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
@@ -164,7 +165,8 @@ def test_a_block_of_a_split_walks_the_part_of_the_folds_range_inside_it(monkeypa
     run = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0)))
     out, _ = run.resolve(_graph(text, shapes, (16, 16)), lambda fork: next(fork.leaves()))
     assert {"O", "O__partial"} <= set(out.nodes)
-    assert "32 * a0 + a3 < 4 * a1 + 4" in str(out.nodes["O__partial"].op.loop_body), "the fold's own end, read from the block's start"
+    piece = str(out.nodes["O__partial"].op.loop_body)
+    assert "for a3 in 0..minimum(32, 4 * a1 - 32 * a0 + 4) of 32" in piece and "load X[a1, 32 * a0 + a3]" in piece
     env = _data(shapes)
     for nid in out.topological_order():
         node = out.nodes[nid]
@@ -230,27 +232,35 @@ def test_an_attention_folds_each_rows_keys_over_a_range(queries: int, keys: int,
     np.testing.assert_allclose(got, _masked_attention(data, keep), rtol=1e-4, atol=1e-4)
 
 
-def test_a_tier_reads_a_carriers_range_or_takes_its_mask() -> None:
-    """The lowering takes a kernel with each carrier's range left on it. A scalar walk opens its loop over the
-    range, so it takes the range's trips and masks nothing. A cooperative reduce strides every position of its axis:
-    it says so, and the kernel is lowered from its masked form instead."""
+def test_a_tier_reads_a_range_or_takes_its_mask() -> None:
+    """The schedule addresses a kernel with each range left on its term, and the lowering takes it so. A scalar walk
+    opens its loop over the range: it takes the range's trips and masks nothing, for an attention's carrier and for
+    a plain sum alike. A cooperative reduce strides every position of its axis: it says so, and the kernel is
+    lowered from its masked form instead."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.stmt import StridedLoop, pretty_body  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from tests.compiler.helpers import compile_with_kernels, statements  # noqa: PLC0415
 
-    def lowered(**pins):
+    def lowered(graph: Graph, **pins):
         with pinned_knobs({"PLACE": "fuse", "TILE": "", "STAGE": "", **pins}):
-            _, kernels = compile_with_kernels(_attention(16, 16, is_causal=True), ctx=Context.from_target((12, 0)), db=None)
+            _, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)), db=None)
         (kernel,) = kernels.values()
         return kernel, "\n".join(pretty_body(kernel.body))
 
-    scalar, text = lowered(WORK="", REDUCE="")
-    (walk,) = [loop for loop in statements(scalar, StridedLoop) if loop.end is not None]
-    assert (str(walk.start), str(walk.step), str(walk.end)) == ("0", "1", "a1 + 1")
+    def walks(kernel) -> list[tuple[str, str, str]]:
+        return [(str(loop.start), str(loop.step), str(loop.end)) for loop in statements(kernel, StridedLoop) if loop.end is not None]
+
+    attention = _attention(16, 16, is_causal=True)
+    scalar, text = lowered(attention, WORK="", REDUCE="")
+    assert walks(scalar) == [("0", "1", "a1 + 1")]
     assert "where(" not in text and "select" not in text
 
-    _, text = lowered(WORK="t32", REDUCE="coop")
+    triangle, text = lowered(_graph(MASKED, {"X": (8, 8), "Y": (8, 8)}, (8, 8)), WORK="", REDUCE="")
+    assert walks(triangle) == [("0", "1", "a0 + 1")]
+    assert "select" not in text
+
+    _, text = lowered(attention, WORK="t32", REDUCE="coop")
     assert "where(" in text, "the mask the range stands for"
 
 

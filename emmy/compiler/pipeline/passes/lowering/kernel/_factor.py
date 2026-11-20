@@ -575,8 +575,10 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         if below and ctx.sched.get("STAGE", site.node) is not None:
             raise UnbindableProjection(f"lowering of {root_site.path} cannot realize STAGE at {site.path}")
     if tiled:
-        # Of the tiled tiers the chunk tier alone reads a range: its key bounds and the mask of the block a bound cuts.
-        if _ranged(c) and not (tile.is_warp and c.chunked() and c.range is not None):
+        # Of the tiled tiers the chunk tier alone reads a range, and only its carrier's: the key bounds and the mask of
+        # the block a bound cuts.
+        chunk = tile.is_warp and c.chunked() and not any(_ranged(edge) for edge in c.operands)
+        if _ranged(c) and not chunk:
             raise NeedsMask(f"the tiled lowering of {root_site.path} folds every position of its axis")
         epi = list(tail)
         if not has_write(epi):
