@@ -16,7 +16,8 @@ commit away from the repository. No compile ever reads it, so what is imported i
 - ``export OUT`` writes the instance's rows as a dataset directory (``search/dataset``): every golden pool
   enumerated from its kernel's definition and packed, every measured pool, and the provenance; the placement space
   reads the constants the import filed beside the rows, so it opens no golden file. ``emmy fit`` and ``emmy eval
-  prior`` read the dataset directory, never the DB.
+  prior`` read the dataset directory, never the DB. The export's timing (``search/progress``) goes to
+  ``timing.json`` beside the manifest, which carries no clock.
 - ``check`` counts the rows of an instance whose tables disagree with themselves (a reference, a card). A DB is a
   cache: a row the current code disagrees with is benched or imported again, so nothing here decodes what the
   compiler wrote.
