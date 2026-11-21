@@ -1719,11 +1719,11 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     card, in-domain inputs against the NumPy reference of post8's traced program: the new kernel set and main's both
     within one fp16 step of it. GSM8K 0.969 (main rounds 0.969-0.984); acceptance 28, 27, 28, 26, 27, 28 of 28, the
     same two known failures as main (an empty answer in think mode, and the reasoning-off case); long-document lookups
-    LONGDOC. Greedy texts: main's two boots agree on 6 of 6, the branch's two agree on 6 of 6, and the branch equals
-    main on 3 of 6: the routed sum and post8's products add in another order. Memory, same probe on both sides: torch
-    peaks 26.75 GB allocated on both, 28.94 GB reserved on main and 28.61 GB here; 768 MiB spare per card here against
-    346-370 on main, the allocator-timing flip of earlier rounds. CI's full suite passes. The prior gate does not hold
-    this recipe.
+    339 of 339 exact without thinking and 336 of 336 with it. Greedy texts: main's two boots agree on 6 of 6, the
+    branch's two agree on 6 of 6, and the branch equals main on 3 of 6: the routed sum and post8's products add in
+    another order. Memory, same probe on both sides: torch peaks 26.75 GB allocated on both, 28.94 GB reserved on main
+    and 28.61 GB here; 768 MiB spare per card here against 346-370 on main, the allocator-timing flip of earlier
+    rounds. CI's full suite passes. The prior gate does not hold this recipe.
   - Regressions: none measured in serving. Three of six greedy texts part from main's. The record re-timed two rows of
     kernels pre8 shares with post8; both are back at main's values.
   - Left for a compiler round, each measured here: the workspace order of a product cut from a sum over a gathered
