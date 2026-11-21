@@ -4,7 +4,8 @@ An atom is the smallest cell a contraction tiles four
 ways (GRID / UNIT / REGISTER / ATOM). Two kinds, one interface (``shape`` + :attr:`lanes`):
 
 - :class:`AtomKind` — a tensor-core ``mma.sync`` cell: a fixed ``(m, n, k)`` shape, per-operand
-  dtypes (``a``/``b`` the f16/bf16 multiplicands, ``c`` the accumulator — f32, or f16 on the
+  dtypes (``a``/``b`` the multiplicands — halves, 8-bit floats, or f32 values read as TF32 — and ``c`` the
+  accumulator — f32, or f16 on the
   ``..._f16_f16`` variant that runs the full-rate HMMA pipe with a chunked f32 register promotion
   in the lowering), and ``lanes == 32`` (the warp that executes one mma cooperatively — its 32
   lanes hold the fixed PTX fragment layout). The Hopper ``wgmma`` cell is the same 16x8 warp
@@ -37,7 +38,7 @@ from emmy.emmy_ir import fragment_table
 
 # Canonical dtype token → the PTX instruction's dtype field, where they differ. The mma wrapper
 # names (``emmy_mma_m16n8k32_e4m3_f32``) and the atom-name convention both spell the PTX token.
-_PTX_DTYPE: dict[str, str] = {"f8e4m3": "e4m3", "f8e5m2": "e5m2", "f4e2m1x2": "e2m1"}
+_PTX_DTYPE: dict[str, str] = {"f8e4m3": "e4m3", "f8e5m2": "e5m2", "f4e2m1x2": "e2m1", "f32": "tf32"}
 
 
 @dataclass(frozen=True)
@@ -267,6 +268,12 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
         (("a", F4E2M1x2), ("b", F4E2M1x2), ("c", F32)),
         target_feature="has_block_scaled_f4_mma",
     ),
+    # The TF32 cell: both multiplicands are f32 values, one to a 32-bit fragment register, which the instruction
+    # reads at ten bits of mantissa over f32's whole exponent range (``mma.sync.aligned.m16n8k8.row.col.f32.tf32.
+    # tf32.f32``, sm_80 and later). A register pair spans eight columns, so K is 8 where a pair of halves makes it
+    # 16. The product of two f32 operands otherwise has no tensor-core cell and runs on the scalar tier. It trades
+    # precision, so enumeration is gated (``TF32_MMA`` / ``FAST_MATH``). Appended last so no option-0 pick moves.
+    "mma_m16n8k8_tf32_f32": AtomKind("mma_m16n8k8_tf32_f32", (16, 8, 8), (("a", F32), ("b", F32), ("c", F32))),
 }
 
 

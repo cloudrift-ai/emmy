@@ -1647,13 +1647,14 @@ kernel's structural features (statement/op histogram + loop extents + operand dt
 (`features.stamps`); `H_*` the card and regime (`Context.features`). Neither is written onto an op: an op's knobs
 hold decisions only, every key a registered knob (Part 6).
 
-**`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP` / `FAST_DIV` / `FAST_SQRT` / `FLUSH_TO_ZERO` /
-`CONTRACT_FMA`** (BOOL, pin-only precision restrictions) — the **precision-trading family**. Precedence per knob: its
+**`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `TF32_MMA` / `FAST_EXP` / `FAST_DIV` / `FAST_SQRT` /
+`FLUSH_TO_ZERO` / `CONTRACT_FMA`** (BOOL, pin-only precision restrictions) — the **precision-trading family**. Precedence per knob: its
 own pin > the `FAST_MATH` umbrella > true (`space.precision_pin`); `CONTRACT_FMA` alone keeps its own default, on in
 both regimes, so only its own pin turns contraction off (`space.precision_default`). `F16_MMA_F32_ACC`
 admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32 register promote), while
-`FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable context excludes those
-choices while composing its lazy frontier.
+`FP8_MMA` admits its native fp8 atoms and `TF32_MMA` the TF32 atom of a product of two f32 operands
+(`mma_m16n8k8_tf32_f32`, each operand rounded to ten bits of mantissa), which otherwise runs on the scalar tier.
+Without the effective gate, Algorithm 1's immutable context excludes those choices while composing its lazy frontier.
 The other five are one knob per instruction class, each picking the instruction its class compiles to.
 `FAST_EXP` swaps the exact exponential for the approximate one (`lowering/kernel/130_approximate_math`); `FAST_DIV`
 picks approximate division and reciprocal, and is the one home of multiplying by a reciprocal

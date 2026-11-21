@@ -73,6 +73,9 @@ pub enum Ty {
     E4m3,
     E5m2,
     E2m1,
+    /// A 32-bit float read at 10 bits of mantissa: the operand type of the TF32 tensor-core product, and what a
+    /// `cvt.rna` rounds a float to. A register holds one as the 32 bits of the float it is.
+    Tf32,
     /// Two 8-bit floats in 16 bits: the source of a packed conversion to two halves, or its result from two f32.
     E4m3x2,
     E5m2x2,
@@ -103,6 +106,7 @@ impl Ty {
             Ty::E5m2x2 => "e5m2x2",
             Ty::E5m2 => "e5m2",
             Ty::E2m1 => "e2m1",
+            Ty::Tf32 => "tf32",
         }
     }
 
@@ -113,7 +117,7 @@ impl Ty {
             Ty::Pred => Bank::Pred,
             Ty::B16 | Ty::U16 | Ty::S16 | Ty::F16 | Ty::Bf16 | Ty::E4m3x2 | Ty::E5m2x2 => Bank::B16,
             Ty::B32 | Ty::U8 | Ty::S32 | Ty::U32 | Ty::F16x2 | Ty::Bf16x2 => Bank::B32,
-            Ty::E4m3 | Ty::E5m2 | Ty::E2m1 => Bank::B32,
+            Ty::E4m3 | Ty::E5m2 | Ty::E2m1 | Ty::Tf32 => Bank::B32,
             Ty::B64 | Ty::S64 | Ty::U64 | Ty::F64 => Bank::B64,
             Ty::F32 => Bank::F32,
         }
@@ -128,7 +132,7 @@ impl Ty {
         match self {
             Ty::Pred | Ty::U8 | Ty::E4m3 | Ty::E5m2 | Ty::E2m1 => 1,
             Ty::B16 | Ty::U16 | Ty::S16 | Ty::F16 | Ty::Bf16 | Ty::E4m3x2 | Ty::E5m2x2 => 2,
-            Ty::B32 | Ty::S32 | Ty::U32 | Ty::F32 | Ty::F16x2 | Ty::Bf16x2 => 4,
+            Ty::B32 | Ty::S32 | Ty::U32 | Ty::F32 | Ty::F16x2 | Ty::Bf16x2 | Ty::Tf32 => 4,
             Ty::B64 | Ty::S64 | Ty::U64 | Ty::F64 => 8,
         }
     }
@@ -180,6 +184,8 @@ impl Cmp {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Round {
     Rn,
+    /// To the nearest, a tie away from zero: the one rounding a conversion to TF32 has.
+    Rna,
     Rm,
     Rni,
     Rzi,
@@ -192,6 +198,7 @@ impl Round {
     pub fn text(self) -> &'static str {
         match self {
             Round::Rn => "rn",
+            Round::Rna => "rna",
             Round::Rm => "rm",
             Round::Rni => "rni",
             Round::Rzi => "rzi",
@@ -260,6 +267,7 @@ impl Cache {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum MmaShape {
     M8n8k4,
+    M16n8k8,
     M16n8k16,
     M16n8k32,
     M16n8k64,
@@ -269,6 +277,7 @@ impl MmaShape {
     pub fn text(self) -> &'static str {
         match self {
             MmaShape::M8n8k4 => "m8n8k4",
+            MmaShape::M16n8k8 => "m16n8k8",
             MmaShape::M16n8k16 => "m16n8k16",
             MmaShape::M16n8k32 => "m16n8k32",
             MmaShape::M16n8k64 => "m16n8k64",

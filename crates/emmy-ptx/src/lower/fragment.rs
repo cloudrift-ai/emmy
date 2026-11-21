@@ -45,6 +45,13 @@ const FRAGMENT_COLUMN: &str = "__fcol";
 const ELEMENT_ROW: &str = "__M__";
 const ELEMENT_COLUMN: &str = "__N__";
 
+const TF32_ROUNDING: Needs = Needs {
+    what: "a rounding of a 32-bit float to TF32 (`cvt.rna.tf32.f32`)",
+    sm: 80..=SM_LAST,
+    arch_specific: false,
+    version: (7, 0),
+};
+
 pub(super) const F8_CONVERSION: Needs = Needs {
     what: "a conversion of 8-bit floats (`cvt` with `e4m3x2`)",
     sm: SM_ADA..=SM_LAST,
@@ -428,11 +435,31 @@ impl Lowerer {
         }
     }
 
+    /// One register of an operand fragment ([`Lowerer::gather_bits`]). A 32-bit float is then rounded to the ten
+    /// bits of mantissa the TF32 product reads: the instruction itself drops the low bits, which makes every
+    /// product a little small, and a dot product does not average that away.
+    fn gather_register(
+        &mut self,
+        reg: Reg,
+        name: Name,
+        elements: &[(Expression, Option<Expression>)],
+        types: (DType, DType),
+        ctx: &SimplifyCtx,
+    ) -> Result<()> {
+        self.gather_bits(reg, name, elements, types, ctx)?;
+        if types.1 == DType::F32 {
+            self.requires(&TF32_ROUNDING)?;
+            let round = Inst::new(Opcode::Cvt(Ty::F32), Ty::Tf32, vec![reg], vec![reg.into()]);
+            self.b.emit(round.rounded(Round::Rna));
+        }
+        Ok(())
+    }
+
     /// One register of a fragment from the elements at `elements`, each an index into `name` and the guard it is
     /// read under. Elements that stand in memory as the register holds them, in a row and proven aligned, are
     /// one 32-bit load; two 8-bit floats in a row are one 16-bit load and one packed conversion where the card
     /// has it. Any other register is a load an element, each converted, then packed.
-    fn gather_register(
+    fn gather_bits(
         &mut self,
         reg: Reg,
         name: Name,
@@ -509,9 +536,11 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Define `reg` as `parts`, the lowest first: two halves by one move, bytes by shifts and sums.
+    /// Define `reg` as `parts`, the lowest first: one 32-bit element as it is, two halves by one move, bytes by
+    /// shifts and sums.
     fn pack_into(&mut self, reg: Reg, parts: &[Reg]) {
         let packed = match parts {
+            [whole] => (*whole).into(),
             [low, high] => Operand::Tuple(vec![*low, *high]),
             parts => self.pack(parts).into(),
         };

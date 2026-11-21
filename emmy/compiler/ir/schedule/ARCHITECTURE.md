@@ -316,8 +316,9 @@ in the enumeration where a pin is decided across sites rather than at one. Readi
 it unsatisfiable on exactly the kernels that need it most: attention spells `TILE` at its score contraction and at
 its chunked value channel, and no schedule carries one mma tile at both.
 
-The precision policy (`allow_f16_accumulate`, `allow_fp8`) filters the CATALOG: an f16-accumulate or FP8 atom is
-offered unpinned only where the compile allowed it. A hand pin naming such a tile is an authored, legal choice and
+The precision policy (`allow_f16_accumulate`, `allow_fp8`, `allow_tf32`) filters the CATALOG: an f16-accumulate, FP8
+or TF32 atom is offered unpinned only where the compile allowed it. The TF32 atom is the cell of a product whose
+operands are all f32; an f32 operand beside a 16-bit one keeps the 16-bit cell that converts it. A hand pin naming such a tile is an authored, legal choice and
 bypasses the policy; a row a descent follows (`with_row` — measured evidence) does not, so an FP16-accumulate row
 recorded or measured in the standard lane cannot deploy there. Likewise a transposed raster (`gn4`, `gn8`) is never the catalog's own offer and is taken only
 where a row names it.

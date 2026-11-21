@@ -300,10 +300,10 @@ def _staged_load(
     **gather,
 ) -> Statement:
     """The drain of one fragment from a staged slab: one ``ldmatrix`` where the instruction applies (a slab of
-    16-bit elements read by a fragment of the m16n8k16 layout), else the gather element by element (a slab of bytes,
-    which ``ldmatrix`` has no form for, and Volta, which has no ``ldmatrix``). ``gather`` holds what only the gather
-    reads: the companion slab of block scales and the fragment's register cell."""
-    if byte_slab or atom.fragment_layout == "m8n8k4":
+    16-bit elements read by a fragment of the m16n8k16 layout), else the gather element by element (a slab of bytes
+    or of 32-bit floats, which ``ldmatrix`` has no form for, and Volta, which has no ``ldmatrix``). ``gather`` holds
+    what only the gather reads: the companion slab of block scales and the fragment's register cell."""
+    if byte_slab or atom.fragment_layout == "m8n8k4" or atom.operand_dtype(role).nbytes == 4:
         return FragmentLoad(
             frag=frag,
             src_buffer=src_buffer,
@@ -2308,8 +2308,8 @@ class _MmaOps(_AtomOps):
     def slab_swizzle(self, inner: int, nbytes: int) -> str:
         """One slab's swizzle mode from its inner (contiguous) row span — the reading
         :meth:`slab_swizzles` applies to A and B, and the chunk tier to each of its two streams."""
-        if nbytes == 1:
-            return "NONE"  # the byte gather reads an ordinary padded row
+        if nbytes in (1, 4):
+            return "NONE"  # the gather of bytes, and of 32-bit floats, reads an ordinary padded row
         # A TMA slab keeps the hardware spelling (the copy engine fixes its permutation, and the
         # descriptor splits its box down to the atom); every other transport writes the slab in
         # software, so its XOR reads the row index at the slab's OWN stride.
