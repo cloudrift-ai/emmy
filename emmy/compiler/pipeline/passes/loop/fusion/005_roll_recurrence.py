@@ -204,6 +204,43 @@ def _stateful(graph: Graph, region: set[str], state: str) -> set[str]:
     return found
 
 
+def _readers(graph: Graph, regions: list[set[str]], states: list[str], chain: list[Node]) -> list[set[str]]:
+    """What each step's own readers add to its region: every node outside the steps that reads the state the step
+    starts from, or a value the step computes from it, and nothing of another step, with what such a node reads
+    that no other step's readers read.
+
+    The rolled kernel computes such a reader in the step, from the state it holds. Left outside, the reader takes
+    its state from a store of every step, which the kernel then has to write. A node that reads two steps (the
+    stack of every step's output) reads those stores, and so does a reader of the state the chain ends with, which
+    no step starts from."""
+    step: dict[str, int | None] = {chain[-1].id: None}
+    for index, (region, state) in enumerate(zip(regions, states, strict=True)):
+        step.setdefault(state, index)
+        step.update((node_id, index) for node_id in _stateful(graph, region, state) if node_id != chain[index].id)
+    taken = set().union(*regions)
+    readers: list[set[str]] = [set() for _ in regions]
+    for node_id in graph.topological_order():
+        if node_id in step or node_id in taken:
+            continue
+        producers = (graph.producer(name) for name in graph.nodes[node_id].inputs)
+        read = {step[producer.id] for producer in producers if producer is not None and producer.id in step}
+        if read:
+            step[node_id] = next(iter(read)) if len(read) == 1 else None
+            if step[node_id] is not None:
+                readers[step[node_id]].add(node_id)
+    beside = [
+        set().union(*(_ancestors(graph, node_id) for node_id in found)) - _ancestors(graph, state) - taken
+        for found, state in zip(readers, states, strict=True)
+    ]
+    # What the readers of two steps both read is read at every step: an input of the body, as the step's own are.
+    seen: set[str] = set()
+    shared: set[str] = set()
+    for nodes in beside:
+        shared |= nodes & seen
+        seen |= nodes
+    return [nodes - shared for nodes in beside]
+
+
 def _spliced(graph: Graph, region: set[str], state: str, stored: str) -> tuple[Body, tuple[str, ...], tuple[tuple[str, object], ...]]:
     """The step as ONE body under step-independent buffer names, the buffers it keeps — the state
     it stores first, then whatever else of the recurrence is read outside the step — and the
@@ -277,8 +314,10 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
 
 def _spelling(body: Body) -> tuple[str, tuple[str, ...]]:
     """What two steps must agree on to be one computation: the body's structure, blind to the names
-    of values and axes and to the order of commutative operands, and the buffers it reads, in order."""
-    return body.structural_key(structural=False), tuple(load.input for load in body.loads)
+    of values and axes and to the order of commutative operands, and the buffer that fills each of its roles.
+    The order its loads stand in is no part of it: a product may spell its two reads either way round."""
+    identity = body.identity(structural=False)
+    return identity.key, tuple(identity.arguments)
 
 
 def _rolled(step: Body, steps: int, seed: float | str, every: bool) -> Body:
@@ -333,9 +372,23 @@ def rewrite(match: Match, first: Node) -> Graph:
 
 
 def _roll(match: Match, chain: list[Node]) -> Graph:
-    graph = match.graph
-    regions, states, shared, count = _steps(graph, chain)
+    regions, states, _, count = _steps(match.graph, chain)
     chain = chain[:count]
+    readers = _readers(match.graph, regions, states, chain)
+    if any(readers):
+        # Each step with its own readers, where those are one body at a stride as the steps are; else the steps
+        # alone, and every reader takes its state from a store.
+        try:
+            return _replaced(match, chain, [region | read for region, read in zip(regions, readers, strict=True)], states)
+        except RuleSkipped:
+            pass
+    return _replaced(match, chain, regions, states)
+
+
+def _replaced(match: Match, chain: list[Node], regions: list[set[str]], states: list[str]) -> Graph:
+    """The fragment that replaces the chain: one kernel that carries the state over ``regions``, one a step, and a
+    slice of its stores for each buffer of a step that is read outside."""
+    graph = match.graph
     # A step is loops and the leaves they read — a constant, an input first read there — which the
     # splicer reads as external inputs of the merged body; anything else is not a step.
     if len(regions) < 2 or not all(
