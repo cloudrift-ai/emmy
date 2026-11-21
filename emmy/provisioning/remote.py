@@ -16,6 +16,46 @@ logger = logging.getLogger(__name__)
 # What the proxy check fetches: any HTTP status back (401 without credentials) proves the proxy forwards to it.
 REGISTRY_PROBE = "https://registry-1.docker.io/v2/"
 
+# Install commands, run as root. Shared with the boot script (`emmy.deploy.boot_script`), which runs
+# them on a VM that sets itself up instead of being provisioned over SSH.
+DOCKER_INSTALL = "curl -fsSL https://get.docker.com | sh"
+NVIDIA_CONTAINER_TOOLKIT_INSTALL = (
+    "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey"
+    " | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+    " && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list"
+    " | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g'"
+    " > /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+    " && apt-get update"
+    " && apt-get install -y nvidia-container-toolkit"
+    " && nvidia-ctk runtime configure --runtime=docker"
+    " && systemctl restart docker"
+)
+# Detects the Ubuntu version (e.g. "24.04" → "ubuntu2404") to pick NVIDIA's per-release CUDA apt repo.
+NVIDIA_CUDA_REPO_SETUP = (
+    "set -e; "
+    ". /etc/os-release; "
+    'distro="ubuntu$(echo "$VERSION_ID" | tr -d .)"; '
+    'arch="$(dpkg --print-architecture)"; '
+    'case "$arch" in amd64) cuda_arch=x86_64;; arm64) cuda_arch=sbsa;; *) echo "unsupported arch $arch" >&2; exit 1;; esac; '
+    'base="https://developer.download.nvidia.com/compute/cuda/repos/${distro}/${cuda_arch}"; '
+    "if [ ! -f /usr/share/keyrings/cuda-archive-keyring.gpg ]; then "
+    '  tmp="$(mktemp)"; '
+    '  curl -fsSL "${base}/cuda-keyring_1.1-1_all.deb" -o "$tmp"; '
+    '  dpkg -i "$tmp"; rm -f "$tmp"; '
+    "fi; "
+    "apt-get update"
+)
+# Needs `set -e`, the CUDA repo and the running driver's version in the shell variable `driver`. Ubuntu's archive
+# and NVIDIA's cuda repo use different revision suffixes ("-1", "-1ubuntu1", "-0ubuntu0.24.04.1"), so it resolves
+# the packaged version that matches the driver instead of guessing one.
+FABRIC_MANAGER_INSTALL = (
+    "ver=$(apt-cache madison nvidia-fabricmanager | cut -d'|' -f2 | tr -d ' ' "
+    '| grep -m1 "^${driver}-" || true); '
+    'if [ -z "$ver" ]; then echo "no nvidia-fabricmanager package matching driver $driver" >&2; exit 1; fi; '
+    'DEBIAN_FRONTEND=noninteractive apt-get install -y "nvidia-fabricmanager=$ver"; '
+    "systemctl enable --now nvidia-fabricmanager"
+)
+
 
 async def provision_remote(
     host: Host,
@@ -48,7 +88,7 @@ async def provision_remote(
         rc, _ = await host.run("command -v docker", capture=True)
         if rc != 0:
             logger.info(f"{host.name}: installing Docker...")
-            await host.run("curl -fsSL https://get.docker.com | sh", sudo=True)
+            await host.run(DOCKER_INSTALL, sudo=True)
 
     # 3. Docker daemon proxy, before the first pull
     if host.proxy:
@@ -72,18 +112,7 @@ async def provision_remote(
         rc, _ = await host.run("command -v nvidia-ctk", capture=True)
         if rc != 0:
             logger.info(f"{host.name}: installing NVIDIA Container Toolkit...")
-            await host.run(
-                "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey"
-                " | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
-                " && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list"
-                " | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g'"
-                " > /etc/apt/sources.list.d/nvidia-container-toolkit.list"
-                " && apt-get update"
-                " && apt-get install -y nvidia-container-toolkit"
-                " && nvidia-ctk runtime configure --runtime=docker"
-                " && systemctl restart docker",
-                sudo=True,
-            )
+            await host.run(NVIDIA_CONTAINER_TOOLKIT_INSTALL, sudo=True)
 
     # 6. Add user to docker group
     await host.run("groups | grep -q docker || sudo usermod -aG docker $(whoami)")
@@ -240,18 +269,7 @@ async def _ensure_fabric_manager(host: Host) -> None:
 
     logger.info(f"{host.name}: NVSwitch host detected, installing Fabric Manager {driver}")
     await _setup_nvidia_cuda_repo(host)
-    # Ubuntu's archive and NVIDIA's cuda repo use different revision suffixes
-    # ("-1", "-1ubuntu1", "-0ubuntu0.24.04.1"), so resolve the packaged version
-    # that matches this driver instead of guessing one.
-    script = (
-        "set -e; "
-        f'driver="{driver}"; '
-        "ver=$(apt-cache madison nvidia-fabricmanager | cut -d'|' -f2 | tr -d ' ' "
-        '| grep -m1 "^${driver}-" || true); '
-        'if [ -z "$ver" ]; then echo "no nvidia-fabricmanager package matching driver $driver" >&2; exit 1; fi; '
-        'DEBIAN_FRONTEND=noninteractive apt-get install -y "nvidia-fabricmanager=$ver"; '
-        "systemctl enable --now nvidia-fabricmanager"
-    )
+    script = f'set -e; driver="{driver}"; {FABRIC_MANAGER_INSTALL}'
     rc, out = await host.run(script, sudo=True, timeout=900, capture=True)
     if rc != 0:
         tail = "\n".join(out.splitlines()[-20:]) if out else ""
@@ -366,22 +384,7 @@ async def _setup_nvidia_cuda_repo(host: Host) -> None:
     (``cuda-drivers-<branch>``, ``cuda-toolkit-X-Y``).
     """
     logger.info(f"{host.name}: setting up NVIDIA CUDA apt repo")
-    # Detect Ubuntu version → e.g. "24.04" → "ubuntu2404"
-    script = (
-        "set -e; "
-        ". /etc/os-release; "
-        'distro="ubuntu$(echo "$VERSION_ID" | tr -d .)"; '
-        'arch="$(dpkg --print-architecture)"; '
-        'case "$arch" in amd64) cuda_arch=x86_64;; arm64) cuda_arch=sbsa;; *) echo "unsupported arch $arch" >&2; exit 1;; esac; '
-        'base="https://developer.download.nvidia.com/compute/cuda/repos/${distro}/${cuda_arch}"; '
-        "if [ ! -f /usr/share/keyrings/cuda-archive-keyring.gpg ]; then "
-        '  tmp="$(mktemp)"; '
-        '  curl -fsSL "${base}/cuda-keyring_1.1-1_all.deb" -o "$tmp"; '
-        '  dpkg -i "$tmp"; rm -f "$tmp"; '
-        "fi; "
-        "apt-get update"
-    )
-    await host.run(script, sudo=True, timeout=600)
+    await host.run(NVIDIA_CUDA_REPO_SETUP, sudo=True, timeout=600)
 
 
 async def _current_driver_version(host: Host) -> str | None:

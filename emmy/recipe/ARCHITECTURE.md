@@ -74,10 +74,12 @@ legacy recipes and sorts as null until the next discovery run.
 versioned JSON document produced by `recipe_inventory_document()` (schema version 2) adds the directory name,
 lifecycle-aware runnable state, whether any variant serves through Emmy, and one entry per matrix-expanded
 deployment — its GPU, GPU count, GPU memory fraction (`engine.llm.gpu_memory_utilization`, default 0.9), effective
-context length and measured full-context latency (`engine.llm.full_context_latency_s`, null until measured) — to
-the identity, tags, task, input modalities (`model.input_modalities`, `["text"]` unless declared), rationale, and
-heat. Deployments are unique per (GPU, count, fraction): a recipe that may share its GPU lists a reduced-fraction
-entry beside its whole-GPU one, each with its own qualified context length, and both appear.
+context length, measured full-context latency (`engine.llm.full_context_latency_s`, null until measured) and the
+CloudRift base instance types that carry its GPU (`cloudrift_instance_types`, from the hardware table; a consumer
+pinning a rental to a node matches the node's instance type against it) — to the identity, tags, task, input
+modalities (`model.input_modalities`, `["text"]` unless declared), rationale, and heat. Deployments are unique per
+(GPU, count, fraction): a recipe that may share its GPU lists a reduced-fraction entry beside its whole-GPU one, each
+with its own qualified context length, and both appear.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
 live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
