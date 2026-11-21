@@ -1611,7 +1611,8 @@ carrying fold (bare when it is the row's only `STAGE` site), with three values:
 - `d1/reg` — persistent register storage for a matrix recurrence whose rows are independent across warps. The chunk
   loop runs inside each CTA, with one FP32 carry slot and reused matrix fragments. The row spells the register
   geometry as the `TILE` of the same route, whose K chunk is the promotion interval, and leaves every site of the
-  step off.
+  step off. A step that keeps part of its state (one row of a triangular inverse a step) runs the product of the
+  blocks it writes alone, its step loop written out (`lowering/kernel/_resident`).
 
 The prior reads the storage as two indicators, one for shared and one for register storage, rather than
 shared-memory pipeline features.

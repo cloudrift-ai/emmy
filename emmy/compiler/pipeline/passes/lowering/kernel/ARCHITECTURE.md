@@ -821,8 +821,9 @@ The scheduled reduction and its combine order remain unchanged. This changes ker
 canonicalization, so the kernel keeps its identity.
 
 Two shared buffers separate the previous and next state. The seed initializes the first buffer, and barriers keep
-initialization, copies and updates uniform across the CTA. A wider seed retains its original first-iteration reads
-instead of rounding through shared storage early. Requested snapshots and externally read carry ports remain global
+initialization, copies and updates uniform across the CTA. A step's choice of the seed at the first step is then
+the buffer's own read, for a seed tensor and for a constant alike. A wider seed retains its original first-iteration
+reads instead of rounding through shared storage early. Requested snapshots and externally read carry ports remain global
 outputs; only an unused private carry port is removed through the materializer's existing graph splice. A state the
 term stores every step has no port (`stored_states`): the shared buffers stand in for that output's lagged reads, and
 its per-step store stays, as the step's own output.
@@ -842,6 +843,29 @@ store each step, the whole-CTA copy has only the two buffers to keep in agreemen
 differs from the state it reads only in the cells the step before changed. So the seed fills both buffers, and where
 the update's predicate bounds the state's leading cell coordinate (one row of a triangular inverse), the copy covers
 that range at the step before instead of the whole state.
+
+## A register-held state that a step keeps part of
+
+`_resident` builds the kernel of a `STAGE=d1/reg` row: the carrying fold's term, evaluated a block of fragments at a
+time. When the state's next value is a choice whose last branch is the state as it stands (the update's predicate
+selects one row of a triangular inverse), the step does not compute the earlier branch for the whole state:
+
+- **A branch is computed behind a test.** Where the branch's condition is nothing but bounds on the block's column
+  coordinate, by values that read neither of the block's coordinates, the branch's statements run only when some
+  position of the block lies inside the bounds. What they compute is no value outside the test.
+- **Inside, the condition is given.** A choice of an index on that condition is its first arm: a read of the state
+  it guarded is the read itself, and a read of memory loses the guard where its index then stays inside the buffer
+  at every position. Where the condition holds the column to one value, an address spelled by that value moves with
+  the column, so the product's memory operand is the atom's own strided load and no gather.
+- **The step loop is written out.** The tests read the step alone, so the loop is flagged for `117_unroll_loops`
+  (under the `UNROLL` budget, up to its whole-loop limit) and each copy's tests are decided there: a step's code is
+  the product of the blocks it writes, and a block it keeps is no code at all.
+- **The seed is in the fragments ahead of the steps,** since a step no longer reads every block. A zero seed is the
+  fragment as declared, for every register-held state.
+- **A store that does not read the step** is made by the last step alone, as under the other storages.
+
+A row loop over a 64 x 64 state, 63 steps, runs 7.1 on an RTX 5090 this way for 192 matrices (f16 operands, f32
+accumulator). Left a loop, with its tests taken at run time, the same kernel ran 30.
 
 ## Kernel-IR peepholes
 

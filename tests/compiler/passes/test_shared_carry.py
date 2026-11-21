@@ -25,7 +25,7 @@ shared = import_module("emmy.compiler.pipeline.passes.lowering.kernel.035_shared
 _PINS = {"PLACE": "fuse", "WORK": "t512", "REDUCE": "coop-t/n8/v4", "FAST_MATH": True}
 
 
-def _body(n=40, *, masked=True, extra_reader=False, last=False):
+def _body(n=40, *, masked=True, extra_reader=False, last=False, seed="`seed`"):
     row = f"t + {n - 5}"
     predicate = f"r < {row} + 1 && {row} <= r && c < {row}"
     owner = f"{predicate} ? b : 0" if masked else "b"
@@ -46,7 +46,7 @@ def _body(n=40, *, masked=True, extra_reader=False, last=False):
                         old = pre state[b, r, c]
                         updated = add(old, sum)
                         {value}
-                        state[b, r, c] <- next seed `seed`
+                        state[b, r, c] <- next seed {seed}
                         out[{"" if last else "t, "}b, r, c] = next{extra}
         """
     )
@@ -54,13 +54,17 @@ def _body(n=40, *, masked=True, extra_reader=False, last=False):
     return body, carry
 
 
-def _graph(dtype=F32, *, masked=True, n=40, last=False):
-    """The scan storing every step's state, or (``last``) the state it ends with alone."""
+def _graph(dtype=F32, *, masked=True, n=40, last=False, constant=None):
+    """The scan storing every step's state, or (``last``) the state it ends with alone; from the tensor ``seed``, or
+    from the number ``constant``."""
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("seed", (2, n, n), dtype), node_id="seed")
+    inputs = [] if constant is not None else ["seed"]
+    for name in inputs:
+        graph.add_node(InputOp(), [], Tensor(name, (2, n, n), dtype), node_id=name)
     out = Tensor("out", (2, n, n) if last else (3, 2, n, n), dtype)
-    graph.add_node(LoopOp(body=_body(n, masked=masked, last=last)[0]), ["seed"], out, node_id="out")
-    graph.inputs, graph.outputs = ["seed"], ["out"]
+    body = _body(n, masked=masked, last=last, seed="`seed`" if constant is None else repr(constant))[0]
+    graph.add_node(LoopOp(body=body), inputs, out, node_id="out")
+    graph.inputs, graph.outputs = inputs, ["out"]
     return graph
 
 
@@ -278,3 +282,27 @@ def test_a_scan_that_keeps_its_last_state_matches_the_last_step_of_one_that_keep
         assert op.knobs[key] == storage
         outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
     np.testing.assert_array_equal(outputs[0][2], outputs[1])
+
+
+def test_a_constant_seed_is_read_from_the_seeded_buffer_like_a_seed_tensor():
+    """The shared buffers are seeded ahead of the steps, so a step's choice of a constant seed at the first step is
+    the buffer's own read, as its choice of a seed tensor is. The step then copies its unchanged cells as one that
+    starts from a tensor does: the row the step before wrote, not the whole state."""
+    with pinned_knobs({**_PINS, "STAGE": "d1/smem"}):
+        _, kernels = compile_with_kernels(_graph(last=True, constant=0.25), ctx=Context.from_target((7, 0)))
+    (kernel,) = kernels.values()
+    (copy,) = (loop for loop in statements(kernel, Loop) if loop.axis.name == "_carry_copy")
+    assert tuple(map(str, copy.range)) == ("40 * a0 + thread_idx.x + 1360", "40 * a0 + 1400")
+
+
+@requires_cuda
+def test_a_scan_from_a_constant_matches_on_both_storages():
+    outputs = []
+    for storage in ("", "d1/smem"):
+        with pinned_knobs({**_PINS, "WORK": "t128", "REDUCE": "coop-t/v2", "STAGE": storage}):
+            compiled = Pipeline.build(CUDA_PASSES).run(_graph(last=True, constant=0.25), ctx=Context.probe())
+        (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+        assert op.knobs["STAGE"] == storage
+        outputs.append(CudaBackend().run(compiled, input_data={})[0].outputs["out"])
+    assert np.abs(outputs[0]).max() > 0.25
+    np.testing.assert_array_equal(outputs[0], outputs[1])

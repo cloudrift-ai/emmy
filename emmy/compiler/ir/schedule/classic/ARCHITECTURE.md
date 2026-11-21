@@ -661,7 +661,9 @@ store(out, S)
 **Row.** A static loop over one matrix state, with maps and additive products, takes register storage:
 `WORK=w<M>x1`, `STAGE=d1/reg` at the carrying fold, which keeps the state in registers across all steps of one
 launch, and at the same route a `TILE` of an f16 atom with `f1x<N>` covering the state's columns. Any other
-recurrence is one launch per step over a state buffer, or `STAGE=d1/smem` where one CTA owns the whole state.
+recurrence is one launch per step over a state buffer, or `STAGE=d1/smem` where one CTA owns the whole state. The
+substitution that inverts the chunk's triangular system is such a loop too, one that writes a row of its state a
+step: its register row computes one block of rows a step.
 
 **Verdict: gap, and most of it is evidence.** The recurrence of a 27B-class layer (48 heads, head size 128), RTX 5090,
 256 rows: FlashInfer 38 to 87 depending on how the call is timed (80 the way vLLM calls it); Emmy partly tuned 2,310;
@@ -678,6 +680,14 @@ plain bf16 operands. Pinned in one session, with a cut on each fused product, th
 the substitution, it runs 195. The products take `mma_m16n8k16_bf16_f32` tiles and cost 5 to 18 each; the substitution,
 which stores only its last state, is 53 of the 195. None of these picks is the prior's own: unpinned, the substitution
 takes a thread tile and runs 919, and one 128-wide reduce takes a CTA per output cell and runs 336.
+
+The substitution has since been spelled as a row of memory times the rows so far, which register storage holds.
+Alone, for 48 heads and four chunks of 64 on an RTX 5090, its 63 steps run 7.1 with `mma_m16n8k16_f16_f32` (6.3
+with the f16 accumulator, 6.8 with bf16 operands, 14 with TF32 and 55 with its split), and the inverse's three
+kernels together run 11; the earlier spelling ran 35 as recorded, on a thread tile with the state in shared
+memory. Against the 64-bit inverse the error over the rms is 7e-5 for f16 operands, 6e-4 for bf16 and 3e-8 for the
+split, with the state itself kept in f32. None of it is the prior's pick: with no evidence the substitution takes
+the thread tile and runs 45.
 
 Inside a whole layer the gain is smaller. Recorded on the RTX 5090 for the 256-row layer of the 27B NVFP4 checkpoint,
 the six roots the rule reaches sum to 474 against 524 for the rule as Transformers writes it. The root that forms the

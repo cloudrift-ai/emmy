@@ -499,12 +499,15 @@ class TileOp(Op):
     def resident_state(self) -> tuple | None:
         """``(fold, batch cells, column cell, row cell)`` of the one state this kernel keeps between steps, where
         register fragments can hold it, else ``None``. One warp owns sixteen positions of the state's last cell and
-        every position of the one before it, so: one state of static shape under no free axis, a row count the
-        fragment's sixteen rows divide and column counts its eight divide, and every output a matrix over the
-        state's rows. What the step computes is the lowering's to accept or decline."""
+        every position of the one before it, so: one state of static shape under no free axis of more than one
+        position (the size-one axis the row lift binds is none), a row count the fragment's sixteen rows divide and
+        column counts its eight divide, and every output a matrix over the state's rows. What the step computes is
+        the lowering's to accept or decline."""
         carrying = self._carrying
         folds = [site.node for site in carrying.sites if site.node.carries] if carrying is not None else []
-        if len(folds) != 1 or carrying.place.free or any(not axis.extent.is_static for axis in carrying.axes):
+        if len(folds) != 1 or any(not axis.extent.is_static for axis in (*carrying.axes, *carrying.place.free)):
+            return None
+        if any(axis.extent.as_static() != 1 for axis in carrying.place.free):
             return None
         (fold,) = folds
         if len(fold.base.results) != 1 or len(fold.cells) < 2:

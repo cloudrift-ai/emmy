@@ -332,7 +332,11 @@ def _chunk_rule(
     last is stored. ``beta``, the decay and the query scale multiply the ``chunk x chunk`` matrices and the rows of
     a product's result, never the queries, keys or values: those stay the operands they were loaded as, which is
     what a tensor-core tile reads. The sums are the reference's; a scale meets its product on the other side, so
-    the rounding differs in the last place."""
+    the rounding differs in the last place.
+
+    The inverse of the chunk's triangular system is the reference's substitution, a row a step, with the row read
+    from the system and not from the buffer the step writes: the step is then a row of memory times the state, the
+    form a state kept in registers takes (``lowering/kernel/_resident``), and it writes one row of that state."""
     import torch
     import torch.nn.functional as F
 
@@ -359,11 +363,14 @@ def _chunk_rule(
     if not scope["is_torchdynamo_exporting"]():
         inverse = torch.linalg.solve_triangular(system, eye.expand_as(system), upper=False, unitriangular=True)
     else:
-        inverse = -system.tril(-1)
+        # Row ``i`` of the inverse less its diagonal is the system's row plus that row times the rows above it, and
+        # the system is zero from the diagonal on, so the product may run over every row. Each step reads its row
+        # from the one stored system and the rows so far as its state, and writes one row of that state.
+        lower = -system.tril(-1)
+        inverse = torch.zeros_like(lower)
         for i in range(1, chunk_size):
-            row = inverse[..., i, :i].clone()
-            sub = inverse[..., :i, :i].clone()
-            inverse[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+            inverse = inverse.clone()
+            inverse[..., i, :] = lower[..., i, :] + (lower[..., i : i + 1, :] @ inverse).squeeze(-2)
         inverse = inverse + eye
     new_values = (inverse * beta.unsqueeze(3)) @ value
     k_cumdecay = (inverse * (beta * cum.exp()).unsqueeze(3)) @ key
