@@ -350,13 +350,12 @@ def _rolled(step: Body, steps: int, seed: float | str, every: bool) -> Body:
     return Body((Loop(axis=Axis("step", steps), body=step.map(roll)),))
 
 
-def _slice(tensor: Tensor, source: str, step: int) -> LoopOp:
-    """``tensor`` read from the rolled kernel's store at its ``step``."""
+def _slice(tensor: Tensor, source: str, step: int | None) -> LoopOp:
+    """``tensor`` read from the rolled kernel's store: its ``step``, or the whole of a store that keeps one."""
     axes = tuple(Axis(f"s{dim}", extent) for dim, extent in enumerate(tensor.shape))
     cell = tuple(Var(axis.name) for axis in axes)
-    body = Body(
-        (Load(names=("kept",), input=source, index=(Literal(step, "int"), *cell)), Write(output=tensor.name, index=cell, values=("kept",)))
-    )
+    at = cell if step is None else (Literal(step, "int"), *cell)
+    body = Body((Load(names=("kept",), input=source, index=at), Write(output=tensor.name, index=cell, values=("kept",))))
     for axis in reversed(axes):
         body = Body((Loop(axis=axis, body=body),))
     return LoopOp(body=body)
@@ -459,15 +458,13 @@ def _replaced(match: Match, chain: list[Node], regions: list[set[str]], states: 
     renamed: dict[str, str] = {}
     for index, (_, live, _) in enumerate(spliced):
         for store, old in zip(stores, live, strict=True):
-            if store == stores[0] and not every:
-                # A store that keeps one state is the state the loop ends with: the last step's buffer itself.
-                if index == len(spliced) - 1:
-                    renamed[old] = store
+            last = store == stores[0] and not every
+            if last and index < len(spliced) - 1:
                 continue
             # The splice restores the replaced buffer's id on the slice; its tensor carries that name.
             renamed[old] = f"{old}__rolled"
             tensor = replace(graph.buffer(old), name=old)
-            fragment.add_node(_slice(tensor, store, index), [store], tensor, node_id=renamed[old])
+            fragment.add_node(_slice(tensor, store, None if last else index), [store], tensor, node_id=renamed[old])
     fragment.outputs = list(renamed.values())
     match.consumed = set().union(*(_stateful(graph, region, state) for region, state in zip(regions, states, strict=True)))
     match.output = renamed
