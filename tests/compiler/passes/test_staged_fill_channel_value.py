@@ -8,7 +8,10 @@ expert twin then failed its random-input check by 70% of the output's peak and s
 served noise.
 
 The shared operand has no such answer: its one slab holds one value. Two products of one computed matrix under two
-scales expose two values of it, and such a node is offered no stage and no tensor-core tile."""
+scales expose two values of it, and such a node is offered no stage and no tensor-core tile.
+
+The channels of one fold are filled alike: a stored B beside a computed one is computed too, as the read it is. Left
+one copied and one computed, the pair was offered no tensor-core tile at all."""
 
 from __future__ import annotations
 
@@ -139,3 +142,74 @@ def test_products_of_one_matrix_under_two_scales_match_numpy_on_the_gpu():
     for name, scale, right in (("out", "s", "b"), ("other", "t", "c")):
         exact = (np.exp(wide["a"]) * wide[scale]) @ wide[right]
         np.testing.assert_allclose(result.outputs[name].reshape(m, n), exact, rtol=1e-4, atol=1e-4)
+
+
+def _stored_beside_computed(m: int = 32, n: int = 32, k: int = 64):
+    """``out = (2 a) @ b`` and ``other = (2 a) @ (c * s)``: ``b`` stored at bf16, the other channel's B computed."""
+    from emmy.compiler.dtype import BF16, F32
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.loop import LoopOp
+
+    body = parse_body(
+        f"""
+for a0 in 0..{m}:
+  for a1 in 0..{n}:
+    for a2 in 0..{k}:
+      in0 = load a[a0, a2]
+      in1 = load b[a2, a1]
+      in2 = load c[a2, a1]
+      in3 = load s[a2]
+      w = in0 + in0
+      u = in2 * in3
+      v0 = w * in1
+      v1 = w * u
+      acc0 <- add(acc0, v0) over a2
+      acc1 <- add(acc1, v1) over a2
+    out[a0, a1] = acc0
+    other[a0, a1] = acc1
+"""
+    )
+    graph = Graph()
+    shapes = {"a": (m, k), "b": (k, n), "c": (k, n), "s": (k,)}
+    for name, shape in shapes.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape, BF16 if name == "b" else F32), node_id=name)
+    graph.add_node(LoopOp(body=body), list(shapes), outputs=(Tensor("out", (m, n), F32), Tensor("other", (m, n), F32)), node_id="out")
+    graph.inputs, graph.outputs = list(shapes), ["out", "other"]
+    return graph
+
+
+def test_a_stored_channel_beside_a_computed_one_is_offered_tensor_cores():
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.schedule.classic import ClassicProblem
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import Pipeline
+
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_stored_beside_computed())
+    (tile,) = (node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    site = ClassicProblem(tile, Context.from_target((12, 0))).node_site(next(iter(tile.contractions)))
+    assert len(site.node.bilinear_channels()) == 2
+    assert any(choice.node.tile.is_warp for choice in site.choices)
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_a_stored_channel_beside_a_computed_one_matches_numpy_on_the_gpu():
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.kernel.ir import MmaSyncPtx
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from tests.compiler.helpers import statements
+
+    m, n, k = 32, 32, 64
+    with pinned_knobs({"TILE": "mma_m16n8k16_bf16_f32/f1x4/k4", "WORK": "w2x1", "STAGE": "d1/smem"}):
+        compiled, kernels = compile_with_kernels(_stored_beside_computed(m, n, k))
+    assert statements(kernels, MmaSyncPtx)
+    # Small integers: every operand is exact at bf16, so the tensor-core sums are the exact ones.
+    rng = np.random.default_rng(0)
+    exact = {name: rng.integers(-4, 5, shape).astype(np.float32) for name, shape in {"a": (m, k), "b": (k, n), "c": (k, n), "s": k}.items()}
+    feed = {**exact, "b": torch.from_numpy(exact["b"]).to(torch.bfloat16).view(torch.uint16).numpy()}
+    result, _ = CudaBackend().run(compiled, input_data=feed)
+    np.testing.assert_array_equal(result.outputs["out"].reshape(m, n), (2 * exact["a"]) @ exact["b"])
+    np.testing.assert_array_equal(result.outputs["other"].reshape(m, n), (2 * exact["a"]) @ (exact["c"] * exact["s"][:, None]))

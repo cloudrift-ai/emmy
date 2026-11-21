@@ -333,7 +333,9 @@ def _chunk_rule(
     a product's result, never the queries or values: those stay the operands they were loaded as, which is what a
     tensor-core tile reads. The keys take one decay, in the one product that shares its left operand with another.
     The sums are the reference's; a scale meets its product on the other side, so the rounding differs in the last
-    place.
+    place. The two matrices the walk multiplies its state by every step, beside the queries and keys, are rounded to
+    the model's dtype before the walk, as a 16-bit tensor-core atom rounds its operands: that is the one place a
+    model of 16 bits departs from the reference's f32.
 
     The inverse of the chunk's triangular system is the reference's substitution, a row a step, with the row read
     from the system and not from the buffer the step writes: the step is then a row of memory times the state, the
@@ -380,6 +382,9 @@ def _chunk_rule(
     new_values = scaled @ value
     k_cumdecay = scaled @ (key * cum.exp().unsqueeze(4))
     intra = (query @ key.transpose(-1, -2)) * (pairwise * scale)
+    # The walk multiplies its state by these two every step. Held at the model's dtype they are operands a tensor
+    # core loads as stored, beside the queries and keys; in f32 each load converts every element.
+    k_cumdecay, intra = (x.to(dtype).to(torch.float32) for x in (k_cumdecay, intra))
     state = new_values.new_zeros((batch, v_heads, k_dim, v_dim)) if initial_state is None else initial_state.to(new_values)
     query_row = (cum.exp() * scale).unsqueeze(4)
     key_row = (cum[..., -1:] - cum).exp().unsqueeze(4)

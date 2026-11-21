@@ -126,9 +126,8 @@ class _Blocks:
     sixteen), and the axis its columns run along and where they start. Equal blocks are computed once, and a value
     that does not read the column axis is one block for every column."""
 
-    def __init__(self, tile, atom, period: int, row_base, state: tuple[str, ...], ahead: bool = False):
+    def __init__(self, tile, atom, period: int, row_base, state: tuple[str, ...]):
         self.tile, self.atom, self.period, self.row_base, self.state = tile, atom, period, row_base, state
-        self.ahead = ahead
         self.carrying, self.batch, _, _, _ = tile.resident_state
         self.time = self.carrying.axis
         self.layout = atom.fragment_layout
@@ -196,32 +195,11 @@ class _Blocks:
         ]
 
     def seeded(self, cb: int) -> str:
-        """The state one step back at column ``cb``: the warp's own fragment of it, and at the first step the seed,
-        a constant or the seed tensor read at the block. A zero seed is the fragment as declared, and a state
-        seeded ahead of its steps (:meth:`seeding`) is the fragment too. Selecting any other seed inside the step is
-        measured, not principle: seeding the fragments ahead of the loop does less work and ran 5 to 8% slower on an
-        RTX 5090 for a step that writes the whole state."""
-        key = ("seeded", cb)
-        if self.ahead or self.carrying.init[0] == 0:
-            return self.state[cb // self.atom.atom_n]
-        if key not in self.memo:
-            seed, kind = self._seed(cb)
-            if kind == GMEM:
-                seed, kind = self.copied((seed,), (GMEM,), None, cb), FRAG
-            name = self.fresh("s")
-            first = BinaryExpression(">", Var(self.time), Literal(0, "int"))
-            self.out.append(
-                FragmentApply(
-                    out=name,
-                    op=ElementwiseImpl("where"),
-                    args=fragment_args((first, self.state[cb // self.atom.atom_n], seed), (COORD, FRAG, kind)),
-                    layout=self.layout,
-                    row_base=self.row_base,
-                    col_base=Literal(cb, "int"),
-                )
-            )
-            self.memo[key] = name
-        return self.memo[key]
+        """The state one step back at column ``cb``: the warp's own fragment of it, which holds the seed at the
+        first step (:meth:`seeding`). Choosing the seed inside the step holds every block twice, the state and the
+        chosen value, and reads the seed from memory every step: a walk of four steps over bf16 operands ran 37.3
+        that way and 33.1 seeded ahead on an RTX 5090."""
+        return self.state[cb // self.atom.atom_n]
 
     def gmem(self, buffer: str, index: tuple, row: str, col: str, rb: int | None, cb: int) -> str:
         """The fragment of ``buffer`` at ``index``, the block's rows and columns standing for ``row`` and ``col``."""
@@ -435,7 +413,7 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     # test left in it, and a block it keeps is no work at all.
     members, _ = _needed(fold.lift.body, fold.lift.results[0])
     keeps = bool(members) and isinstance(members[-1], Select)
-    blocks = _Blocks(tile, atom, period, row_base, state, ahead=keeps)
+    blocks = _Blocks(tile, atom, period, row_base, state)
     declared = [RegFragment(name=name, role="c", dtype=F32, fragment_layout=atom.fragment_layout) for name in state]
 
     # Every stored value of the step, then the state's next value; the state's fragments are overwritten last. A
@@ -484,4 +462,4 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
         Axis("_rw", warps),
         Axis("_rl", 32),
     )
-    return Tile(axes=axes, body=Body((*declared, *(blocks.seeding() if keeps else ()), loop)), block_threads=warps * 32)
+    return Tile(axes=axes, body=Body((*declared, *blocks.seeding(), loop)), block_threads=warps * 32)
