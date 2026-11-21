@@ -76,7 +76,9 @@ def test_export_writes_a_dataset_the_readers_load(tmp_path):
     from emmy.compiler.pipeline.search.dataset import Dataset
 
     tuned_db(tmp_path / "dataset.db", (_CASE,), us=500.0).close()
-    args = Namespace(out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1)
+    args = Namespace(
+        out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1, candidates=[]
+    )
     handle_db_export(args)
     dataset = Dataset.load(tmp_path / "dataset")
     assert (len(dataset.golden), len(dataset.measured)) == (0, 1) and dataset.provenance["source"] == str(tmp_path / "dataset.db")
@@ -116,7 +118,7 @@ def test_placement_export_reads_the_instance_alone(tmp_path):
     golden = _golden(tmp_path, "cut", 500.0, case="fused/linear-add-place-cut-sm70.json")
     database = tmp_path / "dataset.db"
     handle_db_import(Namespace(sources=[str(golden)], db=str(database), fresh=True))
-    args = Namespace(out=str(tmp_path / "placement"), db=str(database), pool_sample=0, seed=0, space="placement", jobs=1)
+    args = Namespace(out=str(tmp_path / "placement"), db=str(database), pool_sample=0, seed=0, space="placement", jobs=1, candidates=[])
     handle_db_export(args)
     assert Dataset.load(args.out).golden
 
