@@ -353,7 +353,8 @@ def test_the_row_substitution_composes_to_its_last_state_on_the_gpu(pin: str) ->
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
 
     graph, _, (module, _, _) = graph_from_code(_INVERSE.format(n=8))
-    with pinned_knobs({SCAN: pin}):
+    # The atoms are the prior's to pick, and the numbers are held to f32: fast math off.
+    with pinned_knobs({SCAN: pin, "FAST_MATH": False}):
         graph = Pipeline.build(CUDA_PASSES).run(graph)
     assert sum(node.id.endswith("__probe") for node in graph.nodes.values()) == (pin == "g2k")
     a = (np.random.default_rng(0).standard_normal((2, 8, 8)) * 0.1).astype(np.float32)
