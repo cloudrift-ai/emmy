@@ -148,8 +148,10 @@ both programs as they load (runtime `ARCHITECTURE.md`, "Cached generation"). The
 off the device, once, and the device holds the resident experts and the slots once; the trunk, the KV cache and the
 Gated DeltaNet state stay where they are. A prefill chunk lists more experts than the slots hold, and reads the misses
 past them in place over the link. The budget is fixed at preparation: a reused pack keeps the slots and resident experts
-it was prepared with. Each launch reading a paged buffer takes its own inspector and paging run, 14 launches per buffer,
-so a paged layer adds 28 launches per step with 16-bit experts and 56 with FP8 ones, decode and prefill chunk alike.
+it was prepared with. A layer's expert buffers share one page list, so each launch reading them takes one inspector
+and one paging run for all of them: 13 launches, then a page table update and a copy per buffer (3 each), so a paged
+launch adds 19 launches with 16-bit experts and 25 with FP8 ones, decode and prefill chunk alike, where a run per
+buffer added 28 and 56.
 
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
@@ -481,8 +483,8 @@ The chunk's fixed-slot expert program had no row then, so that export prefilled 
 below records one). The prefill attention piece that read the paged cache was recorded with asynchronous copies, since
 no TMA descriptor may read a page. The pager's own kernels are the
 only ones the strict export compiles without a row: they are compiled at `paging.HINTS` whatever the geometry, where
-the card's hardware golden holds their rows, and at 256 pages their decision kernel builds a single schedule (one
-CTA), so no row could change it.
+the card's hardware golden holds their rows. At 256 pages the decision kernel that counted misses pairwise built a
+single one-CTA schedule, so no row could change it; a running count replaced it.
 
 On the dev box, served over HTTP with the pager warm across requests, as the plugin's server is, native decoded the
 same four raw prompts at 46 ms a token against the plugin's 51 ms on the same box (`vllm bench serve`, one request at
