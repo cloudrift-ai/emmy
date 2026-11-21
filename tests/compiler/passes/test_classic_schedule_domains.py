@@ -805,6 +805,8 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
     )
     target = Context.from_target((12, 0))
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [Stage.parse("d1/smem-async")])
+    # The copy stage alone: the bf16 cell of a product of f32 operands stages through the compute fill instead.
+    monkeypatch.setenv("EMMY_F32_AS_BF16_MMA", "0")
     offers = _offers(tile, target)
     context = _plain(tile, target)
 

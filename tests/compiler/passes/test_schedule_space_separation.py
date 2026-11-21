@@ -209,12 +209,12 @@ def test_an_off_precision_gate_stamps_the_same_space() -> None:
     default matches FAST_MATH=true, and individual pins still override that umbrella."""
     from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
     from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_MATH, FP8_MMA, TF32_MMA
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, F32_AS_BF16_MMA, FAST_MATH, FP8_MMA, TF32_MMA
 
     default = schedule_pin_fingerprint()
     with FAST_MATH.pinned("0"):
         clean = schedule_pin_fingerprint()
-    gates_off = {"F16_MMA_F32_ACC": 0, "FP8_MMA": 0, "TF32_MMA": 0}
+    gates_off = {"F16_MMA_F32_ACC": 0, "FP8_MMA": 0, "TF32_MMA": 0, "F32_AS_BF16_MMA": 0}
     for off in ({"FAST_MATH": False}, {"FAST_MATH": 0}, gates_off):
         with pinned_knobs(off):
             assert schedule_pin_fingerprint() == clean, f"an OFF gate {off} must enumerate the precise space"
@@ -231,9 +231,9 @@ def test_an_off_precision_gate_stamps_the_same_space() -> None:
         with F16_MMA_F32_ACC.pinned("0"):
             f16_off = schedule_pin_fingerprint()
     assert umbrella == default != clean
-    with F16_MMA_F32_ACC.pinned("1"), FP8_MMA.pinned("1"), TF32_MMA.pinned("1"):
+    with F16_MMA_F32_ACC.pinned("1"), FP8_MMA.pinned("1"), TF32_MMA.pinned("1"), F32_AS_BF16_MMA.pinned("1"):
         assert schedule_pin_fingerprint() == umbrella
-    with FAST_MATH.pinned("0"), FP8_MMA.pinned("1"), TF32_MMA.pinned("1"):
+    with FAST_MATH.pinned("0"), FP8_MMA.pinned("1"), TF32_MMA.pinned("1"), F32_AS_BF16_MMA.pinned("1"):
         assert schedule_pin_fingerprint() == f16_off
     assert schedule_pin_fingerprint() == default
 
