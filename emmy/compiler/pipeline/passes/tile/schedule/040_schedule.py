@@ -145,6 +145,7 @@ def classic_forks(
     kernel's graph node id, which names the buffer a carried state's serial form keeps it in."""
     from emmy.compiler.pipeline.search.space import (  # noqa: PLC0415
         F16_MMA_F32_ACC,
+        F32_AS_BF16_MMA,
         FP8_MMA,
         TF32_MMA,
         TF32_SPLIT_MMA,
@@ -189,6 +190,7 @@ def classic_forks(
         allow_fp8=precision_pin(FP8_MMA) is True,
         allow_tf32=precision_pin(TF32_MMA) is True,
         allow_tf32_split=precision_pin(TF32_SPLIT_MMA) is True,
+        allow_f32_as_bf16=precision_pin(F32_AS_BF16_MMA) is True,
         validate_pins=ctx.validate_pins and not kernel_set,
         tolerate_kernel_pins=peer,
         paged=paged or {},

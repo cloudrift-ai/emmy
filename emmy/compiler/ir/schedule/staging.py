@@ -770,10 +770,16 @@ def converting_a(node: Fold, atom, inputs) -> bool:
     return t is not None and t.dtype.logical_elems == 1 and t.dtype != atom.operand_dtype("a")
 
 
-def copied_b(c: Fold, edge: Fold, inputs) -> bool:
-    """A stored B needs a gather when neither matrix coordinate has unit element stride."""
+def copied_b(c: Fold, edge: Fold, inputs, dtype=None) -> bool:
+    """Whether a stored B moves into its slab byte for byte. It needs a gather when neither matrix coordinate has
+    unit element stride, and, ``dtype`` being the element the compute fill stages it at, a typed store when it
+    holds another dtype: the B side of :func:`converting_a`. A slab of bytes is no such case, since the fragment
+    loads convert it."""
     slab = edge.as_slab()
     if slab is None:
+        return False
+    stored = inputs.get(slab.load.input) if inputs and dtype is not None and dtype.nbytes >= 2 else None
+    if stored is not None and stored.dtype.logical_elems == 1 and stored.dtype.nbytes > 1 and stored.dtype != dtype:
         return False
     view = c.as_contraction()
     steps = [gmem_axis_step(slab.load, axis, inputs) for axis in (view.axis, *view.right_axes)]
@@ -809,7 +815,7 @@ def computed_operand_cover(c: Fold, tile: Tile, *, converting: bool = False, k_a
                 "a transposed B stages N-major (K contiguous), so its cp.async chunk runs along K "
                 "and cannot clamp a symbolic K's partial tail; pin a canonical B layout"
             )
-    materialized_b = [copied_b(c, edge, inputs) for edge in c.operands[1:]]
+    materialized_b = [copied_b(c, edge, inputs, tile.atom.operand_dtype("b")) for edge in c.operands[1:]]
     if any(materialized_b) and not all(materialized_b):
         return "the smem compute fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"
     if tile.n.mask and any(materialized_b) and not c.as_contraction().b_trans:
@@ -828,9 +834,11 @@ def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool
     slabs, but it *copies* every materialized peer byte-for-byte.  A copied f32 edge therefore
     cannot feed an f16 ``ldmatrix`` fragment merely because another edge is filled. Filled edges
     are exempt because their slab store performs the normal typed conversion — ``converting``
-    marks a materialized ``a`` that rides the converting fill rather than the copy."""
+    marks a materialized ``a`` that rides the converting fill rather than the copy, and a stored ``b`` of another
+    dtype rides it too (:func:`copied_b`)."""
     for edge, role in ((c.operands[0], "a"), *((edge, "b") for edge in c.operands[1:])):
-        if edge.as_slab() is None or (role == "a" and converting) or (role == "b" and not copied_b(c, edge, inputs)):
+        filled_b = role == "b" and not copied_b(c, edge, inputs, tile.atom.operand_dtype("b"))
+        if edge.as_slab() is None or (role == "a" and converting) or filled_b:
             continue
         tensor = inputs.get(edge.as_slab().load.input) if inputs else None
         # Structural scheduler fixtures intentionally do not carry Tensor metadata. Absence is not
@@ -843,8 +851,7 @@ def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool
             continue
         return (
             f"smem compute fill: materialized {role.upper()} edge {edge.as_slab().load.input!r} is {tensor.dtype}, but "
-            f"atom {tile.atom.name} copies it into a {want} slab without conversion; only the "
-            "``a`` role has a converting fill"
+            f"atom {tile.atom.name} copies it into a {want} slab without conversion"
         )
     return None
 
@@ -893,7 +900,7 @@ def _fill_slabs(c: Fold, tile: Tile, budget: int, *, inputs, seam, k_axis: Axis,
     else:
         sync_bytes += a_bytes
     for ch in c.operands[1:]:
-        if copied_b(c, ch, inputs):
+        if copied_b(c, ch, inputs, atom.operand_dtype("b")):
             async_bytes += tile.n.tile * bk_elems * b_nbytes
         else:
             sync_bytes += tile.n.tile * bk_elems * b_nbytes
@@ -976,7 +983,7 @@ def resolve_fill_stage(
             _decline(why, "every slab of this contraction is computed, so a TMA stage has nothing to copy")
             return None
         boxed = [(c.operands[0], m.axis.name)] if a_copied else []
-        boxed += [(edge, n.axis.name) for edge in c.operands[1:] if copied_b(c, edge, inputs)]
+        boxed += [(edge, n.axis.name) for edge in c.operands[1:] if copied_b(c, edge, inputs, atom.operand_dtype("b"))]
         if not (
             all(_tma_operand_box(edge.as_slab().load.index, axis, k_axis.name) for edge, axis in boxed)
             and max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
@@ -987,7 +994,7 @@ def resolve_fill_stage(
     elif not vector_copies_aligned(
         _contraction_copies(
             c.operands[0] if a_copied else None,
-            tuple(edge for edge in c.operands[1:] if copied_b(c, edge, inputs)),
+            tuple(edge for edge in c.operands[1:] if copied_b(c, edge, inputs, atom.operand_dtype("b"))),
             tile,
             k_axis,
             bk_elems,
@@ -1003,7 +1010,7 @@ def resolve_fill_stage(
     # single-buffer), so the clamp budgets the ringed slot against what the fixed slabs leave.
     depth = _clamp_depth(want_depth, async_bytes, budget - fixed) if async_bytes else 1
     computed = [] if a_copied else [c.operands[0].exposes[-1]]
-    computed.extend(edge.exposes[-1] for edge in c.operands[1:] if not copied_b(c, edge, inputs))
+    computed.extend(edge.exposes[-1] for edge in c.operands[1:] if not copied_b(c, edge, inputs, atom.operand_dtype("b")))
     choice = replace(want, depth=depth, reg_depth=min(want.reg_depth, tile.bk))
     return ResolvedStage(choice, smem=tuple(computed), bk_elems=bk_elems)
 

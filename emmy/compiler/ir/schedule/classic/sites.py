@@ -51,6 +51,7 @@ from .refusals import (
     _Relation,
     _relation_refusal,
     _resolve_stage,
+    _rounded_atoms,
     _stage_candidates,
     _swept_root_refusal,
     _warp_atoms,
@@ -554,9 +555,11 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         facts = tile.contractions.get(self.id)
         if facts is None:
             return any(choice.tile.is_warp for choice in self.nodes)
-        # The reading the priors were fit on is of a cell of 16 bits or fewer: a product of f32 operands keeps the
-        # scalar ranking they learned, and the TF32 cell joins this reading with the featurizer version that refits
-        # them.
+        # The reading the priors were fit on is of a product with an operand of 16 bits or fewer: a product of f32
+        # operands keeps the scalar ranking they learned, and its cells (TF32, and bf16 by rounding) join this
+        # reading with the featurizer version that refits them.
+        if _rounded_atoms(tile, self.problem.target, node):
+            return False
         atoms = tuple(name for name in self.problem.atoms_of(self.id) if ATOM_REGISTRY[name].operand_dtype("a") != F32)
         return any(self._placed_ok(ReductionSchedule(plan, Reduce())) for plan in _warp_plans(node, facts, atoms))
 
@@ -862,6 +865,9 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     allow_tf32: bool = True
     #: Off unless the compile's pin says otherwise, as the gate is (``space.TF32_SPLIT_MMA``).
     allow_tf32_split: bool = False
+    #: Whether a product of f32 operands is offered the bf16 atoms, each operand rounded to bf16 in its fill. Off
+    #: unless the compile says otherwise: its gate (``space.F32_AS_BF16_MMA``) follows fast math.
+    allow_f32_as_bf16: bool = False
     validate_pins: bool = True
     #: A split's finalize tolerates a bare WORK / RASTER / REDUCE pin its own domain cannot take:
     #: it may name the partial's row, so the finalize keeps its catalog instead of offering nothing.
@@ -966,10 +972,12 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     @cached_method
     def policy_atoms(self, site: NodeId) -> tuple[str, ...]:
         """The atoms the unpinned catalog offers: :meth:`atoms_of` under the precision policy."""
+        rounded = () if self.allow_f32_as_bf16 else _rounded_atoms(self.tile, self.target, self.tile.sites[site].node)
         return tuple(
             name
             for name in self.atoms_of(site)
-            if _atom_policy_ok(
+            if name not in rounded
+            and _atom_policy_ok(
                 ATOM_REGISTRY[name],
                 allow_f16_accumulate=self.allow_f16_accumulate,
                 allow_fp8=self.allow_fp8,
