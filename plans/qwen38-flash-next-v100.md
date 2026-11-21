@@ -1675,7 +1675,7 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   - Post8, cold per layer: 163.8 us in 19 kernels on main, 139.3 us in 15 here. Ten cuts are pinned on the root
     kernel and each piece keeps what main cut off it: the first mixer weight's product carries its norm's weights
     (14.3 us in two kernels to 9.2 in one), the second mixer's up product its sigmoid (21.5 to 16.4), the last gate's
-    product its sigmoid (13.3 to 10.2), and the two cross-CTA finishes their activations (two kernels less). The
+    product its sigmoid (13.3 to 10.2), and the down product's cross-CTA finish its SiLU (11.2 to 6.1). The
     normalized mixer input stays a kernel of its own: folded into the down product's fill it saved a launch cold
     (140.3 us in 14 kernels) and cost 5.7 us per layer warm, 23.8 us against 18.1. Profiled, rank 0: 105.7 to 92.6
     us per layer, 0.63 ms per step, a third of the 43.7 us the 13 pieces took. One kernel still runs twice, the
@@ -1713,8 +1713,19 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     eight requests against 252. Behind it: post8 met its time (139.3 us against 142) with 15 kernels where 14 were
     stated; the one-row program met its bar (33.8 us, two kernels around it); the eight-row program is unchanged, so
     eight requests gain only what post8 gains.
-  - Checks: CHECKLINE
-  - Regressions: REGLINE
+  - Checks: every one of the 19 programs compiles under strict evidence GPU-free; `emmy golden check` says current;
+    the release audit on the card passes (19 twins deploy from the golden rows alone); program by program, every
+    program but post8 and the two summed twins keeps main's kernels, routes and rows. A numeric check on the card,
+    in-domain inputs against the NumPy reference of post8's traced program: the new route and main's both within one
+    fp16 step of it. GSM8K 0.969 (main rounds 0.969-0.984); acceptance 28, 27, 28, 26, 27, 28 of 28, the same two
+    known failures as main (an empty answer in think mode, and the reasoning-off case); long-document lookups
+    LONGDOC. Greedy texts: main's two boots agree on 6 of 6, the branch's two agree on 6 of 6, and the branch equals
+    main on 3 of 6: the routed sum and post8's products add in another order. Memory, same probe on both sides:
+    torch peaks 26.75 GB allocated on both, 28.94 GB reserved on main and 28.61 GB here; 768 MiB spare per card here
+    against 346-370 on main, the allocator-timing flip of earlier rounds. CI's full suite passes. The prior gate
+    does not hold this recipe.
+  - Regressions: none measured in serving. Three of six greedy texts part from main's. The record re-timed two rows
+    of kernels pre8 shares with post8; both are back at main's values.
   - Left for a compiler round, each measured here: the workspace order of a product cut from a sum over a gathered
     weight (it decides whether the summed program pays at four and eight rows, 9.5 us of dispatch per layer); the
     mean stored twice (3.4 us per layer); and a search that tunes the pieces of a route before it prices the route.
