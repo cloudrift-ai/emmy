@@ -483,14 +483,7 @@ class Featurizer:
         given no context. Computed once per kernel."""
         from emmy.compiler.ir.schedule.classic import ClassicProblem  # noqa: PLC0415
         from emmy.compiler.pipeline.passes.tile._fromloop import scheduled_form  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import (  # noqa: PLC0415
-            F16_MMA_F32_ACC,
-            F32_AS_BF16_MMA,
-            FP8_MMA,
-            TF32_MMA,
-            TF32_SPLIT_MMA,
-            precision_pin,
-        )
+        from emmy.compiler.pipeline.search.space import precision_policy  # noqa: PLC0415
 
         tile = kernel_tile(kernel)
         if tile is None or tile.op is None or self.ctx is None:
@@ -500,11 +493,7 @@ class Featurizer:
         problem = ClassicProblem(
             scheduled_form(tile, tile.name),
             self.ctx,
-            allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
-            allow_fp8=precision_pin(FP8_MMA) is True,
-            allow_tf32=precision_pin(TF32_MMA) is True,
-            allow_tf32_split=precision_pin(TF32_SPLIT_MMA) is True,
-            allow_f32_as_bf16=precision_pin(F32_AS_BF16_MMA) is True,
+            **precision_policy(),
         )
         self._warp_eligible[id(tile)] = (tile, problem.warp_eligible)  # the tile is held, so its id is not reused
         return problem.warp_eligible

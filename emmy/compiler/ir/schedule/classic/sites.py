@@ -737,17 +737,7 @@ class ClassicKernelSite(Site[ClassicSchedule]):
             for work in (Work.parse(f"w{warps}x1") for warps in (1, 2, 4, 8))
             if pinned is None or work.spell() == pinned
             for tile in problem.state_tiles
-            if tile.spell() == named
-            or (
-                not named
-                and _atom_policy_ok(
-                    tile.atom,
-                    allow_f16_accumulate=problem.allow_f16_accumulate,
-                    allow_fp8=False,
-                    allow_tf32=problem.allow_tf32,
-                    allow_tf32_split=problem.allow_tf32_split,
-                )
-            )
+            if tile.spell() == named or (not named and _atom_policy_ok(tile.atom, problem))
         )
 
     def _states(self) -> tuple[Stage, ...]:
@@ -973,18 +963,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     def policy_atoms(self, site: NodeId) -> tuple[str, ...]:
         """The atoms the unpinned catalog offers: :meth:`atoms_of` under the precision policy."""
         rounded = () if self.allow_f32_as_bf16 else _rounded_atoms(self.tile, self.target, self.tile.sites[site].node)
-        return tuple(
-            name
-            for name in self.atoms_of(site)
-            if name not in rounded
-            and _atom_policy_ok(
-                ATOM_REGISTRY[name],
-                allow_f16_accumulate=self.allow_f16_accumulate,
-                allow_fp8=self.allow_fp8,
-                allow_tf32=self.allow_tf32,
-                allow_tf32_split=self.allow_tf32_split,
-            )
-        )
+        return tuple(name for name in self.atoms_of(site) if name not in rounded and _atom_policy_ok(ATOM_REGISTRY[name], self))
 
     @cached_property
     def bare_pins(self) -> frozendict[str, str]:

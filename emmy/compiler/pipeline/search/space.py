@@ -404,6 +404,22 @@ def precision_pin(knob: Knob) -> bool:
     return precision_default(knob, FAST_MATH.parse(raw) if raw is not None else FAST_MATH.hints[0])
 
 
+#: The gates of the tensor-core atom families, each under the flag of ``ClassicProblem``'s precision policy it decides.
+ATOM_GATES = {
+    "allow_f16_accumulate": F16_MMA_F32_ACC,
+    "allow_fp8": FP8_MMA,
+    "allow_tf32": TF32_MMA,
+    "allow_tf32_split": TF32_SPLIT_MMA,
+    "allow_f32_as_bf16": F32_AS_BF16_MMA,
+}
+
+
+def precision_policy() -> dict[str, bool]:
+    """The precision policy of an unpinned schedule enumeration, as ``ClassicProblem`` takes it: each atom gate as
+    its live pin resolves it."""
+    return {flag: precision_pin(gate) is True for flag, gate in ATOM_GATES.items()}
+
+
 def regime_pin(knob: Knob) -> bool:
     """The effective live pin of a regime BOOL ``knob``: a precision-trading knob's :func:`precision_pin`; any
     other's own ``EMMY_<NAME>`` pin when set, else its default (its first hint)."""
