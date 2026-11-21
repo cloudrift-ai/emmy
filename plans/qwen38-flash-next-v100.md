@@ -11,18 +11,19 @@ Emmy serving the model correctly, step 5 closes the speed gap, and step 6 releas
 Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Each result is written
 under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
 
-**Where it stands (2026-11-19).** Steps 1 to 4 are done; step 5's done gate is not met. Step 4's gate (2026-11-02):
+**Where it stands (2026-11-21).** Steps 1 to 4 are done; step 5's done gate is not met. Step 4's gate (2026-11-02):
 two boots give the same text and the accuracy sets pass, but the correctness limits are not met, and the fork does
 not meet them against itself either. Since the done gate's first run (2026-11-03), step 5 brought Emmy under the
 3 GiB per card margin, sliced the shared expert across ranks, split pre8's down rows across blocks, measured where
 the first-token and eight-request gaps sit (2026-11-07), ran the eight requests' routed experts in one launch (15%
 more output), and found the host time of a decode step equal on both sides. On 2026-11-11 the owner turned async
 scheduling on, on both sides, and on 2026-11-12 a prefill step's wider experts began running 32 per launch, the
-rest on 2026-11-14. Against the async fork, Emmy is now 1.41x slower to the first token at 1K and 1.51-1.59x at
-4K to 32K, 1.67x slower per token at one request, and gives 0.76x the fork's output at four requests and 0.75x at
-eight (2026-11-19). Async doubles the first token at the full context on both sides; the owner keeps the 2.5 GiB
-key/value pool, so that is a known limit (step 5). The next round comes from the 2026-11-19 ranking, for the owner to
-pick; its round 1 stopped at its gate the same day. The minimums in step 2 and Qwen's license are still open with
+rest on 2026-11-14. Against the async fork, Emmy is now 1.41x slower to the first token at 1K and 1.44-1.51x at
+4K to 32K (2026-11-19), 1.58x slower per token at one request, and gives 0.87x the fork's output at two requests,
+0.79x at four and 0.78x at eight (2026-11-21). Async doubles the first token at the full context on both sides; the
+owner keeps the 2.5 GiB key/value pool, so that is a known limit (step 5). Of the 2026-11-19 ranking, round 1
+stopped at its gate, round 2 shipped and round 3 shipped short of its gate (2026-11-21); rounds 4 and 5 and the
+compiler items round 3 left are for the owner to pick. The minimums in step 2 and Qwen's license are still open with
 the owner, who plans as if the license were granted.
 
 ## What we know
@@ -1658,6 +1659,68 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     both sides: torch peaks equal to the byte (26.75 GB allocated, 28.94 GB reserved), 368-370 MiB spare on both.
   - Regressions: none measured. The 1K control is within noise. The one cost is pre's output product, whose stale
     old row keeps a 19 us faster schedule from being picked.
+- **The decode step's post program and slot programs, by routes nobody had measured (2026-11-21).** Round 3 of the
+  2026-11-19 ranking, main `de841a597`. It set out as a compiler round on two things: post8's 13 small pieces (2.1 ms
+  per step) and the gathered down-and-sum with its dispatch (0.8-1.4 ms per step behind the fork). Measured first,
+  both turned out to be routes the compiler already offers and no row had measured, so the round ships golden rows,
+  a twin form and a runner change, and no compiler change.
+  - Why the search never got there. An unpinned cut fork takes one seam at a time, and a piece no row has measured
+    is priced by the prior's schedule: for the merged pieces here a 512-thread cooperative reduce at 60-500 us, where
+    a hand-pinned schedule runs 9-17 us. A merged route loses before anyone tunes its pieces. The 2026-11-18 round's
+    "fused down-and-sum runs 34-36 us under every schedule" was the same gap: its sweep never pinned a cooperative
+    reduce on the kernel that holds both sums, which runs in 16.4 us (`WORK=t16x8`, `REDUCE=coop`).
+  - Gate, stated before building, cold per layer on one card: post8 at most 142 us in at most 14 kernels (164 in
+    19); the one-row program with its sum inside at most 34 us with two small kernels of dispatch around it (35.8,
+    with five); in serving, one request at least 1.0 ms per token faster and eight requests at least 252 tok/s.
+  - Post8, cold per layer: 163.8 us in 19 kernels on main, 139.3 us in 15 here. Ten cuts are pinned on the root
+    kernel and each piece keeps what main cut off it: the first mixer weight's product carries its norm's weights
+    (14.3 us in two kernels to 9.2 in one), the second mixer's up product its sigmoid (21.5 to 16.4), the last gate's
+    product its sigmoid (13.3 to 10.2), and the two cross-CTA finishes their activations (two kernels less). The
+    normalized mixer input stays a kernel of its own: folded into the down product's fill it saved a launch cold
+    (140.3 us in 14 kernels) and cost 5.7 us per layer warm, 23.8 us against 18.1. Profiled, rank 0: 105.7 to 92.6
+    us per layer, 0.63 ms per step, a third of the 43.7 us the 13 pieces took. One kernel still runs twice, the
+    4-stream mean, once into scratch for the shared expert and once into the output (3.4 us per layer): a cut value
+    that is also an output is stored twice.
+  - The slot programs (`ExpertFFN.slots_sum`): the program takes the router's scores and the shared expert's output
+    and returns the layer's routed sum. Around it the runner keeps the selector's write and one write of the scores;
+    the row upload, the shared output's add and the weighted sum are gone (five kernels and 16.6 us per layer to two
+    and 6.8, profiled). The program reads its rows and the shared output where the post twin wrote them. Recorded in
+    three pieces: gate and up with the activation (the activation's own kernel is gone), the down projection as on
+    main, and a sum-and-add piece. Cold per layer: one row 35.8 to 33.8 us, two rows 47.1 to 46.1.
+  - Two forms were measured and dropped. The fused down-and-sum in one kernel: 15.0 us warm at one row and 54.6 at
+    eight, against 9.9 and 41.5 for the plain down projection, because a thread walks an expert's 160 columns alone.
+    And the summed program at four and eight rows: cut from the sum, the down projection writes its picks fastest,
+    so a block reads the rows of 32 experts; 71.7 us warm at eight rows against main's 41.5, though both bench 42.0
+    cold (the bench's selector does not spread its picks). The cut orders a workspace by a weight's layout only when
+    the weight is read straight from memory, not through the selector. So the four- and eight-row programs stay
+    main's, with main's rows.
+  - A B B A on boots never profiled, two of main against two of the branch, one server working at a time:
+
+    | Point | Main | This round | Fork, 2026-11-19 |
+    | --- | ---: | ---: | ---: |
+    | One request, 1K / 512, per token | 16.07-16.08 ms | 15.16-15.19 ms | 9.59-9.60 ms |
+    | 2 requests, 4K / 1K, total output | 91.8-92.0 tok/s | 95.6-95.8 tok/s | 110.6 tok/s |
+    | 4 requests, 4K / 1K, total output | 156.7-156.9 tok/s | 159.7-160.3 tok/s | 203.2-203.5 tok/s |
+    | 8 requests, 4K / 1K, total output | 244.3-244.5 tok/s | 248.2-248.9 tok/s | 316.4-320.3 tok/s |
+    | First token, 1K (control) | 0.609 s | 0.602-0.619 s | 0.43 s |
+    | First token, 4K (control) | 1.189-1.200 s | 1.205-1.227 s | 0.82-0.83 s |
+
+  - The steps between tokens fell by 0.90 ms at one request (16.07 to 15.18), 0.88 at two (19.49 to 18.61), 0.56 at
+    four (21.37 to 20.80) and 0.55 at eight (24.82 to 24.28). Against the fork: one request 1.58x slower (1.67x), two
+    requests 0.87x (0.83x), four 0.79x (0.77x), eight 0.78x (0.77x). The 4K first token read 1.191-1.199 s on an
+    earlier pair of branch boots against 1.199-1.221 s on main: no change.
+  - Gate **missed, closely at one request**: 0.90 ms per token against the 1.0 stated, and 248.2-248.9 tok/s at
+    eight requests against 252. Behind it: post8 met its time (139.3 us against 142) with 15 kernels where 14 were
+    stated; the one-row program met its bar (33.8 us, two kernels around it); the eight-row program is unchanged, so
+    eight requests gain only what post8 gains.
+  - Checks: CHECKLINE
+  - Regressions: REGLINE
+  - Left for a compiler round, each measured here: the workspace order of a product cut from a sum over a gathered
+    weight (it decides whether the summed program pays at four and eight rows, 9.5 us of dispatch per layer); the
+    mean stored twice (3.4 us per layer); and a search that tunes the pieces of a route before it prices the route.
+    A load-vectorizer change that widens a packed weight's byte loads in a serial loop sped the fused down-and-sum
+    from 16.4 to 14.3 us at one row and from 63.5 to 51.2 at eight; no route here uses that kernel and the change
+    moves code of other models' goldens, so it was left out.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
