@@ -31,6 +31,7 @@ from emmy.compiler.pipeline.search.db.admission import admission_reason, kernel_
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, STRUCT_PREFIX, stamps
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups
 from emmy.compiler.structural import digest
+from emmy.compiler.wire import name_of
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ def measured_groups(rows, kernel_op: Callable, *, jobs: int = 1) -> tuple[list[M
         unit="groups",
         mp_context=get_context("spawn"),
         describe=lambda task, _feats: {
-            "kernel": task[1][0][0].kernel,
+            "kernel": name_of(task[1][0][0].kernel),
             "card": task[1][0][0].gpu,
             "regime": task[0] or "default",
             "rows": len(task[1]),

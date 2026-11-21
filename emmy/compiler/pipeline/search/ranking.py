@@ -231,7 +231,7 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
 def describe_pool(pool: GoldenPool) -> dict:
     """A pool as one of a phase's slowest tasks names it (``progress.timed_map``): its kernel, card, regime and
     sizes."""
-    return {"kernel": pool.name, "card": pool.gpu, "regime": pool.regime or "default", "sizes": dict(pool.bindings)}
+    return {"kernel": pool.kernel.name, "card": pool.gpu, "regime": pool.regime or "default", "sizes": dict(pool.bindings)}
 
 
 def _describe_packed(task: tuple, result: tuple) -> dict:
