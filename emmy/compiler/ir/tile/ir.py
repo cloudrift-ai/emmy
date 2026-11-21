@@ -297,6 +297,14 @@ def _reads_move_with(edge: Fold, coord: str, ctx: SimplifyCtx) -> bool:
     return any(coord in index.simplify(ctx).free_vars() for index in _index_reads(edge) if coord in index.free_vars())
 
 
+def matrix_coordinates(index: tuple) -> tuple[int, int] | None:
+    """Where in ``index`` the two coordinates of a stored matrix stand, columns then rows: its last two entries
+    that are no literal, a size-one dim between or after them being addressed by a zero. ``None`` where either is
+    more than an axis."""
+    at = [position for position, entry in enumerate(index) if not isinstance(entry, Literal)][-2:]
+    return (at[0], at[1]) if len(at) == 2 and all(isinstance(index[position], Var) for position in at) else None
+
+
 def loaded_buffers(term):
     """Every ``Load`` the STORED tree reads — each lift body's loads, through the operand edges."""
     yield from term.lift.body.loads
@@ -510,11 +518,10 @@ class TileOp(Op):
             return None
         *batch, col, row = fold.cells
         extent = {axis.name: axis.extent.as_static() for axis in carrying.axes}
-        matrices = [spec.write.index[-2:] for spec in carrying.output_specs]
-        if any(len(spec.write.values) != 1 for spec in carrying.output_specs) or any(
-            len(index) != 2 or not all(isinstance(e, Var) for e in index) for index in matrices
-        ):
+        at = [matrix_coordinates(spec.write.index) for spec in carrying.output_specs]
+        if any(len(spec.write.values) != 1 for spec in carrying.output_specs) or None in at:
             return None
+        matrices = [(spec.write.index[c], spec.write.index[r]) for spec, (c, r) in zip(carrying.output_specs, at, strict=True)]
         if extent[row] % 16 or any(extent[r.name] != extent[row] for _, r in matrices):
             return None
         if any(extent[name] % 8 for name in (col, *(c.name for c, _ in matrices))):

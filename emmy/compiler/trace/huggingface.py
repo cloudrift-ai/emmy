@@ -309,7 +309,7 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
 CHUNK = 64
 
 
-def _chunk_rule_scan_then_read(
+def _chunk_rule(
     scope,
     query,
     key,
@@ -322,14 +322,17 @@ def _chunk_rule_scan_then_read(
     use_qk_l2norm_in_kernel=False,
     **kwargs,
 ):
-    """Transformers' ``torch_chunk_gated_delta_rule`` (``scope`` is its module) with the outputs read after the scan
-    and every pointwise scale applied to the small side of a product.
+    """Transformers' ``torch_chunk_gated_delta_rule`` (``scope`` is its module) with every pointwise scale applied
+    to the small side of a product.
 
-    The scan keeps the state each chunk starts from and the chunk's new values; the output of every chunk is then
-    ``query @ state + intra @ new_values`` over the stacked chunks at once. ``beta``, the decay and the query scale
-    multiply the ``chunk x chunk`` matrices and the rows of a product's result, never the queries, keys or values:
-    those stay the operands they were loaded as, which is what a tensor-core tile reads. The sums are the
-    reference's; a scale meets its product on the other side, so the rounding differs in the last place."""
+    Each step of the scan reads its chunk's output, ``query @ state + intra @ new_values``, from the state it
+    starts with and the new values it has just computed, and then advances the state. The recurrence rolls into
+    one kernel that carries the state, and a step's own readers roll into it too
+    (``loop/fusion/005_roll_recurrence``): the output is computed where the state is held, and no state but the
+    last is stored. ``beta``, the decay and the query scale multiply the ``chunk x chunk`` matrices and the rows of
+    a product's result, never the queries, keys or values: those stay the operands they were loaded as, which is
+    what a tensor-core tile reads. The sums are the reference's; a scale meets its product on the other side, so
+    the rounding differs in the last place."""
     import torch
     import torch.nn.functional as F
 
@@ -369,13 +372,12 @@ def _chunk_rule_scan_then_read(
     query_row = (cum.exp() * scale).unsqueeze(4)
     key_row = (cum[..., -1:] - cum).exp().unsqueeze(4)
     chunk_decay = cum[..., -1].exp()[..., None, None]
-    starts, news = [], []
+    outs = []
     for i in range(chunks):
-        starts.append(state)
-        news.append(new_values[:, :, i] - k_cumdecay[:, :, i] @ state)
-        state = state * chunk_decay[:, :, i] + key[:, :, i].transpose(-1, -2) @ (news[-1] * key_row[:, :, i])
-    out = (query @ torch.stack(starts, dim=2)) * query_row + intra @ torch.stack(news, dim=2)
-    out = out.reshape(batch, v_heads, -1, v_dim)[:, :, :length]
+        new = new_values[:, :, i] - k_cumdecay[:, :, i] @ state
+        outs.append((query[:, :, i] @ state) * query_row[:, :, i] + intra[:, :, i] @ new)
+        state = state * chunk_decay[:, :, i] + key[:, :, i].transpose(-1, -2) @ (new * key_row[:, :, i])
+    out = torch.stack(outs, dim=2).reshape(batch, v_heads, -1, v_dim)[:, :, :length]
     return out.transpose(1, 2).to(dtype, memory_format=torch.contiguous_format), state if output_final_state else None
 
 
@@ -449,13 +451,11 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool
             return (*self._block(x, cache), cache.recurrent_states[0], cache.conv_states[0])
 
         def _chunks(self, x, cache):
-            # Several chunks: the scan over them carries only the state and each chunk's new values, and every
-            # chunk's output is read from the stacked states afterwards, one batched product, the same arithmetic
-            # as the block's own rule. Written inside the scan, each output would trace as one branch per chunk
-            # of a select every output cell evaluates.
+            # Several chunks: the block's own rule with its scales on the small side of each product, which keeps
+            # the queries, keys and values the operands a tensor-core tile reads.
             scope = sys.modules[type(mixer).__module__].__dict__
             saved = scope["torch_chunk_gated_delta_rule"]
-            scope["torch_chunk_gated_delta_rule"] = partial(_chunk_rule_scan_then_read, scope)
+            scope["torch_chunk_gated_delta_rule"] = partial(_chunk_rule, scope)
             try:
                 outs = self._block(x, cache)
             finally:

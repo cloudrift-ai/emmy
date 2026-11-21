@@ -230,10 +230,10 @@ def test_the_row_substitution_composes_to_its_last_state_and_matches_eager(pin: 
 _WRAPPED_RULE = """
 import torch, torch.nn as nn
 import transformers.models.qwen3_5.modeling_qwen3_5 as scope
-from emmy.compiler.trace.huggingface import _chunk_rule_scan_then_read
+from emmy.compiler.trace.huggingface import _chunk_rule
 class Rule(nn.Module):
     def forward(self, q, k, v, g, beta):
-        out, _ = _chunk_rule_scan_then_read(vars(scope), q, k, v, g, beta, chunk_size=8, use_qk_l2norm_in_kernel=True)
+        out, _ = _chunk_rule(vars(scope), q, k, v, g, beta, chunk_size=8, use_qk_l2norm_in_kernel=True)
         return out
 m = Rule()
 m(torch.randn(1, 32, 2, 8), torch.randn(1, 32, 2, 8), torch.randn(1, 32, 2, 8), -torch.rand(1, 32, 2), torch.rand(1, 32, 2))
@@ -317,10 +317,11 @@ def test_the_composed_parts_match_the_sequential_walk_on_the_gpu() -> None:
     np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=1e-4, atol=1e-5)
 
 
-def test_the_delta_rule_splits_and_matches_eager() -> None:
-    """The inter-chunk delta rule of ``test_roll_recurrence``, rolled, split two ways and run as
-    Loop IR against eager PyTorch: its step ``S·exp(g) + kᵀv`` reads the state at its own cell
-    alone, so the map is diagonal and the probe walks from a seed of ones."""
+def test_a_walk_that_computes_its_outputs_in_the_step_is_offered_no_split() -> None:
+    """The inter-chunk delta rule of ``test_roll_recurrence``, rolled: each chunk's output reads the state its step
+    starts with, so the step computes it, and the kernel stores those outputs every step and of its states the
+    last. Parts side by side cannot write that mix of stores, so the walk stays one kernel under a pin that names
+    a split, and matches eager PyTorch as Loop IR."""
     import torch  # noqa: PLC0415
 
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
@@ -332,12 +333,12 @@ def test_the_delta_rule_splits_and_matches_eager() -> None:
     with pinned_knobs({"REDUCE": "g2k"}):
         graph = Pipeline.build(["tile/lift", "tile/cut"], select=["lift", "cut"]).run(Pipeline.build(LOOP_PASSES).run(graph))
     carrying = [node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and node.op.carries]
-    assert len(carrying) == 3 and sum(carries_partition(tile) for tile in carrying) == 2
+    assert len(carrying) == 1 and not carries_partition(carrying[0])
 
     arrays = run_loops(graph)
     reference = torch.cat(module(*(torch.from_numpy(arrays[name]) for name in ("q", "k", "v", "g"))), 1).numpy()
-    # The chunks' outputs by chunk order; the bare pin split the consumers' contractions too, so
-    # their workspaces sit beside them under longer names.
+    # The chunks' outputs by chunk order; the bare pin split the last chunk's contraction, so its workspace sits
+    # beside it under a longer name.
     chunks = sorted((name for name in arrays if re.fullmatch(r"matmul(_\d+)?", name)), key=lambda name: int(name[7:] or 0))
     np.testing.assert_allclose(np.concatenate([arrays[name] for name in chunks], axis=1), reference, rtol=1e-4, atol=1e-5)
 
