@@ -313,7 +313,9 @@ def test_matmul_leaf_set_equals_the_scalar_catalog(monkeypatch):
     assert rows, "the term enumerated nothing"
     serial = [r for r in rows if not str(family_value(r, "REDUCE") or "")]
     offered = {(str(family_value(r, "TILE") or ""), str(r.get("WORK", ""))) for r in serial}
-    assert offered == {_stored(p) for p in scalar_tile_moves()}
+    # A product of two f32 operands also offers the TF32 cell's tiles, beside the scalar ones.
+    tf32 = {pair for pair in offered if pair[0].startswith("mma_m16n8k8_tf32_f32/")}
+    assert tf32 and offered - tf32 == {_stored(p) for p in scalar_tile_moves()}
 
 
 def test_f32_computed_a_contraction_offers_a_tiled_scalar_row():

@@ -52,6 +52,12 @@ const MMA_HALVES: Needs = Needs {
     arch_specific: false,
     version: (7, 0),
 };
+const MMA_TF32: Needs = Needs {
+    what: "`mma.sync` m16n8k8 of 32-bit floats read as TF32",
+    sm: 80..=SM_LAST,
+    arch_specific: false,
+    version: (7, 0),
+};
 const MMA_BYTES: Needs = Needs {
     what: "`mma.sync` m16n8k32 of 8-bit floats",
     sm: 89..=SM_LAST,
@@ -420,6 +426,7 @@ impl Lowerer {
             ((16, 8, 16), "f16", "f32") => Some((MmaShape::M16n8k16, Ty::F16, 4, 4, &MMA_HALVES)),
             ((16, 8, 16), "bf16", "f32") => Some((MmaShape::M16n8k16, Ty::Bf16, 4, 4, &MMA_HALVES)),
             ((16, 8, 16), "f16", "f16") => Some((MmaShape::M16n8k16, Ty::F16, 4, 2, &MMA_HALVES)),
+            ((16, 8, 8), "tf32", "f32") => Some((MmaShape::M16n8k8, Ty::Tf32, 4, 4, &MMA_TF32)),
             ((16, 8, 32), "e4m3", "f32") => Some((MmaShape::M16n8k32, Ty::E4m3, 4, 4, &MMA_BYTES)),
             ((16, 8, 32), "e5m2", "f32") => Some((MmaShape::M16n8k32, Ty::E5m2, 4, 4, &MMA_BYTES)),
             ((16, 8, 64), "e2m1", "f32") => {
