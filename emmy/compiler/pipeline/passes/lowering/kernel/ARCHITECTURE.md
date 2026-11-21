@@ -290,7 +290,10 @@ The score's own fragments are never copied: they repack in registers out of
 the chunk's C fragments, or come off a stored probability tile at the fragment lane map, and that shape has no key at
 all — the value then stages alone. The QUERY is not staged either, for the opposite reason: its index never carries the
 carrier's key, so it is loop-INVARIANT and rides hoisted registers instead, one A fragment per score-K step read once
-ahead of the chunk loop. Depth is the ordinary budget clamp, so a ring deeper than one prefetches the next chunk's key
+ahead of the chunk loop. A warp-group score reads descriptors only, so there the query is copied once into a slab of its
+own ahead of the loop; a tile that overhangs the query rows clamps that fill onto the last valid row, as every slab
+does for an outer stream its chunk does not divide, and the store guard discards the rows. A stored score has no query
+and fills none. Depth is the ordinary budget clamp, so a ring deeper than one prefetches the next chunk's key
 and value ACROSS the softmax between this chunk's fill and drain — the longest overlap this tier has to offer, on a
 STATIC extent. Its key extent may be SYMBOLIC, which every other staged operand refuses: a
 K-major value rows its slab by key and runs its copy chunks along the head dim, so the extent enters neither the chunk
