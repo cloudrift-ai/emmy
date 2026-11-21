@@ -963,11 +963,7 @@ def computed_where_read(body: Body, shapes: Mapping) -> Body:
     if not any(isinstance(stmt, Define) for stmt in body.iter()):
         return body
     with binding_extents(name for shape in shapes.values() for dim in shape for name in dim.expression.free_vars()):
-        token = _VALUES.set({})
-        try:
-            term, _, axes, stores = _lift_parts(body)
-        finally:
-            _VALUES.reset(token)
+        term, _, axes, stores = _lift_parts(body)
         term, axes = term.inlined(axes)
         return LoopOp(body=term.lower(bound=frozenset(), stores=stores, axes=axes)).body
 
@@ -989,7 +985,12 @@ def _lift_parts(body: Body, results: tuple[str, ...] = ()) -> tuple[Fold, list, 
     """``body`` as one Fold tree: the root term, the free axes peeled off it, the axis table and the boundary
     stores. The root exposes ``results`` when they are given."""
     free, cell = _peel(body)
-    edges, stmts = lift_body(cell, tuple(free))
+    # The values this body defines for itself are its own: each lift starts with none.
+    token = _VALUES.set({})
+    try:
+        edges, stmts = lift_body(cell, tuple(free))
+    finally:
+        _VALUES.reset(token)
     split = extract_output_specs(stmts)
     if split is None:
         raise ValueError("Loop IR effects cannot be represented as output specifications")

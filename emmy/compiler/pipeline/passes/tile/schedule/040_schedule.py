@@ -32,6 +32,7 @@ from emmy.compiler.ir.schedule.classic import (
     ClassicProblem,
     ClassicScheduleCodec,
     ClassicScheduleContext,
+    classic_keys,
     materialize_classic,
 )
 from emmy.compiler.ir.tile import TileOp
@@ -159,6 +160,11 @@ def classic_forks(
             state_stages += (Stage(transport="reg"),)
     # A block of a partition walks from zero, and each range is stated of the axis as a tier walks it.
     tile = tile.scheduled()
+    # A value a kernel keeps lives in shared memory that one cell of the grid owns
+    # (``lowering/kernel/012_keep_values``), so the kernel takes the layout with one thread to a cell: every site
+    # at its direct choice, whatever a pin published to every kernel says.
+    if tile.keeps:
+        row = dict.fromkeys(classic_keys(tile), "")
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band). A finalize that cannot take that row keeps its own

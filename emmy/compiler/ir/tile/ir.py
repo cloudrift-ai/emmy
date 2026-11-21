@@ -480,6 +480,13 @@ class TileOp(Op):
         return any(site.node.carries for site in self.sites)
 
     @cached_property
+    def keeps(self) -> bool:
+        """Whether this kernel keeps a value for itself: a term of its tree reads another by index
+        (:meth:`Fold.as_read`), so the value is computed once into storage the launch owns and each reader loads a
+        cell of it — the kernel a Loop IR body with a ``Define`` is."""
+        return any(site.node.as_read() is not None for site in self.sites)
+
+    @cached_property
     def state_routes(self) -> tuple[str, ...]:
         """The route of every fold whose carried state this kernel keeps between steps: the carrying folds of the
         kernel itself, or, for its serial form (:attr:`Placement.serial`), of the carrying kernel that form was

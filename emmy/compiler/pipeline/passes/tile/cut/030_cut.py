@@ -277,6 +277,9 @@ def rewrite(match: Match, root: Node, ctx=None):
             raise RuleSkipped("a kernel that carries a state is one kernel")
         options = [cut.kernel for cut in schedule(_CutContext(tuple(choices)))]
         return options if len(options) > 1 else options[0]
+    if tile.keeps:
+        # A kernel that keeps a value for itself is the arm that keeps it: the value and its readers are one launch.
+        raise RuleSkipped("a kernel that keeps a value is one kernel")
     choices = None if tile.placement_decided else _placement_forks(match, root, tile, ctx)
     if choices is None:
         choices = layout_forks(match, root)

@@ -1,8 +1,9 @@
 """A body may define a value once and read it by index at two or more places.
 
 A ``Define`` stores one cell of a value the kernel keeps for itself and a ``Load`` reads a cell of it, the way it
-reads any buffer. No tier keeps such a value for its readers, so a kernel computes it where each reader reads it
-(``computed_where_read``): the kernel is the one the body that writes the value out at each reader gives.
+reads any buffer. A kernel formed from such a body keeps the value: it computes it once, into shared memory the
+launch owns, and its readers load it. That is another kernel than the one that computes the value at each read
+(``computed_where_read``), which is what fusion forms when it merges a kernel that keeps a value with its reader.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Accum, Define, Load, parse_body
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.tile._fromloop import computed_where_read, lift_loop_op
 from emmy.compiler.pipeline.passes.tile._row import lift_kernel
@@ -127,10 +129,22 @@ def test_a_body_runs_the_same_as_written_and_resolved(text: str, output: tuple[i
     np.testing.assert_allclose(resolved, as_written, rtol=1e-6, atol=1e-6)
 
 
-def test_the_lift_takes_a_body_that_defines_a_value_to_the_kernel_of_the_resolved_body() -> None:
-    defined = lift_kernel(LoopOp(body=parse_body(READ_TWICE)))
-    resolved = lift_loop_op(LoopOp(body=parse_body(COMPUTED_AT_EACH_READ)))
-    assert defined.identity_key(structural=False) == resolved.identity_key(structural=False)
+@pytest.mark.parametrize("text", [READ_TWICE, SOFTMAX], ids=["product", "softmax"])
+def test_the_lift_keeps_a_value_its_body_defines(text: str) -> None:
+    """The kernel of a body with a ``Define`` reads the value by index, and its own body defines it again: the lift
+    takes that body back to the same kernel."""
+    kept = lift_kernel(LoopOp(body=parse_body(text)))
+    assert kept.keeps
+    lowered = LoopOp(body=kept.loop_body)
+    assert sum(isinstance(stmt, Define) for stmt in lowered.body.iter()) == 1
+    assert lift_kernel(lowered).identity_key(structural=False) == kept.identity_key(structural=False)
+
+
+def test_a_kernel_that_keeps_a_value_is_not_the_kernel_that_computes_it_at_each_read() -> None:
+    kept = lift_kernel(LoopOp(body=parse_body(READ_TWICE)))
+    computed = lift_loop_op(LoopOp(body=parse_body(COMPUTED_AT_EACH_READ)))
+    assert not computed.keeps
+    assert kept.identity_key(structural=False) != computed.identity_key(structural=False)
 
 
 def _program() -> Graph:
@@ -184,6 +198,38 @@ def test_a_kernel_that_defines_a_value_computes_what_its_program_does_on_the_car
     backend = CudaBackend()
     got = next(iter(backend.run(backend.compile(_program()), input_data=inputs)[0].outputs.values()))
     np.testing.assert_allclose(np.asarray(got).reshape(want.shape), want, rtol=1e-4, atol=1e-4)
+
+
+def _keeps(kernel) -> bool:
+    """Whether the compiled ``kernel`` was lowered from a kernel that keeps a value."""
+    return any(isinstance(op, TileOp) and op.keeps for op in kernel.source_chain())
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize(("text", "output"), [(READ_TWICE, (4, 8, 8)), (SOFTMAX, (4, 8))], ids=["product", "softmax"])
+def test_a_kernel_keeps_its_value_in_shared_memory_on_the_card(text: str, output: tuple[int, ...]) -> None:
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.kernel import KernelOp, Smem
+
+    loop = LoopOp(body=parse_body(text))
+    rng = np.random.default_rng(0)
+    arrays = {name: rng.standard_normal(_SHAPES[name]).astype(np.float32) for name in loop.inputs}
+    want = execute_loop_op_cpp(loop, arrays, {"out": output})
+    graph = Graph()
+    for name in loop.inputs:
+        graph.add_node(InputOp(), [], Tensor(name, _SHAPES[name]), node_id=name)
+    graph.add_node(loop, list(loop.inputs), Tensor("out", output), node_id="out")
+    graph.inputs, graph.outputs = list(loop.inputs), ["out"]
+    backend = CudaBackend()
+    compiled = backend.compile(graph)
+    (kernel,) = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert _keeps(kernel)
+    lowered = next(op for op in kernel.source_chain() if isinstance(op, KernelOp))
+    assert sum(isinstance(stmt, Smem) for stmt in lowered.body.iter()) == 1
+    got = next(iter(backend.run(compiled, input_data=arrays)[0].outputs.values()))
+    np.testing.assert_allclose(np.asarray(got).reshape(want.shape), want, rtol=1e-4, atol=1e-5)
 
 
 # FlashInfer's walk over the chunks of a Gated DeltaNet layer, for one head. Per chunk ``c``, from the state ``S`` the
@@ -266,7 +312,14 @@ def test_the_walk_over_chunks_runs_as_one_body_with_its_correction_defined_once(
         got = dict(zip(kernel.outputs, execute_loop_op_cpp(kernel, arrays, _WALK_OUTPUTS), strict=True))
         for name, expected in want.items():
             np.testing.assert_allclose(got[name], expected, rtol=1e-4, atol=1e-5)
-    assert lift_kernel(op).carries
+    kernel = lift_kernel(op)
+    assert kernel.carries and kernel.keeps
+    # Each step defines its correction once, inside the loop over the steps, and both of its readers load it.
+    lowered = LoopOp(body=kernel.loop_body)
+    assert sum(isinstance(stmt, Define) for stmt in lowered.body.iter()) == 2
+    got = dict(zip(lowered.outputs, execute_loop_op_cpp(lowered, arrays, _WALK_OUTPUTS), strict=True))
+    for name, expected in want.items():
+        np.testing.assert_allclose(got[name], expected, rtol=1e-4, atol=1e-5)
 
 
 @requires_cuda
@@ -285,7 +338,8 @@ def test_the_walk_over_chunks_compiles_to_one_kernel_on_the_card() -> None:
     graph.inputs, graph.outputs = list(_WALK_SHAPES), list(_WALK_OUTPUTS)
     backend = CudaBackend()
     compiled = backend.compile(graph)
-    assert sum(isinstance(node.op, CudaOp) for node in compiled.nodes.values()) == 1
+    (kernel,) = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert _keeps(kernel)
     got = backend.run(compiled, input_data=arrays)[0].outputs
     for name, expected in want.items():
         np.testing.assert_allclose(np.asarray(got[name]).reshape(expected.shape), expected, rtol=1e-4, atol=1e-5)
