@@ -132,6 +132,14 @@ class AtomKind:
         return self.shape == (16, 8, 16) or self.fragment_layout == "m8n8k4"
 
     @property
+    def resident_operands(self) -> bool:
+        """Whether a state held in accumulator fragments can be this atom's operands, so registers can keep a
+        recurrence's state for it: every atom with the handoff above, and the TF32 cells. A TF32 operand is one
+        accumulator's elements as they are, moved between lanes; its lanes do not line up with the accumulator's
+        the way two halves do, which is why the chunk tier's handoff is not its."""
+        return self.c_to_a_repack or self.operand_dtype("a") == F32
+
+    @property
     def c_to_b_repack(self) -> bool:
         """Whether an FP32 C fragment can feed this atom's B operand through register shuffles."""
         return self.ab_dtype == "f16" and self.fragment_layout in ("m16n8k16", "m8n8k4")

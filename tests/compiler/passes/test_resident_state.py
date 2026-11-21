@@ -1,5 +1,7 @@
 """A carried state kept in register fragments (``STAGE=d1/reg``): the steps as one loop inside the CTA."""
 
+from importlib import import_module
+
 import numpy as np
 import pytest
 
@@ -9,8 +11,9 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.kernel.ir import FragmentApply, MmaSyncPtx, RegStore
+from emmy.compiler.ir.kernel.ir import FragmentApply, FragmentRepack, MmaSyncPtx, RegStore
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.stmt import Loop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -19,6 +22,16 @@ from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements
 
 _HEADS, _STEPS = 2, 3
+
+#: The atoms registers keep a state for, each with how far its recurrence may stand from the 64-bit one: ten bits
+#: of mantissa an operand for halves and TF32, eight for bfloat16, and f32's own for the split.
+_ATOMS = {
+    "mma_m16n8k16_f16_f32": 2e-3,
+    "mma_m16n8k16_f16_f16": 2e-3,
+    "mma_m16n8k16_bf16_f32": 8e-3,
+    "mma_m16n8k8_tf32_f32": 2e-3,
+    "mma_m16n8k8_tf32x3_f32": 2e-6,
+}
 
 
 def _graph(n: int = 32) -> Graph:
@@ -120,8 +133,41 @@ def test_a_state_the_fragments_do_not_tile_is_not_offered():
         resident_walk(_lifted(24), ATOM_REGISTRY["mma_m16n8k16_f16_f32"], 2, 4)
 
 
+@pytest.mark.parametrize("name", _ATOMS)
+def test_a_states_fragments_become_the_operands_of_the_atom_that_reads_them(name):
+    """The repack is told which atom it serves: halves for a 16-bit one, each at that atom's own format, and the
+    f32 elements as they are for a TF32 one. Left untold it packed halves for every atom, and a bfloat16 product
+    read them as bfloat16."""
+    atom = ATOM_REGISTRY[name]
+    body = resident_walk(_lifted(32), atom, 2, 4).body
+    repacks = list(body.iter_of_type(FragmentRepack))
+    assert repacks and {repack.ab_dtype for repack in repacks} == {atom.ab_dtype}
+    # An operand of 32-bit floats is the columns of one accumulator; a pair of halves takes two.
+    assert {len(repack.srcs) for repack in repacks if repack.role == "a"} == {atom.atom_k // atom.atom_n}
+
+
+def test_registers_offer_the_tf32_atoms_under_their_gates():
+    """The state is f32, and a TF32 operand is its fragments as they are. The catalog offers each atom where its
+    gate allows; what a card's fragments can hold is the same whatever the gates say."""
+    from emmy.compiler.ir.schedule.classic import ClassicProblem
+
+    schedule = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule")
+    tile, ctx = _lifted(32), Context.from_target((12, 0))
+    tiles = schedule._resident_tiles(tile, ctx)
+    assert {plan.atom.name for plan in tiles} >= {"mma_m16n8k16_f16_f32", "mma_m16n8k8_tf32_f32", "mma_m16n8k8_tf32x3_f32"}
+    serial = schedule.serial_form(tile, "out").scheduled()
+
+    def offered(**gates) -> set[str]:
+        problem = ClassicProblem(serial, ctx, state_stages=(Stage(transport="reg"),), state_tiles=tiles, **gates)
+        return {kernel.state_tile.atom.name for kernel in problem.kernel_site.kernels if kernel.state_tile is not None}
+
+    assert "mma_m16n8k8_tf32_f32" in offered(allow_tf32=True) and "mma_m16n8k8_tf32_f32" not in offered(allow_tf32=False)
+    assert "mma_m16n8k8_tf32x3_f32" not in offered(allow_tf32=True)
+    assert "mma_m16n8k8_tf32x3_f32" in offered(allow_tf32_split=True)
+
+
 @requires_cuda
-@pytest.mark.parametrize("atom", ["mma_m16n8k16_f16_f32", "mma_m16n8k16_f16_f16"])
+@pytest.mark.parametrize("atom", _ATOMS)
 @pytest.mark.parametrize("n", [32, 64])
 def test_a_state_in_registers_matches_the_recurrence(atom, n):
     with pinned_knobs(_row(n, atom)):
@@ -130,4 +176,4 @@ def test_a_state_in_registers_matches_the_recurrence(atom, n):
     for seed in (0, 1):
         feed = _feed(n, seed)
         got = np.asarray(backend.run(compiled, input_data=dict(feed))[0].outputs["out"], dtype=np.float64)
-        np.testing.assert_allclose(got, _reference(feed), atol=2e-3)
+        np.testing.assert_allclose(got, _reference(feed), atol=_ATOMS[atom])

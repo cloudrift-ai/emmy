@@ -763,7 +763,8 @@ impl Lowerer {
                     self.packed_pair(pair[0], pair[1], to, Some(into));
                 }
             }
-            ("m16n8k16", "b", [source]) if ab == "f16" => {
+            ("m16n8k16", "b", [source]) if matches!(ab, "f16" | "bf16") => {
+                let to = if ab == "f16" { Ty::F16x2 } else { Ty::Bf16x2 };
                 self.requires(&PACKED_CONVERSION)?;
                 let floats = self.tensor_fragment(*source, 4, VTy::F32)?;
                 let packed = self.repacked(node.frag, 2)?;
@@ -775,7 +776,7 @@ impl Lowerer {
                     self.lane_value(&sum(from, Expression::int(4)), ctx)?,
                 ];
                 for (pair, into) in floats.chunks(2).zip(packed) {
-                    let pair = self.packed_pair(pair[0], pair[1], Ty::F16x2, None);
+                    let pair = self.packed_pair(pair[0], pair[1], to, None);
                     let mut halves = Vec::with_capacity(2);
                     for lane in &lanes {
                         let theirs = self.taken_from(pair, lane);
@@ -799,6 +800,59 @@ impl Lowerer {
                         vec![halves[0].into(), high.into()],
                     );
                     self.b.emit(join);
+                }
+            }
+            ("m16n8k16", "a", [source]) if matches!(ab, "tf32" | "tf32x3") => {
+                // An operand of 32-bit floats spans eight K positions: the eight columns of ONE accumulator
+                // fragment. A lane's register `i` is the element at its group's row, eight further down for an
+                // odd `i`, and at column `t + 4 * (i / 2)`. Lane `t / 2 + 2 * (i / 2)` of the same group holds
+                // that column, in the register of that row and of the column's parity, which is the parity of
+                // `t`: so two exchanges with that lane, and the lane's own parity picks.
+                let floats = self.tensor_fragment(*source, 4, VTy::F32)?;
+                let into = self.repacked(node.frag, 4)?;
+                let (group, within) = (over(lane.clone(), 4), modulo(lane.clone(), 4));
+                let from = sum(times(group, 4), over(within, 2));
+                let lanes = [
+                    self.lane_value(&from, ctx)?,
+                    self.lane_value(&sum(from, Expression::int(2)), ctx)?,
+                ];
+                let odd =
+                    Expression::binary(Operation::NotEqual, masked(lane, 1), Expression::int(0));
+                let odd = self.pred(&odd, ctx)?;
+                for (register, into) in into.into_iter().enumerate() {
+                    let (rows, half) = (2 * (register & 1), register >> 1);
+                    let even = self.taken_from(floats[rows], &lanes[half]);
+                    let other = self.taken_from(floats[rows + 1], &lanes[half]);
+                    let operands = vec![other.into(), even.into(), odd.into()];
+                    self.b
+                        .emit(Inst::new(Opcode::Selp, Ty::B32, vec![into], operands));
+                }
+            }
+            ("m16n8k16", "b", [source])
+                if matches!(ab, "tf32" | "tf32x3") && (0..2).contains(&node.part) =>
+            {
+                // The accumulator's rows run along K here, and `part` names which eight of its sixteen. A lane's
+                // register `i` is the element at row `t + 4 * i` of them and at the column of its group. Lane
+                // `g / 2` of the group `t + 4 * i` holds that column, in the register of that half's rows and of
+                // the column's parity, which is the parity of `g`.
+                let floats = self.tensor_fragment(*source, 4, VTy::F32)?;
+                let into = self.repacked(node.frag, 2)?;
+                let (group, within) = (over(lane.clone(), 4), modulo(lane, 4));
+                let from = sum(times(within, 4), over(group.clone(), 2));
+                let lanes = [
+                    self.lane_value(&from, ctx)?,
+                    self.lane_value(&sum(from, Expression::int(16)), ctx)?,
+                ];
+                let odd =
+                    Expression::binary(Operation::NotEqual, masked(group, 1), Expression::int(0));
+                let odd = self.pred(&odd, ctx)?;
+                let rows = 2 * node.part as usize;
+                for (lane, into) in lanes.iter().zip(into) {
+                    let even = self.taken_from(floats[rows], lane);
+                    let other = self.taken_from(floats[rows + 1], lane);
+                    let operands = vec![other.into(), even.into(), odd.into()];
+                    self.b
+                        .emit(Inst::new(Opcode::Selp, Ty::B32, vec![into], operands));
                 }
             }
             ("m8n8k4", "a", [source]) if ab == "f16" && (0..4).contains(&node.part) => {
