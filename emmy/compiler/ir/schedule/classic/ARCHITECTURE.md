@@ -692,6 +692,12 @@ hold the layer's three FP8 projections (155), its convolution and its norms, whi
 do. What the readout still pays is three f32 products on scalar code (60) and the copy that stacks the start states
 (33).
 
+The traced rule now reads each chunk's output in its scan, and the roll takes a step's own readers into the kernel
+that carries the state (`passes/ARCHITECTURE.md`), so the readout's products run from the registers that hold it and
+no state but the last is stored. Written by hand at the layer's sizes, the walk with its readout runs 47 on an RTX
+5090 under the priors' own picks, where the recorded walk, the copy and the two products are 95. The layer's rows are
+not re-recorded.
+
 What is left to match the reference: the solve is a 63-step forward substitution in f32, not a blocked inverse on
 tensor cores, and the reference's one launch per head has no spelling, since warp groups with different roles inside
 one CTA do not exist beyond the load warp. Composing the substitution's steps as dense matrix products is not the

@@ -36,6 +36,7 @@ from emmy.compiler.ir.kernel.ir import (
     fragment_args,
 )
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Pre
+from emmy.compiler.ir.tile.ir import matrix_coordinates
 
 from ._atom import _direct_operand, _residence
 
@@ -199,7 +200,11 @@ class _Blocks:
         if node.range is not None:
             raise Unresident("a product that walks a range of its axis, where the atom folds every position")
         atom, axis = self.atom, node.axis
-        bound = {param: (edge, edge.exposes[component]) for param, edge, component in node.bindings}
+        # The two values the product reads: an operand shared with another product may expose more than this one's.
+        read = node.lift.body.backward_cone(node.lift.results).external_reads
+        bound = {param: (edge, edge.exposes[component]) for param, edge, component in node.bindings if param in read}
+        if len(bound) != 2:
+            raise Unresident("a product of other than two values")
         (left, left_name), (right, right_name) = sorted(bound.values(), key=lambda pair: row not in pair[0].free_axes)
         if rb is not None or row not in left.free_axes or self.extents[axis] % atom.atom_k:
             raise Unresident("a product that is not over the warp's own rows and whole atoms")
@@ -276,7 +281,8 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
         raise Unresident("one state of static shape, its rows and columns whole fragments")
     fold, batch, col, row = tile.resident_state
     extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
-    widths = [extents[col], *(extents[spec.write.index[-2].name] for spec in tile.output_specs)]
+    stored = [(spec, *matrix_coordinates(spec.write.index)) for spec in tile.output_specs]
+    widths = [extents[col], *(extents[spec.write.index[at].name] for spec, at, _ in stored)]
     if extents[row] % atom.atom_m or any(width % atom.atom_n for width in widths):
         raise Unresident("a state or an output the atom's fragments do not tile exactly")
     time = tile.axis_of(fold.axis)
@@ -287,12 +293,15 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
 
     # Every stored value of the step, then the state's next value; the state's fragments are overwritten last.
     stores: list = []
-    for spec in tile.output_specs:
+    for spec, col_dim, row_dim in stored:
         (value,) = spec.write.values
-        out_col, out_row = (e.name for e in spec.write.index[-2:])
+        out_col, out_row = spec.write.index[col_dim].name, spec.write.index[row_dim].name
         for cb in range(0, extents[out_col], atom.atom_n):
             frag = blocks.fragment(fold, value, out_row, out_col, None, cb)
-            index = (*spec.write.index[:-2], Literal(cb, "int"), row_base)
+            index = tuple(
+                Literal(cb, "int") if dim == col_dim else row_base if dim == row_dim else entry
+                for dim, entry in enumerate(spec.write.index)
+            )
             stores.append(
                 RegStore(
                     dst_buffer=spec.write.output,
@@ -300,8 +309,8 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
                     frag=frag,
                     shape=atom.shape,
                     fragment_layout=atom.fragment_layout,
-                    row_dim=len(index) - 1,
-                    col_dim=len(index) - 2,
+                    row_dim=row_dim,
+                    col_dim=col_dim,
                     m_guard=(row_base, Literal(extents[out_row], "int")),
                     n_guard=(Literal(cb, "int"), Literal(extents[out_col], "int")),
                 )

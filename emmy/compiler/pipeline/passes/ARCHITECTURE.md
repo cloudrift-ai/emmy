@@ -818,7 +818,8 @@ reads, and its state is the seed: the one buffer of the state's shape whose ance
 shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a
 Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Each step is spliced into one body by the
 fusion rule's own splicer under step-independent buffer names, the literals'
-deltas are read off the first two, and the first step advanced `j` times must spell step `j`'s body for every `j`. A
+deltas are read off the first two, and the first step advanced `j` times must spell step `j`'s body for every `j`:
+the same structure, and the same buffer in each of its roles, whichever way round a product spells its two reads. A
 chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one it
 writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
 straight-line code that fusion inlines once, and rolling it would only store every state. This is a structural
@@ -829,7 +830,20 @@ partial reduction with. Only then does one kernel replace the chain. It carries 
 the step as its leading axis. A state nothing reads but the next step (a triangular inverse's row substitutions, a
 Sinkhorn iteration) is stored for no one until the last: its store has the state's shape and no step axis, each step
 stores over the last one's, and the one reader reads the whole of it. Ordinary fusion then inlines one slice of those
-stores per replaced buffer into its reader. A chain whose states alternate two
+stores per replaced buffer into its reader.
+
+**A step's own readers roll with it.** A node outside the steps that reads the state a step starts from, or a value
+the step computes from it, and nothing of any other step, is computed in that step: it joins the step's region
+with whatever only such readers read, and its read of the state is the step's `Pre` read. A chunk's output
+(`query @ state + …`) is the case: left outside, it takes its state from a store of every step, which the kernel
+then has to write and a second kernel has to read back. A node that reads two steps (the stack of every step's
+output) reads the stores, and so does a reader of the state the chain ends with, which no step starts from. Where
+the steps with their readers are not one body at a stride, the steps roll alone. Two things follow that are not
+solved: a kernel that carries a state takes no cut, so a reader its storage cannot evaluate keeps the whole kernel
+off that storage; and a kernel that stores its last state beside a per-step output is offered no split across the
+sequence, since parts side by side cannot write that mix (`_split._carry_stores`).
+
+A chain whose states alternate two
 bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
 alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion
 splices whole, up to the splicer's construction bound. A kernel that carries a state is a fusion region of its own
