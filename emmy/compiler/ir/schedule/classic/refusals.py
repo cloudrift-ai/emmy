@@ -160,10 +160,8 @@ def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
             return False
         definitions.update(stmt.defines())
     body = Body(tail)
-    cones = [body.backward_cone(stmt.values) for stmt in tail if isinstance(stmt, Write)]
-    computed = [any(isinstance(member, (Assign, Select)) for member in cone.members) for cone in cones]
-    reads = [bool(cone.external_reads & states) for cone in cones]
-    return all(read or pointwise for read, pointwise in zip(reads, computed, strict=True))
+    cones = (body.backward_cone(stmt.values) for stmt in tail if isinstance(stmt, Write))
+    return all(cone.external_reads & states or any(isinstance(member, (Assign, Select)) for member in cone.members) for cone in cones)
 
 
 def _channel_dtype(tile: TileOp, node, target):

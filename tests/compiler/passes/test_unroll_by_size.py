@@ -157,6 +157,7 @@ def test_the_stores_of_a_running_sum_are_vector_stores() -> None:
     and become one. A fold that stores its total once has no run and takes no copy."""
     from emmy.compiler.dtype import F32
     from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.stmt import Accum, Assign, Write
 
     running = """
@@ -174,7 +175,7 @@ def test_the_stores_of_a_running_sum_are_vector_stores() -> None:
     # In order: every value a store holds is a copy taken right after the step that made it, and the last store
     # holds the accumulator itself, which no later step changes.
     flat = list(op.body.iter())
-    copies = {stmt.name: flat.index(stmt) for stmt in flat if isinstance(stmt, Assign) and "__w" in stmt.name}
+    copies = {stmt.name: flat.index(stmt) for stmt in flat if isinstance(stmt, Assign) and stmt.value == Var("acc")}
     steps = [position for position, stmt in enumerate(flat) if isinstance(stmt, Accum)]
     assert [value for stmt in stores for value in stmt.values] == [*sorted(copies, key=copies.get), "acc"]
     assert all(any(step < at < later for at in copies.values()) for step, later in zip(steps, steps[1:], strict=False))

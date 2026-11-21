@@ -167,10 +167,8 @@ Fragment epilogue legality checks lowered work outside roots the binder can comp
 A grid's free axes are already bound during that check, including a unit row that only an output store reads.
 A sibling reduction or a contraction whose output cannot be partitioned remains work the epilogue must execute. Its
 loop excludes tensor-core atoms before ranking, avoiding repeated materialization refusals. An output that reads no
-accumulator does not exclude them where it is computed: a kernel that scales its product by a weight and stores the
-weight too, for another reader, keeps its atoms, and the fragment's store runs the weight's program element by
-element as it runs the projection's. A bare copy of a load beside the product has no program to run and still
-excludes them.
+accumulator does not exclude them where it is computed (a weight the product is scaled by, stored for another
+reader); a bare copy of a load beside the product still does (`lowering/kernel/ARCHITECTURE.md`).
 
 A reduction domain is projected from node and kernel facts alone, so the shapes the kernel factorizer cannot bind are
 decided once, at the offer, and never dropped from a priced row later. The partition catalog is offered on the reduce

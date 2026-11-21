@@ -471,7 +471,7 @@ per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the
 epilogue (`extra_frags`). The one A slab holds one value, so channels that multiply different values of the shared
 operand (one matrix under two scales, `(A * s) @ B0` beside `(A * t) @ B1`) are offered no stage and no tensor-core
 tile (`refusals._several_multiplicands`); a program that wants both products on tensor cores puts the second scale on
-its B, as the Gated DeltaNet rule does. Epilogue loads substitute the cell base plus each lane's row and column offsets
+its B. Epilogue loads substitute the cell base plus each lane's row and column offsets
 inside their source index expressions, so block-scale quotients and split quotient/remainder coordinates retain
 their arithmetic. A stored value that reads no accumulator (a weight the product is scaled by, kept for another
 reader) is stored the same way: its program runs over the cell's coordinates under the first fragment's name,
@@ -862,34 +862,29 @@ selects one row of a triangular inverse), the step does not compute the earlier 
   it guarded is the read itself, and a read of memory loses the guard where its index then stays inside the buffer
   at every position. Where the condition holds the column to one value, an address spelled by that value moves with
   the column, so the product's memory operand is the atom's own strided load and no gather.
-- **The step loop is written out.** The tests read the step alone, so the loop is flagged for `117_unroll_loops`
-  (under the `UNROLL` budget, up to its whole-loop limit) and each copy's tests are decided there: a step's code is
-  the product of the blocks it writes, and a block it keeps is no code at all.
+- **The step loop is written out** where the tests read the step alone: the loop is flagged for `117_unroll_loops`
+  (under the `UNROLL` budget, up to its whole-loop limit) and each copy's tests are decided there, so a step's code
+  is the product of the blocks it writes, and a block it keeps is no code at all. Tests that read anything else stay
+  in a loop that stays a loop.
 - **A store that does not read the step** is made by the last step alone, as under the other storages.
 
 Every register-held state has its seed in the fragments ahead of the steps; a zero seed is the fragment as declared.
-A choice of the seed inside the step held every block twice, the state and the chosen value, and read the seed from
-memory every step.
+A choice of the seed inside the step would hold every block twice, the state and the chosen value, and read the seed
+from memory every step.
 
 A step holds nothing it has finished with. An output's block is stored where it is computed. A block of the state is
 overwritten after the last statement that reads it or its next value, which the step's own statements decide: where a
 block's next value reads that block alone (a decayed state plus a product), the block is overwritten as soon as that
-value stands, and the next block reuses the registers. Computed whole and overwritten at the end, the sixteen blocks
-of a 128 x 128 state were 64 registers held across the outputs' products; the assembler spilled, and a walk of four
-steps over bf16 operands ran 33 on an RTX 5090 where it now runs 26.
+value stands, and the next block reuses the registers. A state computed whole and overwritten at the end is held
+twice across every output's products, which is what makes the assembler spill.
 
 The memory operand of a product is loaded as it is stored. Where it is stored at the atom's operand dtype, a fragment
-is two packed loads; from f32 it is four loads and four conversions, and that walk ran 41. A program whose model is
-of 16 bits keeps such operands at that dtype (the Gated DeltaNet rule does, for the two matrices its walk multiplies
-the state by).
+is two packed loads; from f32 it is four loads and four conversions.
 
 An output's columns and rows are the last two entries of its store that read an axis other than the state's batch
-cells and the step (`matrix_coordinates`). An entry may be its axis moved by the step: a walk that stores every step's
-rows in one tensor, in sequence order, places a block at `64 * step + row` (`loop/fusion/020_store_through_copies`
-puts such a store in the walk).
-
-A row loop over a 64 x 64 state, 63 steps, runs 7.1 on an RTX 5090 this way for 192 matrices (f16 operands, f32
-accumulator). Left a loop, with its tests taken at run time, the same kernel ran 30.
+cells and the step. An entry may be its axis moved by the step: a walk that stores every step's rows in one tensor,
+in sequence order, places a block at `64 * step + row` (`loop/fusion/020_store_through_copies` puts such a store in
+the walk).
 
 ## Kernel-IR peepholes
 

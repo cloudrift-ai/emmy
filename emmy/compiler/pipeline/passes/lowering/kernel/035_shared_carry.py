@@ -91,9 +91,11 @@ def _resident(op, program, retained=frozenset()):
                 held = defs.get(stmt.branches[0].value)
                 seed = defs.get(stmt.branches[1].value)
                 constant = constants.get(stmt.branches[1].value)
-                if held is not None and held.input == port and constant is not None and constant.value == Literal(float(carry.seed)):
+                if held is None or held.input != port:
+                    pass
+                elif constant is not None and constant.value == Literal(float(carry.seed)):
                     stmt = Assign(stmt.name, Var(held.name), dtype=tensor.dtype)
-                elif held is not None and held.input == port and seed is not None and seed.input == carry.seed:
+                elif seed is not None and seed.input == carry.seed:
                     promoted = dtype_get(dtype_promote("add", [held.dtype.name, seed.dtype.name]))
                     if promoted == tensor.dtype:
                         if uses[seed.name] == 1:

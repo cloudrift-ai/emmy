@@ -67,14 +67,16 @@ def test_each_channel_stages_the_result_it_multiplies():
     assert {staged["b"], staged["b_x1"]} == {"g", "u"}
 
 
-def _two_scaled_products(second: str, m: int = 32, n: int = 32, k: int = 64):
+def _two_scaled_products(second: str, m: int = 32, n: int = 32, k: int = 64, computed: bool = True):
     """``out = (exp(a) * s) @ b`` and ``other = (exp(a) * second) @ c``: one computed matrix, scaled along the
-    summed axis by ``s`` for one product and by ``second`` (``t``, or ``s`` again) for the other."""
+    summed axis by ``s`` for one product and by ``second`` (``t``, or ``s`` again) for the other. Not ``computed``,
+    the matrix is ``a`` as it is stored."""
     from emmy.compiler.dtype import F32
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.loop import LoopOp
 
+    w, defined = ("w", "      w = exp(in0)\n") if computed else ("in0", "")
     body = parse_body(
         f"""
 for a0 in 0..{m}:
@@ -85,9 +87,8 @@ for a0 in 0..{m}:
       in2 = load {second}[a2]
       in3 = load b[a2, a1]
       in4 = load c[a2, a1]
-      w = exp(in0)
-      v0 = w * in1
-      v1 = w * in2
+{defined}      v0 = {w} * in1
+      v1 = {w} * in2
       v2 = v0 * in3
       v3 = v1 * in4
       acc0 <- add(acc0, v2) over a2
@@ -125,13 +126,18 @@ def test_channels_that_multiply_two_values_of_the_shared_operand_take_no_stage()
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_products_of_one_matrix_under_two_scales_match_numpy_on_the_gpu():
+@pytest.mark.parametrize(
+    ("computed", "pins"), [(True, {}), (False, {}), (False, {"STAGE": "d1/smem"})], ids=["computed", "stored", "stored-staged"]
+)
+def test_products_of_one_matrix_under_two_scales_match_numpy_on_the_gpu(computed: bool, pins: dict):
+    """A computed matrix under two scales is two values of one operand and takes no stage. A stored one is one
+    value, its scales the channels' own, and its staged slab is right for both."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     m, n, k = 32, 32, 64
-    with pinned_knobs({"FAST_MATH": False}):
-        compiled, _ = compile_with_kernels(_two_scaled_products("t", m, n, k))
+    with pinned_knobs({"FAST_MATH": False, **pins}):
+        compiled, _ = compile_with_kernels(_two_scaled_products("t", m, n, k, computed=computed))
     rng = np.random.default_rng(0)
     feed = {
         name: rng.standard_normal(shape).astype(np.float32) * 0.5
@@ -140,7 +146,7 @@ def test_products_of_one_matrix_under_two_scales_match_numpy_on_the_gpu():
     result, _ = CudaBackend().run(compiled, input_data=dict(feed))
     wide = {name: value.astype(np.float64) for name, value in feed.items()}
     for name, scale, right in (("out", "s", "b"), ("other", "t", "c")):
-        exact = (np.exp(wide["a"]) * wide[scale]) @ wide[right]
+        exact = ((np.exp(wide["a"]) if computed else wide["a"]) * wide[scale]) @ wide[right]
         np.testing.assert_allclose(result.outputs[name].reshape(m, n), exact, rtol=1e-4, atol=1e-4)
 
 

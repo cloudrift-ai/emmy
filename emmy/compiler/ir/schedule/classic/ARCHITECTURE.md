@@ -681,24 +681,25 @@ the substitution, it runs 195. The products take `mma_m16n8k16_bf16_f32` tiles a
 which stores only its last state, is 53 of the 195. None of these picks is the prior's own: unpinned, the substitution
 takes a thread tile and runs 919, and one 128-wide reduce takes a CTA per output cell and runs 336.
 
-The substitution has since been spelled as a row of memory times the rows so far, which register storage holds.
-Alone, for 48 heads and four chunks of 64 on an RTX 5090, its 63 steps run 7.1 with `mma_m16n8k16_f16_f32` (6.3
-with the f16 accumulator, 6.8 with bf16 operands, 14 with TF32 and 55 with its split), and the inverse's three
-kernels together run 11; the earlier spelling ran 35 as recorded, on a thread tile with the state in shared
-memory. Against the 64-bit inverse the error over the rms is 7e-5 for f16 operands, 6e-4 for bf16 and 3e-8 for the
-split, with the state itself kept in f32. None of it is the prior's pick: with no evidence the substitution takes
-the thread tile and runs 45.
+The rule itself, taken alone as serving calls it (48 heads, four chunks of 64, bf16 inputs, a state handed in),
+compiles to nine kernels and runs 58 under kernel pins and 115 by the prior's own picks on an RTX 5090. Three things
+carry that:
 
-The kernel that builds the system is the keys' product scaled by the decay between two positions and by beta, below
-the diagonal. Taken alone it also stores the decay matrix, which the output's own product reads later, and an
-output that reads no accumulator used to keep a kernel off tensor cores: 18.6 on a thread tile by the prior's pick.
-The fragment store now runs such an output's program beside the projection's, so that kernel runs 6.2 on
-`mma_m16n8k16_bf16_f32` under a pin and 12 on the TF32 tile the prior picks. In the whole rule the same kernel
-stores the normalized keys and a view of beta as well, outputs of other shapes, so its grid is not the product's own
-and no tile is offered. There the product reaches tensor cores through a cut of the product into its own kernel,
-which is offered: that piece runs 6.0 on the bf16 tile under a pin, where the fused kernel runs 464 by the prior's
-pick. The whole rule (48 heads, 256 tokens) runs 4.3 ms by the prior's pick, 3.7 ms of it the output's product
-nested in another product's operand.
+- **The substitution on tensor cores.** It is spelled as a row of memory times the rows so far, which register
+  storage holds. Its 63 steps run 7.1 with `mma_m16n8k16_f16_f32` (6.3 with the f16 accumulator, 6.8 with bf16
+  operands, 14 with TF32 and 55 with its split), against 45 on the thread tile the prior takes with no evidence. The
+  error over the rms against the 64-bit inverse is 7e-5 for f16 operands, 6e-4 for bf16 and 3e-8 for the split, the
+  state itself kept in f32.
+- **The readout in the walk.** The rule reads each chunk's output in its scan, and the roll takes a step's own
+  readers into the kernel that carries the state (`passes/ARCHITECTURE.md`): the readout's products run from the
+  registers that hold the state, no state but the last is stored, and no kernel copies the walk's operands in or
+  moves its outputs after it. The walk is 28 of the 58.
+- **The system's products on tensor cores.** The kernel that builds the system also stores outputs of other shapes,
+  so its grid is not the product's own; the product reaches a tensor-core tile through a cut into a kernel of its
+  own, which is offered.
+
+What the prior misses of the 58 is the substitution's register row (45 against 7), the walk's bf16 atom (39 against
+28) and, by the pool it samples, a tile of the system's product.
 
 Inside a whole layer the gain is smaller. Recorded on the RTX 5090 for the 256-row layer of the 27B NVFP4 checkpoint,
 the six roots the rule reaches sum to 474 against 524 for the rule as Transformers writes it. The root that forms the
@@ -713,14 +714,10 @@ hold the layer's three FP8 projections (155), its convolution and its norms, whi
 do. What the readout still pays is three f32 products on scalar code (60) and the copy that stacks the start states
 (33).
 
-The traced rule now reads each chunk's output in its scan, and the roll takes a step's own readers into the kernel
-that carries the state (`passes/ARCHITECTURE.md`), so the readout's products run from the registers that hold it and
-no state but the last is stored. Written by hand at the layer's sizes, the walk with its readout runs 47 on an RTX
-5090 under the priors' own picks, where the recorded walk, the copy and the two products are 95. The layer's rows are
-not re-recorded.
+These layer rows are of the rule as it was spelled before the readout moved into the walk.
 
-What is left to match the reference: the solve is a 63-step forward substitution in f32, not a blocked inverse on
-tensor cores, and the reference's one launch per head has no spelling, since warp groups with different roles inside
+What is left to match the reference: the solve is a 63-step forward substitution, a row a step, not a blocked
+inverse, and the reference's one launch per head has no spelling, since warp groups with different roles inside
 one CTA do not exist beyond the load warp. Composing the substitution's steps as dense matrix products is not the
 route: spelled so that its step is affine, 192 systems of 64 x 64 compose in 426 on an RTX 5090, where the recorded
 walk of the substitution runs 53. A blocked inverse has to keep each step's rank-one form. Two faults block the
