@@ -837,7 +837,10 @@ the step computes from it, and nothing of any other step, is computed in that st
 with whatever only such readers read, and its read of the state is the step's `Pre` read. A chunk's output
 (`query @ state + …`) is the case: left outside, it takes its state from a store of every step, which the kernel
 then has to write and a second kernel has to read back. A node that reads two steps (the stack of every step's
-output) reads the stores, and so does a reader of the state the chain ends with, which no step starts from. Where
+output) reads the stores, and so does a reader of the state the chain ends with, which no step starts from. What
+the readers of two steps both read (the matrix a chunk's output multiplies by, computed before the loop) is an input
+of the rolled body; it is counted before a step's state is taken out of its readers' ancestry, because every state
+after the first descends from it and the first step's readers would otherwise be left holding the whole setup. Where
 the steps with their readers are not one body at a stride, the steps roll alone. Two things follow that are not
 solved: a kernel that carries a state takes no cut, so a reader its storage cannot evaluate keeps the whole kernel
 off that storage; and a kernel that stores its last state beside a per-step output is offered no split across the

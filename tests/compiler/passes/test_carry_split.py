@@ -241,12 +241,12 @@ m(torch.randn(1, 32, 2, 8), torch.randn(1, 32, 2, 8), torch.randn(1, 32, 2, 8), 
 
 
 @pytest.mark.parametrize("pin", ["g3k", "g3k2"])
-def test_the_chunk_loop_of_the_gated_delta_rule_composes_and_matches_eager(pin: str) -> None:
-    """The rule as the Gated DeltaNet wrapper traces it holds two recurrences. The chunk loop is affine: it
-    stores a second value beside its state every step, under the batch's one coordinate, and three parts
-    of one step read their maps off the step. The row substitution's step is a choice between a product and
-    the state it keeps, which is no affine map of the state as the split reads one, so the pin that reaches
-    both carrying sites decides nothing on it."""
+def test_the_gated_delta_rule_takes_no_split_and_matches_eager(pin: str) -> None:
+    """The rule as the Gated DeltaNet wrapper traces it holds two recurrences, and a pin that names a split of the
+    sequence decides nothing on either. The chunk loop computes each chunk's output in its step, from the state the
+    step starts with, so it stores those outputs every step and of its states the last, a mix that parts side by
+    side cannot write. The row substitution's step is a choice between a product and the state it keeps, which is
+    no affine map of the state as the split reads one."""
     import torch  # noqa: PLC0415
 
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
@@ -256,9 +256,10 @@ def test_the_chunk_loop_of_the_gated_delta_rule_composes_and_matches_eager(pin: 
     graph, _, (module, _, _) = graph_from_code(_WRAPPED_RULE)
     with pinned_knobs({SCAN: pin, "REDUCE": ""}):
         graph = Pipeline.build(["tile/lift", "tile/cut"], select=["lift", "cut"]).run(Pipeline.build(LOOP_PASSES).run(graph))
-    names = [node.id for node in graph.nodes.values() if isinstance(node.op, TileOp)]
-    assert not any(name.endswith("__probe") for name in names)
-    assert sum("__map" in name for name in names) == int(pin[3:] or 0) + 1
+    tiles = {node.id: node.op for node in graph.nodes.values() if isinstance(node.op, TileOp)}
+    assert not any(name.endswith("__probe") or "__map" in name for name in tiles)
+    carrying = [op for op in tiles.values() if op.carries]
+    assert len(carrying) == 2 and not any(carries_partition(op) for op in carrying)
 
     arrays = run_loops(graph)
     (out,) = graph.outputs
