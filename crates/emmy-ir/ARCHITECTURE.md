@@ -157,10 +157,13 @@ once to learn the order on state rolled back, once in it, so a parameter or buff
 index the content gives it. Two loads of one buffer that tie on rank order the normal form by their names, and the
 identity stays the same whatever the buffers are called.
 
-A `Carry` without a seed defines a value the body keeps for itself, and a `Pre` reads it by index. Such a value is no
-resource of the body, as a buffer or a carried state is: the numbering keys a read of it by the number of its
-definition, so the order never reads the name the value goes under, and the free loops of its nest take the order of
-its index, as the loops of a store take the order of the store's.
+A `Define` stores one cell of a value the body keeps for itself, and a `Load` reads it by index. Its name plays the
+roles of a buffer the statement writes and declares, so the body reports it as neither an input nor an output, the
+order keeps every load of it behind the definition as it keeps a load behind a write, and a rename of buffers moves
+the definition and its loads together. Such a value is no resource of the body, as an input or a carried state is:
+the numbering keys a load of it by the number of its definition, so the order never reads the name the value goes
+under, and the free loops of its nest take the order of its index, as the loops of a store take the order of the
+store's.
 
 ## Kernel IR bodies
 

@@ -946,6 +946,7 @@ mod tests {
         "y = exp(x)",
         "s <- add(s, x)",
         "c[i] <- x seed 0",
+        "d[i] <- x",
         "p = pre c[i]",
         "init f32 s = 0",
         "let n = i + 1",
@@ -1113,7 +1114,7 @@ mod tests {
             panic!("not a carry");
         };
         let seeded = Statement::Carry(Carry {
-            seed: Some(NumOr::Value("init".into())),
+            seed: NumOr::Value("init".into()),
             ..fields.clone()
         });
         assert_eq!(strs(&seeded.external_reads()), ["init"]);

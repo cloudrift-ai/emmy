@@ -99,6 +99,7 @@ impl Scope<'_> {
             Statement::Assign(assign) => self.value(&assign.value, declared(assign.dtype)?)?,
             Statement::Accum(accum) => self.operand(&accum.value, declared(accum.dtype)?)?,
             Statement::Carry(carry) => self.name(&carry.value, declared(carry.dtype)?)?,
+            Statement::Define(define) => self.name(&define.value, declared(define.dtype)?)?,
             Statement::Pre(pre) => {
                 let dtype = self.dtype(&pre.carrier);
                 self.types.insert(pre.name, dtype);

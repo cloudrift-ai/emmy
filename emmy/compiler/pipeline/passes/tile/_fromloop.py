@@ -28,6 +28,7 @@ from emmy.compiler.ir.stmt import (
     Assign,
     Body,
     Carry,
+    Define,
     Init,
     Let,
     Load,
@@ -58,10 +59,11 @@ class _Value:
     name: str
     positions: tuple[int, ...]
 
-    def read(self, stmt: Pre) -> Fold:
-        """``stmt``, a read of this value by index, as a term over the one definition."""
-        index = tuple(stmt.index[position] for position in self.positions)
-        return Fold.read((stmt.replace(carrier=self.name, index=index),), self.term, self.cells)
+    def read(self, load: Load) -> Fold:
+        """``load``, a read of this value by index, as a term over the one definition. A term reads an operand by
+        index through a ``Pre`` of its lift, as a carrier read does."""
+        index = tuple(load.index[position] for position in self.positions)
+        return Fold.read((Pre(name=load.name, carrier=self.name, index=index),), self.term, self.cells)
 
 
 #: The values the body being lifted defines for itself, by the name its statements read them under.
@@ -477,16 +479,16 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
     bound = {axis.name for axis in axes}  # one coordinate per name: a sibling sweep reusing one is renamed apart
     values = _VALUES.get()
     for stmt in _accums_sum_names(Body.coerce(body)):
-        if isinstance(stmt, Pre) and stmt.carrier in values:
-            # A read of a value the body defines once: a term of this level over that one definition.
-            read = values[stmt.carrier].read(stmt)
+        if isinstance(stmt, Load) and stmt.input in values:
+            # A load of a value the body defines once: a term of this level over that one definition.
+            read = values[stmt.input].read(stmt)
             edges.append(read)
             level.exposed[stmt.name] = read
             continue
-        if isinstance(stmt, Loop) and not stmt.is_reduce and (carry := _definition(stmt)) is not None:
-            # The nest that defines a value: a term of its own over the value's coordinates, which every read of the
+        if isinstance(stmt, Loop) and not stmt.is_reduce and (define := _definition(stmt)) is not None:
+            # The nest that defines a value: a term of its own over the value's coordinates, which every load of the
             # value holds. What it reads of this level arrives as the operands any reader of the level takes.
-            values[carry.name] = _lift_value(carry, stmt, axes, inner_levels)
+            values[define.name] = _lift_value(define, stmt, axes, inner_levels)
             continue
         if isinstance(stmt, Loop) and not stmt.is_reduce:
             if stmt.axis.name in bound:
@@ -691,14 +693,9 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
         # The chain of loops over the cells, from the carrying loop down to the level that defines
         # the state; a free loop beside that chain is an output SWEEP of the step (the delta rule's
         # corrected values, over the chunk's rows beside the state's), left as one.
-        if any(isinstance(stmt, Carry) and stmt.seed is not None for stmt in body):
+        if any(isinstance(stmt, Carry) for stmt in body):
             return list(body)
-        # The nest of a value the step defines for itself holds no state: it stands beside the chain, like a sweep.
-        chain = [
-            index
-            for index, stmt in enumerate(body)
-            if isinstance(stmt, Loop) and not stmt.is_reduce and any(carry.seed is not None for carry in stmt.body.carries)
-        ]
+        chain = [index for index, stmt in enumerate(body) if isinstance(stmt, Loop) and not stmt.is_reduce and stmt.body.carries]
         if len(chain) != 1:
             return list(body)
         (index,) = chain
@@ -706,7 +703,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
         return [*body[:index], *flatten(body[index].body), *body[index + 1 :]]
 
     flat = Body(flatten(loop.body))
-    defined = tuple(stmt for stmt in flat if isinstance(stmt, Carry) and stmt.seed is not None)
+    defined = tuple(stmt for stmt in flat if isinstance(stmt, Carry))
     if any(
         carry.cells != defined[0].cells or [isinstance(e, Var) for e in carry.index] != [isinstance(e, Var) for e in defined[0].index]
         for carry in defined
@@ -921,47 +918,49 @@ def lift_loop_op(op: LoopOp, *, body: Body | None = None, serial: tuple[Axis, ..
         return _lift_loop_op(op, body, serial)
 
 
-def _definition(loop: Loop) -> Carry | None:
-    """The definition ``loop`` is the nest of: the one ``Carry`` without a seed at the foot of its chain of free
-    loops, where that chain stores nothing else. ``None`` for any other loop."""
+def _definition(loop: Loop) -> Define | None:
+    """The definition ``loop`` is the nest of: the one ``Define`` at the foot of its chain of free loops, where that
+    chain stores nothing else. ``None`` for any other loop."""
     _, cell = _peel(Body((loop,)))
-    carries = [stmt for stmt in cell if isinstance(stmt, Carry) and stmt.seed is None]
-    if len(carries) != 1 or any(isinstance(stmt, Write) or guarded_store(stmt) is not None for stmt in cell):
+    defines = [stmt for stmt in cell if isinstance(stmt, Define)]
+    if len(defines) != 1 or any(isinstance(stmt, Write) or guarded_store(stmt) is not None for stmt in cell):
         return None
-    return carries[0]
+    return defines[0]
 
 
-def _lift_value(carry: Carry, loop: Loop, axes: tuple, levels: tuple) -> _Value:
-    """The value ``carry`` defines as a term over its own coordinates, from the nest ``loop`` that defines it under
+def _lift_value(define: Define, loop: Loop, axes: tuple, levels: tuple) -> _Value:
+    """The value ``define`` defines as a term over its own coordinates, from the nest ``loop`` that defines it under
     the loops ``axes``. The nest is lifted as an output sweep is, the definition in the place of its store."""
-    positions = tuple(position for position, entry in enumerate(carry.index) if isinstance(entry, Var))
-    cells = tuple(carry.index[position].name for position in positions)
-    stored = Body((loop,)).map(lambda stmt: Write(output=carry.name, index=carry.index, values=(carry.value,)) if stmt is carry else stmt)
+    positions = tuple(position for position, entry in enumerate(define.index) if isinstance(entry, Var))
+    cells = tuple(define.index[position].name for position in positions)
+    stored = Body((loop,)).map(
+        lambda stmt: Write(output=define.name, index=define.index, values=(define.value,)) if stmt is define else stmt
+    )
     free, cell = _peel(stored)
     scope = (*axes, *free)
     edges, stmts = lift_body(cell, scope, levels)
     split = extract_output_specs(stmts)
     if split is None or _raw_loops(Body(split[0])):
-        raise ValueError(f"the definition of {carry.name!r} is no nest of free loops over one value")
-    edges, lift = _close((), edges, Body(split[0]), (carry.value,), scope, levels)
+        raise ValueError(f"the definition of {define.name!r} is no nest of free loops over one value")
+    edges, lift = _close((), edges, Body(split[0]), (define.value,), scope, levels)
     # In tree normal form, so the term that exposes the value is the one that defines it.
-    term = Fold(operands=edges, lift=lift).normalized((carry.value,), ())
+    term = Fold(operands=edges, lift=lift).normalized((define.value,), ())
     if not term.free_axes - EXTENTS.get() <= set(cells):
-        raise ValueError(f"the value {carry.name!r} is evaluated over {sorted(term.free_axes)} and defined at {cells}")
-    return _Value(term, cells, carry.value, positions)
+        raise ValueError(f"the value {define.name!r} is evaluated over {sorted(term.free_axes)} and defined at {cells}")
+    return _Value(term, cells, define.value, positions)
 
 
 def computed_where_read(body: Body, shapes: Mapping) -> Body:
-    """``body`` with every value it defines for itself computed where it is read, in normal form: each read by
-    index gives way to the statements that compute the value at the index read. ``body`` itself when it defines
+    """``body`` with every value it defines for itself computed where it is read, in normal form: each load of
+    one gives way to the statements that compute the value at the index read. ``body`` itself when it defines
     no value. ``shapes`` are the shapes of the buffers the body reads and writes, whose symbolic sizes the body
     reads free.
 
     No tier keeps a value for its readers, so this is the body a kernel is formed from: the kernel, its identity
     and its code are those of the body that writes the value out at each of its readers. The body is lifted with
-    each definition a term of its own and each read a term over that one definition (:meth:`Fold.read`), and
+    each definition a term of its own and each load a term over that one definition (:meth:`Fold.read`), and
     lowered again with every read replaced by the value it reads (:meth:`Fold.inlined`)."""
-    if not any(isinstance(stmt, Carry) and stmt.seed is None for stmt in body.iter()):
+    if not any(isinstance(stmt, Define) for stmt in body.iter()):
         return body
     with binding_extents(name for shape in shapes.values() for dim in shape for name in dim.expression.free_vars()):
         token = _VALUES.set({})

@@ -108,9 +108,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   computed once at the shallowest scope that holds its operands, unread values dropped. A Kernel IR body takes these
   alone at construction (`optimize_body`) and keeps the loops, the order and the names its passes wrote, since no
   identity reads it. Like normalization, it answers to no knob, pin or evidence.
-- **Statement type** — The type a Loop IR statement belongs to: `Loop`, `Load`, `Accum`, … Forty-four are declared in
-  one list in the `emmy-ir` crate, fourteen shared and thirty of the Kernel IR; each is a Rust struct and a Python class
-  of the same name. A statement is one instance of its type in a body.
+- **Statement type** — The type a Loop IR statement belongs to: `Loop`, `Load`, `Accum`, … Forty-eight are declared in
+  one list in the `emmy-ir` crate, fifteen shared and thirty-three of the Kernel IR; each is a Rust struct and a Python
+  class of the same name. A statement is one instance of its type in a body.
 - **Expression class** — Which of the two kinds of scalar arithmetic an expression field admits: `Index`, integer
   arithmetic over integer operands (an index, an extent, a guard), or `Value`, every operation over any operand (the
   value an `Assign` or an `Accum` computes, a condition). Every expression field of a statement type declares one, and
@@ -144,10 +144,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   `Fold` keeps the range of the axis it binds. A kernel tier covers an axis from zero to a number of trips, so the
   schedule and the kernel lowering read a range as the **masked form** of the kernel: the walk from zero with each
   folded value selected against its seed past the end (`TileOp.masked`).
-- **Defined value** — A value a kernel defines once for itself and reads by index: a `Carry` without a seed stores one
-  cell per coordinate of the loops around it, and a `Pre` reads a cell wherever those loops have closed. It is neither
-  an input nor an output of the kernel. The lift spells each read as the computation it stands for, which is the same
-  kernel as the one that computes the value at each read.
+- **Defined value** — A value a kernel defines once for itself and reads by index: a `Define` stores one cell per
+  coordinate of the loops around it, and a `Load` behind it reads a cell as it reads any buffer. It is neither an input
+  nor an output of the kernel. The lift spells each read as the computation it stands for, which is the same kernel as
+  the one that computes the value at each read.
 - **Carried state** — A recurrence's state. In Loop IR, `Carry` defines the next value of one cell and names the
   seed, a `Pre` read sees the previous step's value at any cell, and the loop that carries it sits outside the loops
   over its cells; its steps are ordered and its step is any computation, so it has no op. In Tile IR it is a `Fold`

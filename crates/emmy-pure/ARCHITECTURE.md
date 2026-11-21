@@ -53,7 +53,9 @@ and a view are values: they compare by what they hold.
   substitution of the coordinates that term is evaluated over: two reads that differ only in a coordinate a term does
   not read share that term, as a softmax's row maximum is one term under the sum over a row and under each cell of
   it. The first copy of a term keeps its names and every later one spells apart what the term defines and the axis
-  it walks. The lift builds a read only to inline it, so no tree a pass holds has one.
+  it walks. The lift builds a read only to inline it, so no tree a pass holds has one: a Loop IR body reads a defined
+  value with a `Load`, and the `Pre` of a read term is how a lift names an operand it reads by index, as a carrier
+  read does.
 - `readings.rs` — the derived readings: `exposing`, `based`, `roles`, the bilinear channels and the contraction they
   read as, `tiles_whole`, `chunked`, `per_state`, the reduction, slab and affine readings, `merge`, `step`.
 - `rewrite.rs` — `Fold::rewrite`: a term renamed, substituted and axis-mapped the way a statement is, the

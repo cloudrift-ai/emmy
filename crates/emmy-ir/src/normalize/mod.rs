@@ -316,22 +316,22 @@ for k in 0..3:
     }
 
     #[test]
-    fn a_value_defined_once_is_read_by_index_and_stands_ahead_of_its_readers() {
+    fn a_value_defined_once_is_read_by_index_like_a_buffer() {
         // The normalized key of a delta rule: read at the cell, and again inside the sum over `m`.
         let text = normal(
             "for h in 0..4:
-  for n in 0..8:
-    for m in 0..8:
-      b = pre kn[h, m]
-      c = pre kn[h, n]
-      p = multiply(b, c)
-      s <- add(s, p) over m
-    out[h, n] = s
   for a in 0..8:
     k = load K[h, a]
     w = load W[h]
     v = multiply(k, w)
-    kn[h, a] <- v",
+    kn[h, a] <- v
+  for n in 0..8:
+    for m in 0..8:
+      b = load kn[h, m]
+      c = load kn[h, n]
+      p = multiply(b, c)
+      s <- add(s, p) over m
+    out[h, n] = s",
         );
         assert_eq!(
             text,
@@ -340,52 +340,51 @@ for k in 0..3:
   for a1 in 0..8:
     in1 = load K[a0, a1]
     v0 = in0 * in1
-    acc0[a0, a1] <- v0
+    kn[a0, a1] <- v0
   for a2 in 0..8:
-    v1 = pre acc0[a0, a2]
+    in2 = load kn[a0, a2]
     for a3 in 0..8:
-      v2 = pre acc0[a0, a3]
-      v3 = v1 * v2
-      acc1 <- add(acc1, v3) over a3
-    out[a0, a2] = acc1"
+      in3 = load kn[a0, a3]
+      v1 = in2 * in3
+      acc0 <- add(acc0, v1) over a3
+    out[a0, a2] = acc0"
         );
     }
 
     #[test]
-    fn a_definition_in_a_nest_of_its_own_stands_ahead_of_the_nest_that_reads_it() {
-        // The readers are written first, as a splice writes them: the definition's nest is what they follow.
+    fn a_definition_in_a_nest_of_its_own_stays_ahead_of_the_nest_that_reads_it() {
         let text = normal(
-            "for i in 0..8:
+            "for m in 0..8:
+  for n in 0..6:
+    x = load X[m, n]
+    h[m, n] <- x
+for i in 0..8:
   for j in 0..6:
     for k in 0..6:
       w = load W[j, k]
-      a = pre h[i, k]
+      a = load h[i, k]
       p = multiply(a, w)
       s <- add(s, p) over k
-    b = pre h[i, j]
+    b = load h[i, j]
     y = multiply(s, b)
-    out[i, j] = y
-for m in 0..8:
-  for n in 0..6:
-    x = load X[m, n]
-    h[m, n] <- x",
+    out[i, j] = y",
         );
         assert_eq!(
             text,
             "for a0 in 0..8:
   for a1 in 0..6:
     in0 = load X[a0, a1]
-    acc0[a0, a1] <- in0
+    h[a0, a1] <- in0
 for a2 in 0..8:
   for a3 in 0..6:
     for a4 in 0..6:
       in1 = load W[a3, a4]
-      v0 = pre acc0[a2, a4]
-      v1 = in1 * v0
-      acc1 <- add(acc1, v1) over a4
-    v2 = pre acc0[a2, a3]
-    v3 = acc1 * v2
-    out[a2, a3] = v3"
+      in2 = load h[a2, a4]
+      v0 = in1 * in2
+      acc0 <- add(acc0, v0) over a4
+    in3 = load h[a2, a3]
+    v1 = acc0 * in3
+    out[a2, a3] = v1"
         );
     }
 

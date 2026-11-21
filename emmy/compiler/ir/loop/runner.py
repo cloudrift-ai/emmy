@@ -101,13 +101,12 @@ def render_loopop_cpp(
 
     # The reference computes every float in f32, so no operation is native at f16; every buffer is a float array.
     typed = explicit_conversions(loop.body, {}, frozenset())
-    # A value the kernel defines for itself is an array of its own, which its readers index like a buffer.
+    # A value the kernel defines for itself is an array of its own, which a load indexes like any buffer.
     declared = []
     for name, (shape, dtype) in defined_values(typed).items():
         ctx.shapes[name] = shape
-        ctx.ssa_dtypes[name] = dtype
         declared.append(f"    std::vector<{type_name(dtype)}> {name}({math.prod(shape)});")
-    body_text = "\n".join((*declared, *render_body(flat_accesses(typed, shapes), ctx)))
+    body_text = "\n".join((*declared, *render_body(flat_accesses(typed, ctx.shapes), ctx)))
     return f'extern "C" void {fn_name}({params_text}) {{\n{body_text}\n}}\n'
 
 

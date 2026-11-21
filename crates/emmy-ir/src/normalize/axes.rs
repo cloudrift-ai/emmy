@@ -149,10 +149,10 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
 /// stored like an output: its definition's index is the layout its readers address it by.
 pub(crate) fn output_storage_depth(stmts: &Body, axis: &Name) -> Option<usize> {
     let mut depths: Vec<usize> = Vec::new();
-    for store in stmts.of_types(&[StatementType::Write, StatementType::Carry]) {
+    for store in stmts.of_types(&[StatementType::Write, StatementType::Define]) {
         let index = match &**store.stmt() {
             Statement::Write(w) => &w.index,
-            Statement::Carry(c) if c.seed.is_none() => &c.index,
+            Statement::Define(d) => &d.index,
             _ => continue,
         };
         let mut positions = Vec::new();

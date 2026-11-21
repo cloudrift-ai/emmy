@@ -1,8 +1,8 @@
 """A body may define a value once and read it by index at two or more places.
 
-A ``Carry`` without a seed defines a value over the loops around it and a ``Pre`` reads one cell of it. No tier
-keeps such a value for its readers, so a kernel computes it where each reader reads it (``computed_where_read``):
-the kernel is the one the body that writes the value out at each reader gives.
+A ``Define`` stores one cell of a value the kernel keeps for itself and a ``Load`` reads a cell of it, the way it
+reads any buffer. No tier keeps such a value for its readers, so a kernel computes it where each reader reads it
+(``computed_where_read``): the kernel is the one the body that writes the value out at each reader gives.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Accum, Carry, Load, Pre, parse_body
+from emmy.compiler.ir.stmt import Accum, Define, Load, parse_body
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.tile._fromloop import computed_where_read, lift_loop_op
 from emmy.compiler.pipeline.passes.tile._row import lift_kernel
@@ -22,15 +22,6 @@ from tests.compiler.helpers import requires_cuda
 
 # The scaled keys of a product with itself: read as its rows and as its columns.
 READ_TWICE = """
-for h in 0..4:
-  for n in 0..8:
-    for m in 0..8:
-      for d in 0..16:
-        b = pre kn[h, n, d]
-        c = pre kn[h, m, d]
-        p = multiply(b, c)
-        s <- add(s, p) over d
-      out[h, n, m] = s
 for g in 0..4:
   for a in 0..8:
     for e in 0..16:
@@ -38,6 +29,15 @@ for g in 0..4:
       w = load W[g]
       v = multiply(k, w)
       kn[g, a, e] <- v
+for h in 0..4:
+  for n in 0..8:
+    for m in 0..8:
+      for d in 0..16:
+        b = load kn[h, n, d]
+        c = load kn[h, m, d]
+        p = multiply(b, c)
+        s <- add(s, p) over d
+      out[h, n, m] = s
 """
 
 COMPUTED_AT_EACH_READ = """
@@ -68,10 +68,10 @@ for i in 0..4:
     ex[i, j] <- e
 for r in 0..4:
   for c in 0..8:
-    a = pre ex[r, c]
+    a = load ex[r, c]
     s <- add(s, a) over c
   for o in 0..8:
-    b = pre ex[r, o]
+    b = load ex[r, o]
     q = divide(b, s)
     out[r, o] = q
 """
@@ -88,9 +88,22 @@ def _run(body, outputs: dict[str, tuple[int, ...]]) -> np.ndarray:
 
 def test_a_body_that_defines_a_value_is_resolved_to_the_body_that_computes_it_at_each_read() -> None:
     resolved = computed_where_read(LoopOp(body=parse_body(READ_TWICE)).body, {})
-    assert not any(isinstance(stmt, (Carry, Pre)) for stmt in resolved.iter())
+    assert not any(isinstance(stmt, Define) for stmt in resolved.iter())
+    assert {stmt.input for stmt in resolved.iter() if isinstance(stmt, Load)} == {"K", "W"}
     assert sum(isinstance(stmt, Load) and stmt.input == "K" for stmt in resolved.iter()) == 2
     assert resolved == LoopOp(body=parse_body(COMPUTED_AT_EACH_READ)).body
+
+
+def test_a_defined_value_is_a_buffer_of_the_kernel_and_no_input_or_output_of_it() -> None:
+    op = LoopOp(body=parse_body(READ_TWICE))
+    assert (list(op.inputs), list(op.outputs)) == (["K", "W"], ["out"])
+    assert sum(isinstance(stmt, Load) and stmt.input == "kn" for stmt in op.body.iter()) == 2
+
+
+def test_a_load_ahead_of_the_definition_it_reads_is_refused() -> None:
+    definition, readers = READ_TWICE.split("for h in 0..4:")
+    with pytest.raises(ValueError, match="ahead of its definition"):
+        LoopOp(body=parse_body(f"for h in 0..4:{readers}{definition}"))
 
 
 def test_a_body_that_defines_no_value_is_the_body_itself() -> None:
@@ -155,7 +168,7 @@ def test_a_kernel_that_defines_a_value_fuses_with_its_reader() -> None:
 
     fused = Pipeline.build(["loop/fusion"]).run(_program())
     (kernel,) = [node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
-    assert not any(isinstance(stmt, (Carry, Pre)) for stmt in kernel.body.iter())
+    assert not any(isinstance(stmt, Define) for stmt in kernel.body.iter())
     inputs, want = _inputs()
     backend = NumpyBackend()
     got = next(iter(backend.run(backend.compile(fused), input_data=inputs)[0].outputs.values()))
@@ -192,7 +205,7 @@ for c in 0..4:
     for j2 in 0..8:
       for m in 0..4:
         x = load X[c, r2, m]
-        ww = pre w[c, m, j2]
+        ww = load w[c, m, j2]
         p1 = multiply(x, ww)
         a1 <- add(a1, p1) over m
       u[c, r2, j2] <- a1
@@ -205,7 +218,7 @@ for c in 0..4:
         a2 <- add(a2, p2) over i3
       for m3 in 0..4:
         g = load qk[c, r3, m3]
-        uu = pre u[c, m3, j3]
+        uu = load u[c, m3, j3]
         p3 = multiply(g, uu)
         a3 <- add(a3, p3) over m3
       o = add(a2, a3)
@@ -214,7 +227,7 @@ for c in 0..4:
     for j4 in 0..8:
       for r4 in 0..4:
         k4 = load k[c, r4, i4]
-        u4 = pre u[c, r4, j4]
+        u4 = load u[c, r4, j4]
         p4 = multiply(k4, u4)
         a4 <- add(a4, p4) over r4
       dd = load decay[c]
@@ -248,7 +261,7 @@ def test_the_walk_over_chunks_runs_as_one_body_with_its_correction_defined_once(
     arrays, want = _walk_arrays()
     op = LoopOp(body=parse_body(WALK))
     resolved = LoopOp(body=computed_where_read(op.body, {}), outputs=op.outputs)
-    assert not any(isinstance(stmt, Carry) and stmt.seed is None for stmt in resolved.body.iter())
+    assert not any(isinstance(stmt, Define) for stmt in resolved.body.iter())
     for kernel in (op, resolved):
         got = dict(zip(kernel.outputs, execute_loop_op_cpp(kernel, arrays, _WALK_OUTPUTS), strict=True))
         for name, expected in want.items():

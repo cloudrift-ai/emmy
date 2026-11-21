@@ -129,8 +129,8 @@ struct Context<'a> {
     binding: Vec<Name>,
     defined_by: HashMap<Name, usize>,
     depths_of: HashMap<Param, Vec<usize>>,
-    /// The values the body defines for itself (a `Carry` without a seed), each keyed by what its definition
-    /// computes: a read of one is told apart by that, never by the name the value goes under.
+    /// The values the body defines for itself (`Define`), each keyed by what its definition computes: a load of
+    /// one is told apart by that, never by the name the value goes under.
     values: HashMap<Name, Key>,
 }
 
@@ -705,7 +705,9 @@ impl Context<'_> {
                         .iter()
                         .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
                         .collect();
-                    let buffer = if self.env.contains_key(&s.input) {
+                    let buffer = if let Some(defined) = self.values.get(&s.input) {
+                        defined.clone()
+                    } else if self.env.contains_key(&s.input) {
                         self.operand(&s.input, &mut ops, &mut touched)
                     } else {
                         self.resource(&s.input, Tag::Buffer, &mut touched)
@@ -814,16 +816,10 @@ impl Context<'_> {
                         .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
                         .collect();
                     let seed = match &s.seed {
-                        Some(NumOr::Value(name)) => self.resource(name, Tag::Buffer, &mut touched),
-                        Some(NumOr::Num(number)) => Key::num(*number),
-                        None => Key::None,
+                        NumOr::Value(name) => self.resource(name, Tag::Buffer, &mut touched),
+                        NumOr::Num(number) => Key::num(*number),
                     };
-                    // A carried state is a resource of the body, as a buffer is. A value the body defines for
-                    // itself is what its definition computes.
-                    let state = match &s.seed {
-                        Some(_) => self.resource(&s.name, Tag::State, &mut touched),
-                        None => Key::None,
-                    };
+                    let state = self.resource(&s.name, Tag::State, &mut touched);
                     let payload = Key::tuple([
                         state,
                         Key::Tuple(index),
@@ -832,10 +828,22 @@ impl Context<'_> {
                         Key::option(s.dtype.as_ref().map(|d| d.text())),
                     ]);
                     let value = self.compose(Tag::Carry, payload, ops, &params, &[], false);
-                    if s.seed.is_none() {
-                        self.values.insert(s.name, Key::Num(value.0));
-                    }
                     self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
+                }
+                Statement::Define(s) => {
+                    let index: Vec<Key> = s
+                        .index
+                        .iter()
+                        .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
+                        .collect();
+                    let payload = Key::tuple([
+                        Key::Tuple(index),
+                        self.operand(&s.value, &mut ops, &mut touched),
+                        Key::option(s.dtype.as_ref().map(|d| d.text())),
+                    ]);
+                    let value = self.compose(Tag::Define, payload, ops, &params, &[], false);
+                    self.values.insert(s.name, Key::Num(value.0));
+                    self.define(ordinal, &stmt, &[], value);
                 }
                 Statement::Pre(s) => {
                     let index: Vec<Key> = s
@@ -843,10 +851,7 @@ impl Context<'_> {
                         .iter()
                         .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
                         .collect();
-                    let state = match self.values.get(&s.carrier) {
-                        Some(defined) => defined.clone(),
-                        None => self.resource(&s.carrier, Tag::State, &mut touched),
-                    };
+                    let state = self.resource(&s.carrier, Tag::State, &mut touched);
                     let value = self.compose(
                         Tag::Pre,
                         Key::tuple([state, Key::Tuple(index)]),

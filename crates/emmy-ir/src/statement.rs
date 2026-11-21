@@ -169,17 +169,25 @@ macro_rules! with_statement_types {
                 /// the loops over the cells, which is what lets a step read OTHER cells of its own state (a delta rule's `k @ S`)
                 /// through `Pre`; a scalar `Accum` lives inside the cell loops and cannot. One statement defines a state;
                 /// a cell it skips keeps its value.
-                ///
-                /// Without a seed the statement is the DEFINITION of a value the kernel keeps for itself: one
-                /// cell of it per coordinate of `index`, which lists every loop around the statement. No loop
-                /// carries it, nothing reads it one step back, and a `Pre` reads it by index wherever the
-                /// definition's loops have closed, the way a `Load` reads a buffer. A value two or more places
-                /// read is defined once this way and read by each, where it would be computed again at each.
                 shared Carry {} {
                     name: Name [DEFINES],
                     value: Name [READS],
                     index: Exprs [EXPRESSION] : Index,
-                    seed: Option<NumOr<Name>> [BUFFER_READ] = None,
+                    seed: NumOr<Name> [BUFFER_READ],
+                    dtype: Option<DType> [] = None,
+                }
+                /// The definition of one cell of a value the kernel keeps for itself: `name[index] <- value`.
+                ///
+                /// `name` is a buffer of the kernel's own, which this statement declares: neither an input nor an
+                /// output of the kernel. `index` lists every loop around the statement, a literal where a dimension
+                /// has one cell, so the value has one cell per coordinate and each is defined once. A `Load` reads
+                /// a cell by index the way it reads any buffer, wherever it stands behind the definition. A value
+                /// two or more places read is defined once this way and read by each, where it would be computed
+                /// again at each.
+                shared Define {SIDE_EFFECTS} {
+                    name: Name [BUFFER_WRITE | LOCAL_BUFFER],
+                    value: Name [READS],
+                    index: Exprs [EXPRESSION | READS] : Index,
                     dtype: Option<DType> [] = None,
                 }
                 /// A read of one cell of a carried state: `name = carrier[index]`.
@@ -1438,7 +1446,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "5ce539ac0a39332cca2089c52ca6a78dbc1a74423cdd5ca0b3fcdcff241fb31d",
+            "1e5c335f0afcdd79157e96272ec914c96ada0baaa4aa50cfc7bda9cb9d8ee943",
             "{listing}"
         );
     }
