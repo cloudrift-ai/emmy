@@ -118,6 +118,12 @@ def test_the_steps_run_as_one_loop_and_the_state_has_no_store():
     assert not kernel.serial and not statements(kernel, Write)
     assert {store.dst_buffer for store in statements(kernel, RegStore)} == {"out"}
     assert isinstance(loop.body[-1], FragmentApply) and loop.body[-1].in_place, "the state's fragments are overwritten last"
+
+    # The seed tensor fills the fragments ahead of the steps; no step reads it or chooses between it and the state.
+    def seeds(stmt) -> bool:
+        return isinstance(stmt, FragmentApply) and any(getattr(arg, "buffer", None) == "s" for arg in stmt.args)
+
+    assert any(seeds(stmt) for stmt in statements(kernel)) and not any(seeds(stmt) for stmt in loop.body.iter())
     assert [tensor.name for node in compiled.nodes.values() if node.id == "out" for tensor in node.outputs] == ["out"]
 
 

@@ -774,7 +774,14 @@ def copied_b(c: Fold, edge: Fold, inputs, dtype=None) -> bool:
     """Whether a stored B moves into its slab byte for byte. It needs a gather when neither matrix coordinate has
     unit element stride, and, ``dtype`` being the element the compute fill stages it at, a typed store when it
     holds another dtype: the B side of :func:`converting_a`. A slab of bytes is no such case, since the fragment
-    loads convert it."""
+    loads convert it. The channels of one fold move alike: beside a channel the fill computes, a stored one is
+    computed too, as the read it is, so the fill and the drain see one kind of B."""
+    channels = [streamed for _, streamed in c.bilinear_channels()]
+    peers = channels if any(streamed is edge for streamed in channels) else [edge]
+    return all(_copied_alone(c, peer, inputs, dtype) for peer in peers)
+
+
+def _copied_alone(c: Fold, edge: Fold, inputs, dtype) -> bool:
     slab = edge.as_slab()
     if slab is None:
         return False
@@ -816,8 +823,6 @@ def computed_operand_cover(c: Fold, tile: Tile, *, converting: bool = False, k_a
                 "and cannot clamp a symbolic K's partial tail; pin a canonical B layout"
             )
     materialized_b = [copied_b(c, edge, inputs, tile.atom.operand_dtype("b")) for edge in c.operands[1:]]
-    if any(materialized_b) and not all(materialized_b):
-        return "the smem compute fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"
     if tile.n.mask and any(materialized_b) and not c.as_contraction().b_trans:
         return (
             f"a smem compute fill with an N-contiguous materialized B needs a TILE whose N width exactly covers "
