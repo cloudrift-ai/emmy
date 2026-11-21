@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
-from emmy.compiler.dtype import F32
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import ScheduleProblem, ScheduleRefused, Site, note_pin_refusal
@@ -40,6 +39,8 @@ from .refusals import (
     _contraction_plan_refusal,
     _contraction_plans,
     _contraction_reductions,
+    _f32_as_bf16_atoms,
+    _f32_product,
     _fill_budget_refusal,
     _fragment_agreements,
     _FragmentAgreement,
@@ -51,7 +52,6 @@ from .refusals import (
     _Relation,
     _relation_refusal,
     _resolve_stage,
-    _rounded_atoms,
     _stage_candidates,
     _swept_root_refusal,
     _warp_atoms,
@@ -492,7 +492,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
 
             plans = self._select_plans(
                 self._named("TILE"),
-                (plan for plan in _contraction_plans(node, facts, self.problem.policy_atoms(self.id)) if not (swept and plan.is_tiled)),
+                (plan for plan in _contraction_plans(node, facts, self.problem.catalog_atoms(self.id)) if not (swept and plan.is_tiled)),
                 allowed=lambda plan: refusal(plan) is None,
                 work=self.problem.work,
                 why=refusal,
@@ -558,10 +558,9 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         # The reading the priors were fit on is of a product with an operand of 16 bits or fewer: a product of f32
         # operands keeps the scalar ranking they learned, and its cells (TF32, and bf16 by rounding) join this
         # reading with the featurizer version that refits them.
-        if _rounded_atoms(tile, self.problem.target, node):
+        if _f32_product(tile, self.problem.target, node):
             return False
-        atoms = tuple(name for name in self.problem.atoms_of(self.id) if ATOM_REGISTRY[name].operand_dtype("a") != F32)
-        return any(self._placed_ok(ReductionSchedule(plan, Reduce())) for plan in _warp_plans(node, facts, atoms))
+        return any(self._placed_ok(ReductionSchedule(plan, Reduce())) for plan in _warp_plans(node, facts, self.problem.atoms_of(self.id)))
 
     @cached_property
     def node_set(self) -> frozenset[NodeSchedule]:
@@ -737,7 +736,7 @@ class ClassicKernelSite(Site[ClassicSchedule]):
             for work in (Work.parse(f"w{warps}x1") for warps in (1, 2, 4, 8))
             if pinned is None or work.spell() == pinned
             for tile in problem.state_tiles
-            if tile.spell() == named or (not named and _atom_policy_ok(tile.atom, problem))
+            if tile.spell() == named or (not named and not tile.atom.row_only and _atom_policy_ok(tile.atom, problem))
         )
 
     def _states(self) -> tuple[Stage, ...]:
@@ -853,10 +852,8 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     allow_f16_accumulate: bool = True
     allow_fp8: bool = True
     allow_tf32: bool = True
-    #: Off unless the compile's pin says otherwise, as the gate is (``space.TF32_SPLIT_MMA``).
-    allow_tf32_split: bool = False
-    #: Whether a product of f32 operands is offered the bf16 atoms, each operand rounded to bf16 in its fill. Off
-    #: unless the compile says otherwise: its gate (``space.F32_AS_BF16_MMA``) follows fast math.
+    #: Whether a product of f32 operands is offered the bf16 atoms, each operand rounded to bf16 in its fill. Those
+    #: cells stage through the compute fill alone, so a problem built with no policy keeps the copy stages' catalog.
     allow_f32_as_bf16: bool = False
     validate_pins: bool = True
     #: A split's finalize tolerates a bare WORK / RASTER / REDUCE pin its own domain cannot take:
@@ -961,9 +958,13 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
 
     @cached_method
     def policy_atoms(self, site: NodeId) -> tuple[str, ...]:
-        """The atoms the unpinned catalog offers: :meth:`atoms_of` under the precision policy."""
-        rounded = () if self.allow_f32_as_bf16 else _rounded_atoms(self.tile, self.target, self.tile.sites[site].node)
+        """The atoms a row a descent follows may deploy: :meth:`atoms_of` under the precision policy."""
+        rounded = () if self.allow_f32_as_bf16 else _f32_as_bf16_atoms(self.tile, self.target, self.tile.sites[site].node)
         return tuple(name for name in self.atoms_of(site) if name not in rounded and _atom_policy_ok(ATOM_REGISTRY[name], self))
+
+    def catalog_atoms(self, site: NodeId) -> tuple[str, ...]:
+        """The atoms the unpinned catalog offers: :meth:`policy_atoms` less the cells only a row or a pin names."""
+        return tuple(name for name in self.policy_atoms(site) if not ATOM_REGISTRY[name].row_only)
 
     @cached_property
     def bare_pins(self) -> frozendict[str, str]:

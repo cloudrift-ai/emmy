@@ -63,6 +63,9 @@ class AtomKind:
     #: The multiplicand token of an atom that is more than one instruction over its operands' dtype: the split
     #: TF32 cell is three products of one pair of f32 fragments. ``None`` for the dtype's own token.
     ab_token: str | None = None
+    #: Whether a schedule takes the cell only where a row or a pin names it, never as the catalog's own offer: the
+    #: reading a transposed raster has. No precision gate speaks for such a cell.
+    row_only: bool = False
 
     def operand_dtype(self, role: str) -> DataType:
         """The element dtype of operand ``role`` (``"a"`` / ``"b"`` / ``"c"``)."""
@@ -290,9 +293,12 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
     # The split TF32 cell: the same fragments and the same instruction, three times a step. Each operand is its
     # TF32 rounding and what the rounding left, itself at TF32; the cell sums hi*lo + lo*hi + hi*hi for one step
     # from zero and adds that to the accumulator with a float add, since the instruction truncates as it
-    # accumulates (Ootomo and Yokota, 2022). Its sums are as close to the exact one as the scalar tier's, at three
-    # times the plain cell's instructions. Gated by ``TF32_SPLIT_MMA``, off unless pinned: no umbrella moves it.
-    "mma_m16n8k8_tf32x3_f32": AtomKind("mma_m16n8k8_tf32x3_f32", (16, 8, 8), (("a", F32), ("b", F32), ("c", F32)), ab_token="tf32x3"),
+    # accumulates (Ootomo and Yokota, 2022). Its sums are as close to the exact one as the scalar tier's, so it
+    # trades no precision a gate could speak for. It is three times the plain cell's instructions and has the plain
+    # cell's features, so the priors cannot rank it: a row or a pin names it, the catalog does not offer it.
+    "mma_m16n8k8_tf32x3_f32": AtomKind(
+        "mma_m16n8k8_tf32x3_f32", (16, 8, 8), (("a", F32), ("b", F32), ("c", F32)), ab_token="tf32x3", row_only=True
+    ),
 }
 
 
