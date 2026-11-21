@@ -326,6 +326,15 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
             (7, 8),
         ),
         (
+            "f32",
+            "f32",
+            "shape=(16, 8, 8), ab_dtype=tf32",
+            "m16n8k8.row.col.f32.tf32.tf32.f32",
+            floats,
+            vec![80, 89, 90, 120],
+            (7, 8),
+        ),
+        (
             "f8e4m3",
             "f32",
             "shape=(16, 8, 32), ab_dtype=e4m3",
