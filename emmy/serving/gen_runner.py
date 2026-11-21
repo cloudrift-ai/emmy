@@ -2724,6 +2724,8 @@ class EmmyGenRunner:
                     # program works on its leading rows.
                     shared = [(1, self._slot_sel, self._slot_partials)]
                     widths = set.intersection(*(set(t["slot_rows"]) for t in self._expert_tiers))
+                    # The scores of a program that weights its own picks: one buffer of the widest, as the selector.
+                    self._slot_scores = torch.zeros(max(widths, default=1), k, dtype=act_dtype, device="cuda")
                     if widths:
                         self._slot_rows_sel = torch.zeros(max(widths), k, dtype=torch.int64, device="cuda")
                         self._slot_rows_partials = torch.empty(max(widths), k, h, dtype=partial_dtype, device="cuda")
@@ -2754,11 +2756,13 @@ class EmmyGenRunner:
                             p.alias_buffer("sel", sel)
                             if "scores" not in prog.input_names:
                                 p.alias_buffer(prog.output_names[0], partials)
-                            elif self._post_decode is not None and len((post := self._post_decode[layer]).output_names) == 4:
-                                # The routed input and the shared expert's output are the post twin's own buffers:
-                                # under a step's capture the program reads them where the twin wrote them.
-                                for name, out in (("x", post.output_names[1]), ("shared", post.output_names[3])):
-                                    p.alias_buffer(name, post.program.buffer_view(out)[:rows])
+                            else:
+                                p.alias_buffer("scores", self._slot_scores[:rows])
+                                if self._post_decode is not None and len((post := self._post_decode[layer]).output_names) == 4:
+                                    # The routed input and the shared expert's output are the post twin's own buffers:
+                                    # under a step's capture the program reads them where the twin wrote them.
+                                    for name, out in (("x", post.output_names[1]), ("shared", post.output_names[3])):
+                                        p.alias_buffer(name, post.program.buffer_view(out)[:rows])
                             if "paging" in m:
                                 pager = emmy_runtime.Pager()
                                 for name, (on_device, raw, _) in m["inputs"].items():
@@ -3252,7 +3256,8 @@ class EmmyGenRunner:
             slots = moe["slot_rows"][width]
             with gpu_lock():
                 self._slot_rows_sel[:t].copy_(indices)
-                routed = self._run_slots(slots, xn, scores, shared, t)
+                self._slot_scores[:t].copy_(scores)
+                routed = self._run_slots(slots, xn, shared, t)
                 if routed is None:
                     # [T, 1, k] @ [T, k, H] — each row's weighted combine, one batched product.
                     routed = _combine_slot_partials(
@@ -3271,7 +3276,8 @@ class EmmyGenRunner:
             for row in range(t):
                 self._slot_sel.copy_(indices[row])
                 rows = slice(row, row + 1)
-                routed = self._run_slots(moe["slots"], xn[rows], scores[row], None if shared is None else shared[rows], 1)
+                self._slot_scores[:1].copy_(scores[rows])
+                routed = self._run_slots(moe["slots"], xn[rows], None if shared is None else shared[rows], 1)
                 if routed is None:
                     # [1, k] @ [k, H] — the fixed-shape weighted combine.
                     routed = _combine_slot_partials(
@@ -3284,17 +3290,19 @@ class EmmyGenRunner:
                 combined.append(routed)
         return combined[0] if len(combined) == 1 else torch.cat(combined)
 
-    def _run_slots(self, slots, xn, scores, shared, t):
-        """Run one fixed-slot program on the step's first ``t`` rows, its selector already written. Returns the
-        routed sum of a program that takes the router's scores and the shared expert's output, a view of its output
-        under a capture and a copy otherwise; ``None`` for a program that leaves the picks' partials to combine."""
+    def _run_slots(self, slots, xn, shared, t):
+        """Run one fixed-slot program on the step's first ``t`` rows, its selector and scores already written.
+        Returns the routed sum of a program that takes the router's scores and the shared expert's output, a view of
+        its output under a capture and a copy otherwise; ``None`` for a program that leaves the picks' partials to
+        combine."""
         import torch
 
         p = slots.program
         summed = "scores" in slots.input_names
         inputs = {"x": xn.detach().contiguous()}
         if summed:
-            inputs |= {"scores": scores.to(xn.dtype), "shared": shared.contiguous()}
+            # The scores were written where the program reads them: the upload of that memory only marks them bound.
+            inputs |= {"scores": self._slot_scores[:t], "shared": shared.contiguous()}
         capturing = torch.cuda.is_current_stream_capturing()
         with p.on_stream(torch.cuda.current_stream()):
             p.upload_prefix_device(inputs)

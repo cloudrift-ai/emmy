@@ -98,7 +98,20 @@ def vectorize_loads(top: KernelOp, body: Body) -> Body:
     that index (:func:`_fold_run_offset`) and read once, by the body's optimization, so a run holds each address once:
     the two k of a packed weight's byte are one load, and four such bytes one vector."""
     folded = _fold_run_offsets(body, {})
-    return _widen_loads(top, body if folded == body else optimize_body(folded), {})
+    return _widen_loads(top, optimize_body(folded) if _repeats_a_load(folded) else folded, {})
+
+
+def _repeats_a_load(body: Body) -> bool:
+    """Whether two scalar loads of one body, or of a body nested in it, read the same address."""
+    seen = set()
+    for s in body:
+        if any(_repeats_a_load(nested) for nested in s.nested()):
+            return True
+        if isinstance(s, Load) and s.is_scalar and not s.carried:
+            if (key := (s.input, s.index, s.dtype)) in seen:
+                return True
+            seen.add(key)
+    return False
 
 
 def _inner_alignment(stmt: Statement, aligned: Mapping[str, int]) -> Mapping[str, int]:
