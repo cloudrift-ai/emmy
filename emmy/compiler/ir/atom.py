@@ -60,6 +60,9 @@ class AtomKind:
     #: The atom's target has no ``cp.async``, so every staged operand — a copied one and the
     #: materialized peers of a compute fill alike — moves through the blocking vector copy.
     sync_copy_staging: bool = False
+    #: The multiplicand token of an atom that is more than one instruction over its operands' dtype: the split
+    #: TF32 cell is three products of one pair of f32 fragments. ``None`` for the dtype's own token.
+    ab_token: str | None = None
 
     def operand_dtype(self, role: str) -> DataType:
         """The element dtype of operand ``role`` (``"a"`` / ``"b"`` / ``"c"``)."""
@@ -113,6 +116,8 @@ class AtomKind:
         (``emmy_mma_m16n8k16_{f16,bf16}_*`` / ``emmy_mma_m16n8k32_e4m3_*``) — the PTX
         instruction's dtype field, so the fp8 dtypes spell their PTX form (``e4m3``, not
         ``f8e4m3``), matching the atom-name convention below."""
+        if self.ab_token is not None:
+            return self.ab_token
         name = self.operand_dtype("a").name
         return _PTX_DTYPE.get(name, name)
 
@@ -274,6 +279,12 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
     # 16. The product of two f32 operands otherwise has no tensor-core cell and runs on the scalar tier. It trades
     # precision, so enumeration is gated (``TF32_MMA`` / ``FAST_MATH``). Appended last so no option-0 pick moves.
     "mma_m16n8k8_tf32_f32": AtomKind("mma_m16n8k8_tf32_f32", (16, 8, 8), (("a", F32), ("b", F32), ("c", F32))),
+    # The split TF32 cell: the same fragments and the same instruction, three times a step. Each operand is its
+    # TF32 rounding and what the rounding left, itself at TF32; the cell sums hi*lo + lo*hi + hi*hi for one step
+    # from zero and adds that to the accumulator with a float add, since the instruction truncates as it
+    # accumulates (Ootomo and Yokota, 2022). Its sums are as close to the exact one as the scalar tier's, at three
+    # times the plain cell's instructions. Gated by ``TF32_SPLIT_MMA``, off unless pinned: no umbrella moves it.
+    "mma_m16n8k8_tf32x3_f32": AtomKind("mma_m16n8k8_tf32x3_f32", (16, 8, 8), (("a", F32), ("b", F32), ("c", F32)), ab_token="tf32x3"),
 }
 
 

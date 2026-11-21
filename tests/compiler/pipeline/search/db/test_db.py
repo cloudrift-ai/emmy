@@ -116,7 +116,8 @@ def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "TF32_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA"]
+    "name",
+    ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "TF32_MMA", "TF32_SPLIT_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA"],
 )
 @pytest.mark.parametrize("umbrella", [False, True])
 def test_independent_precision_regimes_never_replace_or_price_each_other(name, umbrella) -> None:
@@ -214,11 +215,12 @@ def test_context_keys_match_the_db_version_and_ignore_later_ambient_pins(monkeyp
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     monkeypatch.setenv("EMMY_FAST_EXP", "1")
     expected = {
-        None: "24094c07e43f9456b7f416292ce1f6f647f0554b416ea6b7831c803c167d8b04",
-        "FAST_EXP": "4754990359e5eba54dbbff32d359e573276e056de50925ca973828c6ac12f738",
-        "F16_MMA_F32_ACC": "ad80c2994c4232b3a6170b853e4a2032d79e61117061b5d7912f31d83b125eb8",
-        "FP8_MMA": "451623ec1d88eb75ed29af379508c91e5eb1537fb6b12f2682e03b7a8f03390f",
-        "TF32_MMA": "6d196b208306aeeb9c7383ae5d1698d1cf632d5cbf402781e0114969f2533e6c",
+        None: "c8dd8625a08842318e107646481165831d4c1642dafb2f1cbb42d26d400e4965",
+        "FAST_EXP": "24e91e2fb185efc20587a1044672f9f8961b770280dfb15e63fb5da45ee0fef8",
+        "F16_MMA_F32_ACC": "a8385b98649541d85b2a94da03b1ddf218a03a988449f2261973193e55792cfb",
+        "FP8_MMA": "4f40b86ddfbbf92b0342407664c20e32b6ce0f923b84781568083dba811385d0",
+        "TF32_MMA": "0324a43bce9f50819287372446d7e8fa685c3eb495c598d20ce4387ed5641ed2",
+        "TF32_SPLIT_MMA": "ab57d4348f07223d148348cb994dba37035980b5709b974a9f9f6e7b03b69593",
     }
     for name, key in expected.items():
         ctx = Context.from_target((12, 0), precision={name: True} if name else {})
