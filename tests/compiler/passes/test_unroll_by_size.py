@@ -178,3 +178,24 @@ def test_the_stores_of_a_running_sum_are_vector_stores() -> None:
     steps = [position for position, stmt in enumerate(flat) if isinstance(stmt, Accum)]
     assert [value for stmt in stores for value in stmt.values] == [*sorted(copies, key=copies.get), "acc"]
     assert all(any(step < at < later for at in copies.values()) for step, later in zip(steps, steps[1:], strict=False))
+
+
+def test_the_copies_of_a_store_along_the_axis_are_vector_stores() -> None:
+    """A loop stepping 32 trips at a time states its step, so the axis is a multiple of 32 in every copy: the stores
+    of a copy loop are eight 4-wide stores a trip, proved aligned as its loads are. Without the loop's step the
+    stores proved nothing and stayed scalar, two of every three memory operations of a kernel that only copies."""
+    from emmy.compiler.dtype import F32
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.stmt import Write
+
+    copy = """
+        for j in 0..1024:
+            f32 x = load A[1024 * i + j]
+            f32 out[1024 * i + j] = x
+    """
+    buffers = {"inputs": {"A": Tensor("A", (4096,), F32)}, "outputs": {"out": Tensor("out", (4096,), F32)}}
+    op = _RULE.rewrite(SimpleNamespace(op=replace(_kernel(copy), **buffers)), _CTX)
+    op = _WIDEN.rewrite(SimpleNamespace(op=replace(op, knobs={"VECTORIZE_LOADS": True, "VECTORIZE_STORES": True})))
+    [loop] = _loops(op)
+    assert [len(stmt.names) for stmt in loop.body if isinstance(stmt, Load)] == [4] * 8
+    assert [len(stmt.values) for stmt in loop.body if isinstance(stmt, Write)] == [4] * 8

@@ -204,14 +204,19 @@ def _snapshotted(stmts: list[Statement]) -> list[Statement]:
     return out
 
 
-def vectorize_stores(top: KernelOp, body: Body) -> Body:
+def vectorize_stores(top: KernelOp, body: Body, aligned: dict[str, int] | None = None) -> Body:
     """``body`` with each run of scalar writes widened into one vector ``Write`` (``080_vectorize_stores``), nested
-    bodies first. ``top`` resolves the buffers' dtypes."""
+    bodies first. ``top`` resolves the buffers' dtypes, ``aligned`` the alignment of each enclosing strided loop's
+    variable, as for the loads: a store at ``a + 3`` inside a loop that steps ``a`` sixteen at a time is the fourth of
+    an aligned run."""
+    aligned = aligned or {}
     descended: list[Statement] = []
     for s in body:
         nested = s.nested()
         if nested:
-            descended.append(s.with_bodies(tuple(vectorize_stores(top, b) for b in nested)))
+            strided = isinstance(s, Loop) and s.step is not None
+            inner = {**aligned, s.axis.name: strided_alignment(s.walk()[0], s.step, aligned)} if strided else aligned
+            descended.append(s.with_bodies(tuple(vectorize_stores(top, b, inner) for b in nested)))
         else:
             descended.append(s)
 
@@ -235,7 +240,7 @@ def vectorize_stores(top: KernelOp, body: Body) -> Body:
                 scope,
                 addresses,
                 widths,
-                {},
+                aligned,
                 lambda members, output=output, swizzle=swizzle, value_dtype=value_dtype: Write(
                     output=output,
                     index=scope[members[0]].index,
