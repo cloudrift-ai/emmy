@@ -66,12 +66,6 @@ def read_in_place(graph: Graph, body: Body) -> Body:
 
 def rewrite(match: Match, reader: Node) -> Graph:
     graph = match.graph
-    import os  # DEBUG
-
-    if (skip := os.environ.get("EMMY_DEBUG_SKIP")) and any(part in reader.id for part in skip.split(",")):  # DEBUG
-        raise RuleSkipped("debug skip")  # DEBUG
-    if (only := os.environ.get("EMMY_DEBUG_ONLY")) and not any(part in reader.id for part in only.split(",")):  # DEBUG
-        raise RuleSkipped("debug only")  # DEBUG
     body = read_in_place(graph, reader.op.body)
     if body == reader.op.body:
         raise RuleSkipped("the loop reads no copy")

@@ -5,9 +5,9 @@ read along the axis are consecutive elements: four copies of an f32 load from a 
 The two widenings run again on the unrolled body
 (:func:`_vector.vectorize_loads`, :func:`_vector.vectorize_stores`), with the same alignment proof. A loop stepping
 several trips at a time states its step, so an axis it steps four at a time is a multiple of four, for a store
-along it as for a load; a copy of the remainder, at an offset the launch decides, proves nothing and stays scalar. A running sum written out stores its
-accumulator after every step; each of those stores takes a copy of the value it stores, so four of them become one
-(:func:`_vector._snapshotted`).
+along it as for a load; a copy of the remainder, at an offset the launch decides, proves nothing and stays scalar.
+A running sum written out stores its accumulator after every step; each of those stores takes a copy of the value
+it stores, so four of them become one (:func:`_vector._snapshotted`).
 
 It widens what the vector passes widened before it, under the same decisions: nothing when ``VECTORIZE_LOADS`` /
 ``VECTORIZE_STORES`` was pinned off. What is already a vector stays one, so a second run changes nothing.

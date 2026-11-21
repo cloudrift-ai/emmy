@@ -228,6 +228,18 @@ def _fragment_rows_refusal(tile: TileOp) -> str | None:
     return f"no output dimension carries the fragment's M rows ({axis.name})"
 
 
+def _several_multiplicands(node) -> bool:
+    """Whether the node's channels multiply different values of its first operand (``(A * s) @ B0`` beside
+    ``(A * t) @ B1``, fused into one fold whose operand exposes both scaled values). A staged slab of that operand
+    holds one value, the operand's last, and every channel's drain reads it: staged, all but one channel would fold
+    another channel's multiplicand. Read in place, each channel's product is evaluated as the lift spells it."""
+    shared = node.operands[0]
+    if len(shared.exposes) < 2:
+        return False
+    read = node.lift.body.backward_cone(node.lift.results).external_reads
+    return len({shared.exposes[component] for param, edge, component in node.bindings if edge is shared and param in read}) > 1
+
+
 def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: tuple = (None, None)) -> str | None:
     """Return why static node facts rule out every tensor-core atom."""
     from emmy.compiler.ir.tile.ops import edge_dtypes  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
@@ -243,6 +255,8 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return why
     if not fragment_epilogue:
         return "the projection epilogue is not a per-fragment straight-line program"
+    if _several_multiplicands(node):
+        return "the channels multiply different values of the shared operand, and its one staged slab holds one"
     # The operand tuple in stored order — there is no named A/B role any more, and a nested
     # scheduling site on ANY operand refuses the same way.
     if any(edge.axis is not None for edge in node.operands) and not node.chunked():
@@ -551,6 +565,8 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule, paged: M
     copy's per-thread addresses cannot either. The lowering refuses what the catalog would otherwise
     let the search pick."""
     direct = Stage.direct()
+    if _several_multiplicands(node):
+        return (direct,)
     if not choice.tile.is_tiled or (node.chunked() and not choice.tile.is_warp):
         # A chunked carrier's transport belongs to its own tier, which is the tensor-core one.
         # Its per-cell fallback folds the recipe in registers and reads no slab, so a stage
