@@ -122,7 +122,6 @@ def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
         "F16_MMA_F32_ACC",
         "FP8_MMA",
         "TF32_MMA",
-        "TF32_SPLIT_MMA",
         "F32_AS_BF16_MMA",
         "FAST_DIV",
         "FAST_SQRT",
@@ -226,13 +225,12 @@ def test_context_keys_match_the_db_version_and_ignore_later_ambient_pins(monkeyp
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     monkeypatch.setenv("EMMY_FAST_EXP", "1")
     expected = {
-        None: "917d71a3a26792c950cfd8fd1ea988b675fc1fde98141d16b4392d9fa865cea2",
-        "FAST_EXP": "4f76d9c532ced1ec62d0e0a0f4308b92c9abb95b07e807dce4acd4c746edf5d2",
-        "F16_MMA_F32_ACC": "c2c9c8bf030a39c5194c26fadb85371a4be84d169df5adef2c9d701bef9b5018",
-        "FP8_MMA": "4994654c0e480c7bff2c46230aaa995e5d345401183d85ac58a09b1694d7fa1c",
-        "TF32_MMA": "ddadeae6782d5e43abae9b1ed6acd6544f2359aa89aace522b09129546148eb3",
-        "TF32_SPLIT_MMA": "c29005b3bd53d1a69a80cdc8cd1e14df991d5e2af4649bbe99f3c173ce724645",
-        "F32_AS_BF16_MMA": "204c2f8bc8537420d7e60bbd38f9b8ca4ab5f8f50c566d225dc30117270fe683",
+        None: "977bcdafcaa91afac062d92aa6e330d0838bdc6fe61283069ecf6cfde850700b",
+        "FAST_EXP": "90cd1164cf47eb7f85b8faf0becd4d57c48431e9fccb23be159e1b158da77c49",
+        "F16_MMA_F32_ACC": "22ff8c26b48dd401609fb9a0da7aacea341325dbeacab4fad5f8eb77c43eb8e8",
+        "FP8_MMA": "dd3f0181b16c2c227004b009cb42851e4357cb52657a8dd6a533fd3d26abd4b3",
+        "TF32_MMA": "b57f57801d644d280d33c02b652fd7803c1b727315a079ff094021f54d5fffb1",
+        "F32_AS_BF16_MMA": "4f16470ca5897518fa7ce604e92f37d88c06fe579d685613553c72b55d22e3fb",
     }
     for name, key in expected.items():
         ctx = Context.from_target((12, 0), precision={name: True} if name else {})

@@ -2305,7 +2305,7 @@ class _MmaOps(_AtomOps):
         """One slab's swizzle mode from its inner (contiguous) row span — the reading
         :meth:`slab_swizzles` applies to A and B, and the chunk tier to each of its two streams."""
         if nbytes in (1, 4):
-            return "NONE"  # the gather of bytes, and of 32-bit floats, reads an ordinary padded row
+            return "NONE"  # the gather reads an ordinary row: a padded one of bytes, a plain one of 32-bit floats
         # A TMA slab keeps the hardware spelling (the copy engine fixes its permutation, and the
         # descriptor splits its box down to the atom); every other transport writes the slab in
         # software, so its XOR reads the row index at the slab's OWN stride.

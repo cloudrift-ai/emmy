@@ -334,20 +334,6 @@ TF32_MMA = Knob(
 )
 
 
-TF32_SPLIT_MMA = Knob(
-    "TF32_SPLIT_MMA",
-    KnobType.BOOL,
-    hints=(False,),
-    help="Offer the split TF32 tensor-core atom forks (mma_m16n8k8_tf32x3_f32 — each f32 multiplicand as its TF32 "
-    "rounding and what the rounding left, three products a step, each step added to the accumulator by a float add) "
-    "for a product of two f32 operands. Its sums are as close to the exact one as the scalar tier's (measured), so "
-    "FAST_MATH does not move it; it is three times the TF32 atom's instructions, slower than the scalar tier where "
-    "tensor cores accumulate f32 at half rate (an RTX 5090), and the priors cannot tell it from the TF32 atom, so "
-    "it is off unless pinned: pin 1 to offer. "
-    "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
-)
-
-
 F32_AS_BF16_MMA = Knob(
     "F32_AS_BF16_MMA",
     KnobType.BOOL,
@@ -368,7 +354,6 @@ PRECISION_KNOBS = (
     F16_MMA_F32_ACC,
     FP8_MMA,
     TF32_MMA,
-    TF32_SPLIT_MMA,
     F32_AS_BF16_MMA,
     FAST_DIV,
     FAST_SQRT,
@@ -377,9 +362,8 @@ PRECISION_KNOBS = (
 )
 
 #: The precision-trading knobs whose default is their own first hint, not the umbrella's decision: the standard
-#: regime contracts multiply-adds as well, so the umbrella leaves contraction on in both, and the split TF32 atom
-#: trades no precision the umbrella speaks for, so it stays off in both until a pin offers it.
-_OWN_DEFAULT = (CONTRACT_FMA, TF32_SPLIT_MMA)
+#: regime contracts multiply-adds as well, so the umbrella leaves contraction on in both.
+_OWN_DEFAULT = (CONTRACT_FMA,)
 
 #: The regime knobs: the input pins a measured row is filed under beside the card and the kernel — the
 #: precision-trading family and the cache knob. Every reader of a regime iterates this tuple through
@@ -402,6 +386,21 @@ def precision_pin(knob: Knob) -> bool:
         return knob.parse(raw)
     raw = FAST_MATH.raw()
     return precision_default(knob, FAST_MATH.parse(raw) if raw is not None else FAST_MATH.hints[0])
+
+
+#: The gates of the tensor-core atom families, each under the flag of ``ClassicProblem``'s precision policy it decides.
+ATOM_GATES = {
+    "allow_f16_accumulate": F16_MMA_F32_ACC,
+    "allow_fp8": FP8_MMA,
+    "allow_tf32": TF32_MMA,
+    "allow_f32_as_bf16": F32_AS_BF16_MMA,
+}
+
+
+def precision_policy() -> dict[str, bool]:
+    """The precision policy of an unpinned schedule enumeration, as ``ClassicProblem`` takes it: each atom gate as
+    its live pin resolves it."""
+    return {flag: precision_pin(gate) is True for flag, gate in ATOM_GATES.items()}
 
 
 def regime_pin(knob: Knob) -> bool:

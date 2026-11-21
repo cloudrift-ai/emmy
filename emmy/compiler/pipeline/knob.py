@@ -524,10 +524,9 @@ def consume_kernel_row(knobs: dict) -> dict:
 def schedule_pin_fingerprint(kernel: str | None = None) -> tuple[tuple[str, str], ...]:
     """Every live env pin the schedule enumeration can read, as sorted ``(env var, value)`` pairs spelled as
     the scheduler's catalog arm reads them: the :data:`SCHEDULE_FAMILIES` pins (bare and ``@``-keyed) as
-    set, each restricting a domain, and the precision gates by effect — one ``"1"`` entry per gate
-    ``space.precision_pin`` resolves ON (``F16_MMA_F32_ACC`` / ``FP8_MMA`` / ``TF32_MMA`` / ``F32_AS_BF16_MMA``, under
-    their ``FAST_MATH`` umbrella, and ``TF32_SPLIT_MMA``, which only its own pin turns on), nothing for a gate OFF. Unset
-    precision gates follow the enabled FAST_MATH default.
+    set, each restricting a domain, and the atom gates by effect — one ``"1"`` entry per gate
+    ``space.precision_policy`` resolves ON (``space.ATOM_GATES``, under their ``FAST_MATH`` umbrella), nothing for
+    a gate OFF. Unset gates follow the enabled FAST_MATH default.
     The scheduler folds this into its schedule-space stamp, which also seeds a budgeted pool's draw:
     equivalent effective gates share a stamp regardless of how the pins spell them.
     Given the name ``kernel`` of the one kernel being stamped, a kernel pin naming another kernel is left
@@ -536,21 +535,13 @@ def schedule_pin_fingerprint(kernel: str | None = None) -> tuple[tuple[str, str]
     exception to ``config.py``'s env ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS`` splat."""
     import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
 
-    from emmy.compiler.pipeline.search.space import (  # noqa: PLC0415
-        F16_MMA_F32_ACC,
-        F32_AS_BF16_MMA,
-        FP8_MMA,
-        TF32_MMA,
-        TF32_SPLIT_MMA,
-        precision_pin,
-    )
+    from emmy.compiler.pipeline.search.space import ATOM_GATES, precision_policy  # noqa: PLC0415
 
     prefixes = tuple(config.knob_var(name) for name in SCHEDULE_FAMILIES)
     pins = [(var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)]
     if kernel:
         pins = [(var, val) for var, val in pins if pinned_kernel(_pin_key(var)) in (None, kernel)]
-    gates = (F16_MMA_F32_ACC, FP8_MMA, TF32_MMA, TF32_SPLIT_MMA, F32_AS_BF16_MMA)
-    pins.extend((gate.env, "1") for gate in gates if precision_pin(gate) is True)
+    pins.extend((ATOM_GATES[flag].env, "1") for flag, allowed in precision_policy().items() if allowed)
     return tuple(sorted(pins))
 
 

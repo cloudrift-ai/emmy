@@ -53,13 +53,7 @@ const MMA_HALVES: Needs = Needs {
     version: (7, 0),
 };
 const MMA_TF32: Needs = Needs {
-    what: "`mma.sync` m16n8k8 of 32-bit floats read as TF32",
-    sm: 80..=SM_LAST,
-    arch_specific: false,
-    version: (7, 0),
-};
-const TF32_ROUNDING: Needs = Needs {
-    what: "a rounding of a 32-bit float to TF32 (`cvt.rna.tf32.f32`)",
+    what: "`mma.sync` m16n8k8 of 32-bit floats rounded to TF32 (`cvt.rna.tf32.f32`)",
     sm: 80..=SM_LAST,
     arch_specific: false,
     version: (7, 0),
@@ -471,9 +465,15 @@ impl Lowerer {
         let a = self.tensor_fragment(node.a_frag, a_count, VTy::U32)?;
         let b = self.tensor_fragment(node.b_frag, 2, VTy::U32)?;
         let c = self.tensor_fragment(node.c_frag, c_count, c_ty)?;
-        if ab_ty == Ty::Tf32 {
-            return self.tf32_products(shape, ab == "tf32x3", a, b, c);
+        if ab == "tf32x3" {
+            self.tf32_split(&a, &b, &c);
+            return Ok(());
         }
+        let (a, b) = if ab_ty == Ty::Tf32 {
+            (self.tf32_rounded(&a), self.tf32_rounded(&b))
+        } else {
+            (a, b)
+        };
         let mut operands = vec![
             Operand::Tuple(a),
             Operand::Tuple(b),
@@ -515,84 +515,69 @@ impl Lowerer {
         Ok(())
     }
 
-    /// The product of two fragments of 32-bit floats into `c`. The instruction reads the top ten bits of each
-    /// operand's mantissa and drops the rest, which leaves every product a little small, and a dot product does
-    /// not average that away: each operand is first rounded to what the instruction reads. The `split` form also
-    /// multiplies what the rounding left: an operand is `hi + lo`, both at TF32, and the product is `hi*lo +
-    /// lo*hi + hi*hi`, the small terms first. The instruction truncates as it accumulates, a bias that grows
-    /// with every step of a long sum (measured on an RTX 5090: 2e-5 of the result at K 4096), so the split form
-    /// sums one step from zero and adds it to `c` with a float add, which rounds to nearest.
-    fn tf32_products(
-        &mut self,
-        shape: MmaShape,
-        split: bool,
-        a: Vec<Reg>,
-        b: Vec<Reg>,
-        c: Vec<Reg>,
-    ) -> Result<()> {
-        self.requires(&TF32_ROUNDING)?;
-        let (a_hi, a_lo) = self.tf32_parts(&a, split);
-        let (b_hi, b_lo) = self.tf32_parts(&b, split);
+    /// Each of `regs`, a 32-bit float, rounded to TF32. The instruction reads the top ten bits of an operand's
+    /// mantissa and drops the rest, which leaves every product a little small, and a dot product does not average
+    /// that away: an operand is first rounded to what the instruction reads.
+    fn tf32_rounded(&mut self, regs: &[Reg]) -> Vec<Reg> {
+        let mut rounded = Vec::with_capacity(regs.len());
+        for reg in regs {
+            let to = self.b.reg(Bank::B32);
+            let round = Inst::new(
+                Opcode::Cvt(Ty::F32),
+                Ty::Tf32,
+                vec![to],
+                vec![(*reg).into()],
+            );
+            self.b.emit(round.rounded(Round::Rna));
+            rounded.push(to);
+        }
+        rounded
+    }
+
+    /// The split product of two fragments of 32-bit floats into `c`: an operand is `hi + lo`, its rounding to
+    /// TF32 and what the rounding left, itself at TF32, and the product is `hi*lo + lo*hi + hi*hi`, the small
+    /// terms first. The instruction truncates as it accumulates, a bias that grows with every step of a long sum
+    /// (measured on an RTX 5090: 2e-5 of the result at K 4096), so one step is summed from zero and added to `c`
+    /// with a float add, which rounds to nearest.
+    fn tf32_split(&mut self, a: &[Reg], b: &[Reg], c: &[Reg]) {
+        let (a_hi, b_hi) = (self.tf32_rounded(a), self.tf32_rounded(b));
+        let (a_lo, b_lo) = (self.tf32_rest(a, &a_hi), self.tf32_rest(b, &b_hi));
+        let step: Vec<Reg> = c.iter().map(|_| self.b.reg(Bank::F32)).collect();
+        self.zero(&step, VTy::F32);
         let mma = Mma {
-            shape,
+            shape: MmaShape::M16n8k8,
             b_row: false,
             ab: Ty::Tf32,
             acc: Ty::F32,
             block_scale: false,
         };
-        let product = |this: &mut Self, a: Vec<Reg>, b: Vec<Reg>, into: &[Reg]| {
+        for (a, b) in [(&a_hi, &b_lo), (&a_lo, &b_hi), (&a_hi, &b_hi)] {
             let operands = vec![
-                Operand::Tuple(a),
-                Operand::Tuple(b),
-                Operand::Tuple(into.to_vec()),
+                Operand::Tuple(a.clone()),
+                Operand::Tuple(b.clone()),
+                Operand::Tuple(step.clone()),
             ];
-            this.b.emit(Inst::new(
-                Opcode::Mma(mma),
-                Ty::F32,
-                into.to_vec(),
-                operands,
-            ));
-        };
-        if !split {
-            product(self, a_hi, b_hi, &c);
-            return Ok(());
+            self.b
+                .emit(Inst::new(Opcode::Mma(mma), Ty::F32, step.clone(), operands));
         }
-        let step: Vec<Reg> = c.iter().map(|_| self.b.reg(Bank::F32)).collect();
-        self.zero(&step, VTy::F32);
-        product(self, a_hi.clone(), b_lo, &step);
-        product(self, a_lo, b_hi.clone(), &step);
-        product(self, a_hi, b_hi, &step);
         for (total, part) in c.iter().zip(&step) {
             let operands = vec![(*total).into(), (*part).into()];
             self.b
                 .emit(Inst::new(Opcode::Add, Ty::F32, vec![*total], operands));
         }
-        Ok(())
     }
 
-    /// Each of `regs`, a 32-bit float, rounded to TF32, and with `split` what the rounding left of it, rounded
-    /// to TF32 as well (nothing otherwise).
-    fn tf32_parts(&mut self, regs: &[Reg], split: bool) -> (Vec<Reg>, Vec<Reg>) {
-        let rounded = |this: &mut Self, from: Reg| {
-            let to = this.b.reg(Bank::B32);
-            let round = Inst::new(Opcode::Cvt(Ty::F32), Ty::Tf32, vec![to], vec![from.into()]);
-            this.b.emit(round.rounded(Round::Rna));
-            to
-        };
-        let mut high = Vec::new();
-        let mut low = Vec::new();
-        for reg in regs {
-            let hi = rounded(self, *reg);
-            high.push(hi);
-            if split {
-                let rest = self.b.reg(Bank::B32);
-                let operands = vec![(*reg).into(), hi.into()];
-                self.b
-                    .emit(Inst::new(Opcode::Sub, Ty::F32, vec![rest], operands));
-                low.push(rounded(self, rest));
-            }
+    /// What rounding each of `regs` to `rounded` left of it, rounded to TF32 as well.
+    fn tf32_rest(&mut self, regs: &[Reg], rounded: &[Reg]) -> Vec<Reg> {
+        let mut rest = Vec::with_capacity(regs.len());
+        for (reg, hi) in regs.iter().zip(rounded) {
+            let left = self.b.reg(Bank::B32);
+            let operands = vec![(*reg).into(), (*hi).into()];
+            self.b
+                .emit(Inst::new(Opcode::Sub, Ty::F32, vec![left], operands));
+            rest.push(left);
         }
-        (high, low)
+        self.tf32_rounded(&rest)
     }
 
     // --- between two products ----------------------------------------------------------------------------
@@ -802,7 +787,7 @@ impl Lowerer {
                     self.b.emit(join);
                 }
             }
-            ("m16n8k16", "a", [source]) if matches!(ab, "tf32" | "tf32x3") => {
+            ("m16n8k16", "a", [source]) if matches!(ab, "tf32" | "tf32x3") && node.part == 0 => {
                 // An operand of 32-bit floats spans eight K positions: the eight columns of ONE accumulator
                 // fragment. A lane's register `i` is the element at its group's row, eight further down for an
                 // odd `i`, and at column `t + 4 * (i / 2)`. Lane `t / 2 + 2 * (i / 2)` of the same group holds

@@ -39,8 +39,7 @@ def test_reason_keeps_a_row_of_either_precision_regime() -> None:
         "FAST_SQRT",
         "FLUSH_TO_ZERO",
     )
-    # Contraction is on and the split TF32 atom off in both regimes: the umbrella moves neither.
-    own = {"CONTRACT_FMA": True, "TF32_SPLIT_MMA": False, "COLD_CACHE": False}
+    own = {"CONTRACT_FMA": True, "COLD_CACHE": False}
     assert REGIME_PINS[""] == {**dict.fromkeys(following, False), **own}
     assert REGIME_PINS["FAST_MATH"] == {**dict.fromkeys(following, True), **own}
     assert regime_of(False, {"FAST_MATH": True}) == "FAST_MATH" and regime_of() == ""
