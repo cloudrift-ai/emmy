@@ -1643,10 +1643,12 @@ kernel's structural features (statement/op histogram + loop extents + operand dt
 (`features.stamps`); `H_*` the card and regime (`Context.features`). Neither is written onto an op: an op's knobs
 hold decisions only, every key a registered knob (Part 6).
 
-**`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `TF32_MMA` / `FAST_EXP` / `FAST_DIV` / `FAST_SQRT` /
-`FLUSH_TO_ZERO` / `CONTRACT_FMA`** (BOOL, pin-only precision restrictions) — the **precision-trading family**. Precedence per knob: its
+**`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `TF32_MMA` / `TF32_SPLIT_MMA` / `FAST_EXP` / `FAST_DIV` /
+`FAST_SQRT` / `FLUSH_TO_ZERO` / `CONTRACT_FMA`** (BOOL, pin-only precision restrictions) — the **precision-trading family**. Precedence per knob: its
 own pin > the `FAST_MATH` umbrella > true (`space.precision_pin`); `CONTRACT_FMA` alone keeps its own default, on in
-both regimes, so only its own pin turns contraction off (`space.precision_default`). `F16_MMA_F32_ACC`
+both regimes, so only its own pin turns contraction off (`space.precision_default`). `TF32_SPLIT_MMA` keeps its
+own default too, off in both: it admits the split TF32 atom (`mma_m16n8k8_tf32x3_f32`), whose sums are as close to
+exact as the scalar tier's and which the priors cannot yet tell from the TF32 atom, so only a pin offers it. `F16_MMA_F32_ACC`
 admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32 register promote), while
 `FP8_MMA` admits its native fp8 atoms and `TF32_MMA` the TF32 atom of a product of two f32 operands
 (`mma_m16n8k8_tf32_f32`, each operand rounded to ten bits of mantissa), which otherwise runs on the scalar tier.
