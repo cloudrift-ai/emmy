@@ -272,3 +272,21 @@ def test_a_row_written_a_step_matches_the_substitution(atom, n, seed):
             feed["s"] = (rng.standard_normal((1, _HEADS, n, n)) * 0.2).astype(np.float32)
         got = np.asarray(backend.run(compiled, input_data=dict(feed))[0].outputs["out"], dtype=np.float64)
         np.testing.assert_allclose(got, _rows_reference(feed["m"], feed.get("s")), atol=_ATOMS[atom])
+
+
+@requires_cuda
+def test_a_row_step_left_a_loop_takes_its_tests_at_run_time():
+    """With the unroll budget at zero the steps stay one loop, each block's branch behind its test of the step; the
+    answer is the written-out kernel's."""
+    n = 32
+    with pinned_knobs({**_row(n), "UNROLL": 0}):
+        compiled, kernels = compile_with_kernels(_rows_graph(n, "s"), ctx=Context.probe())
+    (kernel,) = kernels.values()
+    assert [stmt for stmt in statements(kernel, Loop) if stmt.axis.name == "a0"] and statements(kernel, Cond)
+    rng = np.random.default_rng(0)
+    feed = {
+        "m": np.tril(rng.standard_normal((1, _HEADS, n, n)) * 0.2, -1).astype(np.float32),
+        "s": (rng.standard_normal((1, _HEADS, n, n)) * 0.2).astype(np.float32),
+    }
+    got = np.asarray(CudaBackend().run(compiled, input_data=dict(feed))[0].outputs["out"], dtype=np.float64)
+    np.testing.assert_allclose(got, _rows_reference(feed["m"], feed["s"]), atol=2e-3)

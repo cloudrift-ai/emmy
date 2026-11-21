@@ -146,11 +146,14 @@ class _Blocks:
         self.count += 1
         return f"_{stem}{self.count}"
 
-    def settled(self, load):
-        """``load`` with the conditions given taken off its index, where the index then stays inside the buffer
-        at every position of every axis: the choice it loses only kept the read in bounds where the branch that
-        reads it is not taken."""
-        index = tuple(_given(entry, self.given, self.held) for entry in load.index)
+    def settled(self, load, col: str):
+        """``load``, read into a block whose columns run along ``col``, with the conditions given taken off its
+        index, where the index then stays inside the buffer at every position of every axis: the choice it loses
+        only kept the read in bounds where the branch that reads it is not taken. A value held to a coordinate
+        becomes it only where that coordinate is the block's own column: every column is then its own read, and
+        the columns the branch does not take are not kept."""
+        held = tuple(pair for pair in self.held if pair[1] == col)
+        index = tuple(_given(entry, self.given, held) for entry in load.index)
         if index == tuple(load.index):
             return load
         spans = [entry.range(self.ranges) for entry in index]
@@ -278,7 +281,7 @@ class _Blocks:
             elif isinstance(stmt, Load):
                 # Every read is a fragment, one that reads neither axis too. Held as a scalar across the step it
                 # costs a register the assembler has none to spare of: 8% on a 16-step dense recurrence.
-                frags[stmt.name] = self.gmem(stmt.input, self.settled(stmt).index, row, col, rb, cb)
+                frags[stmt.name] = self.gmem(stmt.input, self.settled(stmt, col).index, row, col, rb, cb)
             elif isinstance(stmt, Let) or (isinstance(stmt, Assign) and not set(stmt.deps()) & frags.keys()):
                 # One value for the whole block: a scalar statement, emitted once.
                 if stmt.name not in self.uniform:
@@ -348,7 +351,7 @@ class _Blocks:
         if rb is not None or row not in left.free_axes or self.extents[axis] % atom.atom_k:
             raise Unresident("a product that is not over the warp's own rows and whole atoms")
         slab, direct = right.as_slab(), None
-        load = self.settled(slab.load) if slab is not None else None
+        load = self.settled(slab.load, col) if slab is not None else None
         if slab is not None:
             try:
                 trans, ldm = _direct_operand(load, self.tile.inputs, k_name=axis, own=col, legacy=(False, 0))
