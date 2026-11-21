@@ -642,6 +642,10 @@ What the session changes for the milestones:
     about 1.3 ms a step; 5090 estimate 1.3-2.0 ms. Left for the card: the captured one-row step under nsys, tokens
     against main, and the paging programs' new traces and rows in the 5090 golden (the scan's parallel schedule
     needs a row to be picked).
+    **2026-11-21, one card.** The 5090 golden holds the new paging programs, recorded (scan 1.24 us parallel against
+    4.7 serial). The gate is still open: strict export refuses on main and the branch alike (four twins' cut
+    decisions have no row), and a drafter-off pack's first `emmy generate` wedged the GPU before either tree's
+    tokens came back. Next card: serve main's drafter-off pack first, then the branch's, through `emmy serve`.
 
 12. **Qwen3.6: slots sized to the verify step's picks.** A verify step's three rows route past the 8 slots, so
     the drafter buys almost nothing (a 44-52 ms drafted step against a 19.6-19.8 ms one-row step). The pager's

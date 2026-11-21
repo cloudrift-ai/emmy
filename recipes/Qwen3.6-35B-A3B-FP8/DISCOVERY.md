@@ -29,8 +29,24 @@ lowers to 948 us. The scan is offered parallel schedules: the 32-thread one take
 for the serial one the prior picks. Only a measured row on the card would pick it; the estimates above use the
 serial one.
 
-The 5090 golden's paging rows describe the old programs, so the new kernels lower from the prior until a record run
-adds their programs and rows.
+On the RTX 5090 (2026-11-21, one rented card): the hardware golden's old decision and update programs are replaced by
+the current three, and all 14 kernels are tuned and recorded at the programs' hint sizes (65 pages, 33 slots). The scan
+takes the parallel schedule there: 1.24 us against 4.7 us serial. The largest decision kernel left is the victim
+ranking over slots, 5.6 us at 33 slots. A kernel of the decision program reads the page count only through its
+output's size, which a stored kernel could not lift alone; the lift now binds output sizes too, and every repository
+golden stays current.
+
+The gate is still not measured. What the card showed:
+
+- **No strict pack, on main either.** A strict export refuses at `k_1be59c38438d` (a `type_as` in the 64-row chunk's
+  Gated DeltaNet program): its cut decision has no routing row. Main's tree refuses at the same kernel. The serving
+  audit says 67 twins deploy from the golden rows alone and 4 do not: `gdn4-sparse-linear@fp8`,
+  `gdn64-sparse-linear@fp8`, `post64-sparse-full@fp8` and `prologue4-native`, each a cut decision with no row.
+- **A drafter-off pack stalled the card.** Both trees exported a drafter-off pack without strict evidence (18 minutes
+  each). The first `emmy generate` on this branch's pack never returned a token, and the GPU stayed at 100% use and
+  112 W with no process and 2 MiB allocated, through a container restart. Main's pack, run after it, stalled the same
+  way, but behind a card that was already wedged, so which tree hangs is not known. The card was given back.
+- On the RTX 4080 the parallel scan alone is correct and fast at 65, 257 and 1,000 entries.
 
 ## The FP8 cache staged into shared memory (2026-11-07)
 
