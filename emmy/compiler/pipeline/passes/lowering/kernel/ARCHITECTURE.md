@@ -878,6 +878,11 @@ selects one row of a triangular inverse), the step does not compute the earlier 
   fragment as declared, for every register-held state.
 - **A store that does not read the step** is made by the last step alone, as under the other storages.
 
+An output's columns and rows are the last two entries of its store that read an axis other than the state's batch
+cells and the step (`matrix_coordinates`). An entry may be its axis moved by the step: a walk that stores every step's
+rows in one tensor, in sequence order, places a block at `64 * step + row` (`loop/fusion/020_store_through_copies`
+puts such a store in the walk).
+
 A row loop over a 64 x 64 state, 63 steps, runs 7.1 on an RTX 5090 this way for 192 matrices (f16 operands, f32
 accumulator). Left a loop, with its tests taken at run time, the same kernel ran 30.
 

@@ -664,6 +664,15 @@ kernel whose only work it was. It runs after the roll, which compares a recurren
 copy that rounds is arithmetic and is not read through, nor is a copy of a buffer another kernel stores over, nor one
 of a packed buffer.
 
+A buffer is stored where its one reader would only have moved it (`020_store_through_copies`). A kernel no region
+holds stores what it computes in a buffer of its own, and the loops that read that buffer are another kernel. Where
+that kernel computes nothing and reads every cell once — the steps of a walk stacked into one tensor and put back in
+sequence order — the producer stores each value at the cell the reader would have moved it to, and the reader is gone.
+The reader of a walk's steps reads each step back by its position and chooses among them by the stacked coordinate;
+that choice is one read at that coordinate. A join that chooses by a range of rows (`torch.cat`) is not read that way
+and stays a kernel. The roll itself gives the state its loop ends with the buffer of the last step it replaces, with
+no copy between.
+
 **Measured evidence this rule is spending.** Dropping the work-growth cap and the merge-ordering pass is a deliberate
 trade: both existed because of a measurement, and neither measurement has been retaken. A merge that splices a compute
 producer into a still-open contraction product lands that product in gmem; on a 1-layer Qwen3-0.6B trunk at seq 512 the
