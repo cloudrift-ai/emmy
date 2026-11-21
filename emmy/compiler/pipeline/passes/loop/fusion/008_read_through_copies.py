@@ -27,7 +27,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._region import regions, wrap_multi_output_fragment
+from emmy.compiler.pipeline.passes.loop.fusion._region import joins_a_region, regions, wrap_multi_output_fragment
 
 PATTERN = [Pattern("reader", LoopOp)]
 
@@ -54,7 +54,7 @@ def copied(graph: Graph, name: str) -> tuple[tuple, Load] | None:
     return (tuple(write.index), load) if whole else None
 
 
-def read_in_place(graph: Graph, body: Body, region: frozenset[str] = frozenset()) -> Body:
+def read_in_place(graph: Graph, body: Body, region: frozenset[str]) -> Body:
     """``body`` with each read of a copy that ``region`` does not hold taken through it, and through the copy behind
     that one."""
 
@@ -74,7 +74,14 @@ def read_in_place(graph: Graph, body: Body, region: frozenset[str] = frozenset()
 
 def rewrite(match: Match, reader: Node) -> Graph:
     graph = match.graph
-    body = read_in_place(graph, reader.op.body, regions(graph).get(reader.id, frozenset()))
+    region: frozenset[str] = frozenset()
+    if joins_a_region(reader.op):
+        # A copy this loop alone reads is its own region's: a loop whose every reader sits in one region joins it.
+        # The regions are an answer about the whole graph, asked only for a loop that reads a copy with another reader.
+        region = frozenset(graph.producer(name).id for name in reader.inputs if graph.buffer_users(name) == {reader.id})
+        if read_in_place(graph, reader.op.body, region) != reader.op.body:
+            region = regions(graph).get(reader.id, frozenset())
+    body = read_in_place(graph, reader.op.body, region)
     if body == reader.op.body:
         raise RuleSkipped("the loop reads no copy of another region")
     fragment, match.output = wrap_multi_output_fragment(graph, replace(reader.op, body=body, inputs={}), tuple(reader.buffer_names()))

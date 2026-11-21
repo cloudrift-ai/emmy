@@ -14,6 +14,13 @@ def carries_state(op: LoopOp) -> bool:
     return bool(op.body.carries)
 
 
+def joins_a_region(op: LoopOp) -> bool:
+    """Whether a region may hold ``op``. A kernel that carries a state is in none: the splice inlines a store into
+    its readers, and a state is stored once per step, not once. Neither is an ordered prefix output
+    (:func:`observes_running_accumulator`)."""
+    return not (carries_state(op) or observes_running_accumulator(op))
+
+
 def writes_in_place(node: Node) -> bool:
     """Whether an output of ``node`` is stored in another buffer's memory (``Tensor.alias``): a scatter,
     whose unstored cells are the destination's and so have no spelling a reader could inline."""
@@ -45,9 +52,8 @@ def _packed(graph: Graph, node: Node) -> bool:
 def regions(graph: Graph) -> dict[str, frozenset[str]]:
     """Every loop's region, by member — the partition of the Loop subgraph fusion merges.
 
-    Some nodes no region holds: a kernel that carries a state (the splice inlines a store into its
-    readers, and a state is stored once per step, not once), an ordered prefix output
-    (:func:`observes_running_accumulator`) and any op that is not a loop. A region also stops at a
+    Some nodes no region holds: a kernel that carries a state, an ordered prefix output
+    (:func:`joins_a_region`) and any op that is not a loop. A region also stops at a
     packed buffer it computes (:func:`_packed`): the producer stays, its readers begin another. A
     kernel that writes in place (:func:`writes_in_place`) is such a stop too, and so is the producer of
     the buffer it writes over: the output is that buffer's memory with some cells restored, a value no
@@ -71,11 +77,7 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     """
     order = graph.topological_order()
     nodes = graph.nodes
-    fusable = {
-        nid
-        for nid in order
-        if isinstance(nodes[nid].op, LoopOp) and not (carries_state(nodes[nid].op) or observes_running_accumulator(nodes[nid].op))
-    }
+    fusable = {nid for nid in order if isinstance(nodes[nid].op, LoopOp) and joins_a_region(nodes[nid].op)}
     stops = {nid for nid in fusable if _packed(graph, nodes[nid]) or writes_in_place(nodes[nid])}
     stops |= {
         producer.id
