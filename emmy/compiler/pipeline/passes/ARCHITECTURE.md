@@ -652,21 +652,20 @@ That maximal result is final: no later placement rule cuts it apart.
 
 A copy is read through from outside its region (`008_read_through_copies`). A loop that only re-lays out a buffer or
 widens it — the chunks of a sequence, a transpose, a broadcast, a 16-bit float read as f32 — is inlined into every
-reader of its own region by the splice. A reader outside the region used to make the region store the copy: a kernel
-that carries a state, which no region holds, and a second region. Before any region is merged, such a reader takes the
+reader of its own region by the splice. A reader outside the region would make the region store the copy: a kernel
+that carries a state, which no region holds, or a second region. Before any region is merged, such a reader takes the
 buffer behind the copy at the cell the copy reads. The regions are the same; what goes is the stored copy, and the
 kernel whose only work it was. It runs after the roll, which compares a recurrence's steps as the tracer left them. A
 copy that rounds is arithmetic and is not read through, nor is a copy of a buffer another kernel stores over, nor one
 of a packed buffer.
 
-A buffer is stored where its one reader would only have moved it (`020_store_through_copies`). A kernel no region
-holds stores what it computes in a buffer of its own, and the loops that read that buffer are another kernel. Where
-that kernel computes nothing and reads every cell once — the steps of a walk stacked into one tensor and put back in
-sequence order — the producer stores each value at the cell the reader would have moved it to, and the reader is gone.
-The reader of a walk's steps reads each step back by its position and chooses among them by the stacked coordinate;
-that choice is one read at that coordinate. A join that chooses by a range of rows (`torch.cat`) is not read that way
-and stays a kernel. The copy the roll makes of the state its loop ends with, where the graph exports that state and
-no loop reads it, is such a reader too.
+A buffer is stored where its one reader would only have moved it (`020_store_through_copies`). After the regions are
+merged, a kernel whose one reader computes nothing and reads every cell once — the steps of a walk stacked into one
+tensor and put back in sequence order — stores each value at the cell that reader would have moved it to, and the
+reader is gone. The reader of a walk's steps reads each step back by its position and chooses among them by the
+stacked coordinate; that choice is one read at that coordinate. A join that chooses by a range of rows (`torch.cat`)
+is not read that way and stays a kernel. The copy the roll makes of the state its loop ends with, where the graph
+exports that state and no loop reads it, is such a reader too.
 
 **Measured evidence this rule is spending.** Dropping the work-growth cap and the merge-ordering pass is a deliberate
 trade: both existed because of a measurement, and neither measurement has been retaken. A merge that splices a compute
@@ -851,23 +850,17 @@ with whatever only such readers read, and its read of the state is the step's `P
 (`query @ state + …`) is the case: left outside, it takes its state from a store of every step, which the kernel
 then has to write and a second kernel has to read back. A node that reads two steps (the stack of every step's
 output) reads the stores, and so does a reader of the state the chain ends with, which no step starts from. What
-the readers of two steps both read (the matrix a chunk's output multiplies by, computed before the loop) is an input
-of the rolled body; it is counted before a step's state is taken out of its readers' ancestry, because every state
-after the first descends from it and the first step's readers would otherwise be left holding the whole setup. Where
-the steps with their readers are not one body at a stride, the steps roll alone. Two things follow that are not
-solved: a kernel that carries a state takes no cut, so a reader its storage cannot evaluate keeps the whole kernel
-off that storage; and a kernel that stores its last state beside a per-step output is offered no split across the
-sequence, since parts side by side cannot write that mix (`_split._carry_stores`).
+the recurrence itself descends from, and what the readers of two steps both read (the matrix a chunk's output
+multiplies by, computed before the loop), is an input of the rolled body. Where the steps with their readers are not
+one body at a stride, the steps roll alone. A kernel that carries a state takes no cut, so a reader its storage cannot
+evaluate keeps the whole kernel off that storage; and a kernel that stores its last state beside a per-step output is
+offered no split across the sequence, since parts side by side cannot write that mix.
 
-**A step at the edge of its matrix rolls with the rest.** A step that writes row `i` masks its store by
-`i <= row < i + 1`. At the last row the normal form drops the bound the matrix's extent already gives, so that step's
-body no longer spells like the others once the literals are taken out, and the search for the chain used to stop one
-state short: the last step stayed outside, its product inside whatever read the state. The chain now offers the
-state after its last, where that one has the same statements and another body, and the roll's own test of every
-step (the first step advanced must normalize to it) decides; where it is not that step, the chain rolls without it.
-The traced Gated DeltaNet substitution reads each row from the system in memory and not from the buffer it writes,
-so its step is a row of memory times the state, which register storage takes (`lowering/kernel/_resident`): its 63
-steps are one kernel, with the system's kernel before it and a pointwise one after.
+**A step at the edge of its matrix rolls with the rest.** A step that writes one row masks its store to that row, and
+at the last row the normal form drops the bound the matrix's extent already gives, so that step's body no longer
+spells like the others once the literals are taken out. The chain offers the state after its last, where that one has
+the same statements and another body, and the roll's own test of every step (the first step advanced must normalize
+to it) decides; where it is not that step, the chain rolls without it. Only the last step is offered this way.
 
 A chain whose states alternate two
 bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left

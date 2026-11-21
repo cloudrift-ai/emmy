@@ -25,9 +25,16 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, Write
+from emmy.compiler.ir.stmt import Body, Load, Statement
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._region import joins_a_region, regions, wrap_multi_output_fragment
+from emmy.compiler.pipeline.passes.loop.fusion._region import (
+    coordinates,
+    joins_a_region,
+    moved_load,
+    plain_load,
+    regions,
+    wrap_multi_output_fragment,
+)
 
 PATTERN = [Pattern("reader", LoopOp)]
 
@@ -36,22 +43,19 @@ def copied(graph: Graph, name: str) -> tuple[tuple, Load] | None:
     """``(the cell the copy stores, its one read)`` where ``name`` is the buffer of a loop that computes nothing and
     holds every value it read: the same dtype, or f32 over a 16-bit float. A copy that rounds is arithmetic."""
     producer = graph.producer(name)
-    if producer is None or not isinstance(producer.op, LoopOp) or len(producer.outputs) != 1:
+    found = (
+        moved_load(producer.op.body) if producer is not None and isinstance(producer.op, LoopOp) and len(producer.outputs) == 1 else None
+    )
+    if found is None:
         return None
-    body = producer.op.body
-    if len(body.loads) != 1 or len(body.writes) != 1 or any(not isinstance(stmt, (Loop, Load, Write)) for stmt in body.iter()):
-        return None
-    (load,), (write,) = body.loads, body.writes
+    load, write = found
     source, tensor = graph.buffer(load.input), producer.outputs[0]
     if source is None or tensor.alias is not None or source.dtype.logical_elems != 1 or tensor.dtype.logical_elems != 1:
         return None
     if any(stored.alias == source.name for user in graph.buffer_users(source.name) for stored in graph.nodes[user].outputs):
         return None  # a kernel stores over the source: the copy is what holds the values from before that store
-    cells = [entry.name for entry in write.index if isinstance(entry, Var)]
-    plain = all(isinstance(entry, (Var, Literal)) for entry in write.index) and len(set(cells)) == len(cells)
     exact = source.dtype == tensor.dtype or (tensor.dtype == F32 and source.dtype.name in ("f16", "bf16"))
-    whole = plain and exact and tuple(write.values) == tuple(load.names) and load.dtype is None and not load.carried
-    return (tuple(write.index), load) if whole else None
+    return (tuple(write.index), load) if exact and coordinates(tuple(write.index)) is not None else None
 
 
 def read_in_place(graph: Graph, body: Body, region: frozenset[str]) -> Body:
@@ -59,7 +63,7 @@ def read_in_place(graph: Graph, body: Body, region: frozenset[str]) -> Body:
     that one."""
 
     def through(stmt: Statement) -> Statement:
-        while isinstance(stmt, Load) and stmt.dtype is None and not stmt.carried and (copy := copied(graph, stmt.input)) is not None:
+        while isinstance(stmt, Load) and plain_load(stmt) and (copy := copied(graph, stmt.input)) is not None:
             if graph.producer(stmt.input).id in region:
                 break
             cells, read = copy

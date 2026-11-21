@@ -188,8 +188,9 @@ def test_steps_of_different_sizes_are_not_spliced_with_their_readers(monkeypatch
     """The decay matrix times beta and the inverse times beta are two products of one shape and one body, and the
     second descends from the first through the whole substitution: a chain of two by their bodies. The first one's
     readers are then everything that reads the decay matrix, a step of most of the graph beside a step of ten
-    nodes. Steps that are one body hold as many nodes each, so the roll asks that before it splices: a splice of
-    that step over the substitution, still unrolled, took 9 s at this size and did not come back at twice it."""
+    nodes. Steps that are one body hold as many nodes each, so the roll asks that before it splices: the splicer
+    does not come back from a step of that size over a substitution that is still unrolled. The rule's modules are
+    loaded by path, so the splices are counted on the rule driven by hand."""
     from importlib import import_module
 
     from emmy.compiler.pipeline import Match, RuleSkipped
@@ -215,6 +216,19 @@ def test_steps_of_different_sizes_are_not_spliced_with_their_readers(monkeypatch
             rolled.append(len(match.consumed))
     assert len(rolled) == 2, "the substitution and the walk"
     assert max(spliced) < len(graph.nodes) // 4
+
+
+def test_the_gated_delta_rule_from_a_state_computes_its_outputs_in_the_walk() -> None:
+    """The rule as serving calls it. A chunk's output reads the state its step starts from, so the walk computes it;
+    the walk reads the queries, the keys and the state it is handed as the program holds them, and stores the
+    program's two outputs where the program wants them. No kernel copies an operand in for it, and none moves a
+    value after it."""
+    graph, _, _ = graph_from_code(_RULE_FROM_A_STATE)
+    graph = Pipeline.build(LOOP_PASSES).run(graph)
+    assert len(_carriers(graph)) == 2, "the substitution and the walk"
+    walk = graph.producer(graph.outputs[0])
+    assert walk.op.body.carries and {tensor.name for tensor in walk.outputs} == set(graph.outputs)
+    assert {"q", "k", "state"} <= set(walk.inputs)
 
 
 def test_a_step_with_a_float_offset_rolls() -> None:

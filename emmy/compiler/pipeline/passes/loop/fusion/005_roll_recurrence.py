@@ -126,7 +126,8 @@ def _chain(graph: Graph, first: Node) -> tuple[list[Node], Node | None]:
     with the same statements and another body: a step at the edge of its matrix. A step that writes
     row ``i`` masks its store by ``i <= row < i + 1``, and at the last row the normal form drops the
     bound the extent already gives, so the body is the first step's advanced and no longer spells
-    like it. Whether it is that step is the roll's own test of every step."""
+    like it. Whether it is that step is the roll's own test of every step. A first step at the
+    matrix's other edge is not offered."""
     body, tensor = first.op.body, first.outputs[0]
     chain, reached, edge = [first], {first.id}, None
     for node_id in graph.topological_order():
@@ -161,9 +162,8 @@ def _external(graph: Graph, region: set[str]) -> set[str]:
     return {name for node_id in region for name in graph.nodes[node_id].inputs if graph.producer(name).id not in region}
 
 
-def _steps(graph: Graph, chain: list[Node]) -> tuple[list[set[str]], list[str], set[str], int]:
-    """``(one region per step, the state each step reads, what every step reads beside it, how many
-    states the recurrence spans)``.
+def _steps(graph: Graph, chain: list[Node]) -> tuple[list[set[str]], list[str], int]:
+    """``(one region per step, the state each step reads, how many states the recurrence spans)``.
 
     The first step has no state node before it: its state is the seed, the one buffer of the state's
     shape it reads beyond what every step reads — the tensor the loop started from, or the zeros it
@@ -198,7 +198,7 @@ def _steps(graph: Graph, chain: list[Node]) -> tuple[list[set[str]], list[str], 
     if len(seeds) != 1:
         raise RuleSkipped(f"{len(seeds)} buffers of the state's shape leave a first step like the others")
     seed, region = seeds[0]
-    return [region, *regions], [seed, *states], shared, steps + 1
+    return [region, *regions], [seed, *states], steps + 1
 
 
 def _stateful(graph: Graph, region: set[str], state: str) -> set[str]:
@@ -238,16 +238,16 @@ def _readers(graph: Graph, regions: list[set[str]], states: list[str], chain: li
             step[node_id] = next(iter(read)) if len(read) == 1 else None
             if step[node_id] is not None:
                 readers[step[node_id]].add(node_id)
-    reads = [set().union(*(_ancestors(graph, node_id) for node_id in found)) - taken for found in readers]
-    # What the readers of two steps both read is read at every step: an input of the body, as the step's own are.
-    # It is counted before a step's state is taken out of its readers' ancestry: a later state descends from
-    # whatever every step reads, so only the first step's readers would be left holding it.
+    # What the recurrence itself descends from is an input of the body or a step's own, and so is what the readers
+    # of two steps both read: it is read at every step.
+    recurrence = _ancestors(graph, chain[-1].id)
+    reads = [set().union(*(_ancestors(graph, node_id) for node_id in found)) - recurrence for found in readers]
     seen: set[str] = set()
     shared: set[str] = set()
     for nodes in reads:
         shared |= nodes & seen
         seen |= nodes
-    return [nodes - shared - _ancestors(graph, state) for nodes, state in zip(reads, states, strict=True)]
+    return [nodes - shared for nodes in reads]
 
 
 def _spliced(graph: Graph, region: set[str], state: str, stored: str) -> tuple[Body, tuple[str, ...], tuple[tuple[str, object], ...]]:
@@ -369,22 +369,31 @@ def rewrite(match: Match, first: Node) -> Graph:
     if len(chain) < 2:
         raise RuleSkipped("no later state of this shape depends on this one")
     declined: RuleSkipped | None = None
-    # With the step at the matrix's edge first; without it where that is not the first step advanced.
-    for states in ([*chain, edge], chain) if edge is not None else (chain,):
-        for period in _PERIODS:
-            if len(states[::period]) < 2:
-                break
-            try:
-                return _roll(match, states[::period])
-            except RuleSkipped as why:
-                declined = why
+    for period in _PERIODS:
+        if len(chain[::period]) < 2:
+            break
+        try:
+            # The step at the matrix's edge follows the chain's last where the stride reaches it.
+            return _roll(match, chain[::period], edge if len(chain) % period == 0 else None)
+        except RuleSkipped as why:
+            declined = why
     assert declined is not None
     raise declined
 
 
-def _roll(match: Match, chain: list[Node]) -> Graph:
-    regions, states, _, count = _steps(match.graph, chain)
-    chain = chain[:count]
+def _roll(match: Match, chain: list[Node], edge: Node | None) -> Graph:
+    """Roll ``chain``, with ``edge`` as its last state where the steps are alike with it and it is the first step
+    advanced; without it otherwise."""
+    regions, states, count = _steps(match.graph, chain if edge is None else [*chain, edge])
+    if count == len(chain) + 1:
+        try:
+            return _with_readers(match, [*chain, edge], regions, states)
+        except RuleSkipped:
+            regions, states, count = regions[:-1], states[:-1], count - 1
+    return _with_readers(match, chain[:count], regions, states)
+
+
+def _with_readers(match: Match, chain: list[Node], regions: list[set[str]], states: list[str]) -> Graph:
     readers = _readers(match.graph, regions, states, chain)
     joined = [region | read for region, read in zip(regions, readers, strict=True)]
     # Each step with its own readers, where those are one body at a stride as the steps are; else the steps alone,

@@ -1,14 +1,15 @@
 """Store a buffer where its one reader would only have copied it.
 
-A kernel no region holds — one that carries a state, an ordered prefix — stores what it computes in a buffer of its
-own, and the loops that read that buffer are another kernel. Where that kernel computes nothing, it only moves every
-cell to where the program wants it: the steps of a walk stacked into one tensor, its tokens put back in sequence
-order, a transpose. The producer then stores each value at the cell the reader would have moved it to, and the reader
-is gone with the buffer between them.
+It runs after ``010_merge_loop_ops``, so every loop it sees is a kernel: a region already merged, or a kernel no
+region holds — one that carries a state, an ordered prefix — whose readers are therefore another kernel. Where such a
+reader computes nothing, it only moves every cell to where the program wants it: the steps of a walk stacked into one
+tensor, its tokens put back in sequence order, a transpose. The producer then stores each value at the cell the
+reader would have moved it to, and the reader is gone with the buffer between them. A reader that computes anything
+keeps its kernel.
 
-It runs after ``010_merge_loop_ops``, on the reader's whole region: a region that computes anything keeps its
-kernel. The reader of a walk's steps reads each step back by its position and chooses among them by the stacked
-coordinate; that choice is one read at that coordinate (:func:`moved`).
+The reader of a walk's steps reads each step back by its position and chooses among them by the stacked coordinate;
+that choice is one read at that coordinate (:func:`moved`). Inside a region the splice does the like for a chain of
+layout copies that ends at a graph output (``splicer._retarget_equivalent_output``).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Loop, Select, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._region import wrap_multi_output_fragment
+from emmy.compiler.pipeline.passes.loop.fusion._region import coordinates, moved_load, plain_load, wrap_multi_output_fragment
 
 PATTERN = [Pattern("reader", LoopOp)]
 
@@ -57,27 +58,19 @@ def moved(op: LoopOp) -> tuple[str, tuple, Write] | None:
     """``(the buffer read, the cell read, the store)`` of a loop that computes nothing and reads every cell of its one
     input once."""
     body = op.body
-    loads, selects, writes = body.loads, body.iter_of_type(Select), body.writes
-    if len(writes) != 1 or len(selects) > 1 or any(not isinstance(stmt, (Loop, Load, Select, Write)) for stmt in body.iter()):
-        return None
-    if len({load.input for load in loads}) != 1 or any(load.dtype is not None or load.carried or len(load.names) != 1 for load in loads):
-        return None
-    (write,) = writes
-    if selects:
-        cell = _chosen(body, selects[0]) if tuple(write.values) == (selects[0].name,) else None
+    if (found := moved_load(body)) is not None:
+        source, cell, write = found[0].input, tuple(found[0].index), found[1]
     else:
-        cell = tuple(loads[0].index) if len(loads) == 1 and tuple(write.values) == tuple(loads[0].names) else None
-    if cell is None:
+        # A choice among reads of one buffer in place of the one read.
+        loads, selects, writes = body.loads, body.iter_of_type(Select), body.writes
+        if len(writes) != 1 or len(selects) != 1 or any(not isinstance(stmt, (Loop, Load, Select, Write)) for stmt in body.iter()):
+            return None
+        if len({load.input for load in loads}) != 1 or not all(map(plain_load, loads)) or tuple(writes[0].values) != (selects[0].name,):
+            return None
+        source, cell, write = loads[0].input, _chosen(body, selects[0]), writes[0]
+    if cell is None or set(coordinates(cell) or ()) != {loop.axis.name for loop in body.iter_of_type(Loop)}:
         return None
-    coordinates = [entry.name for entry in cell if isinstance(entry, Var)]
-    axes = {loop.axis.name for loop in body.iter_of_type(Loop)}
-    if (
-        any(not isinstance(entry, (Var, Literal)) for entry in cell)
-        or len(set(coordinates)) != len(coordinates)
-        or set(coordinates) != axes
-    ):
-        return None
-    return loads[0].input, cell, write
+    return source, cell, write
 
 
 def rewrite(match: Match, reader: Node) -> Graph:
