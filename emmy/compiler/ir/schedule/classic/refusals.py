@@ -432,14 +432,14 @@ def _scalar_catalog() -> frozenset[Tile]:
     return frozenset(scalar_tile_moves())
 
 
-def _atom_policy_ok(atom: AtomKind, *, allow_f16_accumulate: bool, allow_fp8: bool, allow_tf32: bool) -> bool:
-    """The precision policy of UNPINNED enumeration: an f16-accumulate, FP8 or TF32 atom is offered
+def _atom_policy_ok(atom: AtomKind, *, allow_f16_accumulate: bool, allow_fp8: bool, allow_tf32: bool, allow_tf32_split: bool) -> bool:
+    """The precision policy of UNPINNED enumeration: an f16-accumulate, FP8, TF32 or split TF32 atom is offered
     only where the caller allowed it. A row that names such a tile bypasses this — an authored
     value is a legal independent choice — so the policy filters the catalog, never a parse."""
     a = atom.operand_dtype("a")
     if a.logical_elems == 1 and a.nbytes == 1 and not allow_fp8:
         return False
-    if a == F32 and not allow_tf32:
+    if a == F32 and not (allow_tf32_split if atom.ab_token is not None else allow_tf32):
         return False
     return atom.operand_dtype("c").nbytes != 2 or allow_f16_accumulate
 

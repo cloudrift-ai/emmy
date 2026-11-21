@@ -566,9 +566,12 @@ a thread per 64-key chunk at head width 256, each holding a register until it co
 at 255 registers with spills. Staged, the 27B one-row decode piece at 131,072 cached tokens runs 431 us against 845 on
 an RTX 4080, about 87% of the card's bandwidth.
 
-**Staged f32 operand slabs (the TF32 atom).** An f32 operand stages as a slab of f32 and drains through the same
-staged `FragmentLoad`, one 32-bit element to a fragment register, each rounded to TF32 as it lands
-(`cvt.rna.tf32.f32`): the instruction itself drops the low mantissa bits, which leaves every product a little small.
+**Staged f32 operand slabs (the TF32 atoms).** An f32 operand stages as a slab of f32 and drains through the same
+staged `FragmentLoad`, one 32-bit element to a fragment register, as the f32 it is. The product rounds its operands
+itself, in its PTX lowering (`cvt.rna.tf32.f32`): the instruction drops the low mantissa bits, which leaves every
+product a little small. The split atom (`mma_m16n8k8_tf32x3_f32`) is the same statement under another token: the
+lowering also rounds what each rounding left and multiplies `hi*lo + lo*hi + hi*hi`, summed for one step from zero
+and added to the accumulator with a float add, because the instruction truncates as it accumulates.
 `ldmatrix` refuses a slab of f32 today, so the slab is NONE-swizzle like a byte slab and takes no pad. A matrix load
 could serve an f32 A, since a row of four f32 is the 16 bytes a row of eight halves is; that, and a pad or a swizzle
 against the bank conflicts of the plain rows, are not built.

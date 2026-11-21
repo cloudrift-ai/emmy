@@ -737,7 +737,13 @@ class ClassicKernelSite(Site[ClassicSchedule]):
             if tile.spell() == named
             or (
                 not named
-                and _atom_policy_ok(tile.atom, allow_f16_accumulate=problem.allow_f16_accumulate, allow_fp8=False, allow_tf32=False)
+                and _atom_policy_ok(
+                    tile.atom,
+                    allow_f16_accumulate=problem.allow_f16_accumulate,
+                    allow_fp8=False,
+                    allow_tf32=False,
+                    allow_tf32_split=False,
+                )
             )
         )
 
@@ -854,6 +860,8 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     allow_f16_accumulate: bool = True
     allow_fp8: bool = True
     allow_tf32: bool = True
+    #: Off unless the compile's pin says otherwise, as the gate is (``space.TF32_SPLIT_MMA``).
+    allow_tf32_split: bool = False
     validate_pins: bool = True
     #: A split's finalize tolerates a bare WORK / RASTER / REDUCE pin its own domain cannot take:
     #: it may name the partial's row, so the finalize keeps its catalog instead of offering nothing.
@@ -966,6 +974,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
                 allow_f16_accumulate=self.allow_f16_accumulate,
                 allow_fp8=self.allow_fp8,
                 allow_tf32=self.allow_tf32,
+                allow_tf32_split=self.allow_tf32_split,
             )
         )
 
