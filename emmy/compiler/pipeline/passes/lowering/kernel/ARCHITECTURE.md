@@ -568,10 +568,12 @@ an RTX 4080, about 87% of the card's bandwidth.
 
 **A stored operand of another dtype (the converting fill).** A copy transport moves bytes, so a stored operand that
 holds another dtype than its slab's rides the compute fill as a computed one does: the fill evaluates its load cell
-by cell and the typed store into the slab converts it. This holds on both sides of the product
-(`staging.converting_a`, `staging.copied_b`), which is what lets a bf16 atom take a product of two f32 operands: both
-slabs are filled with the operands rounded to bf16 and drained by `ldmatrix`. A slab of bytes is no such case, since
-its fragment loads convert it.
+by cell and the typed store into the slab converts it. A stored A of another dtype asks for the fill
+(`staging.converting_a`), and under the fill a stored B of another dtype is converted the same way
+(`staging.copied_b`). That is what lets a bf16 atom take a product of two f32 operands: both slabs are filled with the
+operands rounded to bf16 and drained by `ldmatrix`. A stored B alone does not ask for the fill: beside a stored A of
+the atom's dtype it keeps its converting load from global memory. A slab of bytes is no such case, since its fragment
+loads convert it.
 
 **Staged f32 operand slabs (the TF32 atoms).** An f32 operand stages as a slab of f32 and drains through the same
 staged `FragmentLoad`, one 32-bit element to a fragment register, as the f32 it is. The product rounds its operands
@@ -579,9 +581,7 @@ itself, in its PTX lowering (`cvt.rna.tf32.f32`): the instruction drops the low 
 product a little small. The split atom (`mma_m16n8k8_tf32x3_f32`) is the same statement under another token: the
 lowering also rounds what each rounding left and multiplies `hi*lo + lo*hi + hi*hi`, summed for one step from zero
 and added to the accumulator with a float add, because the instruction truncates as it accumulates.
-`ldmatrix` refuses a slab of f32 today, so the slab is NONE-swizzle like a byte slab and takes no pad. A matrix load
-could serve an f32 A, since a row of four f32 is the 16 bytes a row of eight halves is; that, and a pad or a swizzle
-against the bank conflicts of the plain rows, are not built.
+`ldmatrix` takes no slab of f32, so the slab is NONE-swizzle like a byte slab and takes no pad.
 
 **Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
 the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading

@@ -14,6 +14,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.kernel.ir import FragmentApply, FragmentRepack, MmaSyncPtx, RegStore
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.schedule import Stage
+from emmy.compiler.ir.schedule.classic.schedule import classic_state_tile_keys
 from emmy.compiler.ir.stmt import Loop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -146,9 +147,10 @@ def test_a_states_fragments_become_the_operands_of_the_atom_that_reads_them(name
     assert {len(repack.srcs) for repack in repacks if repack.role == "a"} == {atom.atom_k // atom.atom_n}
 
 
-def test_registers_offer_the_tf32_atoms_under_their_gates():
-    """The state is f32, and a TF32 operand is its fragments as they are. The catalog offers each atom where its
-    gate allows; what a card's fragments can hold is the same whatever the gates say."""
+def test_registers_offer_the_tf32_atom_under_its_gate_and_the_split_to_a_row_alone():
+    """The state is f32, and a TF32 operand is its fragments as they are. The catalog offers the TF32 atom where its
+    gate allows and never the split, which a row or a pin names; what a card's fragments can hold is the same
+    whatever the gate says."""
     from emmy.compiler.ir.schedule.classic import ClassicProblem
 
     schedule = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule")
@@ -157,13 +159,16 @@ def test_registers_offer_the_tf32_atoms_under_their_gates():
     assert {plan.atom.name for plan in tiles} >= {"mma_m16n8k16_f16_f32", "mma_m16n8k8_tf32_f32", "mma_m16n8k8_tf32x3_f32"}
     serial = schedule.serial_form(tile, "out").scheduled()
 
-    def offered(**gates) -> set[str]:
-        problem = ClassicProblem(serial, ctx, state_stages=(Stage(transport="reg"),), state_tiles=tiles, **gates)
+    def offered(row=None, **gates) -> set[str]:
+        problem = ClassicProblem(serial, ctx, row=row or {}, state_stages=(Stage(transport="reg"),), state_tiles=tiles, **gates)
         return {kernel.state_tile.atom.name for kernel in problem.kernel_site.kernels if kernel.state_tile is not None}
 
     assert "mma_m16n8k8_tf32_f32" in offered(allow_tf32=True) and "mma_m16n8k8_tf32_f32" not in offered(allow_tf32=False)
     assert "mma_m16n8k8_tf32x3_f32" not in offered(allow_tf32=True)
-    assert "mma_m16n8k8_tf32x3_f32" in offered(allow_tf32_split=True)
+    (key,) = classic_state_tile_keys(serial)
+    (split,) = (plan for plan in tiles if plan.atom.name == "mma_m16n8k8_tf32x3_f32" and plan.spell().endswith("/k4"))
+    named = offered(row={key: split.spell()}, allow_tf32=False)
+    assert "mma_m16n8k8_tf32x3_f32" in named and "mma_m16n8k8_tf32_f32" not in named
 
 
 @requires_cuda

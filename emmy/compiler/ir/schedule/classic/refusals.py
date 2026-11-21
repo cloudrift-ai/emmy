@@ -191,17 +191,22 @@ def _family_dtype(tile: TileOp, node, target, dtype):
     return dtype if own else _channel_dtype(tile, node, target)
 
 
-def _rounded_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
+def _f32_product(tile: TileOp, target, node) -> bool:
+    """Whether ``node`` is a product whose operands are all f32, off the chunk tier and the packed pair: the one
+    product the TF32 atoms are the cells of."""
+    from emmy.compiler.ir.tile.ops import edge_dtypes  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
+
+    if node.chunked() or tile.packed_reading(node)[1] is not None:
+        return False
+    return _family_dtype(tile, node, target, edge_dtypes(node.operands[0], tile.inputs)[0]) == F32
+
+
+def _f32_as_bf16_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
     """The bf16 atoms a product of f32 operands takes with every operand rounded to bf16 in its fill: the cell an
     f32 operand beside a bf16 one already takes, on a product that has no bf16 operand. bf16 keeps f32's exponent
     range, so the rounding cannot overflow; it keeps eight bits of mantissa, so offering it is a precision decision
     (``ClassicProblem.allow_f32_as_bf16``). Empty for any other product."""
-    from emmy.compiler.ir.tile.ops import edge_dtypes  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
-
-    if node.chunked() or tile.packed_reading(node)[1] is not None:
-        return ()
-    dtype = edge_dtypes(node.operands[0], tile.inputs)[0]
-    return atoms_for(BF16, ctx=target) if _family_dtype(tile, node, target, dtype) == F32 else ()
+    return atoms_for(BF16, ctx=target) if _f32_product(tile, target, node) else ()
 
 
 def _fragment_rows_refusal(tile: TileOp) -> str | None:
@@ -428,7 +433,7 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
     atom_dtype = _family_dtype(tile, node, target, dtype)
     base = bindable(atoms_for(atom_dtype, ctx=target))
     reduced_acc = bindable(atoms_for(atom_dtype, acc=atom_dtype, ctx=target))
-    return tuple(dict.fromkeys((*base, *reduced_acc, *bindable(_rounded_atoms(tile, target, node)))))
+    return tuple(dict.fromkeys((*base, *reduced_acc, *bindable(_f32_as_bf16_atoms(tile, target, node)))))
 
 
 def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
@@ -448,13 +453,14 @@ def _scalar_catalog() -> frozenset[Tile]:
 
 
 def _atom_policy_ok(atom: AtomKind, problem: ClassicProblem) -> bool:
-    """The precision policy of UNPINNED enumeration: an f16-accumulate, FP8, TF32 or split TF32 atom is offered
+    """The precision policy of UNPINNED enumeration: an f16-accumulate, FP8 or TF32 atom is offered
     only where ``problem`` allows it. A row that names such a tile bypasses this — an authored
-    value is a legal independent choice — so the policy filters the catalog, never a parse."""
+    value is a legal independent choice — so the policy filters the catalog, never a parse. The split TF32 atom
+    trades no precision, so the policy passes it; the catalog leaves it out all the same (``AtomKind.row_only``)."""
     a = atom.operand_dtype("a")
     if a.logical_elems == 1 and a.nbytes == 1 and not problem.allow_fp8:
         return False
-    if a == F32 and not (problem.allow_tf32_split if atom.ab_token is not None else problem.allow_tf32):
+    if a == F32 and not (atom.row_only or problem.allow_tf32):
         return False
     return atom.operand_dtype("c").nbytes != 2 or problem.allow_f16_accumulate
 

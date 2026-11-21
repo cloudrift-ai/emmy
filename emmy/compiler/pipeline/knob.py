@@ -525,9 +525,8 @@ def schedule_pin_fingerprint(kernel: str | None = None) -> tuple[tuple[str, str]
     """Every live env pin the schedule enumeration can read, as sorted ``(env var, value)`` pairs spelled as
     the scheduler's catalog arm reads them: the :data:`SCHEDULE_FAMILIES` pins (bare and ``@``-keyed) as
     set, each restricting a domain, and the atom gates by effect — one ``"1"`` entry per gate
-    ``space.precision_policy`` resolves ON (``space.ATOM_GATES``: under their ``FAST_MATH`` umbrella, but for
-    ``TF32_SPLIT_MMA``, which only its own pin turns on), nothing for a gate OFF. Unset gates follow the enabled
-    FAST_MATH default.
+    ``space.precision_policy`` resolves ON (``space.ATOM_GATES``, under their ``FAST_MATH`` umbrella), nothing for
+    a gate OFF. Unset gates follow the enabled FAST_MATH default.
     The scheduler folds this into its schedule-space stamp, which also seeds a budgeted pool's draw:
     equivalent effective gates share a stamp regardless of how the pins spell them.
     Given the name ``kernel`` of the one kernel being stamped, a kernel pin naming another kernel is left

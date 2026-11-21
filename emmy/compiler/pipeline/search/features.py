@@ -478,23 +478,18 @@ class Featurizer:
 
     def warp_eligible(self, kernel: Op) -> bool:
         """Whether the classic schedule space of ``kernel`` holds a warp plan on this card — the scheduling
-        problem's own answer, under the live precision pins. A schedule row reads it: a scalar tile on such a
+        problem's own answer, whatever the precision pins are. A schedule row reads it: a scalar tile on such a
         kernel competes against tensor cores. ``False`` for a kernel no tile stands behind and for a featurizer
         given no context. Computed once per kernel."""
         from emmy.compiler.ir.schedule.classic import ClassicProblem  # noqa: PLC0415
         from emmy.compiler.pipeline.passes.tile._fromloop import scheduled_form  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import precision_policy  # noqa: PLC0415
 
         tile = kernel_tile(kernel)
         if tile is None or tile.op is None or self.ctx is None:
             return False
         if (known := self._warp_eligible.get(id(tile))) is not None:
             return known[1]
-        problem = ClassicProblem(
-            scheduled_form(tile, tile.name),
-            self.ctx,
-            **precision_policy(),
-        )
+        problem = ClassicProblem(scheduled_form(tile, tile.name), self.ctx)
         self._warp_eligible[id(tile)] = (tile, problem.warp_eligible)  # the tile is held, so its id is not reused
         return problem.warp_eligible
 
