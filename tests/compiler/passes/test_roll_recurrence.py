@@ -128,6 +128,45 @@ def test_a_reader_of_several_steps_stays_outside_and_reads_the_stored_states() -
     assert states.shape[0].as_static() == 3, "the three states a later chunk starts from"
 
 
+_SETUP = """
+import torch, torch.nn as nn
+class Walk(nn.Module):
+    # a walk from a state it is handed, whose outputs read a matrix computed before the loop; the values each step
+    # adds are computed from that matrix too, so every state after the first descends from it
+    def forward(self, q, k, v, state):
+        B, T, D = q.shape
+        C = 4
+        chunked = lambda x: x.reshape(B, T // C, C, D)
+        weights = (chunked(q) @ chunked(k).transpose(-1, -2)).tril()
+        values = weights @ chunked(v)
+        outs = []
+        for c in range(T // C):
+            kc = k[:, c*C:(c+1)*C]
+            new = values[:, c] - kc @ state
+            outs.append(q[:, c*C:(c+1)*C] @ state + weights[:, c] @ new)
+            state = state + kc.transpose(1, 2) @ new
+        return torch.stack(outs, 1), state
+m = Walk()
+m(torch.randn(2, 16, 8), torch.randn(2, 16, 8), torch.randn(2, 16, 8), torch.randn(2, 8, 8))
+"""
+
+
+def test_the_first_steps_readers_do_not_take_what_every_step_reads() -> None:
+    """What the readers of two steps both read is an input of the rolled body. A later state descends from it, so it
+    is out of a later step's readers by ancestry, and counted after that it was shared with no one: the first
+    step's readers kept the whole setup, their step was no longer the others' body, and every output was computed
+    outside the walk from a stored state. Counted first, each step's readers are its own two products."""
+    graph, _, _ = graph_from_code(_SETUP)
+    graph = Pipeline.build(LOOP_PASSES).run(graph)
+
+    (rolled,) = _carriers(graph)
+    (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
+    assert steps.axis.extent.as_static() == 4
+    last, outs = rolled.outputs.values()
+    assert len(outs.shape) == len(last.shape) + 1 and outs.shape[0].as_static() == 4, "an output a step, the last state once"
+    assert {"q", "tril"} <= set(rolled.inputs), "the output's products are in the step, the matrix they read an input"
+
+
 def test_a_step_with_a_float_offset_rolls() -> None:
     """The literal abstraction lifts integer anchors alone: a step's float offset (an epsilon the normal form spells
     inside the sum) stays as spelled instead of truncating to an integer, so the first step advanced zero times is

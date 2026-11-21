@@ -238,17 +238,16 @@ def _readers(graph: Graph, regions: list[set[str]], states: list[str], chain: li
             step[node_id] = next(iter(read)) if len(read) == 1 else None
             if step[node_id] is not None:
                 readers[step[node_id]].add(node_id)
-    beside = [
-        set().union(*(_ancestors(graph, node_id) for node_id in found)) - _ancestors(graph, state) - taken
-        for found, state in zip(readers, states, strict=True)
-    ]
+    reads = [set().union(*(_ancestors(graph, node_id) for node_id in found)) - taken for found in readers]
     # What the readers of two steps both read is read at every step: an input of the body, as the step's own are.
+    # It is counted before a step's state is taken out of its readers' ancestry: a later state descends from
+    # whatever every step reads, so only the first step's readers would be left holding it.
     seen: set[str] = set()
     shared: set[str] = set()
-    for nodes in beside:
+    for nodes in reads:
         shared |= nodes & seen
         seen |= nodes
-    return [nodes - shared for nodes in beside]
+    return [nodes - shared - _ancestors(graph, state) for nodes, state in zip(reads, states, strict=True)]
 
 
 def _spliced(graph: Graph, region: set[str], state: str, stored: str) -> tuple[Body, tuple[str, ...], tuple[tuple[str, object], ...]]:
