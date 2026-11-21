@@ -134,8 +134,9 @@ def test_weight_scale_inputs_are_drawn_as_a_checkpoint_scale():
     reference holds NaN, or two orders of the same FP32 sum disagree on those."""
     import numpy as np
 
-    from emmy.compiler.backend.cuda.compare import _random_source_values, _weight_scale_inputs
+    from emmy.compiler.backend.cuda.compare import _random_source_values
     from emmy.compiler.dtype import decode_f8
+    from emmy.compiler.loader.synthesize import scale_input_leaves
 
     dtypes = {
         "x": "f16",
@@ -151,7 +152,7 @@ def test_weight_scale_inputs_are_drawn_as_a_checkpoint_scale():
         "w_down_scale": "f32",
         "attn_out_static_fp8_scale": "f32",
     }
-    leaves = _weight_scale_inputs(dtypes)
+    leaves = scale_input_leaves(dtypes)
     assert leaves == {
         "p_gate_weight_scale": "weight_scale_inv",
         "w_gate_up_scale_2": "weight_scale_2",

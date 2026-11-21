@@ -24,6 +24,7 @@ from emmy.compiler.backend.correctness import (
     to_cuda_tensor,
 )
 from emmy.compiler.loader.binder import flatten_tensors
+from emmy.compiler.loader.synthesize import scale_input_leaves
 
 logger = logging.getLogger(__name__)
 
@@ -152,30 +153,6 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
         # reference holds infinities and no correctness check or isolated re-bench can run.
         return rng.standard_normal(shape, dtype=np.float32) * 0.02
     return rng.standard_normal(shape, dtype=np.float32)
-
-
-def _weight_scale_inputs(dtypes: dict) -> dict[str, str]:
-    """The inputs, among ``dtypes`` (each input's dtype by name), that scale a quantized weight, each with the
-    checkpoint leaf it is drawn as (:func:`_random_source_values`): the f32 block scale ``<weight>_scale`` of an
-    8-bit float ``<weight>`` or ``<weight>_bits`` (``weight_scale_inv``), and the f32 per-tensor scale
-    ``<weight>_scale_2`` of an NVFP4 one (``weight_scale_2``); and the static FP8 activation scale
-    ``<activation>_static_fp8_scale`` (``activation_scale``). A stored kernel reads its constants as inputs, and
-    a program reads a routed expert's weights as inputs. Drawn at unit std the weight is thousands of times a real
-    one: a gated MLP's product of two such projections is infinity or zero in FP16, and the eager
-    reference holds NaN, or two orders of the same FP32 sum disagree past any tolerance. An activation scale drawn
-    at unit std is near zero or negative for some draws, and the cast to e4m3 of the activation over it gives NaN."""
-    from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
-
-    leaves = {}
-    for name, dtype in dtypes.items():
-        weight, canonical = name.removesuffix("_bits"), get_dtype(dtype).name
-        if canonical in {"f8e4m3", "f8e5m2"}:
-            leaves[f"{weight}_scale"] = "weight_scale_inv"
-        elif canonical == "f4e2m1x2":
-            leaves[f"{weight}_scale_2"] = "weight_scale_2"
-        elif name.endswith("_static_fp8_scale"):
-            leaves[name] = "activation_scale"
-    return {name: leaf for name, leaf in leaves.items() if name in dtypes}
 
 
 def _scatter_index_inputs(graphs) -> dict[str, list]:
@@ -311,12 +288,12 @@ async def bench_lowered_vs_torch(
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
     position = _chunk_position(lowered, _static)
-    weight_scales = _weight_scale_inputs({nid: node.output.dtype for nid, node in lowered.nodes.items() if isinstance(node.op, InputOp)})
+    scale_leaves = scale_input_leaves({nid: node.output.dtype for nid, node in lowered.nodes.items() if isinstance(node.op, InputOp)})
     scatter_rows = _scatter_index_inputs(([frontend] if frontend is not None else []) + [lowered])
     for nid, node in lowered.nodes.items():
         if isinstance(node.op, InputOp):
             # The checkpoint key's leaf is what names a weight's scale to the draw of a source.
-            draw, name = (_random_source_values, weight_scales[nid]) if nid in weight_scales else (_random_input_values, nid)
+            draw, name = (_random_source_values, scale_leaves[nid]) if nid in scale_leaves else (_random_input_values, nid)
             shape = _static(node.output.shape)
             if nid in scatter_rows:
                 arr = _distinct_rows(rng, shape[0], min(_static(scatter_rows[nid])))
