@@ -956,10 +956,11 @@ def computed_where_read(body: Body, shapes: Mapping) -> Body:
     no value. ``shapes`` are the shapes of the buffers the body reads and writes, whose symbolic sizes the body
     reads free.
 
-    No tier keeps a value for its readers, so this is the body a kernel is formed from: the kernel, its identity
-    and its code are those of the body that writes the value out at each of its readers. The body is lifted with
-    each definition a term of its own and each load a term over that one definition (:meth:`Fold.read`), and
-    lowered again with every read replaced by the value it reads (:meth:`Fold.inlined`)."""
+    A kernel formed from a body that defines a value keeps it, and this is the body of the kernel that does not:
+    what fusion reads a member as, since one kernel's choice to keep a value does not bind the kernel fused from
+    it. The body is lifted with each definition a term of its own and each load a term over that one definition
+    (:meth:`Fold.read`), and lowered again with every read replaced by the value it reads
+    (:meth:`Fold.inlined`)."""
     if not any(isinstance(stmt, Define) for stmt in body.iter()):
         return body
     with binding_extents(name for shape in shapes.values() for dim in shape for name in dim.expression.free_vars()):

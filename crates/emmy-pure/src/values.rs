@@ -1,9 +1,9 @@
 //! A value read by index, as the computation it stands for.
 //!
 //! A term that reads its operand by index ([`Fold::as_read`]) names a value defined once, over its own coordinates.
-//! No tier keeps such a value for its readers, so each reader computes it for itself: the operand with every
-//! coordinate the read binds replaced by the index read. [`Fold::inlined`] gives a tree in that form, the one every
-//! pass and the kernel's identity read.
+//! A kernel keeps such a value. Where a kernel is fused into another its choice to keep the value does not bind the
+//! new kernel, and each reader computes the value for itself: the operand with every coordinate the read binds
+//! replaced by the index read. [`Fold::inlined`] gives a tree in that form.
 //!
 //! One copy is taken of a term per substitution of the coordinates THAT TERM is evaluated over. Two reads that
 //! differ only in a coordinate a term does not read share that term, as two readers of one value at one place do:

@@ -497,11 +497,16 @@ read. The name is a buffer name that the statement declares: neither an input no
 of the buffers a body reports, and renamed with the buffers. A load stands behind the definition it reads, as a load
 stands behind a write to its buffer. The normal form keeps that order, orders the loops of a definition's nest by the
 definition's index as it orders a store's, and tells a load of the value apart by what the definition computes, never
-by the name the value goes under. No tier keeps such a value for its readers, so a kernel computes it where each
-reader reads it: the tile lift takes the body with every load of one replaced by the statements that compute the
-value at the index read (`computed_where_read`), and that is the body the kernel's identity is taken of. The body
-that defines a value and the body that writes it out at each reader are one kernel. The Loop IR runner keeps a defined
-value as an array of its own, which is the meaning of the form.
+by the name the value goes under. A kernel formed from such a body keeps the value. The tile lift leaves each load as
+a term that reads the definition's term by index (`Fold.read`, `TileOp.keeps`), two loads of one value holding the one
+term. `Fold.lower` writes the definition back once, in a nest of its own ahead of its loads, so the kernel's own body
+defines the value again and the lift takes that body back to the same kernel. A coordinate every load takes at the
+coordinate itself is not walked where the scope binds it: a step of a recurrence defines the cells that step reads.
+The kernel lowering stores the value in shared memory, one copy per cell of the grid (`012_keep_values`). It is
+another kernel than the one that computes the value at each read, with an identity of its own. Fusion forms a new
+kernel, so it reads a member's defined value as the computation it stands for (`computed_where_read`): one kernel's
+choice to keep a value does not bind the kernel fused from it. The Loop IR runner keeps a defined value as an array of
+its own, which is the meaning of the form.
 
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:

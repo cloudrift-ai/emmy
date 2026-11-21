@@ -146,8 +146,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   folded value selected against its seed past the end (`TileOp.masked`).
 - **Defined value** — A value a kernel defines once for itself and reads by index: a `Define` stores one cell per
   coordinate of the loops around it, and a `Load` behind it reads a cell as it reads any buffer. It is neither an input
-  nor an output of the kernel. The lift spells each read as the computation it stands for, which is the same kernel as
-  the one that computes the value at each read.
+  nor an output of the kernel. A kernel formed from such a body keeps the value in shared memory for the launch and
+  computes it once; it is another kernel than the one that computes the value at each read.
 - **Carried state** — A recurrence's state. In Loop IR, `Carry` defines the next value of one cell and names the
   seed, a `Pre` read sees the previous step's value at any cell, and the loop that carries it sits outside the loops
   over its cells; its steps are ordered and its step is any computation, so it has no op. In Tile IR it is a `Fold`
