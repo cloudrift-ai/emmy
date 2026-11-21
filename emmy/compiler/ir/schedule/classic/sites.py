@@ -741,8 +741,8 @@ class ClassicKernelSite(Site[ClassicSchedule]):
                     tile.atom,
                     allow_f16_accumulate=problem.allow_f16_accumulate,
                     allow_fp8=False,
-                    allow_tf32=False,
-                    allow_tf32_split=False,
+                    allow_tf32=problem.allow_tf32,
+                    allow_tf32_split=problem.allow_tf32_split,
                 )
             )
         )

@@ -732,6 +732,69 @@ fn an_accumulator_is_a_b_fragment_by_an_exchange_of_packed_pairs() {
     );
 }
 
+/// An operand of 32-bit floats is one accumulator's elements moved between lanes, with no conversion: a lane's
+/// register takes one of two registers of another lane, by a parity of its own. A is the accumulator's eight
+/// columns; B is eight of its sixteen rows, which `part` names.
+#[test]
+fn an_accumulator_is_an_operand_of_32_bit_floats_by_exchanges_alone() {
+    let repack = |rest: &str| {
+        format!(
+            "
+        RegFragment(name=c0, role=c, dtype=f32)
+        FragmentRepack(frag=f, srcs=(c0), {rest})
+        "
+        )
+    };
+    for ab in ["tf32", "tf32x3"] {
+        for sm in [80, 89, 90, 120] {
+            let a = warp(&repack(&format!("ab_dtype={ab}")), sm).unwrap();
+            assert_eq!(
+                only(&a, &["shfl"]).len(),
+                8,
+                "two exchanges a register of A"
+            );
+            assert_eq!(only(&a, &["selp"]).len(), 4);
+            assert!(
+                only(&a, &["cvt"]).is_empty(),
+                "the floats are the operand as they are"
+            );
+            for part in 0..2 {
+                let b = warp(&repack(&format!("ab_dtype={ab}, part={part}, role=b")), sm).unwrap();
+                assert_eq!(only(&b, &["shfl"]).len(), 4);
+                assert_eq!(only(&b, &["selp"]).len(), 2);
+            }
+        }
+    }
+    // The registers a lane takes: of A, the row's two columns from the lane two columns to a lane away in its
+    // own group; of B, the two columns of the first or the second eight rows.
+    let a = code(&repack("ab_dtype=tf32"), 80);
+    let exchanged: Vec<&str> = a
+        .iter()
+        .filter(|line| line.starts_with("shfl"))
+        .map(|line| line.split(", ").nth(1).unwrap())
+        .collect();
+    assert_eq!(
+        exchanged,
+        ["%f0", "%f1", "%f2", "%f3", "%f0", "%f1", "%f2", "%f3"]
+    );
+    for (part, rows) in [
+        (0, ["%f0", "%f1", "%f0", "%f1"]),
+        (1, ["%f2", "%f3", "%f2", "%f3"]),
+    ] {
+        let b = code(&repack(&format!("ab_dtype=tf32, part={part}, role=b")), 80);
+        let exchanged: Vec<&str> = b
+            .iter()
+            .filter(|line| line.starts_with("shfl"))
+            .map(|line| line.split(", ").nth(1).unwrap())
+            .collect();
+        assert_eq!(exchanged, rows);
+    }
+    assert!(
+        refusal(&repack("ab_dtype=tf32, part=2, role=b"), 80).contains("no PTX rule"),
+        "an accumulator has two halves of rows"
+    );
+}
+
 /// Volta's accumulator covers 16 by 16; `part` picks four of its columns as an A fragment or four of its rows as
 /// a B fragment. `sm_70` has no packed conversion, so each pair is two conversions joined by a move. Each part of
 /// each role is listed for `sm_70` and assembled for `sm_80`.
