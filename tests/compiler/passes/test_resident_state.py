@@ -158,7 +158,7 @@ def _rows_graph(n: int = 32, seed: str = "0") -> Graph:
     row = "a2 < a0 + 2 && a0 + 1 <= a2"
     body = parse_body(
         f"""
-for a0 in 0..{n - 2}:
+for a0 in 0..{n - 1}:
   for a1 in 0..{_HEADS}:
     for a2 in 0..{n}:
       for a3 in 0..{n}:
@@ -189,7 +189,7 @@ for a0 in 0..{n - 2}:
 def _rows_reference(matrix: np.ndarray, seed: np.ndarray | None = None) -> np.ndarray:
     matrix, n = matrix.astype(np.float64), matrix.shape[-1]
     state = np.zeros_like(matrix) if seed is None else seed.astype(np.float64)
-    for i in range(1, n - 1):
+    for i in range(1, n):
         state[..., i, :] = matrix[..., i, :] + np.einsum("...k,...kc->...c", matrix[..., i, :], state)
     return state
 
@@ -206,7 +206,7 @@ def test_a_step_that_writes_one_row_runs_the_product_of_one_block(name):
     (kernel,) = kernels.values()
     assert not kernel.serial and not [stmt for stmt in statements(kernel, Loop) if stmt.axis.name == "a0"]
     assert not statements(kernel, Cond)
-    assert len(statements(kernel, MmaSyncPtx)) == (n - 2) * (n // atom.atom_k)
+    assert len(statements(kernel, MmaSyncPtx)) == (n - 1) * (n // atom.atom_k)
     assert len(statements(kernel, RegStore)) == n // atom.atom_n
 
 

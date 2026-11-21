@@ -77,6 +77,10 @@ def _resident(op, program, retained=frozenset()):
     def cells_of(index):
         return tuple(index[dim] for dim in kept[1 + len(batch) :])
 
+    # The shared buffer is seeded ahead of the steps, so the first step's choice of the seed is the buffer's own read:
+    # of a seed tensor's load, or of the constant a seed is.
+    constants = {s.name: s for s in tile.body.iter() if isinstance(s, Let)} if not isinstance(carry.seed, str) else {}
+
     def rewrite(body):
         defs = {s.name: s for s in body if isinstance(s, Load)}
         uses = Counter(name for s in body.iter() for name in s.deps())
@@ -86,7 +90,10 @@ def _resident(op, program, retained=frozenset()):
             if isinstance(stmt, Select) and len(stmt.branches) == 2 and stmt.branches[0].select == before:
                 held = defs.get(stmt.branches[0].value)
                 seed = defs.get(stmt.branches[1].value)
-                if held is not None and held.input == port and seed is not None and seed.input == carry.seed:
+                constant = constants.get(stmt.branches[1].value)
+                if held is not None and held.input == port and constant is not None and constant.value == Literal(float(carry.seed)):
+                    stmt = Assign(stmt.name, Var(held.name), dtype=tensor.dtype)
+                elif held is not None and held.input == port and seed is not None and seed.input == carry.seed:
                     promoted = dtype_get(dtype_promote("add", [held.dtype.name, seed.dtype.name]))
                     if promoted == tensor.dtype:
                         if uses[seed.name] == 1:

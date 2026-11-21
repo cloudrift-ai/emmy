@@ -830,8 +830,9 @@ The scheduled reduction and its combine order remain unchanged. This changes ker
 canonicalization, so the kernel keeps its identity.
 
 Two shared buffers separate the previous and next state. The seed initializes the first buffer, and barriers keep
-initialization, copies and updates uniform across the CTA. A wider seed retains its original first-iteration reads
-instead of rounding through shared storage early. Requested snapshots and externally read carry ports remain global
+initialization, copies and updates uniform across the CTA. A step's choice of the seed at the first step is then
+the buffer's own read, for a seed tensor and for a constant alike. A wider seed retains its original first-iteration
+reads instead of rounding through shared storage early. Requested snapshots and externally read carry ports remain global
 outputs; only an unused private carry port is removed through the materializer's existing graph splice. A state the
 term stores every step has no port (`stored_states`): the shared buffers stand in for that output's lagged reads, and
 its per-step store stays, as the step's own output.
@@ -872,7 +873,7 @@ selects one row of a triangular inverse), the step does not compute the earlier 
   fragment as declared, for every register-held state.
 - **A store that does not read the step** is made by the last step alone, as under the other storages.
 
-A row loop over a 64 x 64 state, 62 steps, runs 7.7 on an RTX 5090 this way for 192 matrices (f16 operands, f32
+A row loop over a 64 x 64 state, 63 steps, runs 7.1 on an RTX 5090 this way for 192 matrices (f16 operands, f32
 accumulator). Left a loop, with its tests taken at run time, the same kernel ran 30.
 
 ## Kernel-IR peepholes

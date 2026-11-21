@@ -16,7 +16,8 @@ step then a column step) rolls as one step of two; a chain that is not one step 
 alone: a recurrence rolled wrongly is a wrong answer. A chain whose steps read their state only at
 the cell they write, and whose states nothing but the next step reads, is left alone too: fused
 whole it re-derives no state, so it is straight-line code, and rolling it would only store every
-state.
+state. A step at the edge of its matrix, whose mask the normal form shortened by the bound the extent
+gives, is taken with the chain where it is the first step advanced (:func:`_chain`).
 """
 
 from __future__ import annotations
@@ -119,11 +120,15 @@ def _literal_free_key(body: Body) -> str:
     return _literals_abstracted(body)[0].structural_key(structural=False)
 
 
-def _chain(graph: Graph, first: Node) -> list[Node]:
+def _chain(graph: Graph, first: Node) -> tuple[list[Node], Node | None]:
     """``first`` and every later state: what descends from it with the same shape and the same body
-    once its integer literals are taken out."""
+    once its integer literals are taken out. And the state after the last of them, if there is one
+    with the same statements and another body: a step at the edge of its matrix. A step that writes
+    row ``i`` masks its store by ``i <= row < i + 1``, and at the last row the normal form drops the
+    bound the extent already gives, so the body is the first step's advanced and no longer spells
+    like it. Whether it is that step is the roll's own test of every step."""
     body, tensor = first.op.body, first.outputs[0]
-    chain, reached = [first], {first.id}
+    chain, reached, edge = [first], {first.id}, None
     for node_id in graph.topological_order():
         node = graph.nodes[node_id]
         if not any(producer.id in reached for name in node.inputs if (producer := graph.producer(name)) is not None):
@@ -132,9 +137,14 @@ def _chain(graph: Graph, first: Node) -> list[Node]:
         alike = isinstance(node.op, LoopOp) and node.outputs[0].shape == tensor.shape and node.outputs[0].dtype == tensor.dtype
         # The exact key canonicalizes the body, which a fused kernel of thousands of statements pays
         # for in seconds: ask only of a body with the same statements to begin with.
-        if alike and _census(node.op.body) == _census(body) and _literal_free_key(node.op.body) == _literal_free_key(body):
+        if not alike or _census(node.op.body) != _census(body):
+            continue
+        if _literal_free_key(node.op.body) == _literal_free_key(body):
             chain.append(node)
-    return chain
+            edge = None
+        elif edge is None:
+            edge = node
+    return chain, edge
 
 
 def _is_zero(graph: Graph, name: str) -> bool:
@@ -356,17 +366,19 @@ def rewrite(match: Match, first: Node) -> Graph:
     graph = match.graph
     if first.outputs[0].dtype != F32:
         raise RuleSkipped("a carried state is f32")
-    chain = _chain(graph, first)
+    chain, edge = _chain(graph, first)
     if len(chain) < 2:
         raise RuleSkipped("no later state of this shape depends on this one")
     declined: RuleSkipped | None = None
-    for period in _PERIODS:
-        if len(chain[::period]) < 2:
-            break
-        try:
-            return _roll(match, chain[::period])
-        except RuleSkipped as why:
-            declined = why
+    # With the step at the matrix's edge first; without it where that is not the first step advanced.
+    for states in ([*chain, edge], chain) if edge is not None else (chain,):
+        for period in _PERIODS:
+            if len(states[::period]) < 2:
+                break
+            try:
+                return _roll(match, states[::period])
+            except RuleSkipped as why:
+                declined = why
     assert declined is not None
     raise declined
 

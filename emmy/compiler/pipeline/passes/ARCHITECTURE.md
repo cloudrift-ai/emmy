@@ -843,14 +843,15 @@ solved: a kernel that carries a state takes no cut, so a reader its storage cann
 off that storage; and a kernel that stores its last state beside a per-step output is offered no split across the
 sequence, since parts side by side cannot write that mix (`_split._carry_stores`).
 
-**A step at the edge of its matrix is another step.** A step that writes row `i` masks its store by `i <= row < i + 1`.
-At the last row the normal form drops the bound the matrix's extent already gives, the body is no longer the first
-step's advanced, and that step stays outside the roll, its product inside whatever reads the state. The traced Gated
-DeltaNet substitution therefore holds row `r` of its inverse at position `r - 1`: the first row is zero and takes no
-position, the second is the seed, and every step writes a position with one on each side. Its 62 steps roll into
-one kernel with a pointwise kernel on each side. Each step reads its row from the system in memory and not from
-the buffer it writes, so the step is a row of memory times the state, which register storage takes
-(`lowering/kernel/_resident`).
+**A step at the edge of its matrix rolls with the rest.** A step that writes row `i` masks its store by
+`i <= row < i + 1`. At the last row the normal form drops the bound the matrix's extent already gives, so that step's
+body no longer spells like the others once the literals are taken out, and the search for the chain used to stop one
+state short: the last step stayed outside, its product inside whatever read the state. The chain now offers the
+state after its last, where that one has the same statements and another body, and the roll's own test of every
+step (the first step advanced must normalize to it) decides; where it is not that step, the chain rolls without it.
+The traced Gated DeltaNet substitution reads each row from the system in memory and not from the buffer it writes,
+so its step is a row of memory times the state, which register storage takes (`lowering/kernel/_resident`): its 63
+steps are one kernel, with the system's kernel before it and a pointwise one after.
 
 A chain whose states alternate two
 bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left

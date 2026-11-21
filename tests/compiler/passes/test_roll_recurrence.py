@@ -269,7 +269,7 @@ def test_a_scan_whose_states_only_the_next_step_reads_stores_the_last_one_alone(
     rolled = Pipeline.build(LOOP_PASSES).run(graph)
     ((scan, store),) = ((node.op, node.outputs) for node in rolled.nodes.values() if isinstance(node.op, LoopOp) and node.op.body.carries)
     (steps,) = (stmt for stmt in scan.body if isinstance(stmt, Loop))
-    assert steps.axis.extent.as_static() > 2, "the rows between the first step's and the reader's roll"
+    assert steps.axis.extent.as_static() == 8 - 2, "every row's step but the first, which computes the seed"
     assert [tuple(dim.as_static() for dim in tensor.shape) for tensor in store] == [(2, 8, 8)]
 
     got, reference = _lifted_output(_INVERSE.format(n=8), "a")
@@ -413,35 +413,36 @@ def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(
 
 _ROWS = """
 import torch, torch.nn as nn
-import torch.nn.functional as F
 class Inverse(nn.Module):
     # the substitution as the Gated DeltaNet wrapper traces it: each row read from the matrix and not from the
-    # buffer the step writes, and row r held at position r - 1, so no step writes at the matrix's edge
+    # buffer the step writes, so a step is a row of memory times the rows so far
     def forward(self, a):
         lower = -a.tril(-1)
-        rows = F.pad(lower[..., 1:, :], (0, 0, 0, 1))
-        above = F.pad(lower[..., 1:, 1:], (0, 1, 0, 1))
-        solved = F.pad(rows[..., :1, :], (0, 0, 0, {n} - 1))
-        for i in range(1, {n} - 1):
-            solved = solved.clone()
-            solved[..., i, :] = rows[..., i, :] + (above[..., i : i + 1, :] @ solved).squeeze(-2)
-        return F.pad(solved[..., :-1, :], (0, 0, 1, 0)) + torch.eye({n})
+        inverse = torch.zeros_like(lower)
+        for i in range(1, {n}):
+            inverse = inverse.clone()
+            inverse[..., i, :] = lower[..., i, :] + (lower[..., i : i + 1, :] @ inverse).squeeze(-2)
+        return inverse + torch.eye({n})
 m = Inverse()
 m(torch.randn(2, 3, {n}, {n}) * 0.2)
 """
 
 
-def test_a_substitution_that_writes_no_edge_row_rolls_every_step() -> None:
-    """A step that writes the matrix's last row loses a bound of its mask to the normal form, so it is another step
-    and stays outside the roll, its product inside whatever reads the inverse. Held one position up, every row is
-    written by the same step: the rolled kernel takes them all, and what is left beside it computes no product."""
+def test_a_step_at_the_edge_of_its_matrix_rolls_with_the_rest() -> None:
+    """A step that writes row ``i`` masks its store by ``i <= row < i + 1``. At the last row the normal form drops
+    the bound the extent already gives, so that step's body no longer spells like the others. It is still the first
+    step advanced, and the roll takes it: every row's step is in the kernel that carries the state, and what is left
+    beside it computes no product."""
     n = 16
     rolled = Pipeline.build(LOOP_PASSES).run(graph_from_code(_ROWS.format(n=n))[0])
     loops = [node.op for node in rolled.nodes.values() if isinstance(node.op, LoopOp)]
     (scan,) = (op for op in loops if op.body.carries)
     (steps,) = (stmt for stmt in scan.body if isinstance(stmt, Loop))
-    assert steps.axis.extent.as_static() == n - 2
+    assert steps.axis.extent.as_static() == n - 1
     assert len(loops) == 3 and not [op for op in loops if op is not scan and op.body.iter_of_type(Accum)]
+
+    got, reference = _lifted_output(_ROWS.format(n=8), "a")
+    np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)
 
 
 @requires_cuda
@@ -461,7 +462,7 @@ def test_a_substitution_keeps_the_rows_so_far_in_registers(atom: str, bound: flo
     with pinned_knobs({"STAGE@map.1/scan": "d1/reg", "TILE@map.1/scan": f"{atom}/f1x4/k4", "WORK": "w2x1"}):
         compiled, kernels = compile_with_kernels(graph)
     (walk,) = (kernel for kernel in kernels.values() if statements(kernel, FragmentRepack))
-    assert len(statements(walk, MmaSyncPtx)) == (n - 2) * (n // ATOM_REGISTRY[atom].atom_k)
+    assert len(statements(walk, MmaSyncPtx)) == (n - 1) * (n // ATOM_REGISTRY[atom].atom_k)
 
     result, _ = CudaBackend().run(compiled, input_data={"a": matrix})
     want = module.double()(torch.from_numpy(matrix).double()).numpy()
