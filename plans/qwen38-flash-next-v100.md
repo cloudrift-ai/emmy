@@ -1659,28 +1659,28 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     both sides: torch peaks equal to the byte (26.75 GB allocated, 28.94 GB reserved), 368-370 MiB spare on both.
   - Regressions: none measured. The 1K control is within noise. The one cost is pre's output product, whose stale
     old row keeps a 19 us faster schedule from being picked.
-- **The decode step's post program and slot programs, by routes nobody had measured (2026-11-21).** Round 3 of the
-  2026-11-19 ranking, main `de841a597`. It set out as a compiler round on two things: post8's 13 small pieces (2.1 ms
-  per step) and the gathered down-and-sum with its dispatch (0.8-1.4 ms per step behind the fork). Measured first,
-  both turned out to be routes the compiler already offers and no row had measured, so the round ships golden rows,
-  a twin form and a runner change, and no compiler change.
-  - Why the search never got there. An unpinned cut fork takes one seam at a time, and a piece no row has measured
-    is priced by the prior's schedule: for the merged pieces here a 512-thread cooperative reduce at 60-500 us, where
-    a hand-pinned schedule runs 9-17 us. A merged route loses before anyone tunes its pieces. The 2026-11-18 round's
-    "fused down-and-sum runs 34-36 us under every schedule" was the same gap: its sweep never pinned a cooperative
-    reduce on the kernel that holds both sums, which runs in 16.4 us (`WORK=t16x8`, `REDUCE=coop`).
-  - Gate, stated before building, cold per layer on one card: post8 at most 142 us in at most 14 kernels (164 in
-    19); the one-row program with its sum inside at most 34 us with two small kernels of dispatch around it (35.8,
-    with five); in serving, one request at least 1.0 ms per token faster and eight requests at least 252 tok/s.
-  - Post8, cold per layer: 163.8 us in 19 kernels on main, 139.3 us in 15 here. Ten cuts are pinned on the root
-    kernel and each piece keeps what main cut off it: the first mixer weight's product carries its norm's weights
-    (14.3 us in two kernels to 9.2 in one), the second mixer's up product its sigmoid (21.5 to 16.4), the last gate's
-    product its sigmoid (13.3 to 10.2), and the down product's cross-CTA finish its SiLU (11.2 to 6.1). The
-    normalized mixer input stays a kernel of its own: folded into the down product's fill it saved a launch cold
-    (140.3 us in 14 kernels) and cost 5.7 us per layer warm, 23.8 us against 18.1. Profiled, rank 0: 105.7 to 92.6
-    us per layer, 0.63 ms per step, a third of the 43.7 us the 13 pieces took. One kernel still runs twice, the
-    4-stream mean, once into scratch for the shared expert and once into the output (3.4 us per layer): a cut value
-    that is also an output is stored twice.
+- **The decode step's post program and slot programs, by kernel sets nobody had measured (2026-11-21).** Round 3 of
+  the 2026-11-19 ranking, main `de841a597`. It set out as a compiler round on two things: post8's 13 small pieces (2.1
+  ms per step) and the gathered down-and-sum with its dispatch (0.8-1.4 ms per step behind the fork). Measured first,
+  both turned out to be kernel sets the compiler already offers and no row had measured, so the round ships golden
+  rows, a twin form and a runner change, and no compiler change.
+  - Why the search never got there. An unpinned cut fork takes one seam at a time, and a piece no row has measured is
+    priced by the prior's schedule: for the merged pieces here a 512-thread cooperative reduce at 60-500 us, where a
+    hand-pinned schedule runs 9-17 us. A kernel set that merges kernels loses before anyone tunes its pieces. The
+    2026-11-18 round's "fused down-and-sum runs 34-36 us under every schedule" was the same gap: its sweep never
+    pinned a cooperative reduce on the kernel that holds both sums, which runs in 16.4 us (`WORK=t16x8`,
+    `REDUCE=coop`).
+  - Gate, stated before building, cold per layer on one card: post8 at most 142 us in at most 14 kernels (164 in 19);
+    the one-row program with its sum inside at most 34 us with two small kernels of dispatch around it (35.8, with
+    five); in serving, one request at least 1.0 ms per token faster and eight requests at least 252 tok/s.
+  - Post8, cold per layer: 163.8 us in 19 kernels on main, 139.3 us in 15 here. Ten cuts are pinned on the root kernel
+    and each piece keeps what main cut off it: the first mixer weight's product carries its norm's weights (14.3 us in
+    two kernels to 9.2 in one), the second mixer's up product its sigmoid (21.5 to 16.4), the last gate's product its
+    sigmoid (13.3 to 10.2), and the down product's cross-CTA finish its SiLU (11.2 to 6.1). The normalized mixer input
+    stays a kernel of its own: folded into the down product's fill it saved a launch cold (140.3 us in 14 kernels) and
+    cost 5.7 us per layer warm, 23.8 us against 18.1. Profiled, rank 0: 105.7 to 92.6 us per layer, 0.63 ms per step,
+    a third of the 43.7 us the 13 pieces took. One kernel still runs twice, the 4-stream mean, once into scratch for
+    the shared expert and once into the output (3.4 us per layer): a cut value that is also an output is stored twice.
   - The slot programs (`ExpertFFN.slots_sum`): the program takes the router's scores and the shared expert's output
     and returns the layer's routed sum. Around it the runner keeps the selector's write and one write of the scores;
     the row upload, the shared output's add and the weighted sum are gone (five kernels and 16.6 us per layer to two
@@ -1689,11 +1689,11 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     main, and a sum-and-add piece. Cold per layer: one row 35.8 to 33.8 us, two rows 47.1 to 46.1.
   - Two forms were measured and dropped. The fused down-and-sum in one kernel: 15.0 us warm at one row and 54.6 at
     eight, against 9.9 and 41.5 for the plain down projection, because a thread walks an expert's 160 columns alone.
-    And the summed program at four and eight rows: cut from the sum, the down projection writes its picks fastest,
-    so a block reads the rows of 32 experts; 71.7 us warm at eight rows against main's 41.5, though both bench 42.0
-    cold (the bench's selector does not spread its picks). The cut orders a workspace by a weight's layout only when
-    the weight is read straight from memory, not through the selector. So the four- and eight-row programs stay
-    main's, with main's rows.
+    And the sum inside the four- and eight-row programs: cut from the sum, the down projection writes its picks
+    fastest, so a block reads the rows of 32 experts; 71.7 us warm at eight rows against main's 41.5, though both
+    bench 42.0 cold (the bench's selector does not spread its picks). The cut orders a workspace by a weight's layout
+    only when the weight is read straight from memory, not through the selector. So the four- and eight-row programs
+    stay main's, with main's rows.
   - A B B A on boots never profiled, two of main against two of the branch, one server working at a time:
 
     | Point | Main | This round | Fork, 2026-11-19 |
@@ -1709,29 +1709,29 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     four (21.37 to 20.80) and 0.55 at eight (24.82 to 24.28). Against the fork: one request 1.58x slower (1.67x), two
     requests 0.87x (0.83x), four 0.79x (0.77x), eight 0.78x (0.77x). The 4K first token read 1.191-1.199 s on an
     earlier pair of branch boots against 1.199-1.221 s on main: no change.
-  - Gate **missed, closely at one request**: 0.90 ms per token against the 1.0 stated, and 248.2-248.9 tok/s at
-    eight requests against 252. Behind it: post8 met its time (139.3 us against 142) with 15 kernels where 14 were
-    stated; the one-row program met its bar (33.8 us, two kernels around it); the eight-row program is unchanged, so
-    eight requests gain only what post8 gains.
+  - Gate **missed, closely at one request**: 0.90 ms per token against the 1.0 stated, and 248.2-248.9 tok/s at eight
+    requests against 252. Behind it: post8 met its time (139.3 us against 142) with 15 kernels where 14 were stated;
+    the one-row program met its bar (33.8 us, two kernels around it); the eight-row program is unchanged, so eight
+    requests gain only what post8 gains.
   - Checks: every one of the 19 programs compiles under strict evidence GPU-free; `emmy golden check` says current;
     the release audit on the card passes (19 twins deploy from the golden rows alone); program by program, every
-    program but post8 and the two summed twins keeps main's kernels, routes and rows. A numeric check on the card,
-    in-domain inputs against the NumPy reference of post8's traced program: the new route and main's both within one
-    fp16 step of it. GSM8K 0.969 (main rounds 0.969-0.984); acceptance 28, 27, 28, 26, 27, 28 of 28, the same two
-    known failures as main (an empty answer in think mode, and the reasoning-off case); long-document lookups
+    program but post8 and the two new slot twins keeps main's kernels, routing rows and rows. A numeric check on the
+    card, in-domain inputs against the NumPy reference of post8's traced program: the new kernel set and main's both
+    within one fp16 step of it. GSM8K 0.969 (main rounds 0.969-0.984); acceptance 28, 27, 28, 26, 27, 28 of 28, the
+    same two known failures as main (an empty answer in think mode, and the reasoning-off case); long-document lookups
     LONGDOC. Greedy texts: main's two boots agree on 6 of 6, the branch's two agree on 6 of 6, and the branch equals
-    main on 3 of 6: the routed sum and post8's products add in another order. Memory, same probe on both sides:
-    torch peaks 26.75 GB allocated on both, 28.94 GB reserved on main and 28.61 GB here; 768 MiB spare per card here
-    against 346-370 on main, the allocator-timing flip of earlier rounds. CI's full suite passes. The prior gate
-    does not hold this recipe.
-  - Regressions: none measured in serving. Three of six greedy texts part from main's. The record re-timed two rows
-    of kernels pre8 shares with post8; both are back at main's values.
+    main on 3 of 6: the routed sum and post8's products add in another order. Memory, same probe on both sides: torch
+    peaks 26.75 GB allocated on both, 28.94 GB reserved on main and 28.61 GB here; 768 MiB spare per card here against
+    346-370 on main, the allocator-timing flip of earlier rounds. CI's full suite passes. The prior gate does not hold
+    this recipe.
+  - Regressions: none measured in serving. Three of six greedy texts part from main's. The record re-timed two rows of
+    kernels pre8 shares with post8; both are back at main's values.
   - Left for a compiler round, each measured here: the workspace order of a product cut from a sum over a gathered
-    weight (it decides whether the summed program pays at four and eight rows, 9.5 us of dispatch per layer); the
-    mean stored twice (3.4 us per layer); and a search that tunes the pieces of a route before it prices the route.
-    A load-vectorizer change that widens a packed weight's byte loads in a serial loop sped the fused down-and-sum
-    from 16.4 to 14.3 us at one row and from 63.5 to 51.2 at eight; no route here uses that kernel and the change
-    moves code of other models' goldens, so it was left out.
+    weight (it decides whether the sum pays inside the four- and eight-row programs, 9.5 us of dispatch per layer);
+    the mean stored twice (3.4 us per layer); and a search that tunes the pieces of a kernel set before it prices the
+    set. A load-vectorizer change that widens a packed weight's byte loads in a serial loop sped the fused
+    down-and-sum from 16.4 to 14.3 us at one row and from 63.5 to 51.2 at eight; no kernel set recorded here uses that
+    kernel and the change moves code of other models' goldens, so it was left out.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
