@@ -117,7 +117,18 @@ def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "TF32_MMA", "TF32_SPLIT_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA"],
+    [
+        "FAST_EXP",
+        "F16_MMA_F32_ACC",
+        "FP8_MMA",
+        "TF32_MMA",
+        "TF32_SPLIT_MMA",
+        "F32_AS_BF16_MMA",
+        "FAST_DIV",
+        "FAST_SQRT",
+        "FLUSH_TO_ZERO",
+        "CONTRACT_FMA",
+    ],
 )
 @pytest.mark.parametrize("umbrella", [False, True])
 def test_independent_precision_regimes_never_replace_or_price_each_other(name, umbrella) -> None:
@@ -215,12 +226,13 @@ def test_context_keys_match_the_db_version_and_ignore_later_ambient_pins(monkeyp
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     monkeypatch.setenv("EMMY_FAST_EXP", "1")
     expected = {
-        None: "c8dd8625a08842318e107646481165831d4c1642dafb2f1cbb42d26d400e4965",
-        "FAST_EXP": "24e91e2fb185efc20587a1044672f9f8961b770280dfb15e63fb5da45ee0fef8",
-        "F16_MMA_F32_ACC": "a8385b98649541d85b2a94da03b1ddf218a03a988449f2261973193e55792cfb",
-        "FP8_MMA": "4f40b86ddfbbf92b0342407664c20e32b6ce0f923b84781568083dba811385d0",
-        "TF32_MMA": "0324a43bce9f50819287372446d7e8fa685c3eb495c598d20ce4387ed5641ed2",
-        "TF32_SPLIT_MMA": "ab57d4348f07223d148348cb994dba37035980b5709b974a9f9f6e7b03b69593",
+        None: "917d71a3a26792c950cfd8fd1ea988b675fc1fde98141d16b4392d9fa865cea2",
+        "FAST_EXP": "4f76d9c532ced1ec62d0e0a0f4308b92c9abb95b07e807dce4acd4c746edf5d2",
+        "F16_MMA_F32_ACC": "c2c9c8bf030a39c5194c26fadb85371a4be84d169df5adef2c9d701bef9b5018",
+        "FP8_MMA": "4994654c0e480c7bff2c46230aaa995e5d345401183d85ac58a09b1694d7fa1c",
+        "TF32_MMA": "ddadeae6782d5e43abae9b1ed6acd6544f2359aa89aace522b09129546148eb3",
+        "TF32_SPLIT_MMA": "c29005b3bd53d1a69a80cdc8cd1e14df991d5e2af4649bbe99f3c173ce724645",
+        "F32_AS_BF16_MMA": "204c2f8bc8537420d7e60bbd38f9b8ca4ab5f8f50c566d225dc30117270fe683",
     }
     for name, key in expected.items():
         ctx = Context.from_target((12, 0), precision={name: True} if name else {})

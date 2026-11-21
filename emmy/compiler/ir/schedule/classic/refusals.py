@@ -189,6 +189,19 @@ def _family_dtype(tile: TileOp, node, target, dtype):
     return dtype if own else _channel_dtype(tile, node, target)
 
 
+def _rounded_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
+    """The bf16 atoms a product of f32 operands takes with every operand rounded to bf16 in its fill: the cell an
+    f32 operand beside a bf16 one already takes, on a product that has no bf16 operand. bf16 keeps f32's exponent
+    range, so the rounding cannot overflow; it keeps eight bits of mantissa, so offering it is a precision decision
+    (``ClassicProblem.allow_f32_as_bf16``). Empty for any other product."""
+    from emmy.compiler.ir.tile.ops import edge_dtypes  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
+
+    if node.chunked() or tile.packed_reading(node)[1] is not None:
+        return ()
+    dtype = edge_dtypes(node.operands[0], tile.inputs)[0]
+    return atoms_for(BF16, ctx=target) if _family_dtype(tile, node, target, dtype) == F32 else ()
+
+
 def _fragment_rows_refusal(tile: TileOp) -> str | None:
     """Why the M rows of a C fragment would have nowhere to land.
 
@@ -413,7 +426,7 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
     atom_dtype = _family_dtype(tile, node, target, dtype)
     base = bindable(atoms_for(atom_dtype, ctx=target))
     reduced_acc = bindable(atoms_for(atom_dtype, acc=atom_dtype, ctx=target))
-    return tuple(dict.fromkeys((*base, *reduced_acc)))
+    return tuple(dict.fromkeys((*base, *reduced_acc, *bindable(_rounded_atoms(tile, target, node)))))
 
 
 def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:

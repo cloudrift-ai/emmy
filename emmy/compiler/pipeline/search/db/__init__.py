@@ -238,7 +238,7 @@ _OBSOLETE_TABLES = (
 #: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key, and
 #: what a context's regime measures. A file holding another is re-created; bump when any changes. The DB tests pin
 #: kernel and context identities.
-VERSION = 20  # A context's precision decisions include the TF32 gate, so every context key moved.
+VERSION = 21  # A context's precision decisions include the gate of bf16 atoms on f32 products, so every context key moved.
 
 # What one perf read selects, in ``_row_to_perf`` order: the context's columns, then the row's.
 _PERF_SEL = "c.gpu_name, c.arch, c.backend, p.kernel, p.bindings, p.schedule, p.status, p.us, p.error, p.source, c.cold_cache, c.precision"

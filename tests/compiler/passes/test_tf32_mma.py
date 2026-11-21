@@ -73,10 +73,11 @@ def test_the_split_is_the_same_cell_under_a_token_of_its_own() -> None:
     assert (plain.ab_dtype, split.ab_dtype) == ("tf32", "tf32x3")
 
 
-def test_a_product_of_two_f32_operands_is_offered_the_two_atoms_and_no_other() -> None:
-    assert _offered(*_term()) == (TF32, SPLIT)
+def test_a_product_of_two_f32_operands_is_offered_the_two_atoms() -> None:
+    """The first two it is offered: the bf16 atoms that round its operands follow them."""
+    assert _offered(*_term())[:2] == (TF32, SPLIT)
     # The instruction needs sm_80; Volta has no cell for two f32 operands.
-    assert _offered(*_term(cap=(8, 0))) == (TF32, SPLIT)
+    assert _offered(*_term(cap=(8, 0)))[:2] == (TF32, SPLIT)
     assert _offered(*_term(cap=(7, 0))) == ()
 
 
@@ -102,7 +103,7 @@ def test_each_gate_decides_whether_the_catalog_offers_its_atom() -> None:
         (),
     )
     # What the node allows is the same either way: a row or a pin that names an atom is a choice of its own.
-    assert ClassicProblem(tile, ctx, allow_tf32=False, allow_tf32_split=False).atoms_of(site.id) == (TF32, SPLIT)
+    assert ClassicProblem(tile, ctx, allow_tf32=False, allow_tf32_split=False).atoms_of(site.id)[:2] == (TF32, SPLIT)
 
 
 def test_the_gate_follows_fast_math_unless_pinned(monkeypatch) -> None:
@@ -140,7 +141,7 @@ def test_the_priors_reading_of_tensor_core_eligibility_does_not_count_the_atom()
     it and that reading stays the one they learned."""
     tile, ctx, _ = _term()
     problem = ClassicProblem(tile, ctx)
-    assert problem.atoms_of(problem.node_sites[0].id) == (TF32, SPLIT) and not problem.warp_eligible
+    assert problem.atoms_of(problem.node_sites[0].id)[:2] == (TF32, SPLIT) and not problem.warp_eligible
     narrow = ClassicProblem(*_term(a_dtype=F16, b_dtype=F16)[:2])
     assert narrow.warp_eligible
 
