@@ -92,19 +92,26 @@ def _atomized(expression: Expression, atoms: dict[Expression, Var]) -> Expressio
     return atoms.setdefault(expression, Var(f"_run_atom{len(atoms)}"))
 
 
-def vectorize_loads(top: KernelOp, body: Body, aligned: dict[str, int] | None = None) -> Body:
-    """``body`` with each run of scalar loads widened into one vector ``Load`` (``050_vectorize_loads``), nested
-    bodies first. ``top`` resolves the inputs, ``aligned`` the alignment of each enclosing strided loop's variable."""
-    aligned = aligned or {}
+def _descended(body: Body, aligned: dict[str, int], widen) -> list[Statement]:
+    """``body``'s statements with ``widen(nested body, alignment)`` in place of each nested body, the alignment
+    extended by the variable of each strided loop on the way down."""
     descended: list[Statement] = []
     for s in body:
         nested = s.nested()
         if nested:
             strided = isinstance(s, Loop) and s.step is not None
             inner = {**aligned, s.axis.name: strided_alignment(s.walk()[0], s.step, aligned)} if strided else aligned
-            descended.append(s.with_bodies(tuple(vectorize_loads(top, b, inner) for b in nested)))
+            descended.append(s.with_bodies(tuple(widen(b, inner) for b in nested)))
         else:
             descended.append(s)
+    return descended
+
+
+def vectorize_loads(top: KernelOp, body: Body, aligned: dict[str, int] | None = None) -> Body:
+    """``body`` with each run of scalar loads widened into one vector ``Load`` (``050_vectorize_loads``), nested
+    bodies first. ``top`` resolves the inputs, ``aligned`` the alignment of each enclosing strided loop's variable."""
+    aligned = aligned or {}
+    descended = _descended(body, aligned, lambda nested, inner: vectorize_loads(top, nested, inner))
 
     descended = [s.map_expressions(lambda e: _fold_run_offset(e, aligned)) if isinstance(s, Load) else s for s in descended]
     # No literal-constant loads (those render as embedded scalar floats), none without the stamped dtype that picks the
@@ -210,17 +217,8 @@ def vectorize_stores(top: KernelOp, body: Body, aligned: dict[str, int] | None =
     variable, as for the loads: a store at ``a + 3`` inside a loop that steps ``a`` sixteen at a time is the fourth of
     an aligned run."""
     aligned = aligned or {}
-    descended: list[Statement] = []
-    for s in body:
-        nested = s.nested()
-        if nested:
-            strided = isinstance(s, Loop) and s.step is not None
-            inner = {**aligned, s.axis.name: strided_alignment(s.walk()[0], s.step, aligned)} if strided else aligned
-            descended.append(s.with_bodies(tuple(vectorize_stores(top, b, inner) for b in nested)))
-        else:
-            descended.append(s)
-
-    descended = _snapshotted(descended)
+    plain = _descended(body, aligned, lambda nested, inner: vectorize_stores(top, nested, inner))
+    descended = _snapshotted(plain)
     # Already-widened Writes never re-merge, and atomic reduce-writes never vectorize (each contributing lane needs
     # its own ``atomicAdd``). A swizzled-slab run merges only under one mode (the alignment proof then keeps the
     # n-aligned run inside one 16-byte swizzle chunk, where the XOR passes bits 0..2 through).
@@ -249,5 +247,5 @@ def vectorize_stores(top: KernelOp, body: Body, aligned: dict[str, int] | None =
                     swizzle=swizzle,
                 ),
             )
-    vectorized = Body(tuple(scope.ordered() if changed else descended))
+    vectorized = Body(tuple(scope.ordered() if changed else plain))  # no run merged: no copy was needed
     return body if vectorized == body else vectorized

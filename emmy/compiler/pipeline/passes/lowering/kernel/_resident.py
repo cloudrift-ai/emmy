@@ -6,8 +6,8 @@ fold's term evaluated block by block (:class:`_Blocks`): a read from memory is a
 statements at fragment residence (:func:`~._atom._residence`, the evaluation the chunk tier uses), and a product
 packs the fragments of its row-side operand into the atom's A, loads its other operand as B, and runs the atom.
 
-The seed is selected in at the first step, every value of a step is computed and stored before the state's fragments
-are overwritten, and the state itself has no store.
+The seed is loaded into the state's fragments ahead of the steps. A step stores a value beside where it is computed,
+overwrites a block of the state after the last statement that reads it, and the state itself has no store.
 
 A step may keep part of its state: its next value is a choice whose last branch is the state as it stands. A block
 that no position of an earlier branch reaches does not compute that branch (:meth:`_Blocks._chosen`), so a step that
@@ -41,6 +41,7 @@ from emmy.compiler.ir.kernel.ir import (
 )
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Let, Load, Loop, Pre, Select
+from emmy.compiler.pipeline.passes.tile._fromloop import conjuncts
 from emmy.compiler.target import FLAGGED_WHOLE
 
 from ._atom import _direct_operand, _residence, unroll_ok
@@ -81,7 +82,7 @@ def _needed(body: Body, result: str) -> tuple[list, set[str]]:
         if reads.isdisjoint(stmt.defines()):
             continue
         members.append(stmt)
-        if not isinstance(stmt, Select) or stmt.name == result:
+        if not isinstance(stmt, Select):
             reads |= set(stmt.deps())
     return members[::-1], reads
 
@@ -90,14 +91,10 @@ def _bounds(condition, col: str, row: str) -> tuple[list, list] | None:
     """``(lows, highs)``: the values ``condition`` keeps ``col`` at or above, and the ones it keeps it below. ``None``
     where the condition is more than such bounds by values that read neither cell: nothing is known of where it
     holds."""
-    lows, highs, terms, one = [], [], [condition], Literal(1, "int")
-    while terms:
-        term = terms.pop()
+    lows, highs, one = [], [], Literal(1, "int")
+    for term in conjuncts(condition):
         if not isinstance(term, BinaryExpression):
             return None
-        if term.op == "&&":
-            terms += [term.left, term.right]
-            continue
         over = term.left == Var(col)
         if not over and term.right != Var(col):
             return None
@@ -128,7 +125,7 @@ class _Blocks:
 
     def __init__(self, tile, atom, period: int, row_base, state: tuple[str, ...]):
         self.tile, self.atom, self.period, self.row_base, self.state = tile, atom, period, row_base, state
-        self.carrying, self.batch, _, _, _ = tile.resident_state
+        self.carrying, self.batch = tile.resident_state.fold, tile.resident_state.batch
         self.time = self.carrying.axis
         self.layout = atom.fragment_layout
         self.extents = {axis.name: axis.extent.as_static() for axis in (*tile.axes, *tile.place.free)}
@@ -139,6 +136,8 @@ class _Blocks:
         self.uniform: set[str] = set()
         self.given: tuple = ()
         self.held: tuple = ()
+        #: The test each block of a kept state is computed behind (:meth:`_chosen`).
+        self.reached: list = []
         self.count = 0
 
     def fresh(self, stem: str) -> str:
@@ -175,31 +174,21 @@ class _Blocks:
         )
         return name
 
-    def _seed(self, cb: int) -> tuple:
-        """The seed at column ``cb`` as a fragment statement reads it: the operand, and its kind."""
-        seed = self.carrying.init[0]
-        if not isinstance(seed, str):
-            return Literal(float(seed)), UNIFORM
-        cells = (*(Var(b) for b in self.batch), Var(FRAG_COL), Var(FRAG_ROW))
-        return (seed, _at_unit_dims(cells, self.tile.inputs[seed].shape)), GMEM
-
     def seeding(self) -> list:
-        """The statements that put the seed in the state's fragments ahead of the steps. A zero takes none: a
-        fragment is declared zero."""
-        if self.carrying.init[0] == 0:
+        """The statements that put the seed in the state's fragments ahead of the steps, so a step reads the state
+        one step back as the warp's own fragment of it. A zero takes none: a fragment is declared zero. Choosing
+        the seed inside the step would hold every block twice, the state and the chosen value, and read the seed
+        from memory every step."""
+        seed = self.carrying.init[0]
+        if seed == 0:
             return []
-        fill = dict(op=ElementwiseImpl("copy"), layout=self.layout, row_base=self.row_base, in_place=True)
-        return [
-            FragmentApply(out=name, args=fragment_args(*zip(self._seed(cb))), col_base=Literal(cb, "int"), **fill)
-            for cb, name in zip(range(0, len(self.state) * self.atom.atom_n, self.atom.atom_n), self.state, strict=True)
-        ]
-
-    def seeded(self, cb: int) -> str:
-        """The state one step back at column ``cb``: the warp's own fragment of it, which holds the seed at the
-        first step (:meth:`seeding`). Choosing the seed inside the step holds every block twice, the state and the
-        chosen value, and reads the seed from memory every step: a walk of four steps over bf16 operands ran 37.3
-        that way and 33.1 seeded ahead on an RTX 5090."""
-        return self.state[cb // self.atom.atom_n]
+        if isinstance(seed, str):
+            cells = (*(Var(b) for b in self.batch), Var(FRAG_COL), Var(FRAG_ROW))
+            args = fragment_args(((seed, _at_unit_dims(cells, self.tile.inputs[seed].shape)),), (GMEM,))
+        else:
+            args = fragment_args((Literal(float(seed)),), (UNIFORM,))
+        fill = dict(op=ElementwiseImpl("copy"), args=args, layout=self.layout, row_base=self.row_base, in_place=True)
+        return [FragmentApply(out=name, col_base=Literal(j * self.atom.atom_n, "int"), **fill) for j, name in enumerate(self.state)]
 
     def gmem(self, buffer: str, index: tuple, row: str, col: str, rb: int | None, cb: int) -> str:
         """The fragment of ``buffer`` at ``index``, the block's rows and columns standing for ``row`` and ``col``."""
@@ -255,7 +244,7 @@ class _Blocks:
             elif isinstance(stmt, Pre):
                 if rb is not None or tuple(_given(e, self.given) for e in stmt.index[-2:]) != (Var(col), Var(row)):
                     raise Unresident("a read of the state off its own row and column")
-                frags[stmt.name] = self.seeded(cb)
+                frags[stmt.name] = self.state[cb // self.atom.atom_n]
             elif isinstance(stmt, Load):
                 # Every read is a fragment, one that reads neither axis too. Held as a scalar across the step it
                 # costs a register the assembler has none to spare of: 8% on a 16-step dense recurrence.
@@ -306,6 +295,7 @@ class _Blocks:
             else:
                 kept = FragmentApply(out=name, op=ElementwiseImpl("copy"), args=fragment_args((chosen,), (FRAG,)), **base)
                 self.out.append(Cond(reach, Body(taken), Body((kept,))))
+                self.reached.append(reach)
             chosen = name
         return chosen
 
@@ -328,9 +318,9 @@ class _Blocks:
         (left, left_name), (right, right_name) = sorted(bound.values(), key=lambda pair: row not in pair[0].free_axes)
         if rb is not None or row not in left.free_axes or self.extents[axis] % atom.atom_k:
             raise Unresident("a product that is not over the warp's own rows and whole atoms")
-        slab, direct = right.as_slab(), None
-        load = self.settled(slab.load, col) if slab is not None else None
+        slab, load, direct = right.as_slab(), None, None
         if slab is not None:
+            load = self.settled(slab.load, col)
             try:
                 trans, ldm = _direct_operand(load, self.tile.inputs, k_name=axis, own=col, legacy=(False, 0))
                 direct = dict(b_trans=trans, ldm=ldm) if ldm else None
@@ -401,19 +391,14 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     if tile.resident_state is None:
         raise Unresident("one state of static shape, its rows and columns whole fragments")
     fold, batch, col, row, stored = tile.resident_state
-    extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
+    time = tile.axis_of(fold.axis)
+    row_base = Literal(atom.atom_m, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
+    state = tuple(f"_state{j}" for j in range(tile.axis_of(col).extent.as_static() // atom.atom_n))
+    blocks = _Blocks(tile, atom, period, row_base, state)
+    extents = blocks.extents
     widths = [extents[col], *(extents[out_col] for _, _, out_col, _ in stored)]
     if extents[row] % atom.atom_m or any(width % atom.atom_n for width in widths):
         raise Unresident("a state or an output the atom's fragments do not tile exactly")
-    time = tile.axis_of(fold.axis)
-    row_base = Literal(atom.atom_m, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
-    state = tuple(f"_state{j}" for j in range(extents[col] // atom.atom_n))
-    # A step that keeps part of its state has its state seeded ahead of the steps, and is written out step by step:
-    # the tests of its blocks read the step alone, so each copy is the work of the blocks that step writes, with no
-    # test left in it, and a block it keeps is no work at all.
-    members, _ = _needed(fold.lift.body, fold.lift.results[0])
-    keeps = bool(members) and isinstance(members[-1], Select)
-    blocks = _Blocks(tile, atom, period, row_base, state)
     declared = [RegFragment(name=name, role="c", dtype=F32, fragment_layout=atom.fragment_layout) for name in state]
 
     # The values a step stores, then the ones the last step alone stores, then the state's next value. A step's own
@@ -423,14 +408,11 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     late: list = []
     last = BinaryExpression("==", Var(time.name), Literal(time.extent.as_static() - 1, "int"))
 
-    def every_step(spec) -> bool:
-        return any(time.name in entry.free_vars() for entry in spec.write.index)
-
-    for spec, (col_dim, row_dim, out_col, out_row) in sorted(
-        zip(tile.output_specs, stored, strict=True), key=lambda pair: not every_step(pair[0])
+    every_step = [any(time.name in entry.free_vars() for entry in spec.write.index) for spec in tile.output_specs]
+    for every, spec, (col_dim, row_dim, out_col, out_row) in sorted(
+        zip(every_step, tile.output_specs, stored, strict=True), key=lambda output: not output[0]
     ):
         (value,) = spec.write.values
-        every = every_step(spec)
         for cb in range(0, extents[out_col], atom.atom_n):
             frag = blocks.fragment(fold, value, out_row, out_col, None, cb)
             # The block's first cell: a coordinate the step moves (its rows in a tensor of every step's) keeps that.
@@ -475,7 +457,11 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     kept = dict(zip(following, state, strict=True))
     if late:
         step.append(Cond(last, Body(tuple(store.replace(frag=kept.get(store.frag, store.frag)) for store in late)), Body()))
-    unroll = keeps and unroll_ok(time.extent, FLAGGED_WHOLE)
+    # A step that keeps part of its state is written out step by step where the tests of its blocks read the step
+    # alone: each copy is then the work of the blocks that step writes, with no test left in it, and a block it
+    # keeps is no work at all.
+    alone = bool(blocks.reached) and all(test.free_vars() <= {time.name} for test in blocks.reached)
+    unroll = alone and unroll_ok(time.extent, FLAGGED_WHOLE)
     loop = Loop.strided(axis=time, start=Literal(0, "int"), step=Literal(1, "int"), body=Body(tuple(step)), unroll=unroll)
     rows = extents[row]
     axes = (

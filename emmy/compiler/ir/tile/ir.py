@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from functools import cached_property
+from typing import NamedTuple
 
 from frozendict import frozendict
 
@@ -297,7 +298,19 @@ def _reads_move_with(edge: Fold, coord: str, ctx: SimplifyCtx) -> bool:
     return any(coord in index.simplify(ctx).free_vars() for index in _index_reads(edge) if coord in index.free_vars())
 
 
-def matrix_coordinates(index: tuple, outside: frozenset[str] = frozenset()) -> tuple[int, int, str, str] | None:
+class ResidentState(NamedTuple):
+    """The one state a kernel keeps between steps, as register fragments hold it (:attr:`TileOp.resident_state`)."""
+
+    fold: Fold
+    #: The cells a block holds one position of, ahead of the state's matrix.
+    batch: tuple[str, ...]
+    col: str
+    row: str
+    #: Per output of the kernel: where its matrix's columns and rows stand in the store's index, and their axes.
+    stored: tuple[tuple[int, int, str, str], ...]
+
+
+def _matrix_coordinates(index: tuple, outside: frozenset[str]) -> tuple[int, int, str, str] | None:
     """Where in ``index`` the two coordinates of a stored matrix stand and the axes they run along, columns then
     rows: its last two entries that read an axis ``outside`` does not name (the cells a block holds one of, and the
     step). An entry is its axis, or its axis moved by what ``outside`` names: a step's rows in a store that keeps
@@ -502,13 +515,13 @@ class TileOp(Op):
         return tuple(site.path for site in carrying.sites if site.node.carries) if carrying is not None else ()
 
     @cached_property
-    def resident_state(self) -> tuple | None:
-        """``(fold, batch cells, column cell, row cell, each output's matrix coordinates)`` of the one state this
-        kernel keeps between steps, where register fragments can hold it, else ``None``. One warp owns sixteen
+    def resident_state(self) -> ResidentState | None:
+        """The one state this kernel keeps between steps, where register fragments can hold it, else ``None``. One
+        warp owns sixteen
         positions of the state's last cell and every position of the one before it, so: one state of static shape
         under no free axis of more than one position (the size-one axis the row lift binds is none), a row count the
         fragment's sixteen rows divide and column counts its eight divide, and every output a matrix over the state's
-        rows (:func:`matrix_coordinates`). What the step computes is the lowering's to accept or decline."""
+        rows (:func:`_matrix_coordinates`). What the step computes is the lowering's to accept or decline."""
         carrying = self._carrying
         folds = [site.node for site in carrying.sites if site.node.carries] if carrying is not None else []
         if len(folds) != 1 or any(not axis.extent.is_static for axis in (*carrying.axes, *carrying.place.free)):
@@ -521,14 +534,14 @@ class TileOp(Op):
         *batch, col, row = fold.cells
         extent = {axis.name: axis.extent.as_static() for axis in carrying.axes}
         outside = frozenset((*batch, fold.axis, *(axis.name for axis in carrying.place.free)))
-        at = tuple(matrix_coordinates(spec.write.index, outside) for spec in carrying.output_specs)
+        at = tuple(_matrix_coordinates(spec.write.index, outside) for spec in carrying.output_specs)
         if any(len(spec.write.values) != 1 for spec in carrying.output_specs) or None in at:
             return None
         if extent[row] % 16 or any(extent[rows] != extent[row] for _, _, _, rows in at):
             return None
         if any(extent[name] % 8 for name in (col, *(cols for _, _, cols, _ in at))):
             return None
-        return fold, tuple(batch), col, row, at
+        return ResidentState(fold, tuple(batch), col, row, at)
 
     @cached_property
     def _carrying(self) -> TileOp | None:
