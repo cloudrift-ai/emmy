@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import logging
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
 from multiprocessing import get_context
 
+from emmy.compiler.pipeline.search import progress
 from emmy.compiler.pipeline.search.dataset import (
     REGIME_PINS,
     Dataset,
@@ -146,11 +146,21 @@ def measured_groups(rows, kernel_op: Callable, *, jobs: int = 1) -> tuple[list[M
     for grp in buckets.values():
         grp.sort(key=lambda r: (r.kernel, knobs_json(r.knobs)))  # a pool's row order is its own, not the DB's
     tasks = [(regime, [(r, kernel_op(r)) for r in buckets[gpu, sig, regime]]) for gpu, sig, regime in keys]
-    if jobs == 1:
-        feats = map(_group_features, tasks)
-    else:
-        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
-            feats = list(workers.map(_group_features, tasks, chunksize=1))
+    feats = progress.timed_map(
+        _group_features,
+        tasks,
+        name="measured groups",
+        jobs=jobs,
+        unit="groups",
+        mp_context=get_context("spawn"),
+        describe=lambda task, _feats: {
+            "kernel": task[1][0][0].kernel,
+            "card": task[1][0][0].gpu,
+            "regime": task[0] or "default",
+            "rows": len(task[1]),
+        },
+        card=lambda task: task[1][0][0].gpu,
+    )
     groups = []
     for (gpu, sig, regime), group_feats in zip(keys, feats, strict=True):
         key = f"{gpu}/{sig}" + (f" {regime}" if regime else "")
@@ -177,10 +187,12 @@ def export_dataset(
     from emmy import config  # noqa: PLC0415
 
     jobs = config.workers() if jobs is None else jobs
-    kernel_op = kernel_ops(db)
-    pools, dropped_golden = golden_pools(db, kernel_op)
+    with progress.phase("read golden pools"):
+        kernel_op = kernel_ops(db)
+        pools, dropped_golden = golden_pools(db, kernel_op)
     if space == "placement":
-        pools = placement_pools(db, pools)
+        with progress.phase("read placement pools"):
+            pools = placement_pools(db, pools)
         logger.info(
             "Walking the placement forks of %d kernels (%d decisions, %d at a time) ...", len(pools), sum(bool(p.rows) for p in pools), jobs
         )
@@ -191,6 +203,11 @@ def export_dataset(
         golden, skipped = build_golden_groups(pools, sample=pool_sample, seed=seed, jobs=jobs)
         measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"), kernel_op, jobs=jobs)
         dropped = {"golden": dropped_golden, "measured": dropped_measured}
+    if (report := progress.current()) is not None:
+        report.count(f"{space} pools", Counter(pool.gpu for pool in pools))
+        report.count(f"{space} golden groups", Counter(group.gpu for group in golden))
+        if measured:
+            report.count(f"{space} measured groups", Counter(group.gpu for group in measured))
     provenance = {
         "source": source,
         "space": space,

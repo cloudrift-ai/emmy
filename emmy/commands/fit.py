@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 from emmy import storage
-from emmy.compiler.pipeline.search import features
+from emmy.compiler.pipeline.search import features, progress
 from emmy.compiler.pipeline.search.dataset import Dataset, repo_commit
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
@@ -128,11 +128,20 @@ def handle_fit(args) -> None:
     out_dir = Path(args.out) if args.out else Path("_tune/fits") / time.strftime("%Y%m%d-%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        dataset = Dataset.load(args.dataset)
-    except (OSError, ValueError) as exc:
-        logger.error("%s", exc)
-        sys.exit(2)
+    with progress.recording("emmy fit") as report:
+        try:
+            with progress.phase("load dataset"):
+                dataset = Dataset.load(args.dataset)
+        except (OSError, ValueError) as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
+        _fit(args, dataset, out_dir)
+    report.log()
+    # Beside the metrics, never in them: two fits of the same inputs write the same metrics file.
+    storage.write_json(out_dir / progress.TIMING, report.to_json(), indent=1)
+
+
+def _fit(args, dataset: Dataset, out_dir: Path) -> None:
     space = dataset.provenance.get("space", "schedule")
     if args.iterations is None:
         args.iterations = fit_catboost.PLACEMENT_ITERATIONS if space == "placement" else fit_catboost.CatBoostTrainer.iterations
