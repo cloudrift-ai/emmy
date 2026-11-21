@@ -89,6 +89,8 @@ def rewrite(match: Match, reader: Node) -> Graph:
     stored, kept, producer = graph.buffer(source), reader.outputs[0], graph.producer(source)
     if producer is None or not isinstance(producer.op, LoopOp) or source in graph.outputs or graph.buffer_users(source) != {reader.id}:
         raise RuleSkipped("the buffer is read elsewhere, or no loop stores it")
+    if source in producer.op.inputs:
+        raise RuleSkipped("the producer reads the buffer back")
     if stored.dtype != kept.dtype or stored.dtype.logical_elems != 1 or stored.alias is not None or kept.alias is not None:
         raise RuleSkipped("the reader converts what it reads, or one of the two is stored over another buffer")
     extents = {loop.axis.name: loop.axis.extent for loop in reader.op.body.iter_of_type(Loop)}

@@ -670,8 +670,8 @@ that kernel computes nothing and reads every cell once — the steps of a walk s
 sequence order — the producer stores each value at the cell the reader would have moved it to, and the reader is gone.
 The reader of a walk's steps reads each step back by its position and chooses among them by the stacked coordinate;
 that choice is one read at that coordinate. A join that chooses by a range of rows (`torch.cat`) is not read that way
-and stays a kernel. The roll itself gives the state its loop ends with the buffer of the last step it replaces, with
-no copy between.
+and stays a kernel. The copy the roll makes of the state its loop ends with, where the graph exports that state and
+no loop reads it, is such a reader too.
 
 **Measured evidence this rule is spending.** Dropping the work-growth cap and the merge-ordering pass is a deliberate
 trade: both existed because of a measurement, and neither measurement has been retaken. A merge that splices a compute
