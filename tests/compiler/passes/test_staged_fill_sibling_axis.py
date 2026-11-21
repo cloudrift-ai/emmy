@@ -19,8 +19,11 @@ Qwen3-8B's M=1 v_proj on sm_120, which degraded every single-token decode to the
 
 from __future__ import annotations
 
+import pytest
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, U8
+from emmy.compiler.ir.address import clamped
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import Expression, Literal, Var
 from emmy.compiler.ir.schedule import Tile, Work
@@ -214,3 +217,28 @@ def test_a_slab_streamed_along_its_sibling_axis_keeps_its_rows():
     row_index, col_index = op.index(Var("m_b"))(Var("_row"), Var("_col"))
     assert "_row" in _free((row_index,)), "the query slab's row must select the query row"
     assert "_col" in _free((col_index,)), "the query slab's column must select the head dim"
+
+
+@pytest.mark.parametrize("rows", [Dim(100), Dim("seq_len")], ids=["static", "symbolic"])
+def test_a_query_slab_that_overhangs_its_rows_copies_the_last_row(rows):
+    """A 64-row query tile over rows it does not divide, static or symbolic: the fill's row is
+    clamped onto the last valid one, so the tail of the last tile reads in bounds. A tile that
+    divides the rows keeps its plain index."""
+
+    def row_index(extent: Dim):
+        q, d = Axis("m", extent), Axis("d", Dim(64))
+        tile = Tile.parse(f"{K16}/f1x4/k8", Work.parse("w4x1"))
+        (op,) = _slab_operands(
+            index_srcs=(None, (Var("m"), Var("d"))),
+            bufs=(None, "q"),
+            mn=tile.at(q, d).mn,
+            k_axis=q,
+            bk_elems=64,
+            base=(_lit(0), _lit(0)),
+            roles=(1,),
+        )
+        return op.index(Var("m_b"))(Var("_row"), Var("_col"))[0]
+
+    position, extent = clamped(row_index(rows))
+    assert "_row" in position.free_vars() and extent == Axis("m", rows).extent_expression()
+    assert clamped(row_index(Dim(128))) is None
