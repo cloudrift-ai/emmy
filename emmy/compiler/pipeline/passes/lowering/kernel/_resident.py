@@ -126,8 +126,9 @@ class _Blocks:
     sixteen), and the axis its columns run along and where they start. Equal blocks are computed once, and a value
     that does not read the column axis is one block for every column."""
 
-    def __init__(self, tile, atom, period: int, row_base, state: tuple[str, ...]):
+    def __init__(self, tile, atom, period: int, row_base, state: tuple[str, ...], ahead: bool = False):
         self.tile, self.atom, self.period, self.row_base, self.state = tile, atom, period, row_base, state
+        self.ahead = ahead
         self.carrying, self.batch, _, _ = tile.resident_state
         self.time = self.carrying.axis
         self.layout = atom.fragment_layout
@@ -172,28 +173,45 @@ class _Blocks:
         )
         return name
 
+    def _seed(self, cb: int) -> tuple:
+        """The seed at column ``cb`` as a fragment statement reads it: the operand, and its kind."""
+        seed = self.carrying.init[0]
+        if not isinstance(seed, str):
+            return Literal(float(seed)), UNIFORM
+        cells = (*(Var(b) for b in self.batch), Var(FRAG_COL), Var(FRAG_ROW))
+        return (seed, _at_unit_dims(cells, self.tile.inputs[seed].shape)), GMEM
+
+    def seeding(self) -> list:
+        """The statements that put the seed in the state's fragments ahead of the steps. A zero takes none: a
+        fragment is declared zero."""
+        if self.carrying.init[0] == 0:
+            return []
+        fill = dict(op=ElementwiseImpl("copy"), layout=self.layout, row_base=self.row_base, in_place=True)
+        return [
+            FragmentApply(out=name, args=fragment_args(*zip(self._seed(cb))), col_base=Literal(cb, "int"), **fill)
+            for cb, name in zip(range(0, len(self.state) * self.atom.atom_n, self.atom.atom_n), self.state, strict=True)
+        ]
+
     def seeded(self, cb: int) -> str:
         """The state one step back at column ``cb``: the warp's own fragment of it, and at the first step the seed,
-        a constant or the seed tensor read at the block. Selecting the seed inside the step is measured, not
-        principle: seeding the fragments ahead of the loop does less work and ran 5 to 8% slower on an RTX 5090."""
+        a constant or the seed tensor read at the block. A zero seed is the fragment as declared, and a state
+        seeded ahead of its steps (:meth:`seeding`) is the fragment too. Selecting any other seed inside the step is
+        measured, not principle: seeding the fragments ahead of the loop does less work and ran 5 to 8% slower on an
+        RTX 5090 for a step that writes the whole state."""
         key = ("seeded", cb)
-        seed = self.carrying.init[0]
-        if not isinstance(seed, str) and float(seed) == 0.0:
-            return self.state[cb // self.atom.atom_n]  # a fragment is declared zero: the state as declared is its seed
+        if self.ahead or self.carrying.init[0] == 0:
+            return self.state[cb // self.atom.atom_n]
         if key not in self.memo:
-            if isinstance(seed, str):
-                cells = (*(Var(b) for b in self.batch), Var(FRAG_COL), Var(FRAG_ROW))
-                seed = self.copied(((seed, _at_unit_dims(cells, self.tile.inputs[seed].shape)),), (GMEM,), None, cb)
-                kinds = (COORD, FRAG, FRAG)
-            else:
-                seed, kinds = Literal(float(seed)), (COORD, FRAG, UNIFORM)
+            seed, kind = self._seed(cb)
+            if kind == GMEM:
+                seed, kind = self.copied((seed,), (GMEM,), None, cb), FRAG
             name = self.fresh("s")
             first = BinaryExpression(">", Var(self.time), Literal(0, "int"))
             self.out.append(
                 FragmentApply(
                     out=name,
                     op=ElementwiseImpl("where"),
-                    args=fragment_args((first, self.state[cb // self.atom.atom_n], seed), kinds),
+                    args=fragment_args((first, self.state[cb // self.atom.atom_n], seed), (COORD, FRAG, kind)),
                     layout=self.layout,
                     row_base=self.row_base,
                     col_base=Literal(cb, "int"),
@@ -410,7 +428,12 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     time = tile.axis_of(fold.axis)
     row_base = Literal(atom.atom_m, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
     state = tuple(f"_state{j}" for j in range(extents[col] // atom.atom_n))
-    blocks = _Blocks(tile, atom, period, row_base, state)
+    # A step that keeps part of its state has its state seeded ahead of the steps, and is written out step by step:
+    # the tests of its blocks read the step alone, so each copy is the work of the blocks that step writes, with no
+    # test left in it, and a block it keeps is no work at all.
+    members, _ = _needed(fold.lift.body, fold.lift.results[0])
+    keeps = bool(members) and isinstance(members[-1], Select)
+    blocks = _Blocks(tile, atom, period, row_base, state, ahead=keeps)
     declared = [RegFragment(name=name, role="c", dtype=F32, fragment_layout=atom.fragment_layout) for name in state]
 
     # Every stored value of the step, then the state's next value; the state's fragments are overwritten last. A
@@ -449,10 +472,7 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
         )
         for name, value in zip(state, following, strict=True)
     ]
-    # A step that keeps part of its state is written out step by step: the tests of its blocks read the step alone,
-    # so each copy is the work of the blocks that step writes, with no test left in it.
-    members, _ = _needed(fold.lift.body, fold.lift.results[0])
-    unroll = bool(members) and isinstance(members[-1], Select) and unroll_ok(time.extent, FLAGGED_WHOLE)
+    unroll = keeps and unroll_ok(time.extent, FLAGGED_WHOLE)
     loop = Loop.strided(
         axis=time, start=Literal(0, "int"), step=Literal(1, "int"), body=Body((*blocks.out, *stores, *commit)), unroll=unroll
     )
@@ -464,4 +484,4 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
         Axis("_rw", warps),
         Axis("_rl", 32),
     )
-    return Tile(axes=axes, body=Body((*declared, loop)), block_threads=warps * 32)
+    return Tile(axes=axes, body=Body((*declared, *(blocks.seeding() if keeps else ()), loop)), block_threads=warps * 32)

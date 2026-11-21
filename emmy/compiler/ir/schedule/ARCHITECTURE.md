@@ -383,7 +383,8 @@ C→A and C→B repacking support and `f1x<N>`, where `N` covers all state colum
 the fragment geometry: eight columns for m16n8k16, sixteen for Volta m8n8k4. `STAGE=d1/reg` gives the carried state
 one register slot across steps; there is no shared-memory ring or operand prefetch. Equal loads, pointwise
 operations, and products share FP32 register results within a step. Operand conversions stay beside each MMA
-to shorten their live ranges. All reads finish before the carried slot is updated.
+to shorten their live ranges. All reads finish before the carried slot is updated. The state lies under no free axis
+of more than one position: the size-one axis the row lift binds for a product with no row of its own is none.
 
 The catalog offers FP32 accumulation and FP16 partial accumulation under `F16_MMA_F32_ACC` (also enabled by
 `FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. Under their gates it also

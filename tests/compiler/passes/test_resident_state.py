@@ -150,10 +150,11 @@ def test_a_states_fragments_become_the_operands_of_the_atom_that_reads_them(name
     assert {len(repack.srcs) for repack in repacks if repack.role == "a"} == {atom.atom_k // atom.atom_n}
 
 
-def _rows_graph(n: int = 32) -> Graph:
+def _rows_graph(n: int = 32, seed: str = "0") -> Graph:
     """The inverse of a unit lower triangle less its diagonal, a row a step: row ``a0 + 1`` of the state becomes
     the matrix's row plus that row times the state, and every other row is kept. The reads of the written row choose
-    their coordinates on the row's own test, as the roll of a row assignment writes them."""
+    their coordinates on the row's own test, as the roll of a row assignment writes them. The state starts from
+    ``seed``: zero, or the tensor ``s``."""
     row = "a2 < a0 + 2 && a0 + 1 <= a2"
     body = parse_body(
         f"""
@@ -173,19 +174,21 @@ for a0 in 0..{n - 2}:
           v2 when {row}
           v3 when true
         out[0, a1, a2, a3] = v4
-        acc0[0, a1, a2, a3] <- v4 seed 0
+        acc0[0, a1, a2, a3] <- v4 seed {seed}
 """
     )
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("m", (1, _HEADS, n, n), F32), node_id="m")
-    graph.add_node(LoopOp(body=body), ["m"], Tensor("out", (1, _HEADS, n, n), F32), node_id="out")
-    graph.inputs, graph.outputs = ["m"], ["out"]
+    inputs = ["m", "s"] if seed == "s" else ["m"]
+    for name in inputs:
+        graph.add_node(InputOp(), [], Tensor(name, (1, _HEADS, n, n), F32), node_id=name)
+    graph.add_node(LoopOp(body=body), inputs, Tensor("out", (1, _HEADS, n, n), F32), node_id="out")
+    graph.inputs, graph.outputs = inputs, ["out"]
     return graph
 
 
-def _rows_reference(matrix: np.ndarray) -> np.ndarray:
+def _rows_reference(matrix: np.ndarray, seed: np.ndarray | None = None) -> np.ndarray:
     matrix, n = matrix.astype(np.float64), matrix.shape[-1]
-    state = np.zeros_like(matrix)
+    state = np.zeros_like(matrix) if seed is None else seed.astype(np.float64)
     for i in range(1, n - 1):
         state[..., i, :] = matrix[..., i, :] + np.einsum("...k,...kc->...c", matrix[..., i, :], state)
     return state
@@ -255,12 +258,17 @@ def test_a_state_in_registers_matches_the_recurrence(atom, n):
 
 @requires_cuda
 @pytest.mark.parametrize("atom", _ATOMS)
-@pytest.mark.parametrize("n", [32, 64])
-def test_a_row_written_a_step_matches_the_substitution(atom, n):
+@pytest.mark.parametrize(("n", "seed"), [(32, "0"), (32, "s"), (64, "s")])
+def test_a_row_written_a_step_matches_the_substitution(atom, n, seed):
+    """From zero the fragments are the seed as declared; from a tensor they are filled ahead of the steps, since a
+    step that writes one row reads no seed into the rows it keeps."""
     with pinned_knobs(_row(n, atom)):
-        compiled = Pipeline.build(CUDA_PASSES).run(_rows_graph(n), ctx=Context.probe())
+        compiled = Pipeline.build(CUDA_PASSES).run(_rows_graph(n, seed), ctx=Context.probe())
     backend = CudaBackend()
-    for seed in (0, 1):
-        matrix = np.tril(np.random.default_rng(seed).standard_normal((1, _HEADS, n, n)) * 0.2, -1).astype(np.float32)
-        got = np.asarray(backend.run(compiled, input_data={"m": matrix})[0].outputs["out"], dtype=np.float64)
-        np.testing.assert_allclose(got, _rows_reference(matrix), atol=_ATOMS[atom])
+    for draw in (0, 1):
+        rng = np.random.default_rng(draw)
+        feed = {"m": np.tril(rng.standard_normal((1, _HEADS, n, n)) * 0.2, -1).astype(np.float32)}
+        if seed == "s":
+            feed["s"] = (rng.standard_normal((1, _HEADS, n, n)) * 0.2).astype(np.float32)
+        got = np.asarray(backend.run(compiled, input_data=dict(feed))[0].outputs["out"], dtype=np.float64)
+        np.testing.assert_allclose(got, _rows_reference(feed["m"], feed.get("s")), atol=_ATOMS[atom])

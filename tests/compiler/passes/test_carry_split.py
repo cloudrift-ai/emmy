@@ -244,8 +244,9 @@ m(torch.randn(1, 32, 2, 8), torch.randn(1, 32, 2, 8), torch.randn(1, 32, 2, 8), 
 def test_the_chunk_loop_of_the_gated_delta_rule_composes_and_matches_eager(pin: str) -> None:
     """The rule as the Gated DeltaNet wrapper traces it holds two recurrences. The chunk loop is affine: it
     stores a second value beside its state every step, under the batch's one coordinate, and three parts
-    of one step read their maps off the step. The row substitution multiplies two reads of its state, so
-    the pin that reaches both carrying sites decides nothing on it."""
+    of one step read their maps off the step. The row substitution's step is a choice between a product and
+    the state it keeps, which is no affine map of the state as the split reads one, so the pin that reaches
+    both carrying sites decides nothing on it."""
     import torch  # noqa: PLC0415
 
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415

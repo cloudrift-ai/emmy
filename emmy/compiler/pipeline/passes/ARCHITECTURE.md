@@ -843,6 +843,15 @@ solved: a kernel that carries a state takes no cut, so a reader its storage cann
 off that storage; and a kernel that stores its last state beside a per-step output is offered no split across the
 sequence, since parts side by side cannot write that mix (`_split._carry_stores`).
 
+**A step at the edge of its matrix is another step.** A step that writes row `i` masks its store by `i <= row < i + 1`.
+At the last row the normal form drops the bound the matrix's extent already gives, the body is no longer the first
+step's advanced, and that step stays outside the roll, its product inside whatever reads the state. The traced Gated
+DeltaNet substitution therefore holds row `r` of its inverse at position `r - 1`: the first row is zero and takes no
+position, the second is the seed, and every step writes a position with one on each side. Its 62 steps roll into
+one kernel with a pointwise kernel on each side. Each step reads its row from the system in memory and not from
+the buffer it writes, so the step is a row of memory times the state, which register storage takes
+(`lowering/kernel/_resident`).
+
 A chain whose states alternate two
 bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
 alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion

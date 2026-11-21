@@ -507,9 +507,9 @@ class TileOp(Op):
         """``(fold, batch cells, column cell, row cell)`` of the one state this kernel keeps between steps, where
         register fragments can hold it, else ``None``. One warp owns sixteen positions of the state's last cell and
         every position of the one before it, so: one state of static shape under no free axis of more than one
-        position, a row count the
-        fragment's sixteen rows divide and column counts its eight divide, and every output a matrix over the
-        state's rows. What the step computes is the lowering's to accept or decline."""
+        position (the size-one axis the row lift binds is none), a row count the fragment's sixteen rows divide and
+        column counts its eight divide, and every output a matrix over the state's rows. What the step computes is
+        the lowering's to accept or decline."""
         carrying = self._carrying
         folds = [site.node for site in carrying.sites if site.node.carries] if carrying is not None else []
         if len(folds) != 1 or any(not axis.extent.is_static for axis in (*carrying.axes, *carrying.place.free)):

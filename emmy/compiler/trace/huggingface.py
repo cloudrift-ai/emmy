@@ -336,7 +336,7 @@ def _chunk_rule(
 
     The inverse of the chunk's triangular system is the reference's substitution, a row a step, with the row read
     from the system and not from the buffer the step writes: the step is then a row of memory times the state, the
-    form a state kept in registers takes (``lowering/kernel/_resident``)."""
+    form a state kept in registers takes (``lowering/kernel/_resident``), and it writes one row of that state."""
     import torch
     import torch.nn.functional as F
 
@@ -363,15 +363,20 @@ def _chunk_rule(
     if not scope["is_torchdynamo_exporting"]():
         inverse = torch.linalg.solve_triangular(system, eye.expand_as(system), upper=False, unitriangular=True)
     else:
-        # Row ``i`` of the inverse less its diagonal is the system's row times the rows above it, and the system
-        # is zero from the diagonal on, so the product may run over every row. Each step then reads the system
-        # from memory and the rows so far as its state, and writes one row of that state.
+        # Row ``r`` of the inverse less its diagonal is the system's row plus that row times the rows above it, and
+        # the system is zero from the diagonal on, so the product may run over every row. ``solved`` holds row
+        # ``r`` at position ``r - 1``: the first row is zero and takes no position, and the second is the system's
+        # own, the seed. Every step then writes a position with one on each side of it. A step that wrote the
+        # matrix's last row would lose a bound of its mask to the normal form and be another step, left outside
+        # the kernel that carries the state.
         lower = -system.tril(-1)
-        inverse = torch.zeros_like(lower)
-        for i in range(1, chunk_size):
-            inverse = inverse.clone()
-            inverse[..., i, :] = lower[..., i, :] + (lower[..., i : i + 1, :] @ inverse).squeeze(-2)
-        inverse = inverse + eye
+        rows = F.pad(lower[..., 1:, :], (0, 0, 0, 1))
+        above = F.pad(lower[..., 1:, 1:], (0, 1, 0, 1))
+        solved = F.pad(rows[..., :1, :], (0, 0, 0, chunk_size - 1))
+        for i in range(1, chunk_size - 1):
+            solved = solved.clone()
+            solved[..., i, :] = rows[..., i, :] + (above[..., i : i + 1, :] @ solved).squeeze(-2)
+        inverse = F.pad(solved[..., :-1, :], (0, 0, 1, 0)) + eye
     new_values = (inverse * beta.unsqueeze(3)) @ value
     k_cumdecay = (inverse * (beta * cum.exp()).unsqueeze(3)) @ key
     intra = (query @ key.transpose(-1, -2)) * (pairwise * scale)

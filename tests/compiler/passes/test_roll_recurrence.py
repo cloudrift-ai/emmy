@@ -19,7 +19,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Loop, Pre
+from emmy.compiler.ir.stmt import Accum, Loop, Pre
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
@@ -409,3 +409,62 @@ def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(
         want = want.numpy()
         error = np.asarray(got).reshape(want.shape) - want
         assert float(np.sqrt(np.mean(error**2))) < bound * float(np.sqrt(np.mean(want**2)))
+
+
+_ROWS = """
+import torch, torch.nn as nn
+import torch.nn.functional as F
+class Inverse(nn.Module):
+    # the substitution as the Gated DeltaNet wrapper traces it: each row read from the matrix and not from the
+    # buffer the step writes, and row r held at position r - 1, so no step writes at the matrix's edge
+    def forward(self, a):
+        lower = -a.tril(-1)
+        rows = F.pad(lower[..., 1:, :], (0, 0, 0, 1))
+        above = F.pad(lower[..., 1:, 1:], (0, 1, 0, 1))
+        solved = F.pad(rows[..., :1, :], (0, 0, 0, {n} - 1))
+        for i in range(1, {n} - 1):
+            solved = solved.clone()
+            solved[..., i, :] = rows[..., i, :] + (above[..., i : i + 1, :] @ solved).squeeze(-2)
+        return F.pad(solved[..., :-1, :], (0, 0, 1, 0)) + torch.eye({n})
+m = Inverse()
+m(torch.randn(2, 3, {n}, {n}) * 0.2)
+"""
+
+
+def test_a_substitution_that_writes_no_edge_row_rolls_every_step() -> None:
+    """A step that writes the matrix's last row loses a bound of its mask to the normal form, so it is another step
+    and stays outside the roll, its product inside whatever reads the inverse. Held one position up, every row is
+    written by the same step: the rolled kernel takes them all, and what is left beside it computes no product."""
+    n = 16
+    rolled = Pipeline.build(LOOP_PASSES).run(graph_from_code(_ROWS.format(n=n))[0])
+    loops = [node.op for node in rolled.nodes.values() if isinstance(node.op, LoopOp)]
+    (scan,) = (op for op in loops if op.body.carries)
+    (steps,) = (stmt for stmt in scan.body if isinstance(stmt, Loop))
+    assert steps.axis.extent.as_static() == n - 2
+    assert len(loops) == 3 and not [op for op in loops if op is not scan and op.body.iter_of_type(Accum)]
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize(("atom", "bound"), [("mma_m16n8k16_f16_f32", 2e-3), ("mma_m16n8k8_tf32x3_f32", 2e-6)])
+def test_a_substitution_keeps_the_rows_so_far_in_registers(atom: str, bound: float) -> None:
+    """A step is a row of memory times the state and writes one row of it, so the registers hold the state and each
+    step runs the product of the one block of rows it writes."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+    from emmy.compiler.ir.atom import ATOM_REGISTRY  # noqa: PLC0415
+    from emmy.compiler.ir.kernel.ir import FragmentRepack, MmaSyncPtx  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    n = 32
+    graph, _, (module, example, _) = graph_from_code(_ROWS.format(n=n))
+    matrix = (np.random.default_rng(0).standard_normal(tuple(example[0].shape)) * 0.2).astype(np.float32)
+    with pinned_knobs({"STAGE@map.1/scan": "d1/reg", "TILE@map.1/scan": f"{atom}/f1x4/k4", "WORK": "w2x1"}):
+        compiled, kernels = compile_with_kernels(graph)
+    (walk,) = (kernel for kernel in kernels.values() if statements(kernel, FragmentRepack))
+    assert len(statements(walk, MmaSyncPtx)) == (n - 2) * (n // ATOM_REGISTRY[atom].atom_k)
+
+    result, _ = CudaBackend().run(compiled, input_data={"a": matrix})
+    want = module.double()(torch.from_numpy(matrix).double()).numpy()
+    (got,) = result.outputs.values()
+    error = np.asarray(got).reshape(want.shape) - want
+    assert float(np.sqrt(np.mean(error**2))) < bound * float(np.sqrt(np.mean(want**2)))
