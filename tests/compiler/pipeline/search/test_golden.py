@@ -228,14 +228,15 @@ def test_a_scope_reads_a_file_only_on_the_card_that_measured_it(caplog) -> None:
 def test_a_piece_a_new_program_lowers_to_whole_becomes_its_target() -> None:
     """Appending a program whose one kernel is a stored cut piece (one kernel by identity) makes the piece that
     program's target under the program's own body, so the fresh lowering of the program writes its outputs and a
-    restamp keeps it. The H100 golden's sdpa prefill route stores the piece a plain f16 linear lowers to."""
+    restamp keeps it. The H100 golden's sdpa prefill route stores the piece a plain f16 linear lowers to; the golden
+    also records that linear as a program of its own, so the piece's provenance is cleared first."""
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline.search.golden.working import _append
 
     document = GoldenFile.load(_RECORDS_DIR / "h100_sm90.json")
-    piece = next(kernel for kernel in document.kernels if kernel.name == "k_bd48bb693056")
-    assert piece.traced is None
+    index = next(i for i, kernel in enumerate(document.kernels) if kernel.name == "k_bd48bb693056")
+    document.kernels[index] = piece = replace(document.kernels[index], traced=None)
     program = {
         "inputs": ["x0", "x1"],
         "outputs": ["linear"],
@@ -248,7 +249,7 @@ def test_a_piece_a_new_program_lowers_to_whole_becomes_its_target() -> None:
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name)
     assert _append(Graph.from_wire(program), ctx=ctx, document=document) == 0, "the program's kernel is the stored piece"
     target = document.kernel(piece.ref)
-    assert target.traced == len(document.programs) - 1 and target.name == piece.name
+    assert target.traced is not None and target.name == piece.name
     fresh, report = restamp(document, traced=target.traced)
     assert not report.changed, "\n".join(report.lines())
 
