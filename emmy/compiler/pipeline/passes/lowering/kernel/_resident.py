@@ -245,11 +245,13 @@ class _Blocks:
                 index = tuple(e.substitute(at) for e in slab.load.index)
                 filled = FragmentLoad(frag=b, src_buffer=slab.load.input, src_index=index, role="b", fragment_layout=self.layout, **direct)
             else:
-                filled = FragmentRepack(frag=b, srcs=(b_source,), role="b", fragment_layout=self.layout, part=b_part)
+                filled = FragmentRepack(
+                    frag=b, srcs=(b_source,), role="b", fragment_layout=self.layout, part=b_part, ab_dtype=atom.ab_dtype
+                )
             self.out += [
                 *prepare,
                 RegFragment(name=a, role="a", dtype=atom.operand_dtype("a"), fragment_layout=self.layout),
-                FragmentRepack(frag=a, srcs=a_sources, role="a", fragment_layout=self.layout, part=a_part),
+                FragmentRepack(frag=a, srcs=a_sources, role="a", fragment_layout=self.layout, part=a_part, ab_dtype=atom.ab_dtype),
                 RegFragment(name=b, role="b", dtype=atom.operand_dtype("b"), fragment_layout=self.layout),
                 filled,
                 MmaSyncPtx(
