@@ -480,7 +480,7 @@ def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(
     output where the program joins them: a step's rows of one tensor, at a row the step moves when the chunks are
     put back in sequence."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
-    from emmy.compiler.ir.kernel.ir import FragmentRepack, RegStore  # noqa: PLC0415
+    from emmy.compiler.ir.kernel.ir import FragmentApply, FragmentRepack, MmaSyncPtx, RegStore  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     graph, _, (module, example, _) = graph_from_code(_WALK.replace("torch.stack(outs, dim=1)", join))
@@ -495,6 +495,13 @@ def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(
     (walk,) = (kernel for kernel in kernels.values() if statements(kernel, FragmentRepack))
     assert not walk.serial and len({store.dst_buffer for store in statements(walk, RegStore)}) == 2
     assert len(kernels) == 1, "the walk stores the joined outputs itself"
+    # Nothing is held while the rest of the step is computed: an output's block is stored where it is computed, and
+    # a block of the state, whose next value reads that block alone, is overwritten as soon as that value stands.
+    (step,) = (loop for loop in statements(walk, Loop) if any(isinstance(inner, MmaSyncPtx) for inner in loop.body.iter()))
+    commits = [at for at, stmt in enumerate(step.body) if isinstance(stmt, FragmentApply) and stmt.in_place]
+    stores = [at for at, stmt in enumerate(step.body) if isinstance(stmt, RegStore)]
+    assert len(commits) > 1 and all(after - before > 1 for before, after in zip(commits, commits[1:], strict=False))
+    assert stores[0] < commits[0] and all(isinstance(step.body[at - 1], MmaSyncPtx | FragmentApply) for at in stores[:1])
 
     result, _ = CudaBackend().run(compiled, input_data=arrays)
     exact = module.double()(*(torch.from_numpy(arrays[name]).double() for name in names))

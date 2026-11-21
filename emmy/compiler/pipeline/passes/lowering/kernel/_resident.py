@@ -416,19 +416,27 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     blocks = _Blocks(tile, atom, period, row_base, state)
     declared = [RegFragment(name=name, role="c", dtype=F32, fragment_layout=atom.fragment_layout) for name in state]
 
-    # Every stored value of the step, then the state's next value; the state's fragments are overwritten last. A
-    # store that does not read the step writes the same cells every step, so the last step's alone is made.
-    stores: list = []
+    # The values a step stores, then the ones the last step alone stores, then the state's next value. A step's own
+    # store stands beside the value it stores, so no block of an output is held while the others are computed. A
+    # store that does not read the step writes the same cells every step, so the last step's alone is made, after
+    # the state is overwritten.
+    late: list = []
     last = BinaryExpression("==", Var(time.name), Literal(time.extent.as_static() - 1, "int"))
-    for spec, (col_dim, row_dim, out_col, out_row) in zip(tile.output_specs, stored, strict=True):
+
+    def every_step(spec) -> bool:
+        return any(time.name in entry.free_vars() for entry in spec.write.index)
+
+    for spec, (col_dim, row_dim, out_col, out_row) in sorted(
+        zip(tile.output_specs, stored, strict=True), key=lambda pair: not every_step(pair[0])
+    ):
         (value,) = spec.write.values
-        cells = []
+        every = every_step(spec)
         for cb in range(0, extents[out_col], atom.atom_n):
             frag = blocks.fragment(fold, value, out_row, out_col, None, cb)
             # The block's first cell: a coordinate the step moves (its rows in a tensor of every step's) keeps that.
             first = Sigma({out_col: Literal(cb, "int"), out_row: row_base})
             index = tuple(first.apply(entry) if dim in (col_dim, row_dim) else entry for dim, entry in enumerate(spec.write.index))
-            cells.append(
+            (blocks.out if every else late).append(
                 RegStore(
                     dst_buffer=spec.write.output,
                     dst_index=index,
@@ -441,19 +449,34 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
                     n_guard=(Literal(cb, "int"), Literal(extents[out_col], "int")),
                 )
             )
-        every = any(time.name in entry.free_vars() for entry in spec.write.index)
-        stores += cells if every else [Cond(last, Body(cells), Body())]
     following = [blocks.fragment(fold, fold.lift.results[0], row, col, None, j * atom.atom_n) for j in range(len(state))]
-    commit = [
-        FragmentApply(
-            out=name, op=ElementwiseImpl("copy"), args=fragment_args((value,), (FRAG,)), layout=atom.fragment_layout, in_place=True
-        )
-        for name, value in zip(state, following, strict=True)
-    ]
-    unroll = keeps and unroll_ok(time.extent, FLAGGED_WHOLE)
-    loop = Loop.strided(
-        axis=time, start=Literal(0, "int"), step=Literal(1, "int"), body=Body((*blocks.out, *stores, *commit)), unroll=unroll
+    # A block of the state is overwritten after the last statement that reads it or its next value: where a block's
+    # next value reads that block alone, right after it, and the next value's registers are free for the block after.
+    step = list(blocks.out)
+    touched: dict[str, int] = {}
+    for at, stmt in enumerate(step):
+        for inner in Body((stmt,)).iter():
+            touched.update(dict.fromkeys((*inner.deps(), *inner.defines()), at))
+    commits = sorted(
+        (
+            (
+                max(touched.get(name, -1), touched.get(value, -1)) + 1,
+                FragmentApply(
+                    out=name, op=ElementwiseImpl("copy"), args=fragment_args((value,), (FRAG,)), layout=atom.fragment_layout, in_place=True
+                ),
+            )
+            for name, value in zip(state, following, strict=True)
+        ),
+        key=lambda commit: commit[0],
+        reverse=True,
     )
+    for at, commit in commits:
+        step.insert(at, commit)
+    kept = dict(zip(following, state, strict=True))
+    if late:
+        step.append(Cond(last, Body(tuple(store.replace(frag=kept.get(store.frag, store.frag)) for store in late)), Body()))
+    unroll = keeps and unroll_ok(time.extent, FLAGGED_WHOLE)
+    loop = Loop.strided(axis=time, start=Literal(0, "int"), step=Literal(1, "int"), body=Body(tuple(step)), unroll=unroll)
     rows = extents[row]
     axes = (
         *tile.place.free,

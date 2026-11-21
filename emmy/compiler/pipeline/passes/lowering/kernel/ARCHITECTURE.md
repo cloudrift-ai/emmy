@@ -865,9 +865,23 @@ selects one row of a triangular inverse), the step does not compute the earlier 
 - **The step loop is written out.** The tests read the step alone, so the loop is flagged for `117_unroll_loops`
   (under the `UNROLL` budget, up to its whole-loop limit) and each copy's tests are decided there: a step's code is
   the product of the blocks it writes, and a block it keeps is no code at all.
-- **The seed is in the fragments ahead of the steps,** since a step no longer reads every block. A zero seed is the
-  fragment as declared, for every register-held state.
 - **A store that does not read the step** is made by the last step alone, as under the other storages.
+
+Every register-held state has its seed in the fragments ahead of the steps; a zero seed is the fragment as declared.
+A choice of the seed inside the step held every block twice, the state and the chosen value, and read the seed from
+memory every step.
+
+A step holds nothing it has finished with. An output's block is stored where it is computed. A block of the state is
+overwritten after the last statement that reads it or its next value, which the step's own statements decide: where a
+block's next value reads that block alone (a decayed state plus a product), the block is overwritten as soon as that
+value stands, and the next block reuses the registers. Computed whole and overwritten at the end, the sixteen blocks
+of a 128 x 128 state were 64 registers held across the outputs' products; the assembler spilled, and a walk of four
+steps over bf16 operands ran 33 on an RTX 5090 where it now runs 26.
+
+The memory operand of a product is loaded as it is stored. Where it is stored at the atom's operand dtype, a fragment
+is two packed loads; from f32 it is four loads and four conversions, and that walk ran 41. A program whose model is
+of 16 bits keeps such operands at that dtype (the Gated DeltaNet rule does, for the two matrices its walk multiplies
+the state by).
 
 An output's columns and rows are the last two entries of its store that read an axis other than the state's batch
 cells and the step (`matrix_coordinates`). An entry may be its axis moved by the step: a walk that stores every step's
