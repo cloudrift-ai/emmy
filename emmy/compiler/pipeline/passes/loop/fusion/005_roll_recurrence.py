@@ -386,11 +386,15 @@ def _roll(match: Match, chain: list[Node]) -> Graph:
     regions, states, _, count = _steps(match.graph, chain)
     chain = chain[:count]
     readers = _readers(match.graph, regions, states, chain)
-    if any(readers):
-        # Each step with its own readers, where those are one body at a stride as the steps are; else the steps
-        # alone, and every reader takes its state from a store.
+    joined = [region | read for region, read in zip(regions, readers, strict=True)]
+    # Each step with its own readers, where those are one body at a stride as the steps are; else the steps alone,
+    # and every reader takes its state from a store. Steps that are one body hold as many nodes each, which is asked
+    # before any of them is spliced: two unrelated products of one matrix are a chain of two by their bodies, the
+    # first one's readers are then everything that reads the matrix, and a splice of that many nodes over an
+    # unrolled recurrence does not come back.
+    if any(readers) and len({len(nodes) for nodes in joined}) == 1:
         try:
-            return _replaced(match, chain, [region | read for region, read in zip(regions, readers, strict=True)], states)
+            return _replaced(match, chain, joined, states)
         except RuleSkipped:
             pass
     return _replaced(match, chain, regions, states)
