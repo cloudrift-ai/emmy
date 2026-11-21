@@ -740,8 +740,9 @@ def _geom_feats(
         # KERNEL combine (``c<cta>k``), 0.0 = in-place ATOMIC (``c<cta>a`` / bare). The
         # offline prior's split-K gate reads it.
         "D_finalize_kernel": 1.0 if (splitk > 1 and finalize == "kernel") else 0.0,
-        # A scalar tile on a warp-ELIGIBLE contraction (16-bit operands, atoms offered —
-        # ``Featurizer.warp_eligible``) competes against tensor cores: the
+        # A scalar tile on a warp-ELIGIBLE contraction (operands of 16 bits or fewer, atoms offered —
+        # ``Featurizer.warp_eligible``, which does not count the TF32 atom of an fp32 product) competes against
+        # tensor cores: the
         # roofline bar none of the flat geometry terms can see. 0 on warp rows and on kernels
         # with no warp offer, so fp32 / non-contraction ranking is untouched.
         "D_scalar_on_warp_eligible": 1.0 if (not warp and float(knobs.get("S_warp_eligible", 0.0) or 0.0) > 0) else 0.0,

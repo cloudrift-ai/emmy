@@ -4,7 +4,8 @@ An atom is the smallest cell a contraction tiles four
 ways (GRID / UNIT / REGISTER / ATOM). Two kinds, one interface (``shape`` + :attr:`lanes`):
 
 - :class:`AtomKind` — a tensor-core ``mma.sync`` cell: a fixed ``(m, n, k)`` shape, per-operand
-  dtypes (``a``/``b`` the f16/bf16 multiplicands, ``c`` the accumulator — f32, or f16 on the
+  dtypes (``a``/``b`` the multiplicands — halves, 8-bit floats, or f32 values read as TF32 — and ``c`` the
+  accumulator — f32, or f16 on the
   ``..._f16_f16`` variant that runs the full-rate HMMA pipe with a chunked f32 register promotion
   in the lowering), and ``lanes == 32`` (the warp that executes one mma cooperatively — its 32
   lanes hold the fixed PTX fragment layout). The Hopper ``wgmma`` cell is the same 16x8 warp
