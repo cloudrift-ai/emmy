@@ -689,11 +689,16 @@ memory. Against the 64-bit inverse the error over the rms is 7e-5 for f16 operan
 split, with the state itself kept in f32. None of it is the prior's pick: with no evidence the substitution takes
 the thread tile and runs 45.
 
-The kernel that builds the system (the keys' product scaled by the decay between two positions and by beta, below
-the diagonal) also stores the decay matrix, which the output's own product reads later. That second output reads no
-accumulator, and it used to keep the kernel off tensor cores: 18.6 on a thread tile by the prior's pick. The fragment
-store now runs such an output's program beside the projection's, so the kernel runs 6.2 on
-`mma_m16n8k16_bf16_f32` under a pin and 12 on the TF32 tile the prior picks.
+The kernel that builds the system is the keys' product scaled by the decay between two positions and by beta, below
+the diagonal. Taken alone it also stores the decay matrix, which the output's own product reads later, and an
+output that reads no accumulator used to keep a kernel off tensor cores: 18.6 on a thread tile by the prior's pick.
+The fragment store now runs such an output's program beside the projection's, so that kernel runs 6.2 on
+`mma_m16n8k16_bf16_f32` under a pin and 12 on the TF32 tile the prior picks. In the whole rule the same kernel
+stores the normalized keys and a view of beta as well, outputs of other shapes, so its grid is not the product's own
+and no tile is offered. There the product reaches tensor cores through a cut of the product into its own kernel,
+which is offered: that piece runs 6.0 on the bf16 tile under a pin, where the fused kernel runs 464 by the prior's
+pick. The whole rule (48 heads, 256 tokens) runs 4.3 ms by the prior's pick, 3.7 ms of it the output's product
+nested in another product's operand.
 
 Inside a whole layer the gain is smaller. Recorded on the RTX 5090 for the 256-row layer of the 27B NVFP4 checkpoint,
 the six roots the rule reaches sum to 474 against 524 for the rule as Transformers writes it. The root that forms the
