@@ -6,7 +6,7 @@ from math import gcd
 
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Statement, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._siblings import Siblings
 from emmy.compiler.target import vector_widths
 
@@ -176,17 +176,51 @@ def _buf_dtype(top: KernelOp, name: str) -> str:
     return "f32"
 
 
-def vectorize_stores(top: KernelOp, body: Body) -> Body:
+def _snapshotted(stmts: list[Statement]) -> list[Statement]:
+    """``stmts`` with a copy taken of each value a running fold stores. A prefix sum written out stores its
+    accumulator after every step: one name, and another value each time, so each store has to stand before the next
+    step and no two of them can become one. A store of a copy does not: the copy holds the value, and the run of
+    stores stands together behind the last step. Nothing changes where fewer than two stores of a buffer read a
+    name that a later statement folds into."""
+    folds = [position for position, stmt in enumerate(stmts) if isinstance(stmt, Accum)]
+    last = {stmts[position].name: position for position in folds}
+    held = [
+        position
+        for position, stmt in enumerate(stmts)
+        if isinstance(stmt, Write) and not stmt.is_vector and not stmt.atomic and last.get(stmt.value, -1) > position
+    ]
+    outputs = [stmts[position].output for position in held]
+    held = [position for position in held if outputs.count(stmts[position].output) > 1]
+    if not held:
+        return stmts
+    dtypes = {stmts[position].name: stmts[position].dtype for position in folds}
+    out: list[Statement] = []
+    for position, stmt in enumerate(stmts):
+        if position in held:
+            copy = f"{stmt.value}__w{position}"
+            out.append(Assign(copy, Var(stmt.value), dtype=dtypes[stmt.value]))
+            stmt = stmt.replace(values=(copy,))
+        out.append(stmt)
+    return out
+
+
+def vectorize_stores(top: KernelOp, body: Body, aligned: dict[str, int] | None = None) -> Body:
     """``body`` with each run of scalar writes widened into one vector ``Write`` (``080_vectorize_stores``), nested
-    bodies first. ``top`` resolves the buffers' dtypes."""
+    bodies first. ``top`` resolves the buffers' dtypes, ``aligned`` the alignment of each enclosing strided loop's
+    variable, as for the loads: a store at ``a + 3`` inside a loop that steps ``a`` sixteen at a time is the fourth of
+    an aligned run."""
+    aligned = aligned or {}
     descended: list[Statement] = []
     for s in body:
         nested = s.nested()
         if nested:
-            descended.append(s.with_bodies(tuple(vectorize_stores(top, b) for b in nested)))
+            strided = isinstance(s, Loop) and s.step is not None
+            inner = {**aligned, s.axis.name: strided_alignment(s.walk()[0], s.step, aligned)} if strided else aligned
+            descended.append(s.with_bodies(tuple(vectorize_stores(top, b, inner) for b in nested)))
         else:
             descended.append(s)
 
+    descended = _snapshotted(descended)
     # Already-widened Writes never re-merge, and atomic reduce-writes never vectorize (each contributing lane needs
     # its own ``atomicAdd``). A swizzled-slab run merges only under one mode (the alignment proof then keeps the
     # n-aligned run inside one 16-byte swizzle chunk, where the XOR passes bits 0..2 through).
@@ -206,7 +240,7 @@ def vectorize_stores(top: KernelOp, body: Body) -> Body:
                 scope,
                 addresses,
                 widths,
-                {},
+                aligned,
                 lambda members, output=output, swizzle=swizzle, value_dtype=value_dtype: Write(
                     output=output,
                     index=scope[members[0]].index,
