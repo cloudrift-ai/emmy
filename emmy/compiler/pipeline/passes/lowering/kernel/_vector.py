@@ -6,7 +6,7 @@ from math import gcd
 
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Load, Statement, StridedLoop, Write, optimize_body
+from emmy.compiler.ir.stmt import Body, Load, Statement, StridedLoop, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._siblings import Siblings
 from emmy.compiler.target import vector_widths
 
@@ -92,59 +92,20 @@ def _atomized(expression: Expression, atoms: dict[Expression, Var]) -> Expressio
     return atoms.setdefault(expression, Var(f"_run_atom{len(atoms)}"))
 
 
-def vectorize_loads(top: KernelOp, body: Body) -> Body:
+def vectorize_loads(top: KernelOp, body: Body, aligned: dict[str, int] | None = None) -> Body:
     """``body`` with each run of scalar loads widened into one vector ``Load`` (``050_vectorize_loads``), nested
-    bodies first. ``top`` resolves the inputs. The elements of a run that read one block index are first spelled at
-    that index (:func:`_fold_run_offset`) and read once, by the body's optimization, so a run holds each address once:
-    the two k of a packed weight's byte are one load, and four such bytes one vector."""
-    folded = _fold_run_offsets(body, {})
-    return _widen_loads(top, optimize_body(folded) if _repeats_a_load(folded) else folded, {})
-
-
-def _repeats_a_load(body: Body) -> bool:
-    """Whether two scalar loads of one body, or of a body nested in it, read the same address."""
-    seen = set()
-    for s in body:
-        if any(_repeats_a_load(nested) for nested in s.nested()):
-            return True
-        if isinstance(s, Load) and s.is_scalar and not s.carried:
-            if (key := (s.input, s.index, s.dtype)) in seen:
-                return True
-            seen.add(key)
-    return False
-
-
-def _inner_alignment(stmt: Statement, aligned: Mapping[str, int]) -> Mapping[str, int]:
-    """``aligned`` inside ``stmt``: a strided loop adds the alignment of its variable."""
-    return {**aligned, stmt.axis.name: strided_alignment(stmt.start, stmt.step, aligned)} if isinstance(stmt, StridedLoop) else aligned
-
-
-def _fold_run_offsets(body: Body, aligned: Mapping[str, int]) -> Body:
-    """``body`` with every scalar load's index folded by :func:`_fold_run_offset`, nested bodies too."""
-    out = []
-    for s in body:
-        if nested := s.nested():
-            inner = _inner_alignment(s, aligned)
-            s = s.with_bodies(tuple(_fold_run_offsets(b, inner) for b in nested))
-        elif isinstance(s, Load):
-            s = s.map_expressions(lambda e: _fold_run_offset(e, aligned))
-        out.append(s)
-    folded = Body(tuple(out))
-    return body if folded == body else folded
-
-
-def _widen_loads(top: KernelOp, body: Body, aligned: Mapping[str, int]) -> Body:
-    """The widening of :func:`vectorize_loads` over a body whose run offsets are folded; ``aligned`` is the alignment
-    of each enclosing strided loop's variable."""
+    bodies first. ``top`` resolves the inputs, ``aligned`` the alignment of each enclosing strided loop's variable."""
+    aligned = aligned or {}
     descended: list[Statement] = []
     for s in body:
         nested = s.nested()
         if nested:
-            inner = _inner_alignment(s, aligned)
-            descended.append(s.with_bodies(tuple(_widen_loads(top, b, inner) for b in nested)))
+            inner = {**aligned, s.axis.name: strided_alignment(s.start, s.step, aligned)} if isinstance(s, StridedLoop) else aligned
+            descended.append(s.with_bodies(tuple(vectorize_loads(top, b, inner) for b in nested)))
         else:
             descended.append(s)
 
+    descended = [s.map_expressions(lambda e: _fold_run_offset(e, aligned)) if isinstance(s, Load) else s for s in descended]
     # No literal-constant loads (those render as embedded scalar floats), none without the stamped dtype that picks the
     # vector type (``030_stamp_types``), and no scalar-constant input: it is inlined at CUDA lowering, so the kernel
     # takes no such buffer to reinterpret.
@@ -159,7 +120,6 @@ def _widen_loads(top: KernelOp, body: Body, aligned: Mapping[str, int]) -> Body:
         if (address := flat_address(stmt.index, tensor, atoms)) is not None:
             runs.setdefault((stmt.input, stmt.dtype), {})[position] = address
     scope = Siblings(descended) if any(len(addresses) > 1 for addresses in runs.values()) else None
-    aligned = {**aligned, **{atom.name: _quotient_alignment(term, aligned) for term, atom in atoms.items()}}
     changed = False
     for (name, dtype), addresses in runs.items():
         if len(addresses) > 1:
@@ -177,40 +137,21 @@ def _widen_loads(top: KernelOp, body: Body, aligned: Mapping[str, int]) -> Body:
     return body if vectorized == body else vectorized
 
 
-def _quotient_alignment(term: Expression, aligned: Mapping[str, int]) -> int:
-    """The power of two every value of an atomized subterm is a multiple of: ``g / d`` for a quotient ``Y / d`` whose
-    ``Y`` is a multiple of ``g`` (its constant and its variables' coefficients times their known alignment) that
-    ``d`` divides, else 1. A packed weight's byte ``k / 2`` under a loop stepping 8 is a multiple of 4."""
-    if not (isinstance(term, BinaryExpression) and term.op == "/" and isinstance(term.right, Literal)):
-        return 1
-    form = affine_form(term.left, term.left.free_vars())
-    anchor = form[0].simplify(SimplifyCtx.empty()) if form is not None else None
-    divisor = term.right.value
-    if not (isinstance(anchor, Literal) and isinstance(anchor.value, int) and isinstance(divisor, int) and divisor > 0):
-        return 1
-    multiple = gcd(anchor.value, *(c * aligned.get(v, 1) for v, c in form[1].items()))
-    quotient = multiple // divisor if multiple % divisor == 0 else 1
-    return quotient & -quotient or 1
-
-
 def _fold_run_offset(expression: Expression, aligned: dict[str, int]) -> Expression:
-    """``(Y + r) / d`` as ``Y / d`` and ``(Y + r) % d`` as the literal ``r % d``, where ``Y`` is a non-negative
-    multiple of ``g`` (its variables' coefficients times their known alignment): the quotient when ``g`` divides ``d``
-    and ``0 < r < g``, the remainder when ``d`` divides ``g``. The elements of a lane's run then read a block scale at
-    one index, the run's own, and the two halves of a packed pair at their literal columns."""
+    """``(Y + r) / d`` as ``Y / d`` where ``Y`` is a non-negative multiple of ``g`` (its variables' coefficients
+    times their known alignment), ``g`` divides ``d`` and ``0 < r < g``: the elements of a lane's run then read
+    a block scale at one index, the run's own."""
     if not isinstance(expression, BinaryExpression):
         return expression
     left, right = _fold_run_offset(expression.left, aligned), _fold_run_offset(expression.right, aligned)
-    if expression.op in ("/", "%") and isinstance(right, Literal) and isinstance(right.value, int) and right.value > 0:
+    if expression.op == "/" and isinstance(right, Literal) and isinstance(right.value, int) and right.value > 0:
         form = affine_form(left, left.free_vars())
         anchor = form[0].simplify(SimplifyCtx.empty()) if form is not None else None
         if isinstance(anchor, Literal) and isinstance(anchor.value, int) and anchor.value >= 0 and form[1]:
             terms = [c * aligned.get(v, 1) for v, c in form[1].items()]
             if all(t > 0 for t in terms):
-                if expression.op == "%":
-                    if not gcd(*terms) % right.value:
-                        return Literal(anchor.value % right.value, "int")
-                elif offset := anchor.value % gcd(right.value, *terms):
+                offset = anchor.value % gcd(right.value, *terms)
+                if offset:
                     left = _affine(form[1], anchor.value - offset)
     return expression if (left, right) == (expression.left, expression.right) else BinaryExpression(expression.op, left, right)
 
