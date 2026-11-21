@@ -46,6 +46,14 @@ The gate is still not measured. What the card showed:
   each). The first `emmy generate` on this branch's pack never returned a token, and the GPU stayed at 100% use and
   112 W with no process and 2 MiB allocated, through a container restart. Main's pack, run after it, stalled the same
   way, but behind a card that was already wedged, so which tree hangs is not known. The card was given back.
+- **Main's pack hangs the same way, and the cause is the 4-row chunk** (a second card, the same day). Main's
+  drafter-off pack, served first under nsys, ran 16 launches of its first step and never finished the 17th: the
+  4-row chunk's `gdn0.add_70`, the first Gated DeltaNet layer's whole tail (state update, output projection, norm and
+  the shared expert) in one launch of one block of 256 threads. That is the uncovered `gdn4-sparse-linear` twin:
+  with no row for its cut, the export falls back to the unsplit kernel, once in each of the 30 such layers. It does
+  not deadlock; it runs for hours, and the GPU stays busy after the process is gone until it ends. Both trees' packs
+  hold it, and neither the one-row step nor the 64-row chunk holds a launch like it. A prompt of exactly 64 tokens
+  is one 64-row chunk (with carried state a chunk holds prompt tokens only), so it never reaches the 4-row chunk.
 - On the RTX 4080 the parallel scan alone is correct and fast at 65, 257 and 1,000 entries.
 
 ## The FP8 cache staged into shared memory (2026-11-07)
