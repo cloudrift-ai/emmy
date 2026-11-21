@@ -29,6 +29,13 @@ def slot_widths(bucket: int) -> tuple[int, ...]:
     return tuple(sorted({w for i in range(bucket.bit_length()) if (w := bucket >> i) > 1}))
 
 
+#: The widest fixed-slot program that weights, sums and adds its own picks (``ExpertFFN.slots_sum``). Its down
+#: product writes one value per (output, pick), picks fastest, since the cut that parts it from the sum keeps the
+#: sum's axis order: a block of two rows' twenty picks still reads few experts' rows at a time, one of four or
+#: eight rows' reads thirty-two (Qwen3.8-Flash-Next on the V100, per layer: 71.7 us at eight rows against 41.5 us
+#: for the program that leaves the sum to the runner).
+SUMMED_SLOT_ROWS = 2
+
 _KEY = re.compile(r"[A-Z][A-Z0-9_]*")
 _HEX_REVISION = re.compile(r"[0-9a-f]{7,40}")
 
