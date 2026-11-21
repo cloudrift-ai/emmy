@@ -1,5 +1,37 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## The paging programs in one run per launch, dev box only (2026-11-20)
+
+Milestone 11 of the native parity plan. The one-row step spent 7.45 ms in the pager's table programs: 160 paging runs
+(40 layers, four paged buffers each: gate-up and down codes and their scales), each 14 launches, and in each run a
+decision kernel on one thread block that counted every miss's rank by comparing all pairs of pages. At 256 pages that
+kernel was about 34 us of the run's 46.5 us on the RTX 5090; the 5090 golden's row for it reads 7.1 us at the
+65-page size the programs are compiled at.
+
+The change (#1454): the four buffers of one expert launch share one page list, so the launch takes one inspector,
+one decision and one state update, then a page table update and a copy per buffer; and a miss's rank is a running
+count (a scan) instead of the pairwise count. Measured on the RTX 4080 (sm_89) with a surrogate at Qwen3.6's
+geometry (256 pages, 8 slots, 120 resident, 8 random picks a step, 200 steps, kernel times from nsys):
+
+| one launch reading four paged stacks | paging kernels a step | launches |
+| --- | --- | --- |
+| before: four runs | about 122 us | 4 x 14 |
+| after: one run | about 33 us | 13 + 4 x 2 |
+
+The page copies are unchanged (about 2.5 us each here). At 40 layers the estimate is about 1.3 ms of paging a
+one-row step on this card, against the gate's 2 ms. The 5090 number is not measured: the old run cost 1.5x the 4080's
+there, mostly the pairwise kernel that is gone, so the estimate there is 1.3-2.0 ms.
+
+What did not work, from the plan's first lever: no schedule the compiler offers makes the pairwise count parallel.
+Its kernel holds sweeps over pages and over slots, so it has no grid axis; the one cut offered splits off the
+per-page miss flag and leaves the rank loop in place (16.0 us against 15.0 on the 4080), and the 512-thread leaf
+lowers to 948 us. The scan is offered parallel schedules: the 32-thread one takes 3.3 us at 256 pages against 7.0 us
+for the serial one the prior picks. Only a measured row on the card would pick it; the estimates above use the
+serial one.
+
+The 5090 golden's paging rows describe the old programs, so the new kernels lower from the prior until a record run
+adds their programs and rows.
+
 ## The FP8 cache staged into shared memory (2026-11-07)
 
 Native attention's FP8 key-value cache now copies into shared memory before the tensor-core fold reads it (#1366, on

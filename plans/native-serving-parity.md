@@ -635,6 +635,13 @@ What the session changes for the milestones:
     schedule, so no row could change it); the per-expert scale pages folded into their codes' paging run; one
     paging run per layer over its buffers' joint list. Gate: paging overhead <= 2 ms a captured one-row step;
     tokens unchanged. Needs 1.
+    **2026-11-20, #1454, gate not yet measured.** The four buffers are read by one expert launch, so the second
+    and third levers are one change: buffers of a program with the same pages and slots share one page list, one
+    run per launch. The first lever does not work by schedule (no offered schedule parallelizes the pairwise
+    count); the miss rank became a running count instead. RTX 4080 surrogate: paging 33 us a layer against 122,
+    about 1.3 ms a step; 5090 estimate 1.3-2.0 ms. Left for the card: the captured one-row step under nsys, tokens
+    against main, and the paging programs' new traces and rows in the 5090 golden (the scan's parallel schedule
+    needs a row to be picked).
 
 12. **Qwen3.6: slots sized to the verify step's picks.** A verify step's three rows route past the 8 slots, so
     the drafter buys almost nothing (a 44-52 ms drafted step against a 19.6-19.8 ms one-row step). The pager's
