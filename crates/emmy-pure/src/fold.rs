@@ -377,7 +377,30 @@ fn check_zero_axis(parts: &Parts, lift: &Lambda) -> Result<()> {
             lift.params().len()
         )));
     }
+    if !parts.cells.is_empty() && read_index(&parts.operands, &parts.cells, lift).is_none() {
+        return Err(Error::Value(
+            "a zero-axis term that states cells reads its one operand by index: one `Pre` per value, all at one \
+             coordinate per cell"
+                .into(),
+        ));
+    }
     Ok(())
+}
+
+/// The index a READ of an operand takes it at: a zero-axis term over one operand whose lift is one `Pre` per value
+/// read, all at one index of a coordinate per cell. `None` for any other shape.
+fn read_index<'a>(operands: &[Fold], cells: &[Name], lift: &'a Lambda) -> Option<&'a [Expression]> {
+    let stmts = lift.body().stmts();
+    if cells.is_empty() || operands.len() != 1 || stmts.is_empty() {
+        return None;
+    }
+    let Statement::Pre(first) = &*stmts[0] else {
+        return None;
+    };
+    let alike = stmts.iter().all(|stmt| {
+        matches!(&**stmt, Statement::Pre(pre) if pre.index == first.index && lift.params().contains(&pre.carrier))
+    });
+    (alike && first.index.len() == cells.len()).then_some(&first.index[..])
 }
 
 fn check_reduce(parts: &Parts, lift: &Lambda, base: &Lambda) -> Result<()> {
@@ -822,30 +845,41 @@ impl Fold {
         matches!(&*body.stmts()[0], Statement::Pre(_)).then(|| &body.stmts()[0])
     }
 
+    /// The index of a READ of a value another term defines: this term's one operand, taken at one coordinate per
+    /// cell — the operand's own coordinates, which the read binds (`cells`) — or `None`. The value is defined once,
+    /// over its own coordinates, and every place that needs it reads it this way; two reads of one value hold the
+    /// same operand term.
+    pub fn as_read(&self) -> Option<&[Expression]> {
+        if self.0.base.is_some() {
+            return None;
+        }
+        read_index(&self.0.operands, &self.0.cells, &self.0.lift)
+    }
+
     /// The coordinates this term is evaluated over as seen from outside: the lift's trailing params (past the axis
     /// and the operand binding) and its operands' free coordinates, less what the operands produce, the axis it binds
-    /// and a carried state's cells. A carried state's operands are its own loops' business and add nothing.
+    /// and a carried state's cells. A carried state's operands are its own loops' business and add nothing. A read
+    /// by index binds its operand's coordinates, and is evaluated over what its index reads.
     pub fn free_axes(&self) -> &HashSet<Name> {
         self.0.free_axes.get_or_init(|| {
-            let lead = usize::from(self.axis().is_some()) + self.bindings().len();
-            let mut space: HashSet<Name> = self
-                .0
-                .lift
-                .params()
-                .get(lead..)
-                .unwrap_or(&[])
-                .iter()
-                .copied()
-                .collect();
-            if let Some(read) = self.as_carrier_read()
-                && let Statement::Pre(pre) = &**read
-            {
-                space.remove(&pre.carrier);
-            }
+            let read = self.as_read().is_some();
+            let mut space: HashSet<Name> = HashSet::new();
             if !self.carries() {
                 for edge in &self.0.operands {
                     space.extend(edge.free_axes().iter().copied());
                 }
+            }
+            if read {
+                for cell in &self.0.cells {
+                    space.remove(cell);
+                }
+            }
+            let lead = usize::from(self.axis().is_some()) + self.bindings().len();
+            space.extend(self.0.lift.params().get(lead..).unwrap_or(&[]));
+            if let Some(read) = self.as_carrier_read()
+                && let Statement::Pre(pre) = &**read
+            {
+                space.remove(&pre.carrier);
             }
             for edge in &self.0.operands {
                 for name in edge.exposes() {
@@ -855,8 +889,10 @@ impl Fold {
             if let Some(axis) = self.axis() {
                 space.remove(&axis);
             }
-            for cell in &self.0.cells {
-                space.remove(cell);
+            if !read {
+                for cell in &self.0.cells {
+                    space.remove(cell);
+                }
             }
             space
         })

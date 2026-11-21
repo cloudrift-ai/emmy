@@ -490,6 +490,18 @@ and the CPU code generator walk it. The classic schedule and the kernel lowering
 may also state a `step`, how far its axis moves each trip: a kernel loop takes one where the threads of a block stride
 through an axis, and a Loop IR body states none.
 
+**A value may be defined once and read by index.** A `Carry` without a seed is the definition of a value the body keeps
+for itself: one cell per coordinate of the loops around it, each an index entry. A `Pre` reads a cell by index wherever
+those loops have closed, as a `Load` reads a buffer, so a value two or more places read is written once. Nothing is
+declared: the name is neither an input nor an output of the kernel, and no loop carries it. The normal form orders the
+nest that holds a definition ahead of every sibling that reads it, orders the nest's loops by the definition's index as
+it orders a store's, and tells a read apart by what the definition computes, never by the name the value goes under. No
+tier keeps such a value for its readers, so a kernel computes it where each reader reads it: the tile lift takes the
+body with every read replaced by the statements that compute the value at the index read (`computed_where_read`), and
+that is the body the kernel's identity is taken of. The body that defines a value and the body that writes it out at
+each reader are one kernel. The Loop IR runner keeps a defined value as an array of its own, which is the meaning of
+the form.
+
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
 

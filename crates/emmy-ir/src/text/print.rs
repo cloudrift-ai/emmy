@@ -108,11 +108,12 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
         }
         Statement::Carry(s) => {
             let seed = match &s.seed {
-                NumOr::Num(n) => spell_number(n.as_f64()),
-                NumOr::Value(name) => spell_stmt_name(name)?,
+                Some(NumOr::Num(n)) => format!(" seed {}", spell_number(n.as_f64())),
+                Some(NumOr::Value(name)) => format!(" seed {}", spell_stmt_name(name)?),
+                None => String::new(),
             };
             format!(
-                "{}{}{} <- {} seed {}",
+                "{}{}{} <- {}{}",
                 typed(&s.dtype),
                 spell_stmt_name(&s.name)?,
                 index(&s.index)?,

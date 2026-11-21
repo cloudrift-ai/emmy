@@ -1113,7 +1113,7 @@ mod tests {
             panic!("not a carry");
         };
         let seeded = Statement::Carry(Carry {
-            seed: NumOr::Value("init".into()),
+            seed: Some(NumOr::Value("init".into())),
             ..fields.clone()
         });
         assert_eq!(strs(&seeded.external_reads()), ["init"]);

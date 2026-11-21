@@ -21,6 +21,7 @@ from emmy.compiler.ir.expression import (
     CastExpression,
     Expression,
     FunctionCallExpression,
+    Interval,
     Literal,
     SimplifyCtx,
     TernaryExpression,
@@ -435,8 +436,36 @@ def _(stmt: Accum, ctx: RenderCtx) -> list[str]:
 
 @render_stmt.register
 def _(stmt: Carry, ctx: RenderCtx) -> list[str]:
+    if stmt.seed is None:
+        # A value the kernel defines for itself: one array, declared ahead of the body (:func:`defined_values`).
+        return [f"{_pad(ctx.indent)}{stmt.name}[{render_index(stmt.name, stmt.index, ctx)}] = {stmt.value};"]
     # The carrying ``Loop`` declared this slot beside the one reads see, and commits it after every step.
     return [f"{_pad(ctx.indent)}{stmt.name}{NEXT_STEP}[{render_index(stmt.name, stmt.index, ctx)}] = {stmt.value};"]
+
+
+def defined_values(body: Body) -> dict[str, tuple[tuple[int, ...], str]]:
+    """The values ``body`` defines for itself, each with the shape its cells take and its dtype: a ``Carry`` without
+    a seed, whose index holds one coordinate per loop around it. A dimension is the extent of the axis its
+    coordinate is, or one past the most a literal or an expression over the axes reaches."""
+    out: dict[str, tuple[tuple[int, ...], str]] = {}
+
+    def walk(stmts: Body, axes: dict[str, int]) -> None:
+        ranges = SimplifyCtx(ranges={name: Interval(0, extent - 1) for name, extent in axes.items()})
+        for stmt in stmts:
+            if isinstance(stmt, Carry) and stmt.seed is None:
+                dims = []
+                for coordinate in stmt.index:
+                    reach = coordinate.range(ranges)
+                    if reach is None:
+                        raise ValueError(f"the value {stmt.name!r} is defined at a coordinate with no bound: {coordinate}")
+                    dims.append(reach.hi + 1)
+                out[stmt.name] = (tuple(dims), (stmt.dtype or F32).name)
+            for child in stmt.nested():
+                inner = {**axes, stmt.axis.name: int(stmt.axis.extent.as_static())} if isinstance(stmt, Loop) else axes
+                walk(child, inner)
+
+    walk(body, {})
+    return out
 
 
 @render_stmt.register

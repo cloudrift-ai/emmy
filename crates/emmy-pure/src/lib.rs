@@ -11,6 +11,7 @@ pub mod readings;
 pub mod rewrite;
 pub mod tree;
 pub mod twist;
+pub mod values;
 
 pub use fold::Fold;
 pub use lambda::Lambda;

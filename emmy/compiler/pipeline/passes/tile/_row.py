@@ -31,7 +31,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, output_regions
 from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.passes.tile._free_axes import canonical_free_axes
-from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
+from emmy.compiler.pipeline.passes.tile._fromloop import computed_where_read, lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 from emmy.compiler.structural import form
 
@@ -131,6 +131,9 @@ def lift_kernel(loop: LoopOp, *, shapes: Mapping | None = None) -> TileOp:
     so a bare nest a cut is forming binds the row its stored definition binds when the lift takes it back: the piece
     and its stored definition are one kernel with one identity."""
     shapes = io_shapes(loop) if shapes is None else shapes
+    # A kernel computes each value its program defines where it is read: every step below reads that body.
+    if (body := computed_where_read(loop.body, shapes)) is not loop.body:
+        loop = replace(loop, body=body)
     if (body := canonical_free_axes(loop.body, shapes)) is not None:
         loop = replace(loop, body=body)
     tile = lift_loop_op(loop)
