@@ -1,8 +1,11 @@
-"""A copy is read through by every loop outside its region (``loop/fusion/008_read_through_copies``).
+"""A copy is read through by every loop outside its region (``loop/fusion/008_read_through_copies``), and a kernel
+no region holds stores its buffer where the one loop that reads it would only have moved it
+(``loop/fusion/020_store_through_copies``).
 
 A loop that only re-lays out or widens a buffer was stored wherever a kernel outside its region read it: for a kernel
 that carries a state, which is in no region, and for a second region. The reader now reads the buffer behind the
-copy, and the copy is stored for no one.
+copy, and the copy is stored for no one. On the other side of such a kernel, the loop that puts its outputs where the
+program wants them was a kernel of its own.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from tests.compiler.helpers import requires_cuda
 
 _RULE = importlib.import_module("emmy.compiler.pipeline.passes.loop.fusion.008_read_through_copies")
+_STORE = importlib.import_module("emmy.compiler.pipeline.passes.loop.fusion.020_store_through_copies")
 
 _WALK = """
 import torch, torch.nn as nn
@@ -140,3 +144,68 @@ def test_readers_through_a_copy_match_eager_on_the_gpu(code: str) -> None:
     want = want if isinstance(want, tuple) else (want,)
     for got, reference in zip(result.outputs.values(), want, strict=True):
         np.testing.assert_allclose(np.asarray(got).reshape(reference.shape), reference.float().numpy(), rtol=1e-4, atol=1e-5)
+
+
+_STEPS = """
+import torch, torch.nn as nn
+class Steps(nn.Module):
+    # a walk whose step computes its output, the outputs put back in sequence order{also}
+    def forward(self, q, k, v, state):
+        B, T, D = q.shape
+        outs = []
+        for c in range(T // 4):
+            kc = k[:, c*4:(c+1)*4]
+            new = v[:, c*4:(c+1)*4] - kc @ state
+            outs.append(q[:, c*4:(c+1)*4] @ state)
+            state = state + kc.transpose(1, 2) @ new
+        return torch.stack(outs, 1).reshape(B, T, D), state{first}
+m = Steps()
+m(torch.randn(2, 16, 8), torch.randn(2, 16, 8), torch.randn(2, 16, 8), torch.randn(2, 8, 8))
+"""
+
+
+def test_a_walk_stores_its_outputs_where_their_one_reader_would_move_them() -> None:
+    graph, _, _ = graph_from_code(_STEPS.format(also="", first=""))
+    graph = Pipeline.build(LOOP_PASSES).run(graph)
+
+    (walk,) = _loops(graph)
+    # Each step stores its four rows of the joined tensor, at a row the step moves, and nothing joins them after.
+    assert walk.op.body.carries and set(graph.outputs) == {tensor.name for tensor in walk.outputs}
+    (rows,) = (write.index[1] for write in walk.op.body.writes if len(write.index) == 3 and len(write.index[1].free_vars()) == 2)
+    assert "4" in str(rows)
+
+
+def test_a_buffer_read_elsewhere_is_stored_as_it_is() -> None:
+    graph, _, _ = graph_from_code(_STEPS.format(also=", and the first one alone", first=", outs[0]"))
+    graph = Pipeline.build(LOOP_PASSES).run(graph)
+
+    # Two loops read the steps' outputs: the walk keeps its own buffer, and the join is a kernel.
+    (walk,) = (node for node in _loops(graph) if node.op.body.carries)
+    assert len(_loops(graph)) > 1 and not set(graph.outputs) <= {tensor.name for tensor in walk.outputs}
+
+
+def _moved(body: str):
+    return _STORE.moved(LoopOp(body=parse_body(body)))
+
+
+def test_only_a_loop_that_moves_every_cell_once_is_stored_through() -> None:
+    chosen = """
+for a0 in 0..3:
+  for a1 in 0..4:
+    in0 = load s[0, 0, a1]
+    in1 = load s[1, 0, a1]
+    in2 = load s[2, 0, a1]
+    v0 = select:
+      in0 when 0 == a0
+      in1 when 1 == a0
+      in2 when true
+    c[4 * a0 + a1] = v0
+"""
+    # The steps read back by position and chosen by the joined coordinate are one read at that coordinate.
+    source, cell, write = _moved(chosen)
+    assert source == "s" and [str(entry) for entry in cell] == ["a0", "0", "a1"] and write.output == "c"
+    # A step missing from the choice, a value computed on the way, a cell read twice: each stays a kernel.
+    assert _moved(chosen.replace("in1 = load s[1, 0, a1]", "in1 = load s[0, 0, a1]")) is None
+    assert _moved("for a0 in 0..4:\n  in0 = load s[a0]\n  v0 = exp(in0)\n  c[a0] = v0") is None
+    assert _moved("for a0 in 0..4:\n  for a1 in 0..2:\n    in0 = load s[a0]\n    c[a0, a1] = in0") is None
+    assert _moved("for a0 in 0..4:\n  in0 = load s[3 - a0]\n  c[a0] = in0") is None

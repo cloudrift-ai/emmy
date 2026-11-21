@@ -163,7 +163,10 @@ def test_the_first_steps_readers_do_not_take_what_every_step_reads() -> None:
     (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
     assert steps.axis.extent.as_static() == 4
     last, outs = rolled.outputs.values()
-    assert len(outs.shape) == len(last.shape) + 1 and outs.shape[0].as_static() == 4, "an output a step, the last state once"
+    # The last state once, and an output a step. The program stacks the outputs and nothing else reads them, so the
+    # walk stores each where the stack wants it (``loop/fusion/020_store_through_copies``).
+    assert [dim.as_static() for dim in last.shape] == [2, 8, 8] and [dim.as_static() for dim in outs.shape] == [2, 4, 4, 8]
+    assert set(graph.outputs) == set(rolled.outputs), "no kernel after the walk"
     assert {"q", "tril"} <= set(rolled.inputs), "the output's products are in the step, the matrix they read an input"
 
 
@@ -469,15 +472,18 @@ m(torch.randn(2, 3, 16, 32), torch.randn(2, 3, 16, 32), torch.randn(2, 3, 16, 32
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("join", ["torch.stack(outs, dim=1)", "torch.stack(outs, dim=1).flatten(1, 2)"], ids=["stacked", "in-sequence"])
 @pytest.mark.parametrize(("atom", "bound"), [("mma_m16n8k16_f16_f32", 2e-3), ("mma_m16n8k8_tf32x3_f32", 2e-6)])
-def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(atom: str, bound: float) -> None:
+def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(atom: str, bound: float, join: str) -> None:
     """The outputs' two products roll into the step, so one launch computes them from the state its registers hold:
-    the kernel stores each chunk's output and the state the loop ends with, and no state between."""
+    the kernel stores each chunk's output and the state the loop ends with, and no state between. It stores an
+    output where the program joins them: a step's rows of one tensor, at a row the step moves when the chunks are
+    put back in sequence."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.ir.kernel.ir import FragmentRepack, RegStore  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
-    graph, _, (module, example, _) = graph_from_code(_WALK)
+    graph, _, (module, example, _) = graph_from_code(_WALK.replace("torch.stack(outs, dim=1)", join))
     names = ("query", "key", "new_values", "k_cumdecay", "intra", "decay", "state")
     rng = np.random.default_rng(0)
     arrays = {
@@ -488,6 +494,7 @@ def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(
     # The kernel whose products read the state's own fragments: it stores the outputs and the last state.
     (walk,) = (kernel for kernel in kernels.values() if statements(kernel, FragmentRepack))
     assert not walk.serial and len({store.dst_buffer for store in statements(walk, RegStore)}) == 2
+    assert len(kernels) == 1, "the walk stores the joined outputs itself"
 
     result, _ = CudaBackend().run(compiled, input_data=arrays)
     exact = module.double()(*(torch.from_numpy(arrays[name]).double() for name in names))
