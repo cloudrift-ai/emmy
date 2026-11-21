@@ -689,6 +689,12 @@ memory. Against the 64-bit inverse the error over the rms is 7e-5 for f16 operan
 split, with the state itself kept in f32. None of it is the prior's pick: with no evidence the substitution takes
 the thread tile and runs 45.
 
+The kernel that builds the system (the keys' product scaled by the decay between two positions and by beta, below
+the diagonal) also stores the decay matrix, which the output's own product reads later. That second output reads no
+accumulator, and it used to keep the kernel off tensor cores: 18.6 on a thread tile by the prior's pick. The fragment
+store now runs such an output's program beside the projection's, so the kernel runs 6.2 on
+`mma_m16n8k16_bf16_f32` under a pin and 12 on the TF32 tile the prior picks.
+
 Inside a whole layer the gain is smaller. Recorded on the RTX 5090 for the 256-row layer of the 27B NVFP4 checkpoint,
 the six roots the rule reaches sum to 474 against 524 for the rule as Transformers writes it. The root that forms the
 system and its inverse went from 192 to 94; the root that applies the inverse to the values and keys went from 279 to
