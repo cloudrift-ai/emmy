@@ -682,9 +682,9 @@ which stores only its last state, is 53 of the 195. None of these picks is the p
 takes a thread tile and runs 919, and one 128-wide reduce takes a CTA per output cell and runs 336.
 
 The substitution has since been spelled as a row of memory times the rows so far, which register storage holds.
-Alone, for 48 heads and four chunks of 64 on an RTX 5090, its 63 steps run 7.1 with `mma_m16n8k16_f16_f32` (about
-the same with the f16 accumulator and with bf16 operands, 27 with TF32 and 60 with its split), and the inverse's
-three kernels together run 11; the earlier spelling ran 35 as recorded, on a thread tile with the state in shared
+Alone, for 48 heads and four chunks of 64 on an RTX 5090, its 63 steps run 7.1 with `mma_m16n8k16_f16_f32` (6.3
+with the f16 accumulator, 6.8 with bf16 operands, 14 with TF32 and 55 with its split), and the inverse's three
+kernels together run 11; the earlier spelling ran 35 as recorded, on a thread tile with the state in shared
 memory. Against the 64-bit inverse the error over the rms is 7e-5 for f16 operands, 6e-4 for bf16 and 3e-8 for the
 split, with the state itself kept in f32. None of it is the prior's pick: with no evidence the substitution takes
 the thread tile and runs 45.
