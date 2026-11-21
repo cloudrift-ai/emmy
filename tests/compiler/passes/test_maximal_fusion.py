@@ -195,7 +195,7 @@ def test_a_recurrence_chain_rolls_and_the_rest_of_the_region_merges():
     assert steps.axis.extent.as_static() == 11, "eleven states carried from the first, which reads the broadcast"
     (merged,) = (nid for nid, op in kernels.items() if not carries_state(op) and "easy" in op.outputs)
     assert set(kernels[merged].outputs) >= {"easy", "s0"}, "the producer, the broadcast, the first state and the sibling are one kernel"
-    assert len(kernels) == 3, sorted(kernels)  # ... plus the slice of the last state the graph exports
+    assert len(kernels) == 2, sorted(kernels)  # the last state the graph exports is the rolled kernel's own store
     after = backend.run(backend.compile(fused), input_data=inputs)[0].outputs
     for name in (last, "easy"):
         np.testing.assert_allclose(after[name], before[name])

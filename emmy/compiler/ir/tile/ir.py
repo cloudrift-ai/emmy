@@ -38,7 +38,7 @@ from frozendict import frozendict
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op, buffer_types
-from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
@@ -297,12 +297,18 @@ def _reads_move_with(edge: Fold, coord: str, ctx: SimplifyCtx) -> bool:
     return any(coord in index.simplify(ctx).free_vars() for index in _index_reads(edge) if coord in index.free_vars())
 
 
-def matrix_coordinates(index: tuple) -> tuple[int, int] | None:
-    """Where in ``index`` the two coordinates of a stored matrix stand, columns then rows: its last two entries
-    that are no literal, a size-one dim between or after them being addressed by a zero. ``None`` where either is
-    more than an axis."""
-    at = [position for position, entry in enumerate(index) if not isinstance(entry, Literal)][-2:]
-    return (at[0], at[1]) if len(at) == 2 and all(isinstance(index[position], Var) for position in at) else None
+def matrix_coordinates(index: tuple, outside: frozenset[str] = frozenset()) -> tuple[int, int, str, str] | None:
+    """Where in ``index`` the two coordinates of a stored matrix stand and the axes they run along, columns then
+    rows: its last two entries that read an axis ``outside`` does not name (the cells a block holds one of, and the
+    step). An entry is its axis, or its axis moved by what ``outside`` names: a step's rows in a store that keeps
+    every step's rows in one tensor (``64 * step + row``). ``None`` where either is more than that."""
+    own = [(position, entry.free_vars() - outside) for position, entry in enumerate(index)]
+    at = [(position, names) for position, names in own if names][-2:]
+    if len(at) != 2 or any(len(names) != 1 for _, names in at):
+        return None
+    (cols, (col,)), (rows, (row,)) = ((position, tuple(names)) for position, names in at)
+    forms = (affine_form(index[cols], (col,)), affine_form(index[rows], (row,)))
+    return (cols, rows, col, row) if all(form is not None and set(form[1].values()) == {1} for form in forms) else None
 
 
 def loaded_buffers(term):
@@ -497,12 +503,12 @@ class TileOp(Op):
 
     @cached_property
     def resident_state(self) -> tuple | None:
-        """``(fold, batch cells, column cell, row cell)`` of the one state this kernel keeps between steps, where
-        register fragments can hold it, else ``None``. One warp owns sixteen positions of the state's last cell and
-        every position of the one before it, so: one state of static shape under no free axis of more than one
-        position (the size-one axis the row lift binds is none), a row count the fragment's sixteen rows divide and
-        column counts its eight divide, and every output a matrix over the state's rows. What the step computes is
-        the lowering's to accept or decline."""
+        """``(fold, batch cells, column cell, row cell, each output's matrix coordinates)`` of the one state this
+        kernel keeps between steps, where register fragments can hold it, else ``None``. One warp owns sixteen
+        positions of the state's last cell and every position of the one before it, so: one state of static shape
+        under no free axis of more than one position (the size-one axis the row lift binds is none), a row count the
+        fragment's sixteen rows divide and column counts its eight divide, and every output a matrix over the state's
+        rows (:func:`matrix_coordinates`). What the step computes is the lowering's to accept or decline."""
         carrying = self._carrying
         folds = [site.node for site in carrying.sites if site.node.carries] if carrying is not None else []
         if len(folds) != 1 or any(not axis.extent.is_static for axis in (*carrying.axes, *carrying.place.free)):
@@ -514,15 +520,15 @@ class TileOp(Op):
             return None
         *batch, col, row = fold.cells
         extent = {axis.name: axis.extent.as_static() for axis in carrying.axes}
-        at = [matrix_coordinates(spec.write.index) for spec in carrying.output_specs]
+        outside = frozenset((*batch, fold.axis, *(axis.name for axis in carrying.place.free)))
+        at = tuple(matrix_coordinates(spec.write.index, outside) for spec in carrying.output_specs)
         if any(len(spec.write.values) != 1 for spec in carrying.output_specs) or None in at:
             return None
-        matrices = [(spec.write.index[c], spec.write.index[r]) for spec, (c, r) in zip(carrying.output_specs, at, strict=True)]
-        if extent[row] % 16 or any(extent[r.name] != extent[row] for _, r in matrices):
+        if extent[row] % 16 or any(extent[rows] != extent[row] for _, _, _, rows in at):
             return None
-        if any(extent[name] % 8 for name in (col, *(c.name for c, _ in matrices))):
+        if any(extent[name] % 8 for name in (col, *(cols for _, _, cols, _ in at))):
             return None
-        return fold, tuple(batch), col, row
+        return fold, tuple(batch), col, row, at
 
     @cached_property
     def _carrying(self) -> TileOp | None:

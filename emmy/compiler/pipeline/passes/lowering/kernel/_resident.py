@@ -39,8 +39,8 @@ from emmy.compiler.ir.kernel.ir import (
     Tile,
     fragment_args,
 )
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Let, Load, Loop, Pre, Select
-from emmy.compiler.ir.tile.ir import matrix_coordinates
 from emmy.compiler.target import FLAGGED_WHOLE
 
 from ._atom import _direct_operand, _residence, unroll_ok
@@ -129,7 +129,7 @@ class _Blocks:
     def __init__(self, tile, atom, period: int, row_base, state: tuple[str, ...], ahead: bool = False):
         self.tile, self.atom, self.period, self.row_base, self.state = tile, atom, period, row_base, state
         self.ahead = ahead
-        self.carrying, self.batch, _, _ = tile.resident_state
+        self.carrying, self.batch, _, _, _ = tile.resident_state
         self.time = self.carrying.axis
         self.layout = atom.fragment_layout
         self.extents = {axis.name: axis.extent.as_static() for axis in (*tile.axes, *tile.place.free)}
@@ -422,10 +422,9 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     ``warps`` warps a CTA, a narrow accumulator promoted every ``period`` atom steps."""
     if tile.resident_state is None:
         raise Unresident("one state of static shape, its rows and columns whole fragments")
-    fold, batch, col, row = tile.resident_state
+    fold, batch, col, row, stored = tile.resident_state
     extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
-    stored = [(spec, *matrix_coordinates(spec.write.index)) for spec in tile.output_specs]
-    widths = [extents[col], *(extents[spec.write.index[at].name] for spec, at, _ in stored)]
+    widths = [extents[col], *(extents[out_col] for _, _, out_col, _ in stored)]
     if extents[row] % atom.atom_m or any(width % atom.atom_n for width in widths):
         raise Unresident("a state or an output the atom's fragments do not tile exactly")
     time = tile.axis_of(fold.axis)
@@ -443,16 +442,14 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     # store that does not read the step writes the same cells every step, so the last step's alone is made.
     stores: list = []
     last = BinaryExpression("==", Var(time.name), Literal(time.extent.as_static() - 1, "int"))
-    for spec, col_dim, row_dim in stored:
+    for spec, (col_dim, row_dim, out_col, out_row) in zip(tile.output_specs, stored, strict=True):
         (value,) = spec.write.values
-        out_col, out_row = spec.write.index[col_dim].name, spec.write.index[row_dim].name
         cells = []
         for cb in range(0, extents[out_col], atom.atom_n):
             frag = blocks.fragment(fold, value, out_row, out_col, None, cb)
-            index = tuple(
-                Literal(cb, "int") if dim == col_dim else row_base if dim == row_dim else entry
-                for dim, entry in enumerate(spec.write.index)
-            )
+            # The block's first cell: a coordinate the step moves (its rows in a tensor of every step's) keeps that.
+            first = Sigma({out_col: Literal(cb, "int"), out_row: row_base})
+            index = tuple(first.apply(entry) if dim in (col_dim, row_dim) else entry for dim, entry in enumerate(spec.write.index))
             cells.append(
                 RegStore(
                     dst_buffer=spec.write.output,
