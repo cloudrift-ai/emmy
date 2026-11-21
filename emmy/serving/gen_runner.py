@@ -1814,7 +1814,7 @@ class EmmyGenRunner:
                     for rows in widths:
                         name = pre + ("slots" if rows == 1 else f"slots{rows}")
                         picks = (moe_top_k,) if rows == 1 else (rows, moe_top_k)
-                        sums = [torch.zeros(picks), torch.zeros(rows, hidden, dtype=dtype)] if summed else []
+                        sums = [torch.zeros(picks, dtype=dtype), torch.zeros(rows, hidden, dtype=dtype)] if summed else []
                         slot_examples = [torch.zeros(rows, hidden, dtype=dtype), torch.zeros(picks, dtype=torch.int64), *sums, *stacked_w]
                         try:
                             with evidence_reads() as read:
@@ -3294,7 +3294,7 @@ class EmmyGenRunner:
         summed = "scores" in slots.input_names
         inputs = {"x": xn.detach().contiguous()}
         if summed:
-            inputs |= {"scores": scores.float(), "shared": shared.contiguous()}
+            inputs |= {"scores": scores.to(xn.dtype), "shared": shared.contiguous()}
         capturing = torch.cuda.is_current_stream_capturing()
         with p.on_stream(torch.cuda.current_stream()):
             p.upload_prefix_device(inputs)

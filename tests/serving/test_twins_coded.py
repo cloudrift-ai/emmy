@@ -560,6 +560,9 @@ def test_qwen4_exp_nvfp4_sliced_experts_add_the_grouped_prefill_twins(tmp_path, 
     assert shapes.pop("sel") == ((EXPERT_GROUP,), "i64")
     assert shapes == {i: stacked[i] for i in shapes} and next(iter(shapes.values()))[0][0] == 4
     assert tuple(group.nodes[group.outputs[0]].output.shape) == (EXPERT_GROUP, rows, 32)
+    # A slot program takes each row's router scores and the shared expert's output, and returns the routed sum.
+    assert stacked["scores"] == (stacked["sel"][0], "f32") and stacked["shared"] == stacked["x"] == ((4, 32), "f16")
+    assert tuple(slots.nodes[slots.outputs[0]].output.shape) == (4, 32)
 
 
 def test_qwen4_exp_nvfp4_twins_trace_into_the_inventory(tmp_path, monkeypatch):

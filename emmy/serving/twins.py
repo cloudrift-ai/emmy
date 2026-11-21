@@ -449,7 +449,7 @@ def capture_twin_graphs(
             count = int(parts[1].gate_up_proj.shape[0])
             one = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
             picks = (top_k,) if rows == 1 else (rows, top_k)
-            sums = [torch.zeros(picks), torch.zeros(rows, hidden, dtype=td)] if summed else []
+            sums = [torch.zeros(picks, dtype=td), torch.zeros(rows, hidden, dtype=td)] if summed else []
             stacked = [
                 one[0],
                 torch.zeros(picks, dtype=torch.int64),
