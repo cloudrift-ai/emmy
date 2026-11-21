@@ -1023,6 +1023,13 @@ the rows of an instance whose tables disagree with themselves (`SearchDB.drift`)
 subcommand resolves its instance through `commands/db.db_path`, which refuses a missing one with the command that
 fills it.
 
+Every refit command — `db import`, `db export`, `fit` and `eval prior` — logs a progress line about every 30 s while a
+long phase runs (done of total, rate, elapsed time, time left), also while no pool finishes, and a timing summary at the
+end: each phase's wall time and worker count, the pools per card, and the ten slowest pools by kernel, card, sizes and
+the schedule rows they enumerated (`search/progress.py`). Each worker times its own pool and sends the seconds back
+with the result. The export writes the summary to `timing.json` beside the manifest, the fit beside `metrics.json`,
+and `eval prior --json` under `timing`; the manifest and the metrics carry no clock, so they stay the same bytes.
+
 ### `emmy fit`
 Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db
 export` wrote — the directory the positional argument names — the same groups `eval prior` reads (`Dataset.load`; the

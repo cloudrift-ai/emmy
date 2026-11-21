@@ -16,7 +16,8 @@ commit away from the repository. No compile ever reads it, so what is imported i
 - ``export OUT`` writes the instance's rows as a dataset directory (``search/dataset``): every golden pool
   enumerated from its kernel's definition and packed, every measured pool, and the provenance; the placement space
   reads the constants the import filed beside the rows, so it opens no golden file. ``emmy fit`` and ``emmy eval
-  prior`` read the dataset directory, never the DB.
+  prior`` read the dataset directory, never the DB. The export's timing (``search/progress``) goes to
+  ``timing.json`` beside the manifest, which carries no clock.
 - ``check`` counts the rows of an instance whose tables disagree with themselves (a reference, a card). A DB is a
   cache: a row the current code disagrees with is benched or imported again, so nothing here decodes what the
   compiler wrote.
@@ -31,6 +32,8 @@ import logging
 import sys
 from pathlib import Path
 
+from emmy import storage
+from emmy.compiler.pipeline.search import progress
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
 
 logger = logging.getLogger(__name__)
@@ -109,23 +112,34 @@ def handle_db_import(args) -> None:
             path.with_name(path.name + suffix).unlink(missing_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     db = SearchDB(path)
-    try:
-        for src in sources:
+
+    def load(src: Path) -> int:
+        """Import one source; the perf rows it wrote."""
+        try:
+            if src.suffix == ".json":  # a golden file; anything else is a tune DB
+                return import_file(db, src, file_source("golden", src))["perf rows"]
+            if (source := file_source("tune", src)) in db.sources():
+                return 0
+            tune = SearchDB.open_readonly(src)
             try:
-                if src.suffix == ".json":  # a golden file; anything else is a tune DB
-                    import_file(db, src, file_source("golden", src))
-                elif (source := file_source("tune", src)) not in db.sources():
-                    tune = SearchDB.open_readonly(src)
-                    try:
-                        with db.transaction():
-                            logger.info("imported %s as %s: %d perf rows", src.name, source, db.import_measured(tune, source))
-                    finally:
-                        tune.close()
-            except (ValueError, RuntimeError) as exc:
-                logger.error("%s", exc)
-                sys.exit(2)
-    finally:
-        db.close()
+                with db.transaction():
+                    rows = db.import_measured(tune, source)
+                logger.info("imported %s as %s: %d perf rows", src.name, source, rows)
+                return rows
+            finally:
+                tune.close()
+        except (ValueError, RuntimeError) as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
+
+    with progress.recording("emmy db import") as report:
+        try:
+            progress.timed_map(
+                load, sources, name="import", unit="sources", describe=lambda src, rows: {"source": src.name, "perf_rows": rows}
+            )
+        finally:
+            db.close()
+    report.log()
     logger.info("DB: %s", path)
 
 
@@ -135,15 +149,20 @@ def handle_db_export(args) -> None:
 
     path = db_path(args.db)
     db = SearchDB.open_readonly(path)
-    try:
-        dataset = export_dataset(db, source=str(path), pool_sample=args.pool_sample, seed=args.seed, space=args.space, jobs=args.jobs)
-    finally:
-        db.close()
-    try:
-        out = dataset.dump(args.out)
-    except RuntimeError as exc:
-        logger.error("%s", exc)
-        sys.exit(2)
+    with progress.recording(f"emmy db export --space {args.space}") as report:
+        try:
+            dataset = export_dataset(db, source=str(path), pool_sample=args.pool_sample, seed=args.seed, space=args.space, jobs=args.jobs)
+        finally:
+            db.close()
+        try:
+            with progress.phase("write dataset"):
+                out = dataset.dump(args.out)
+        except RuntimeError as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
+    report.log()
+    # Beside the manifest, never in it: the manifest carries no clock, so one DB exports to the same bytes.
+    storage.write_json(out / progress.TIMING, report.to_json(), indent=1)
     logger.info(
         "dataset: %s (%d golden groups, %d measured groups, %d golden rows skipped)",
         out,
