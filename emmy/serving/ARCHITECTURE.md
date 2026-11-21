@@ -460,9 +460,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `-slots4`, `-slots8`), and a step of several rows runs the narrowest that holds it once, through a second shared
   selector and partials pair, and combines every row with one batched score product. A Qwen4Exp program at every
   width takes the router's scores and the shared expert's output too (`ExpertFFN.slots_sum`: `scores[B, k]` and
-  `shared[B, H]` in, the layer's routed sum `[B, H]` out): it weights, sums and adds in its down projection's
-  kernel, reads the routed rows and the shared output where the layer's post twin wrote them, and leaves the runner
-  the selector write and the scores' upload. A program reads every slot's
+  `shared[B, H]` in, the layer's routed sum `[B, H]` out): it weights, sums and adds in the program, reads the
+  routed rows and the shared output where the layer's post twin wrote them, and leaves the runner the selector's
+  write and the scores' (one shared buffer each, as the partials were). A program reads every slot's
   expert whatever the step's rows, so the narrower programs are what makes a step's expert work follow its rows. The
   rows past the step keep an earlier step's picks and inputs, whose partials no row reads. A step of one row keeps
   the one-row program, and a step no built width holds goes through it one row at a time. Wider steps, prefill and whole-expert

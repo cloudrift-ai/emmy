@@ -3256,8 +3256,7 @@ class EmmyGenRunner:
             slots = moe["slot_rows"][width]
             with gpu_lock():
                 self._slot_rows_sel[:t].copy_(indices)
-                self._slot_scores[:t].copy_(scores)
-                routed = self._run_slots(slots, xn, shared, t)
+                routed = self._run_slots(slots, xn, scores, shared)
                 if routed is None:
                     # [T, 1, k] @ [T, k, H] — each row's weighted combine, one batched product.
                     routed = _combine_slot_partials(
@@ -3276,8 +3275,7 @@ class EmmyGenRunner:
             for row in range(t):
                 self._slot_sel.copy_(indices[row])
                 rows = slice(row, row + 1)
-                self._slot_scores[:1].copy_(scores[rows])
-                routed = self._run_slots(moe["slots"], xn[rows], None if shared is None else shared[rows], 1)
+                routed = self._run_slots(moe["slots"], xn[rows], scores[rows], None if shared is None else shared[rows])
                 if routed is None:
                     # [1, k] @ [k, H] — the fixed-shape weighted combine.
                     routed = _combine_slot_partials(
@@ -3290,18 +3288,19 @@ class EmmyGenRunner:
                 combined.append(routed)
         return combined[0] if len(combined) == 1 else torch.cat(combined)
 
-    def _run_slots(self, slots, xn, shared, t):
-        """Run one fixed-slot program on the step's first ``t`` rows, its selector and scores already written.
-        Returns the routed sum of a program that takes the router's scores and the shared expert's output, a view of
-        its output under a capture and a copy otherwise; ``None`` for a program that leaves the picks' partials to
-        combine."""
+    def _run_slots(self, slots, xn, scores, shared):
+        """Run one fixed-slot program on the step's rows ``xn``, its selector already written. Returns the routed sum
+        of a program that takes the router's scores and the shared expert's output, a view of its output under a
+        capture and a copy otherwise; ``None`` for a program that leaves the picks' partials to combine."""
         import torch
 
         p = slots.program
+        t = xn.shape[0]
         summed = "scores" in slots.input_names
         inputs = {"x": xn.detach().contiguous()}
         if summed:
-            # The scores were written where the program reads them: the upload of that memory only marks them bound.
+            # One write casts the scores into the buffer the program reads; its upload then only marks them bound.
+            self._slot_scores[:t].copy_(scores)
             inputs |= {"scores": self._slot_scores[:t], "shared": shared.contiguous()}
         capturing = torch.cuda.is_current_stream_capturing()
         with p.on_stream(torch.cuda.current_stream()):
