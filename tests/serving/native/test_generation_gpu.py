@@ -58,7 +58,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
         monkeypatch.setenv("PATH", "/nonexistent")
         model.cuda()
         # Strict reference products use FP32 accumulation, including on Torch versions with split-K defaults.
-        from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+        from emmy.compiler.backend.correctness import reference_precision
 
         async def check():
             worker = NativeWorker(executable=executable)
@@ -89,7 +89,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             },
                             wall_timeout_s=30,
                         )
-                        with torch.no_grad(), _reference_precision(True):
+                        with torch.no_grad(), reference_precision():
                             expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
                         actual = np.fromfile(logits_path, np.float32)
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position, prefix[-1]).astype(np.float32))
@@ -117,7 +117,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         position = expected_position
                         if result["tokens"]:
                             prefix = prompt + chunked
-                            with torch.no_grad(), _reference_precision(True):
+                            with torch.no_grad(), reference_precision():
                                 expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
                             actual = np.fromfile(logits_path, np.float32)
                             np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
@@ -399,7 +399,7 @@ def test_nvfp4_head_checkpoint_exports_its_w4a4_head(tmp_path, monkeypatch):
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
-    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+    from emmy.compiler.backend.correctness import reference_precision
     from emmy.compiler.backend.plan import plan_from_dict
     from emmy.serving.native.prepare import load_drafter, load_model
     from tests.serving.helpers import add_mtp_head, nvfp4_head_checkpoint, static_fp4
@@ -436,7 +436,7 @@ def test_nvfp4_head_checkpoint_exports_its_w4a4_head(tmp_path, monkeypatch):
     weight = model.lm_head.weight.detach().float().cpu().numpy()
 
     def reference(prefix):
-        with torch.no_grad(), _reference_precision(True):
+        with torch.no_grad(), reference_precision():
             row = model.model(torch.tensor([prefix], device="cuda")).last_hidden_state[0, -1]
         return static_fp4(row.float().cpu().numpy(), input_scale) @ weight.T
 
@@ -565,7 +565,7 @@ def test_fp8_moe_checkpoint_exports_its_coded_experts(tmp_path, monkeypatch, exp
 def _computes_the_dequantized_model(model, root, executable, tmp_path, tolerance=1e-3):
     """Every logit and greedy token of the pack at ``root`` is the eager model's, within ``tolerance``,
     through the one-token program and through prefill chunks."""
-    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+    from emmy.compiler.backend.correctness import reference_precision
 
     model.cuda()
 
@@ -584,7 +584,7 @@ def _computes_the_dequantized_model(model, root, executable, tmp_path, tolerance
                     )
                     if not result["tokens"]:
                         continue
-                    with torch.no_grad(), _reference_precision(True):
+                    with torch.no_grad(), reference_precision():
                         expected = model(torch.tensor([prompt + generated], device="cuda")).logits[0, -1].float().cpu().numpy()
                     np.testing.assert_allclose(np.fromfile(logits_path, np.float32), expected, rtol=tolerance, atol=tolerance)
                     assert result["tokens"] == [int(expected.argmax())]
@@ -622,7 +622,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         pytest.fail("checkpoint qualification requires the native worker")
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+    from emmy.compiler.backend.correctness import reference_precision
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
     model = AutoModelForCausalLM.from_pretrained(checkpoint, dtype=torch.float16, attn_implementation="eager", local_files_only=True).eval()
@@ -659,7 +659,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                             wall_timeout_s=30,
                         )
                         native_position = result["position"]
-                    with torch.no_grad(), _reference_precision(True):
+                    with torch.no_grad(), reference_precision():
                         ids = torch.tensor([[prefix[-1]]], device="cuda")
                         reference = model(ids, past_key_values=past, use_cache=True)
                         past = reference.past_key_values
@@ -738,7 +738,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
                     for _ in range(3):
                         reset = await worker.run_job({"op": "generation_step", "capture": True}, wall_timeout_s=30)
-                    with torch.no_grad(), _reference_precision(True):
+                    with torch.no_grad(), reference_precision():
                         expected = model(torch.tensor([prompt[:3]], device="cuda")).logits[0, -1]
                     assert reset["tokens"] == [int(expected.argmax())]
             finally:
@@ -751,7 +751,7 @@ def test_a_step_attends_through_its_window_ranges_program(tmp_path, monkeypatch)
     """Each range of windows attends through its own program, priced at its window: the step holds every layer's
     attention once per range, each launch running only in its range, and a step gives the model's logits at a window
     of either range. The boundary sits at the second window here, so a short context reaches both."""
-    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+    from emmy.compiler.backend.correctness import reference_precision
     from emmy.serving.native.prepare import WINDOW
 
     monkeypatch.setattr("emmy.serving.native.prepare.WINDOW_RANGES", (("", 1, 4096), ("-long", 8192, 131072)))
@@ -771,7 +771,7 @@ def test_a_step_attends_through_its_window_ranges_program(tmp_path, monkeypatch)
         program.set_sym_values({WINDOW: 8192})
         long = _python_step(program, len(prompt) - 1, prompt[-1])
         model.cuda()
-        with torch.no_grad(), _reference_precision(True):
+        with torch.no_grad(), reference_precision():
             expected = model(torch.tensor([prompt], device="cuda")).logits[0, -1].float().cpu().numpy()
     np.testing.assert_allclose(short, expected, rtol=1e-3, atol=1e-3)
     np.testing.assert_allclose(long, expected, rtol=1e-3, atol=1e-3)

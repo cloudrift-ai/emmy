@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from emmy.compiler.backend.paging import DECISIONS, MOVES, PageCopy, PagingProgram, PagingUpdate
+from emmy.compiler.backend.paging import DECISIONS, MOVES, STATE, PageCopy, PagingProgram, PagingUpdate, PageTableUpdate
 from tests.compiler.helpers import requires_cuda
 
 PAGES, SLOTS, ELEMS, MOVED = 12, 3, 4, 4
@@ -20,16 +20,18 @@ NAMES = ("marks", "table", "slot_page", "page_slot", "age", "host", "slot_addres
 
 
 class _Step(torch.nn.Module):
-    """One pager step as one module — the decisions, the table update, the copy — which the plan splices in turn."""
+    """One pager step as one module — the decisions, the state update, the page table's update, the copy — which the
+    plan splices in turn."""
 
     def __init__(self):
         super().__init__()
-        self.decide, self.update, self.copy = PagingProgram(), PagingUpdate(), PageCopy()
+        self.decide, self.update, self.table, self.copy = PagingProgram(), PagingUpdate(), PageTableUpdate(), PageCopy()
 
     def forward(self, marks, table, slot_page, page_slot, age, host, slot_address, clock, pages, slots):
         moves = torch.zeros(MOVED, dtype=torch.int64)
-        *decisions, moved_page, moved_slot = self.decide(marks, slot_page, page_slot, age, clock, moves, moves.clone())
-        table, slot_page, page_slot, age, clock = self.update(table, slot_page, page_slot, age, host, slot_address, clock, *decisions)
+        hit_slot, miss_slot, evicted_page, moved_page, moved_slot = self.decide(marks, slot_page, page_slot, age, clock, moves, moves.clone())
+        slot_page, page_slot, age, clock = self.update(slot_page, page_slot, age, clock, hit_slot, miss_slot, evicted_page)
+        table = self.table(table, host, slot_address, miss_slot, evicted_page)
         return table, slot_page, page_slot, age, self.copy(moved_page, moved_slot, pages, slots), clock
 
 
@@ -71,7 +73,7 @@ def _check(got: dict, expected: tuple):
 
 @pytest.mark.parametrize("resident", [0, 3])
 def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_steps(resident):
-    """The three programs compiled one by one and run in turn, as the plan splices them, against the eager step. A
+    """The four programs compiled one by one and run in turn, as the plan splices them, against the eager step. A
     resident page is a hit in no slot: it never takes a slot or leaves its home."""
     from emmy.compiler.backend.loop.backend import LoopBackend
     from emmy.compiler.trace.torch import trace_module
@@ -80,21 +82,11 @@ def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_step
     state = _state(resident)
     feed = _inputs(state, _marks(rng, 0), 0, pages)
     decide_args = ("marks", "slot_page", "page_slot", "age", "clock", *MOVES)
-    update_args = (
-        "table",
-        "slot_page",
-        "page_slot",
-        "age",
-        "host",
-        "slot_address",
-        "clock",
-        "hit_slot",
-        "miss_slot",
-        "evicted_page",
-    )
-    produced = {"decide": (*DECISIONS, *MOVES), "update": ("table", "slot_page", "page_slot", "age", "clock"), "copy": ("slots",)}
+    update_args = (*STATE, *DECISIONS)
+    table_args = ("table", "host", "slot_address", "miss_slot", "evicted_page")
+    produced = {"decide": (*DECISIONS, *MOVES), "update": STATE, "table": ("table",), "copy": ("slots",)}
     decisions = dict(zip(produced["decide"], step.decide(*(feed[n] for n in decide_args)), strict=True))
-    parts = (("decide", decide_args), ("update", update_args), ("copy", (*MOVES, "pages", "slots")))
+    parts = (("decide", decide_args), ("update", update_args), ("table", table_args), ("copy", (*MOVES, "pages", "slots")))
     programs = [
         (part, backend.compile(trace_module(getattr(step, part), tuple({**feed, **decisions}[n] for n in names))), names)
         for part, names in parts
@@ -280,7 +272,7 @@ def test_the_symbolic_decision_kernels_keep_independent_sweeps_apart():
     from emmy.compiler.backend.paging import _paging_plan
     from emmy.compiler.dtype import I64
 
-    decide, _, _ = _paging_plan(I64)
+    decide, *_ = _paging_plan(I64)
     for kernel, spec in decide.kernels.items():
         stack: list[tuple[int, str]] = []
         for line in spec.source.splitlines():
@@ -290,6 +282,60 @@ def test_the_symbolic_decision_kernels_keep_independent_sweeps_apart():
                 outer = {extent for depth, extent in stack if depth < indent} - {match.group(1)}
                 assert not outer, f"{kernel}: a loop over {match.group(1)} nests in one over {outer}"
                 stack.append((indent, match.group(1)))
+
+
+@requires_cuda
+def test_buffers_of_one_page_list_take_one_paging_run_and_move_in_step():
+    """Two stacks of eight rows, three slots each, read at one selector by one launch: they share one page list, so
+    the launch takes one inspector and one decision over the first by name's state, then each stack's own page table
+    update and copy. Every step's result is the eager program's, and each stack's page table points the same pages at
+    its own slots, which hold its own rows."""
+    import torch.nn as nn
+
+    from emmy import emmy_runtime
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.device import device
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.trace.torch import trace_module
+
+    class Toy(nn.Module):
+        def forward(self, w, v, sel, x):
+            return w[sel] * x + v[sel][:, :1]
+
+    toy, w, v = Toy(), torch.arange(ROWS * COLS, dtype=torch.float32).reshape(ROWS, COLS), -torch.arange(ROWS * 2.0).reshape(ROWS, 2)
+    x = torch.full((2, COLS), 2.0)
+    graph = trace_module(toy, (w, v, torch.tensor([5, 1]), x))
+    graph.hints.set("cuda.paged_buffers", (("w", 0, 1, PAGE_SLOTS), ("v", 0, 1, PAGE_SLOTS)))
+    plan = plan_from_graph(CudaBackend().compile(graph))
+    *paging, launch = plan.launches
+    parts = {".".join(lc.node_id.split(".")[1:3]) for lc in paging}
+    assert sum(".inspect." in lc.node_id for lc in paging) == 1
+    assert parts == {"v.inspect", "v.page", "v.copy", "w.page", "w.copy"}, parts
+    assert {lc.node_id.split(".")[1] for lc in paging if ".page." in lc.node_id and ".page.table." not in lc.node_id} == {"v"}
+    with gpu_lock():
+        hosts = {"w": w.pin_memory(), "v": v.pin_memory()}
+        pager = emmy_runtime.Pager()
+        program = CompiledProgram.build_from_plan(plan, {"sel": np.array([5, 1]), "x": x.numpy()})
+        for name, host in hosts.items():
+            pager.declare(device(), name, (0, host.data_ptr()), (ROWS, host[0].nbytes, PAGE_SLOTS, 0))
+            pager.bind(program.executor, name)
+        for picks in ([5, 1], [5, 7], [2, 7], [0, 3], [4, 0]):
+            sel = torch.tensor(picks)
+            program.upload_prefix({"sel": sel.numpy()})
+            program.run_once()
+            np.testing.assert_array_equal(program.outputs()[plan.outputs[0]].reshape(2, COLS), toy(w, v, sel, x).numpy())
+            held = []
+            for name, host in hosts.items():
+                table = np.frombuffer(program.executor.read(f"{name}__table"), dtype=np.int64)[:ROWS]
+                address = list(np.frombuffer(program.executor.read(f"{name}__slot_address"), dtype=np.int64))
+                slots = np.frombuffer(program.executor.read(f"{name}__slots"), dtype=np.float32).reshape(PAGE_SLOTS + 1, -1)
+                in_slots = {page: address.index(at) for page, at in enumerate(table) if at in address}
+                for page, slot in in_slots.items():
+                    np.testing.assert_array_equal(slots[slot], host[page].numpy())
+                held.append(in_slots)
+            assert held[0] == held[1] and set(picks) <= set(held[0]), held
 
 
 @requires_cuda
