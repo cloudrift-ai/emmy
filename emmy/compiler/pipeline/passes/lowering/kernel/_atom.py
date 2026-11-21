@@ -2530,18 +2530,21 @@ class _MmaOps(_AtomOps):
         for write in writes:
             cone = body.backward_cone((write.value,))
             used = [f for f, acc in enumerate(accs) if acc in cone.external_reads]
-            if not used:
+            # A value that reads no accumulator is computed beside the product, element by element as the
+            # projection is: its store runs its program over the cell's coordinates, under the first fragment's
+            # name, which the program does not read.
+            primary = used[0] if used else 0
+            extra = tuple(used[1:])
+            epi = _warp_epilogue(
+                [*cone.members, write], accs[primary], m.axis.name, n.axis.name, sigma, extra_accs=tuple(accs[f] for f in extra)
+            )
+            if not used and not epi:
                 from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
                 # A REJECTING skip: this is the node's lowering declining the offered row, so the
                 # greedy blocklists it and retries. Without the flag the row wedges the compile —
                 # nothing else lowers the node and the terminal keeps an unlowered ``TileOp``.
                 raise RuleSkipped(f"fragment projection for {write.output!r} reads no contraction accumulator", reject=True)
-            primary = used[0]
-            extra = tuple(used[1:])
-            epi = _warp_epilogue(
-                [*cone.members, write], accs[primary], m.axis.name, n.axis.name, sigma, extra_accs=tuple(accs[f] for f in extra)
-            )
             out.append(
                 RegStore(
                     dst_buffer=write.output,
@@ -3803,6 +3806,8 @@ class _FlashOps(_MmaOps):
                     FragmentApply(out=name, op=ElementwiseImpl("copy"), args=fragment_args((rows[write.value],), (ROW,)), layout=layout)
                 )
                 frags[write.value] = name
+            if write.value not in frags:
+                raise RuleSkipped(f"the chunk tier holds {write.output!r}'s value in no fragment to store", reject=True)
             out.append(
                 RegStore(
                     dst_buffer=write.output,

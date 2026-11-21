@@ -293,3 +293,85 @@ def test_the_type_check_reads_a_stores_epilogue() -> None:
     untyped = store.replace(epilogue=_warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)["epilogue"])
     with pytest.raises(TypeError, match="load r.*carries no dtype"):
         check_types(Body([untyped]), {name: dtype.name for name, dtype in buffers.items()})
+
+
+def _scaled_product(second: str, m: int = 32, n: int = 32, k: int = 64):
+    """``out = (a @ b) * exp(r[i] - c[j])``, and beside it ``second``: the weight itself, or a copy of ``r``."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.loop import LoopOp
+
+    stored = {"weight": "v2", "copy": "in2"}[second]
+    body = parse_body(
+        f"""
+for a0 in 0..{m}:
+  for a1 in 0..{n}:
+    for a2 in 0..{k}:
+      in0 = load a[a0, a2]
+      in1 = load b[a2, a1]
+      v0 = in0 * in1
+      acc0 <- add(acc0, v0) over a2
+    in2 = load r[a0]
+    in3 = load c[a1]
+    v1 = in2 - in3
+    v2 = exp(v1)
+    v3 = acc0 * v2
+    out[a0, a1] = v3
+    beside[a0, a1] = {stored}
+"""
+    )
+    graph = Graph()
+    shapes = {"a": (m, k), "b": (k, n), "r": (m,), "c": (n,)}
+    for name, shape in shapes.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape, F32), node_id=name)
+    outputs = (Tensor("out", (m, n), F32), Tensor("beside", (m, n), F32))
+    graph.add_node(LoopOp(body=body), list(shapes), outputs=outputs, node_id="out")
+    graph.inputs, graph.outputs = list(shapes), ["out", "beside"]
+    return graph
+
+
+def _offered_atoms(graph) -> tuple[str, ...]:
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.schedule.classic import refusals
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.ir.tile.path import sites
+    from emmy.compiler.pipeline import Pipeline
+
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
+    (tile,) = (node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    (product,) = (site.node for site in sites(tile.op) if site.node.axis is not None)
+    return refusals._warp_atoms(tile, Context.from_target((12, 0)), product)
+
+
+def test_a_value_computed_beside_the_product_does_not_keep_the_kernel_off_tensor_cores() -> None:
+    """A kernel that scales its product by a weight and stores the weight too, for another reader, has an output
+    that reads no accumulator. The fragment's store runs that output's program element by element as it runs the
+    projection's, so the product is still offered its atoms. A bare copy of a load has no program to run."""
+    assert "mma_m16n8k8_tf32_f32" in _offered_atoms(_scaled_product("weight"))
+    assert _offered_atoms(_scaled_product("copy")) == ()
+
+
+@requires_cuda
+@requires_sm(8, 0)
+def test_a_value_computed_beside_the_product_is_stored_from_the_fragment_tier() -> None:
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    m, n, k = 32, 32, 64
+    with pinned_knobs({"TILE": "mma_m16n8k8_tf32_f32/f1x4/k8", "WORK": "w2x1", "REDUCE": "", "STAGE": ""}):
+        compiled, kernels = compile_with_kernels(_scaled_product("weight", m, n, k))
+    assert statements(kernels, MmaSyncPtx)
+    assert {store.dst_buffer for store in statements(kernels, RegStore)} == {"out", "beside"}
+
+    rng = np.random.default_rng(0)
+    feed = {
+        "a": rng.integers(-8, 9, (m, k)).astype(np.float32),
+        "b": rng.integers(-8, 9, (k, n)).astype(np.float32),
+        "r": rng.standard_normal(m).astype(np.float32) * 0.5,
+        "c": rng.standard_normal(n).astype(np.float32) * 0.5,
+    }
+    result, _ = CudaBackend().run(compiled, input_data=dict(feed))
+    weight = np.exp(feed["r"].astype(np.float64)[:, None] - feed["c"].astype(np.float64)[None, :])
+    exact = (feed["a"].astype(np.float64) @ feed["b"].astype(np.float64)) * weight
+    np.testing.assert_allclose(result.outputs["beside"].reshape(m, n), weight, rtol=2e-6)
+    np.testing.assert_allclose(result.outputs["out"].reshape(m, n), exact, rtol=2e-5, atol=1e-3)
