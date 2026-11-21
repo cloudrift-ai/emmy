@@ -691,9 +691,14 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
         # The chain of loops over the cells, from the carrying loop down to the level that defines
         # the state; a free loop beside that chain is an output SWEEP of the step (the delta rule's
         # corrected values, over the chunk's rows beside the state's), left as one.
-        if any(isinstance(stmt, Carry) for stmt in body):
+        if any(isinstance(stmt, Carry) and stmt.seed is not None for stmt in body):
             return list(body)
-        chain = [index for index, stmt in enumerate(body) if isinstance(stmt, Loop) and not stmt.is_reduce and stmt.body.carries]
+        # The nest of a value the step defines for itself holds no state: it stands beside the chain, like a sweep.
+        chain = [
+            index
+            for index, stmt in enumerate(body)
+            if isinstance(stmt, Loop) and not stmt.is_reduce and any(carry.seed is not None for carry in stmt.body.carries)
+        ]
         if len(chain) != 1:
             return list(body)
         (index,) = chain
@@ -701,7 +706,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
         return [*body[:index], *flatten(body[index].body), *body[index + 1 :]]
 
     flat = Body(flatten(loop.body))
-    defined = tuple(stmt for stmt in flat if isinstance(stmt, Carry))
+    defined = tuple(stmt for stmt in flat if isinstance(stmt, Carry) and stmt.seed is not None)
     if any(
         carry.cells != defined[0].cells or [isinstance(e, Var) for e in carry.index] != [isinstance(e, Var) for e in defined[0].index]
         for carry in defined
