@@ -330,9 +330,10 @@ def _chunk_rule(
     one kernel that carries the state, and a step's own readers roll into it too
     (``loop/fusion/005_roll_recurrence``): the output is computed where the state is held, and no state but the
     last is stored. ``beta``, the decay and the query scale multiply the ``chunk x chunk`` matrices and the rows of
-    a product's result, never the queries, keys or values: those stay the operands they were loaded as, which is
-    what a tensor-core tile reads. The sums are the reference's; a scale meets its product on the other side, so
-    the rounding differs in the last place.
+    a product's result, never the queries or values: those stay the operands they were loaded as, which is what a
+    tensor-core tile reads. The keys take one decay, in the one product that shares its left operand with another.
+    The sums are the reference's; a scale meets its product on the other side, so the rounding differs in the last
+    place.
 
     The inverse of the chunk's triangular system is the reference's substitution, a row a step, with the row read
     from the system and not from the buffer the step writes: the step is then a row of memory times the state, the
@@ -372,8 +373,12 @@ def _chunk_rule(
             inverse = inverse.clone()
             inverse[..., i, :] = lower[..., i, :] + (lower[..., i : i + 1, :] @ inverse).squeeze(-2)
         inverse = inverse + eye
-    new_values = (inverse * beta.unsqueeze(3)) @ value
-    k_cumdecay = (inverse * (beta * cum.exp()).unsqueeze(3)) @ key
+    # One scaled inverse for both products: the decay that only the keys' product takes is on the keys. Two
+    # products of two differently scaled inverses are one kernel with two left operands, which no staged schedule
+    # holds.
+    scaled = inverse * beta.unsqueeze(3)
+    new_values = scaled @ value
+    k_cumdecay = scaled @ (key * cum.exp().unsqueeze(4))
     intra = (query @ key.transpose(-1, -2)) * (pairwise * scale)
     state = new_values.new_zeros((batch, v_heads, k_dim, v_dim)) if initial_state is None else initial_state.to(new_values)
     query_row = (cum.exp() * scale).unsqueeze(4)

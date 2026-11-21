@@ -637,7 +637,7 @@ requires. Materializing the fused product instead does not merely cost bytes; it
 consumer's index, and a reading that cannot prove k-block invariance declines.
 
 There is one fusion pass and one fixpoint, and the graph decides every region before any is merged
-(`010_merge_loop_ops.regions`). Some nodes no region holds: a kernel that carries a state, an ordered prefix output
+(`_region.regions`). Some nodes no region holds: a kernel that carries a state, an ordered prefix output
 (a scan, whose Write observes a running accumulator) and any op that is not a loop. Two loops share a region when the
 same such nodes — and the same packed producers — lie upstream of both and a chain of loop edges joins them; equal
 upstream boundaries are what keep a region convex, so the merged kernel never depends on a node that depends on it.
@@ -649,6 +649,15 @@ port. The partition is a function of the graph alone, so the kernel set is the s
 visited in — what a walk that grew a region from each producer and shrank it on a refusal could not promise. A
 region the splicer cannot build is an error (`ir/ARCHITECTURE.md`, the construction bound), never a smaller region.
 That maximal result is final: no later placement rule cuts it apart.
+
+A copy is read through from outside its region (`008_read_through_copies`). A loop that only re-lays out a buffer or
+widens it — the chunks of a sequence, a transpose, a broadcast, a 16-bit float read as f32 — is inlined into every
+reader of its own region by the splice. A reader outside the region used to make the region store the copy: a kernel
+that carries a state, which no region holds, and a second region. Before any region is merged, such a reader takes the
+buffer behind the copy at the cell the copy reads. The regions are the same; what goes is the stored copy, and the
+kernel whose only work it was. It runs after the roll, which compares a recurrence's steps as the tracer left them. A
+copy that rounds is arithmetic and is not read through, nor is a copy of a buffer another kernel stores over, nor one
+of a packed buffer.
 
 **Measured evidence this rule is spending.** Dropping the work-growth cap and the merge-ordering pass is a deliberate
 trade: both existed because of a measurement, and neither measurement has been retaken. A merge that splices a compute
