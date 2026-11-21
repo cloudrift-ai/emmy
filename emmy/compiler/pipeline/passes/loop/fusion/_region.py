@@ -7,6 +7,7 @@ from dataclasses import replace
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp, splice_graph
+from emmy.compiler.pipeline.passes.tile._fromloop import computed_where_read
 
 
 def carries_state(op: LoopOp) -> bool:
@@ -50,7 +51,14 @@ def build_merged_region(graph: Graph, region: set[str], live_outputs: tuple[str,
         sub.add_node(InputOp(), [], ext_t, node_id=ext_id)
     for nid in order:
         node = graph.nodes[nid]
-        sub.add_node(node.op, list(node.inputs), outputs=node.outputs, node_id=nid)
+        op = node.op
+        # The splice reconstructs statements at their readers: a value a member defines for itself is computed where
+        # it is read first, as its kernel would compute it.
+        if isinstance(op, LoopOp):
+            shapes = {tensor.name: tensor.shape for tensor in (*(graph.buffer(name) for name in node.inputs), *node.outputs)}
+            if (body := computed_where_read(op.body, shapes)) is not op.body:
+                op = replace(op, body=body)
+        sub.add_node(op, list(node.inputs), outputs=node.outputs, node_id=nid)
     sub.outputs = list(live_outputs)
 
     result = splice_graph(sub)

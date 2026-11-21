@@ -24,6 +24,7 @@ Assign = _ir.Assign
 Call = _ir.Call
 Carry = _ir.Carry
 Cond = _ir.Cond
+Define = _ir.Define
 Init = _ir.Init
 Let = _ir.Let
 Load = _ir.Load
@@ -64,6 +65,7 @@ __all__ = [
     "Body",
     "Call",
     "Carry",
+    "Define",
     "Cond",
     "Identity",
     "Init",

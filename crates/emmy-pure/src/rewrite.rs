@@ -113,6 +113,19 @@ impl TermRewrite {
             .iter()
             .map(|edge| self.term(edge, sigma, done))
             .collect::<Result<Vec<_>>>()?;
+        let rewritten = self.node(fold, operands, sigma)?;
+        done.insert(key, rewritten.clone());
+        Ok(rewritten)
+    }
+
+    /// `fold` itself rewritten over `operands`, which stand where its own did: its lift, its monoid, its cells, its
+    /// observer and its range, each renamed and substituted. `sigma` holds nothing for an axis `fold` binds.
+    pub(crate) fn node(
+        &self,
+        fold: &Fold,
+        operands: Vec<Fold>,
+        sigma: &HashMap<Name, Expression>,
+    ) -> Result<Fold> {
         let lift = fold.lift();
         let lead = usize::from(fold.axis().is_some());
         let bound = lead + fold.bindings().len();
@@ -189,9 +202,7 @@ impl TermRewrite {
                 Ok::<_, emmy_ir::Error>((rewritten(start)?, rewritten(end)?))
             })
             .transpose()?;
-        let rewritten = Fold::new(parts)?;
-        done.insert(key, rewritten.clone());
-        Ok(rewritten)
+        Fold::new(parts)
     }
 }
 

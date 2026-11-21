@@ -15,7 +15,7 @@ use std::sync::Arc;
 use emmy_ir::axis::Axis;
 use emmy_ir::body::{Body, free_names};
 use emmy_ir::expr::Expression;
-use emmy_ir::statement::{Cond, Loop, Statement};
+use emmy_ir::statement::{Cond, Define, Load, Loop, Statement};
 use emmy_ir::{Error, Name, Result};
 
 use crate::fold::Fold;
@@ -144,6 +144,16 @@ struct Lowering<'a> {
     emitted: HashSet<(usize, usize)>,
     retained: Vec<Fold>,
     writes: HashMap<usize, bool>,
+    /// For each value a term reads by index (its definition's address), the coordinates every read takes at the
+    /// coordinate itself: a scope that binds one of those holds the cells its readers read, and walks no more.
+    aligned: HashMap<usize, HashSet<Name>>,
+    /// The definitions already written.
+    defined: HashSet<usize>,
+}
+
+/// The buffer a kernel keeps the value `value` in: its own, apart from the name of one cell of it.
+fn kept_name(value: &Name) -> Name {
+    Name::new(&format!("{value}__kept"))
 }
 
 type Loops = Vec<(Name, HashSet<Name>, usize)>;
@@ -528,7 +538,16 @@ impl Lowering<'_> {
             })
             .map(|b| term.operands()[b.operand].address())
             .collect();
-        let (placed, kept) = self.placed(term)?;
+        // A read by index loads a value the kernel keeps: its definition is written once, in a nest of its own
+        // ahead of this scope's statements, and the read is the load of one cell.
+        let by_index = term.as_read().is_some();
+        let (placed, kept) = if by_index {
+            self.define(term, nest)?;
+            (Vec::new(), Vec::new())
+        } else {
+            self.placed(term)?
+        };
+        let step = if by_index { loads(&step) } else { step };
         for (edge, operand) in placed.iter().zip(&kept) {
             let reader_path = if step_live && read.contains(&operand.address()) {
                 node.as_deref()
@@ -561,6 +580,49 @@ impl Lowering<'_> {
             self.lists[target].extend(step.stmts().iter().cloned());
             self.attach(term, Kind::Step, target, &here, &scope, nest, None)?;
         }
+        Ok(())
+    }
+
+    /// The definition of the value `read` reads by index, written once into the scope `nest` binds, ahead of its
+    /// statements: a nest over the value's coordinates, one cell stored per coordinate. A coordinate every read
+    /// takes at the coordinate itself is not walked where the scope binds it, so the nest defines the cells this
+    /// scope reads: one block's, one step's.
+    fn define(&mut self, read: &Fold, nest: usize) -> Result<()> {
+        let definition = read.operands()[0].clone();
+        if !self.defined.insert(definition.address()) {
+            return Ok(());
+        }
+        let cells = read.cells().to_vec();
+        let scope = self.nests[nest].bound.clone();
+        let aligned = self.aligned.get(&definition.address());
+        let walked: Vec<Name> = cells
+            .iter()
+            .filter(|cell| {
+                !(scope.contains(cell) && aligned.is_some_and(|held| held.contains(cell)))
+            })
+            .copied()
+            .collect();
+        if let Some(missing) = walked.iter().find(|cell| !self.has_coordinate(cell)) {
+            return Err(Error::Value(format!(
+                "lower: no extent for '{missing}' — the kernel's axis table names the coordinates of a value read by \
+                 index"
+            )));
+        }
+        let local = self.new_nest(walked.clone(), scope);
+        self.place(&definition, &Vec::new(), Some(&walked), local)?;
+        let target = self.sink(local, &walked);
+        let index: Vec<Expression> = cells.iter().map(|cell| Expression::var(cell)).collect();
+        for value in self.taken_of(&definition)?.clone() {
+            self.lists[target].push(Arc::new(Statement::Define(Define {
+                name: kept_name(&value),
+                value,
+                index: index.clone().into(),
+                dtype: None,
+            })));
+        }
+        let body = self.assemble(local, &[])?;
+        let top = self.sink(nest, &[]);
+        self.lists[top].extend(body.stmts().iter().cloned());
         Ok(())
     }
 
@@ -652,6 +714,26 @@ impl Lowering<'_> {
         }
         Ok(())
     }
+}
+
+/// The step of a read by index as loads of the value the kernel keeps: each `Pre` of an operand's value is the
+/// load of one cell of the buffer that value is kept in.
+fn loads(step: &Body) -> Body {
+    Body::new(
+        step.stmts()
+            .iter()
+            .map(|stmt| match &**stmt {
+                Statement::Pre(pre) => Arc::new(Statement::Load(Load {
+                    names: vec![pre.name].into(),
+                    input: kept_name(&pre.carrier),
+                    index: pre.index.clone(),
+                    dtype: None,
+                    carried: Name::from(""),
+                })),
+                _ => stmt.clone(),
+            })
+            .collect(),
+    )
 }
 
 impl Fold {
@@ -806,6 +888,7 @@ impl Fold {
         let mut readers: HashMap<Name, usize> = HashMap::new();
         let mut origin: HashMap<Name, (usize, Kind)> = HashMap::new();
         let mut terms: HashMap<usize, Fold> = HashMap::new();
+        let mut aligned: HashMap<usize, HashSet<Name>> = HashMap::new();
         let origins = self.range_origins(axes)?;
         let mut seen: HashSet<usize> = HashSet::new();
         let mut pending = vec![self.clone()];
@@ -822,6 +905,23 @@ impl Fold {
             }
             if let Some(axis) = term.axis() {
                 internal.insert(axis);
+            }
+            if let Some(index) = term.as_read() {
+                // The coordinates of a value read by index are its definition's own.
+                internal.extend(term.cells().iter().copied());
+                let held: HashSet<Name> = term
+                    .cells()
+                    .iter()
+                    .zip(index)
+                    .filter(|(cell, at)| at.as_var() == Some(*cell))
+                    .map(|(cell, _)| *cell)
+                    .collect();
+                aligned
+                    .entry(term.operands()[0].address())
+                    .and_modify(|so_far: &mut HashSet<Name>| {
+                        so_far.retain(|cell| held.contains(cell))
+                    })
+                    .or_insert(held);
             }
             if term.carries() {
                 internal.extend(term.cells().iter().copied());
@@ -992,6 +1092,8 @@ impl Fold {
             emitted: HashSet::new(),
             retained: Vec::new(),
             writes: HashMap::new(),
+            aligned,
+            defined: HashSet::new(),
         };
         let root = lowering.new_nest(opened, bound);
         lowering.place(self, &Vec::new(), None, root)?;

@@ -946,6 +946,7 @@ mod tests {
         "y = exp(x)",
         "s <- add(s, x)",
         "c[i] <- x seed 0",
+        "d[i] <- x",
         "p = pre c[i]",
         "init f32 s = 0",
         "let n = i + 1",

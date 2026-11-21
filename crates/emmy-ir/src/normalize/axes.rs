@@ -145,15 +145,18 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
 
 // --- the free-axis order ----------------------------------------------------------------------------------
 
-/// The innermost row-major output-coordinate depth carrying one free axis.
+/// The innermost row-major output-coordinate depth carrying one free axis. A value the body defines for itself is
+/// stored like an output: its definition's index is the layout its readers address it by.
 pub(crate) fn output_storage_depth(stmts: &Body, axis: &Name) -> Option<usize> {
     let mut depths: Vec<usize> = Vec::new();
-    for write in stmts.writes() {
-        let Statement::Write(w) = &**write.stmt() else {
-            continue;
+    for store in stmts.of_types(&[StatementType::Write, StatementType::Define]) {
+        let index = match &**store.stmt() {
+            Statement::Write(w) => &w.index,
+            Statement::Define(d) => &d.index,
+            _ => continue,
         };
         let mut positions = Vec::new();
-        for (position, expression) in w.index.iter().enumerate() {
+        for (position, expression) in index.iter().enumerate() {
             if !expression.reads(*axis) {
                 continue;
             }
@@ -165,7 +168,7 @@ pub(crate) fn output_storage_depth(stmts: &Body, axis: &Name) -> Option<usize> {
             positions.push(position);
         }
         if let Some(last) = positions.last() {
-            depths.push(w.index.len() - last - 1);
+            depths.push(index.len() - last - 1);
         }
     }
     match depths.first() {

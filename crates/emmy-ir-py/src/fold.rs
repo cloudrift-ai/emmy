@@ -1200,6 +1200,58 @@ impl PyFold {
         )
     }
 
+    /// A read of a value `definition` computes, by index, as a term: `reads` are the `Pre` statements, one per
+    /// value read, each naming the value of `definition` it reads as its carrier, all at one index of a coordinate
+    /// per name of `cells`, the coordinates of `definition` the read binds (`Fold::read`).
+    #[classmethod]
+    fn read<'py>(
+        _cls: &Bound<'py, PyType>,
+        reads: &Bound<'py, PyAny>,
+        definition: &Bound<'py, PyAny>,
+        cells: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyFold>> {
+        let stmts = reads
+            .try_iter()?
+            .map(|stmt| statement_from_py(&stmt?))
+            .collect::<PyResult<Vec<_>>>()?;
+        let definition = definition.cast::<PyFold>()?.get().fold.clone();
+        PyFold::wrap(
+            reads.py(),
+            &Fold::read(stmts, definition, names_of(cells)?).py()?,
+        )
+    }
+
+    /// The index of a read of a value another term defines (`Fold::as_read`): this term's one operand, taken at
+    /// one coordinate per cell. `None` for any other term.
+    fn as_read<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        self.fold
+            .as_read()
+            .map(|index| {
+                let items = index
+                    .iter()
+                    .map(|entry| PyExpression::wrap(py, entry))
+                    .collect::<PyResult<Vec<_>>>()?;
+                PyTuple::new(py, items)
+            })
+            .transpose()
+    }
+
+    /// This tree with every read by index replaced by the value it reads, and the axis table it then reads
+    /// (`Fold::inlined`). `axes` is the kernel's axis table.
+    fn inlined<'py>(
+        &self,
+        py: Python<'py>,
+        axes: &Bound<'py, PyAny>,
+    ) -> PyResult<(Bound<'py, PyFold>, Bound<'py, PyTuple>)> {
+        let axes = axes_from_py(Some(axes))?;
+        let (inlined, table) = self.fold.inlined(&axes).py()?;
+        let table = table
+            .iter()
+            .map(|axis| crate::convert::axis_to_py(py, axis))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok((PyFold::wrap(py, &inlined)?, PyTuple::new(py, table)?))
+    }
+
     /// The combine applied at `(state, other)` as loop-IR statements.
     fn merge<'py>(
         &self,

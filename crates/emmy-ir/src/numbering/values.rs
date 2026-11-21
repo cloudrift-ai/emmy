@@ -129,6 +129,9 @@ struct Context<'a> {
     binding: Vec<Name>,
     defined_by: HashMap<Name, usize>,
     depths_of: HashMap<Param, Vec<usize>>,
+    /// The values the body defines for itself (`Define`), each keyed by what its definition computes: a load of
+    /// one is told apart by that, never by the name the value goes under.
+    values: HashMap<Name, Key>,
 }
 
 fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
@@ -702,7 +705,9 @@ impl Context<'_> {
                         .iter()
                         .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
                         .collect();
-                    let buffer = if self.env.contains_key(&s.input) {
+                    let buffer = if let Some(defined) = self.values.get(&s.input) {
+                        defined.clone()
+                    } else if self.env.contains_key(&s.input) {
                         self.operand(&s.input, &mut ops, &mut touched)
                     } else {
                         self.resource(&s.input, Tag::Buffer, &mut touched)
@@ -824,6 +829,21 @@ impl Context<'_> {
                     ]);
                     let value = self.compose(Tag::Carry, payload, ops, &params, &[], false);
                     self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
+                }
+                Statement::Define(s) => {
+                    let index: Vec<Key> = s
+                        .index
+                        .iter()
+                        .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
+                        .collect();
+                    let payload = Key::tuple([
+                        Key::Tuple(index),
+                        self.operand(&s.value, &mut ops, &mut touched),
+                        Key::option(s.dtype.as_ref().map(|d| d.text())),
+                    ]);
+                    let value = self.compose(Tag::Define, payload, ops, &params, &[], false);
+                    self.values.insert(s.name, Key::Num(value.0));
+                    self.define(ordinal, &stmt, &[], value);
                 }
                 Statement::Pre(s) => {
                     let index: Vec<Key> = s
@@ -1077,6 +1097,7 @@ pub fn value_numbers(
         binding: Vec::new(),
         defined_by: HashMap::new(),
         depths_of: HashMap::new(),
+        values: HashMap::new(),
     };
     context.visit(body);
     context.out

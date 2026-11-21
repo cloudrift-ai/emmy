@@ -24,12 +24,13 @@ Module-level state:
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from emmy.compiler.ir.address import flat_accesses
-from emmy.compiler.ir.loop.render import RenderCtx, render_body
+from emmy.compiler.ir.loop.render import RenderCtx, defined_values, render_body, type_name
 from emmy.compiler.ir.types import explicit_conversions
 
 if TYPE_CHECKING:
@@ -99,7 +100,13 @@ def render_loopop_cpp(
     params_text = ", ".join(sig_parts)
 
     # The reference computes every float in f32, so no operation is native at f16; every buffer is a float array.
-    body_text = "\n".join(render_body(flat_accesses(explicit_conversions(loop.body, {}, frozenset()), shapes), ctx))
+    typed = explicit_conversions(loop.body, {}, frozenset())
+    # A value the kernel defines for itself is an array of its own, which a load indexes like any buffer.
+    declared = []
+    for name, (shape, dtype) in defined_values(typed).items():
+        ctx.shapes[name] = shape
+        declared.append(f"    std::vector<{type_name(dtype)}> {name}({math.prod(shape)});")
+    body_text = "\n".join((*declared, *render_body(flat_accesses(typed, ctx.shapes), ctx)))
     return f'extern "C" void {fn_name}({params_text}) {{\n{body_text}\n}}\n'
 
 

@@ -742,6 +742,23 @@ impl Fold {
         })
     }
 
+    /// A read of a value `definition` computes, by index, as a term: one `Pre` per value read, each naming the
+    /// value of `definition` it reads as its carrier, all at one index of a coordinate per name of `cells` — the
+    /// coordinates of `definition` the read binds ([`Fold::as_read`]).
+    pub fn read(reads: Vec<Arc<Statement>>, definition: Fold, cells: Vec<Name>) -> Result<Fold> {
+        let names: Vec<Name> = reads.iter().flat_map(|stmt| stmt.defines()).collect();
+        Fold::new(Parts {
+            lift: Some(Lambda::closing(
+                definition.exposes().to_vec(),
+                &Body::new(reads),
+                names,
+            )?),
+            operands: vec![definition],
+            cells,
+            ..Parts::default()
+        })
+    }
+
     /// The affine reading of this carried state, or `None`.
     pub fn affine(&self) -> Result<Option<Affine>> {
         if let Some(found) = self.memos().affine.get() {

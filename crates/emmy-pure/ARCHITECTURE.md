@@ -46,10 +46,24 @@ and a view are values: they compare by what they hold.
   A range may also read the value of an operand that is one value for the whole walk, spelled as the lift's param
   for it (`applied_range` spells it as the operand result, as `applied` does the lift): the tree's pruning and the
   lowering's demand walk count that read, so the operand stays bound and is placed ahead of the loop.
+- `values.rs` — `Fold::inlined`: a tree with every read by index replaced by the value it reads. A term that states
+  `cells` over one operand and holds one `Pre` per value read (`Fold::read`, `Fold::as_read`) reads that operand, a
+  value defined once over its own coordinates, at an index. A kernel keeps such a value: `Fold::lower` writes the
+  operand once, in a nest of its own that stores each cell with a `Define`, ahead of the scope that reads it, and
+  each read as the `Load` of one cell. A coordinate every read takes at the coordinate itself is not walked where
+  that scope binds it. Where a kernel is fused into another, the read gives way instead (`Fold::inlined`) to the
+  operand with each coordinate the read binds replaced by the index read. One copy is taken of a term per
+  substitution of the coordinates that term is evaluated over: two reads that differ only in a coordinate a term does
+  not read share that term, as a softmax's row maximum is one term under the sum over a row and under each cell of
+  it. The first copy of a term keeps its names and every later one spells apart what the term defines and the axis
+  it walks. A Loop IR body reads a defined value with a `Load`; the `Pre` of a read term is how a lift names an
+  operand it reads by index, as a carrier read does.
 - `readings.rs` — the derived readings: `exposing`, `based`, `roles`, the bilinear channels and the contraction they
   read as, `tiles_whole`, `chunked`, `per_state`, the reduction, slab and affine readings, `merge`, `step`.
 - `rewrite.rs` — `Fold::rewrite`: a term renamed, substituted and axis-mapped the way a statement is, the
-  substitution hygienic about the axis each term binds and folded under a range context when it carries one.
+  substitution hygienic about the axis each term binds and folded under a range context when it carries one. The
+  rewrite of one term over operands already rewritten (`TermRewrite::node`) is what the copies of a read value are
+  built with.
 - `fuse.rs` — `Fold::fuse`: the one generic algorithm over the recipes. It finds the pivot among the term's operands,
   matches the score cone and a channel's pattern by canonical form, and instantiates the recipe by renaming. Two
   folds fuse where they walk the same range of the axis, and the fused fold keeps it.

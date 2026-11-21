@@ -43,6 +43,8 @@ mod tests {
         "acc0 <- add(scaled, v1)",
         "state[a0, a1] <- v seed 0",
         "f32 state[a0] <- v seed state_in",
+        "kept[a0, a1] <- v",
+        "f32 kept[a0] <- v",
         "y[a0, a1] = v",
         "f16 y[a0] = (v0, v1)",
         "y[a0] += v",

@@ -324,14 +324,14 @@ def operand_statements(edge, result: str | None = None) -> list | None:
 
     ``result`` defaults to the edge's first exposed value; a channel selects the value it multiplies.
     That is the open body of a zero-axis term (:meth:`Fold.lower` with nothing bound); a
-    term that reduces, is a bare slab, or holds a reduce among its operands is not a scalar cone
-    and answers ``None``."""
+    term that reduces, is a bare slab, or holds a reduce or a read of a kept value among its terms is
+    not a scalar cone and answers ``None``."""
     if edge.axis is not None or edge.as_slab() is not None:
         return None
-    pending = list(edge.operands)
+    pending = [edge]
     while pending:
         term = pending.pop()
-        if term.axis is not None:
+        if term.axis is not None or term.as_read() is not None:
             return None
         pending.extend(term.operands)
     stmts = list(edge.lower(axes=()))

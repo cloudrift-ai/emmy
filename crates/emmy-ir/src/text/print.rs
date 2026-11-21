@@ -120,6 +120,13 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
                 seed
             )
         }
+        Statement::Define(s) => format!(
+            "{}{}{} <- {}",
+            typed(&s.dtype),
+            spell_stmt_name(&s.name)?,
+            index(&s.index)?,
+            spell_stmt_name(&s.value)?
+        ),
         Statement::Write(s) => {
             let value = if s.values.len() > 1 {
                 format!("({})", names(&s.values)?)

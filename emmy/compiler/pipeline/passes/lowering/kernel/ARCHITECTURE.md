@@ -794,6 +794,15 @@ the slab (`_restage_loads`). So every staging decision rides a `Stage` on the sc
 row · cp.async / TMA 2-D slab) lowers through one module. A contraction operand `Stage` never sets `smem`, which is how
 the two apply paths stay distinct on a coop-K contraction.
 
+## A value a kernel keeps
+
+`012_keep_values` gives each value a kernel defines for itself (`TileOp.keeps`) its storage: shared memory, one copy
+per cell of the grid. The term's lowering has already written the definition once, in a nest of its own that walks
+the coordinates the grid does not bind, and each read as a load. The pass declares the buffer, turns the definition
+into a store and re-addresses each load to the cells one block holds. One thread runs a block, so the definition is
+complete before the first load with no barrier, and the schedule offers such a kernel that layout alone. Spreading
+the definition and the sweep that reads it over the threads of a block, and the tensor-core tiers, are not built.
+
 ## Shared carried state
 
 `035_shared_carry` realizes the shared storage a row's `STAGE=d1/smem` asks for, on an ordered kernel whose state

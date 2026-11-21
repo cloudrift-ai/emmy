@@ -490,6 +490,24 @@ and the CPU code generator walk it. The classic schedule and the kernel lowering
 may also state a `step`, how far its axis moves each trip: a kernel loop takes one where the threads of a block stride
 through an axis, and a Loop IR body states none.
 
+**A value may be defined once and read by index.** A `Define` stores one cell of a value the body keeps for itself:
+one cell per coordinate of the loops around it, each an index entry. The value is a buffer of the kernel's own, and a
+`Load` reads a cell of it as it reads any buffer, so a value two or more places read is written once and there is one
+read. The name is a buffer name that the statement declares: neither an input nor an output of the kernel, left out
+of the buffers a body reports, and renamed with the buffers. A load stands behind the definition it reads, as a load
+stands behind a write to its buffer. The normal form keeps that order, orders the loops of a definition's nest by the
+definition's index as it orders a store's, and tells a load of the value apart by what the definition computes, never
+by the name the value goes under. A kernel formed from such a body keeps the value. The tile lift leaves each load as
+a term that reads the definition's term by index (`Fold.read`, `TileOp.keeps`), two loads of one value holding the one
+term. `Fold.lower` writes the definition back once, in a nest of its own ahead of its loads, so the kernel's own body
+defines the value again and the lift takes that body back to the same kernel. A coordinate every load takes at the
+coordinate itself is not walked where the scope binds it: a step of a recurrence defines the cells that step reads.
+The kernel lowering stores the value in shared memory, one copy per cell of the grid (`012_keep_values`). It is
+another kernel than the one that computes the value at each read, with an identity of its own. Fusion forms a new
+kernel, so it reads a member's defined value as the computation it stands for (`computed_where_read`): one kernel's
+choice to keep a value does not bind the kernel fused from it. The Loop IR runner keeps a defined value as an array of
+its own, which is the meaning of the form.
+
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
 
@@ -645,8 +663,9 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
 | `Assign`                     | The one scalar definition: `name = value`, `value` one operation over names and literals (`exp(x)`, `2 * x - y`: an affine region is one node), with an optional `dtype`. |
 | `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expression.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
-| `Carry`                      | The next value of one cell of a carried state: `name[index...] <- value`, holding `seed` before the first step. No op: a state folds nothing. Without a seed, the definition of a value the kernel keeps for itself, one cell per coordinate of the loops around it. |
-| `Pre`                        | Read of one cell of a carried state: `name = pre carrier[index...]`, the previous step's value inside the loop that carries it. Of a value defined without a seed, the cell at `index`, read once the definition's loops have closed. |
+| `Carry`                      | The next value of one cell of a carried state: `name[index...] <- value`, holding `seed` before the first step. No op: a state folds nothing. |
+| `Define`                     | The definition of one cell of a value the kernel keeps for itself: `name[index...] <- value`, one cell per coordinate of the loops around it. `name` is a buffer the statement declares, which a `Load` reads. |
+| `Pre`                        | Read of one cell of a carried state: `name = pre carrier[index...]`, the previous step's value inside the loop that carries it. |
 | `Init`                       | Explicit `<dtype> name = identity;` seed at this scope (`name` + scalar `identity` + `dtype`). Used for a carried state's seed (one per component), emitted above the streaming `Loop`. Scope-bound (never hoisted); shadows a deeper same-named `Accum` init. |
 | `Let`                        | Pure binding of one `Expression` to a name: a scalar literal (the twisted carrier's injected `1`), a precomputed integer index, a `FlatIndex` offset. Scoped like an `Assign`; legal inside a stored `Lambda`. |
 | `Write`                      | Write an SSA value to output at `index`.                                                                          |

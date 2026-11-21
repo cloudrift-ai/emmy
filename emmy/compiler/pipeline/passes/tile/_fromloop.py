@@ -10,6 +10,7 @@ epilogue — so the bilinear reading is canonical by construction. There is no r
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from itertools import count
 from math import prod
@@ -27,6 +28,7 @@ from emmy.compiler.ir.stmt import (
     Assign,
     Body,
     Carry,
+    Define,
     Init,
     Let,
     Load,
@@ -44,6 +46,28 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from emmy.compiler.graph import Tensor
+
+
+@dataclass(frozen=True)
+class _Value:
+    """A value the body defines for itself: the term that computes it over its own coordinates (``cells``), the
+    name that term exposes it under, and the positions of the definition's index that hold a coordinate (a
+    size-one dim normalization pinned to ``0`` holds none)."""
+
+    term: Fold
+    cells: tuple[str, ...]
+    name: str
+    positions: tuple[int, ...]
+
+    def read(self, load: Load) -> Fold:
+        """``load``, a read of this value by index, as a term over the one definition. A term reads an operand by
+        index through a ``Pre`` of its lift, as a carrier read does."""
+        index = tuple(load.index[position] for position in self.positions)
+        return Fold.read((Pre(name=load.name, carrier=self.name, index=index),), self.term, self.cells)
+
+
+#: The values the body being lifted defines for itself, by the name its statements read them under.
+_VALUES: ContextVar[dict[str, _Value]] = ContextVar("_VALUES", default={})  # noqa: B039 — a lift binds its own
 
 
 def _stamp_axes(loop: Loop) -> Loop:
@@ -453,7 +477,19 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
     inner_levels = (*levels, level)
     edges: list = []
     bound = {axis.name for axis in axes}  # one coordinate per name: a sibling sweep reusing one is renamed apart
+    values = _VALUES.get()
     for stmt in _accums_sum_names(Body.coerce(body)):
+        if isinstance(stmt, Load) and stmt.input in values:
+            # A load of a value the body defines once: a term of this level over that one definition.
+            read = values[stmt.input].read(stmt)
+            edges.append(read)
+            level.exposed[stmt.name] = read
+            continue
+        if isinstance(stmt, Loop) and not stmt.is_reduce and (define := _definition(stmt)) is not None:
+            # The nest that defines a value: a term of its own over the value's coordinates, which every load of the
+            # value holds. What it reads of this level arrives as the operands any reader of the level takes.
+            values[define.name] = _lift_value(define, stmt, axes, inner_levels)
+            continue
         if isinstance(stmt, Loop) and not stmt.is_reduce:
             if stmt.axis.name in bound:
                 stmt = _renamed_sweep(stmt, bound)
@@ -471,6 +507,7 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
             # per-cell projection — the pure statements its stores read — is one more, a zero-axis
             # term evaluated over the sweep coordinate it declares, closed over the level like any
             # other. The loop keeps only its stores, which the boundary extracts as sweep specs.
+            known = len(values)
             inner, cell = lift_body(stmt.body, (*axes, stmt.axis), inner_levels)
             edges.extend(inner)
             level.exposed.update((name, fold) for fold in inner for name in fold.exposes)
@@ -495,7 +532,9 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
                 term = Fold(operands=operands, lift=lift)
                 edges.append(term)
                 level.exposed.update((name, term) for name in term.exposes)
-            level.stmts.append(stmt.replace(body=retained))
+            # A loop that held only the nest of a definition stores nothing: its value stands under its reads.
+            if retained or len(values) == known:
+                level.stmts.append(stmt.replace(body=retained))
             continue
         nested = stmt.nested()
         if nested:
@@ -879,11 +918,80 @@ def lift_loop_op(op: LoopOp, *, body: Body | None = None, serial: tuple[Axis, ..
         return _lift_loop_op(op, body, serial)
 
 
+def _definition(loop: Loop) -> Define | None:
+    """The definition ``loop`` is the nest of: the one ``Define`` at the foot of its chain of free loops, where that
+    chain stores nothing else. ``None`` for any other loop."""
+    _, cell = _peel(Body((loop,)))
+    defines = [stmt for stmt in cell if isinstance(stmt, Define)]
+    if len(defines) != 1 or any(isinstance(stmt, Write) or guarded_store(stmt) is not None for stmt in cell):
+        return None
+    return defines[0]
+
+
+def _lift_value(define: Define, loop: Loop, axes: tuple, levels: tuple) -> _Value:
+    """The value ``define`` defines as a term over its own coordinates, from the nest ``loop`` that defines it under
+    the loops ``axes``. The nest is lifted as an output sweep is, the definition in the place of its store."""
+    positions = tuple(position for position, entry in enumerate(define.index) if isinstance(entry, Var))
+    cells = tuple(define.index[position].name for position in positions)
+    stored = Body((loop,)).map(
+        lambda stmt: Write(output=define.name, index=define.index, values=(define.value,)) if stmt is define else stmt
+    )
+    free, cell = _peel(stored)
+    scope = (*axes, *free)
+    edges, stmts = lift_body(cell, scope, levels)
+    split = extract_output_specs(stmts)
+    if split is None or _raw_loops(Body(split[0])):
+        raise ValueError(f"the definition of {define.name!r} is no nest of free loops over one value")
+    edges, lift = _close((), edges, Body(split[0]), (define.value,), scope, levels)
+    # In tree normal form, so the term that exposes the value is the one that defines it.
+    term = Fold(operands=edges, lift=lift).normalized((define.value,), ())
+    if not term.free_axes - EXTENTS.get() <= set(cells):
+        raise ValueError(f"the value {define.name!r} is evaluated over {sorted(term.free_axes)} and defined at {cells}")
+    return _Value(term, cells, define.value, positions)
+
+
+def computed_where_read(body: Body, shapes: Mapping) -> Body:
+    """``body`` with every value it defines for itself computed where it is read, in normal form: each load of
+    one gives way to the statements that compute the value at the index read. ``body`` itself when it defines
+    no value. ``shapes`` are the shapes of the buffers the body reads and writes, whose symbolic sizes the body
+    reads free.
+
+    A kernel formed from a body that defines a value keeps it, and this is the body of the kernel that does not:
+    what fusion reads a member as, since one kernel's choice to keep a value does not bind the kernel fused from
+    it. The body is lifted with each definition a term of its own and each load a term over that one definition
+    (:meth:`Fold.read`), and lowered again with every read replaced by the value it reads
+    (:meth:`Fold.inlined`)."""
+    if not any(isinstance(stmt, Define) for stmt in body.iter()):
+        return body
+    with binding_extents(name for shape in shapes.values() for dim in shape for name in dim.expression.free_vars()):
+        term, _, axes, stores = _lift_parts(body)
+        term, axes = term.inlined(axes)
+        return LoopOp(body=term.lower(bound=frozenset(), stores=stores, axes=axes)).body
+
+
 def _lift_loop_op(op: LoopOp, body, serial: tuple[Axis, ...]) -> TileOp:
-    free, cell = _peel(op.body if body is None else Body.coerce(body))
+    term, free, axes, output_specs = _lift_parts(op.body if body is None else Body.coerce(body))
     if any(axis not in free for axis in serial):
         raise ValueError(f"a loop that carries a state must sit outside every reduction: {[axis.name for axis in serial]}")
-    edges, stmts = lift_body(cell, tuple(free))
+    return TileOp(
+        op=term,
+        place=Placement(free=tuple(axis for axis in free if axis not in serial), serial=serial),
+        axes=axes,
+        inputs=dict(op.inputs),
+        output_specs=output_specs,
+    )
+
+
+def _lift_parts(body: Body, results: tuple[str, ...] = ()) -> tuple[Fold, list, tuple[Axis, ...], tuple]:
+    """``body`` as one Fold tree: the root term, the free axes peeled off it, the axis table and the boundary
+    stores. The root exposes ``results`` when they are given."""
+    free, cell = _peel(body)
+    # The values this body defines for itself are its own: each lift starts with none.
+    token = _VALUES.set({})
+    try:
+        edges, stmts = lift_body(cell, tuple(free))
+    finally:
+        _VALUES.reset(token)
     split = extract_output_specs(stmts)
     if split is None:
         raise ValueError("Loop IR effects cannot be represented as output specifications")
@@ -898,19 +1006,13 @@ def _lift_loop_op(op: LoopOp, body, serial: tuple[Axis, ...]) -> TileOp:
     # It exposes what the kernel stores — its body's last definition, or with no body of its own
     # the operand values the boundary writes — so a wrapper over one operand is the identity
     # projection normalization dissolves, rather than a permanent layer over every bare kernel.
-    results = _root_results(Body(body)) or tuple(dict.fromkeys(value for spec in output_specs for value in spec.write.values))
-    edges, lift = _close((), edges, Body(body), results, tuple(free), ())
+    stored = tuple(dict.fromkeys(value for spec in output_specs for value in spec.write.values))
+    edges, lift = _close((), edges, Body(body), results or _root_results(Body(body)) or stored, tuple(free), ())
     # The kernel's axis table: the free axes and every loop the nest bound (reduce, sweep), by
     # name — the term names them, the kernel holds their extents.
     axes = {axis.name: axis for axis in (*free, *(loop.axis for loop in Body.coerce(cell).loops))}
     axes.update((axis.name, axis) for spec in output_specs for axis in spec.sweep)  # a renamed sibling sweep
-    return TileOp(
-        op=Fold(operands=edges, lift=lift),
-        place=Placement(free=tuple(axis for axis in free if axis not in serial), serial=serial),
-        axes=tuple(axes.values()),
-        inputs=dict(op.inputs),
-        output_specs=output_specs,
-    )
+    return Fold(operands=edges, lift=lift), free, tuple(axes.values()), output_specs
 
 
 def seed_index(cell: tuple[Expression, ...], shape: tuple) -> tuple[Expression, ...]:
@@ -1070,6 +1172,7 @@ def scheduled_form(tile: TileOp, prefix: str) -> TileOp:
 __all__ = [
     "carried_program",
     "carrying_loops",
+    "computed_where_read",
     "conjuncts",
     "fold_from_loop",
     "lift_body",

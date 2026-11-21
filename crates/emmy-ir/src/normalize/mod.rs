@@ -316,6 +316,79 @@ for k in 0..3:
     }
 
     #[test]
+    fn a_value_defined_once_is_read_by_index_like_a_buffer() {
+        // The normalized key of a delta rule: read at the cell, and again inside the sum over `m`.
+        let text = normal(
+            "for h in 0..4:
+  for a in 0..8:
+    k = load K[h, a]
+    w = load W[h]
+    v = multiply(k, w)
+    kn[h, a] <- v
+  for n in 0..8:
+    for m in 0..8:
+      b = load kn[h, m]
+      c = load kn[h, n]
+      p = multiply(b, c)
+      s <- add(s, p) over m
+    out[h, n] = s",
+        );
+        assert_eq!(
+            text,
+            "for a0 in 0..4:
+  in0 = load W[a0]
+  for a1 in 0..8:
+    in1 = load K[a0, a1]
+    v0 = in0 * in1
+    kn[a0, a1] <- v0
+  for a2 in 0..8:
+    in2 = load kn[a0, a2]
+    for a3 in 0..8:
+      in3 = load kn[a0, a3]
+      v1 = in2 * in3
+      acc0 <- add(acc0, v1) over a3
+    out[a0, a2] = acc0"
+        );
+    }
+
+    #[test]
+    fn a_definition_in_a_nest_of_its_own_stays_ahead_of_the_nest_that_reads_it() {
+        let text = normal(
+            "for m in 0..8:
+  for n in 0..6:
+    x = load X[m, n]
+    h[m, n] <- x
+for i in 0..8:
+  for j in 0..6:
+    for k in 0..6:
+      w = load W[j, k]
+      a = load h[i, k]
+      p = multiply(a, w)
+      s <- add(s, p) over k
+    b = load h[i, j]
+    y = multiply(s, b)
+    out[i, j] = y",
+        );
+        assert_eq!(
+            text,
+            "for a0 in 0..8:
+  for a1 in 0..6:
+    in0 = load X[a0, a1]
+    h[a0, a1] <- in0
+for a2 in 0..8:
+  for a3 in 0..6:
+    for a4 in 0..6:
+      in1 = load W[a3, a4]
+      in2 = load h[a2, a4]
+      v0 = in1 * in2
+      acc0 <- add(acc0, v0) over a4
+    in3 = load h[a2, a3]
+    v1 = acc0 * in3
+    out[a2, a3] = v1"
+        );
+    }
+
+    #[test]
     fn a_body_normalizes_and_settles() {
         let text = normal(
             "for i in 0..4:\n  for k in 0..8:\n    x = load a[i, k]\n    y = exp(x)\n    s <- add(s, y) over k\n  out[i] = s",

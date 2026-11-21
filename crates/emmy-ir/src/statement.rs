@@ -176,6 +176,20 @@ macro_rules! with_statement_types {
                     seed: NumOr<Name> [BUFFER_READ],
                     dtype: Option<DType> [] = None,
                 }
+                /// The definition of one cell of a value the kernel keeps for itself: `name[index] <- value`.
+                ///
+                /// `name` is a buffer of the kernel's own, which this statement declares: neither an input nor an
+                /// output of the kernel. `index` lists every loop around the statement, a literal where a dimension
+                /// has one cell, so the value has one cell per coordinate and each is defined once. A `Load` reads
+                /// a cell by index the way it reads any buffer, wherever it stands behind the definition. A value
+                /// two or more places read is defined once this way and read by each, where it would be computed
+                /// again at each.
+                shared Define {SIDE_EFFECTS} {
+                    name: Name [BUFFER_WRITE | LOCAL_BUFFER],
+                    value: Name [READS],
+                    index: Exprs [EXPRESSION | READS] : Index,
+                    dtype: Option<DType> [] = None,
+                }
                 /// A read of one cell of a carried state: `name = carrier[index]`.
                 ///
                 /// Inside the `Loop` that carries it, the value the PREVIOUS step left (the seed on the first step) — no read of
@@ -1432,7 +1446,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "5ce539ac0a39332cca2089c52ca6a78dbc1a74423cdd5ca0b3fcdcff241fb31d",
+            "1e5c335f0afcdd79157e96272ec914c96ada0baaa4aa50cfc7bda9cb9d8ee943",
             "{listing}"
         );
     }

@@ -48,6 +48,7 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  #
     Body,
     Carry,
     Cond,
+    Define,
     Init,
     Let,
     Load,
@@ -321,6 +322,8 @@ def _validate(loop: LoopOp) -> None:
     # earlier Accum sharing its name. ``target_ops`` is the running map.
     target_ops: dict[str, ElementwiseImpl] = {}
     celled: dict[str, int] = {}  # carried states -> their rank
+    values: set[str] = set()  # the values the body defines for itself, in the order it reaches them
+    loaded: set[str] = set()
 
     def _walk(stmts: Body, defined: set[str]) -> set[str]:
         """Validate a body scope. Returns the set of ``Accum.name`` names
@@ -365,6 +368,17 @@ def _validate(loop: LoopOp) -> None:
                 if stmt.name in defined:
                     raise ValueError(f"Load {stmt.name!r}: name already defined")
                 defined.add(stmt.name)
+                loaded.add(stmt.input)
+            elif isinstance(stmt, Define):
+                # A value the kernel defines for itself is a buffer of its own: defined by one statement, and read
+                # by a Load that stands behind it.
+                if stmt.value not in defined:
+                    raise ValueError(f"Define {stmt.name!r}: value {stmt.value!r} not defined")
+                if stmt.name in values:
+                    raise ValueError(f"Define {stmt.name!r}: one statement defines a value")
+                if stmt.name in loaded:
+                    raise ValueError(f"Define {stmt.name!r}: a Load reads the value ahead of its definition")
+                values.add(stmt.name)
             elif isinstance(stmt, Carry):
                 if stmt.value not in defined:
                     raise ValueError(f"Carry {stmt.name!r}: value {stmt.value!r} not defined")

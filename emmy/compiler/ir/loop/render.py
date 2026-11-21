@@ -21,12 +21,13 @@ from emmy.compiler.ir.expression import (
     CastExpression,
     Expression,
     FunctionCallExpression,
+    Interval,
     Literal,
     SimplifyCtx,
     TernaryExpression,
     Var,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Init, Let, Load, Loop, Pre, Select, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Define, Init, Let, Load, Loop, Pre, Select, Statement, Write
 from emmy.emmy_ir import DTYPES as _DTYPE_NAMES
 
 _FLOAT_DTYPES = frozenset({"f32", "f16", "f16x2", "f8e4m3", "f8e5m2"})
@@ -437,6 +438,37 @@ def _(stmt: Accum, ctx: RenderCtx) -> list[str]:
 def _(stmt: Carry, ctx: RenderCtx) -> list[str]:
     # The carrying ``Loop`` declared this slot beside the one reads see, and commits it after every step.
     return [f"{_pad(ctx.indent)}{stmt.name}{NEXT_STEP}[{render_index(stmt.name, stmt.index, ctx)}] = {stmt.value};"]
+
+
+@render_stmt.register
+def _(stmt: Define, ctx: RenderCtx) -> list[str]:
+    # A value the kernel defines for itself: one array, declared ahead of the body (:func:`defined_values`).
+    return [f"{_pad(ctx.indent)}{stmt.name}[{render_index(stmt.name, stmt.index, ctx)}] = {stmt.value};"]
+
+
+def defined_values(body: Body) -> dict[str, tuple[tuple[int, ...], str]]:
+    """The values ``body`` defines for itself (``Define``), each with the shape its cells take and its dtype. A
+    dimension is the extent of the axis its coordinate is, or one past the most a literal or an expression over the
+    axes reaches."""
+    out: dict[str, tuple[tuple[int, ...], str]] = {}
+
+    def walk(stmts: Body, axes: dict[str, int]) -> None:
+        ranges = SimplifyCtx(ranges={name: Interval(0, extent - 1) for name, extent in axes.items()})
+        for stmt in stmts:
+            if isinstance(stmt, Define):
+                dims = []
+                for coordinate in stmt.index:
+                    reach = coordinate.range(ranges)
+                    if reach is None:
+                        raise ValueError(f"the value {stmt.name!r} is defined at a coordinate with no bound: {coordinate}")
+                    dims.append(reach.hi + 1)
+                out[stmt.name] = (tuple(dims), (stmt.dtype or F32).name)
+            for child in stmt.nested():
+                inner = {**axes, stmt.axis.name: int(stmt.axis.extent.as_static())} if isinstance(stmt, Loop) else axes
+                walk(child, inner)
+
+    walk(body, {})
+    return out
 
 
 @render_stmt.register
