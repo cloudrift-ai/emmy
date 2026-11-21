@@ -569,6 +569,13 @@ a thread per 64-key chunk at head width 256, each holding a register until it co
 at 255 registers with spills. Staged, the 27B one-row decode piece at 131,072 cached tokens runs 431 us against 845 on
 an RTX 4080, about 87% of the card's bandwidth.
 
+**A stored operand of another dtype (the converting fill).** A copy transport moves bytes, so a stored operand that
+holds another dtype than its slab's rides the compute fill as a computed one does: the fill evaluates its load cell
+by cell and the typed store into the slab converts it. This holds on both sides of the product
+(`staging.converting_a`, `staging.copied_b`), which is what lets a bf16 atom take a product of two f32 operands: both
+slabs are filled with the operands rounded to bf16 and drained by `ldmatrix`. A slab of bytes is no such case, since
+its fragment loads convert it.
+
 **Staged f32 operand slabs (the TF32 atoms).** An f32 operand stages as a slab of f32 and drains through the same
 staged `FragmentLoad`, one 32-bit element to a fragment register, as the f32 it is. The product rounds its operands
 itself, in its PTX lowering (`cvt.rna.tf32.f32`): the instruction drops the low mantissa bits, which leaves every

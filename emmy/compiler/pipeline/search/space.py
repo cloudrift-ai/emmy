@@ -292,7 +292,7 @@ FAST_MATH = Knob(
     KnobType.BOOL,
     hints=(True,),
     help="Fast math is enabled by default: the precision-trading knobs that follow it (FAST_EXP, FAST_DIV, FAST_SQRT, "
-    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA, TF32_MMA). Pin 0 to disable; individual pins win.",
+    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA, TF32_MMA, F32_AS_BF16_MMA). Pin 0 to disable; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
 
@@ -348,6 +348,18 @@ TF32_SPLIT_MMA = Knob(
 )
 
 
+F32_AS_BF16_MMA = Knob(
+    "F32_AS_BF16_MMA",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the bf16 tensor-core atom forks (mma_m16n8k16_bf16_f32 and its wgmma form — the accumulator f32) "
+    "for a product of two f32 operands, each operand rounded to bf16 where its shared-memory slab is filled. bf16 "
+    "keeps f32's exponent range and eight bits of mantissa, so the fork family is precision-trading: pin 1 to "
+    "offer, 0 never; unset follows FAST_MATH. A product with a bf16 or f16 operand takes that cell whatever this "
+    "says. Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
 #: The precision-trading family: the umbrella and the knobs under it (:func:`precision_pin`) — what sorts a
 #: row into the fast-math lane.
 PRECISION_KNOBS = (
@@ -357,6 +369,7 @@ PRECISION_KNOBS = (
     FP8_MMA,
     TF32_MMA,
     TF32_SPLIT_MMA,
+    F32_AS_BF16_MMA,
     FAST_DIV,
     FAST_SQRT,
     FLUSH_TO_ZERO,
