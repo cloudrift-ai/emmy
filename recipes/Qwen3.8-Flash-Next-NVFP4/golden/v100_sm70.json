@@ -10042,51 +10042,25 @@
     "  add_2__place_5dec05dbf7_0[a0] = acc0"
    ]},"inputs":["add_2__place_ff5c550248_0","linear_6_wt__source"],"outputs":[["add_2__place_5dec05dbf7_0","f16",[8]]]}
   ]},"formed":true},
-  {"loop_ir":{"inputs":["add_2__place_ff5c550248_0","linear_7_wt__source","linear_8_wt__source"],"outputs":["add_2__place_f67cdc1905_0"],"nodes":[
+  {"loop_ir":{"inputs":["add_2__place_ff5c550248_0","linear_7_wt","linear_8_wt"],"outputs":["add_2__place_f67cdc1905_0__partial"],"nodes":[
    {"id":"add_2__place_ff5c550248_0","op":"input","outputs":[["add_2__place_ff5c550248_0","f16",[8,2560]]]},
-   {"id":"linear_7_wt__source","op":"input","outputs":[["linear_7_wt__source","f16",[160,2560]]]},
-   {"id":"linear_8_wt__source","op":"input","outputs":[["linear_8_wt__source","f16",[160,2560]]]},
-   {"id":"add_2__place_f67cdc1905_0","op":"loop","attrs":{"body":[
-    "for a0 in 0..8:",
-    "  for a1 in 0..160:",
-    "    for a2 in 0..2560:",
-    "      in0 = load add_2__place_ff5c550248_0[a0, a2]",
-    "      in1 = load linear_7_wt__source[a1, a2]",
-    "      f32 v0 = in0 * in1",
-    "      acc0 <- add(acc0, v0) over a2",
-    "      in2 = load linear_8_wt__source[a1, a2]",
-    "      f32 v1 = in0 * in2",
-    "      acc1 <- add(acc1, v1) over a2",
-    "    f16 v2 = acc1",
-    "    f16 v3 = acc0",
-    "    f32 v4 = v3",
-    "    v5 = -v4",
-    "    v6 = exp(v5)",
-    "    v7 = v6 + 1.0",
-    "    f16 v8 = v4 / v7",
-    "    v9 = v8 * v2",
-    "    add_2__place_f67cdc1905_0[a0, a1] = v9"
-   ]},"inputs":["add_2__place_ff5c550248_0","linear_7_wt__source","linear_8_wt__source"],"outputs":[["add_2__place_f67cdc1905_0","f16",[8,160]]]}
-  ]},"formed":true},
-  {"loop_ir":{"inputs":["add_2__place_ff5c550248_0","linear_7_wt__source","linear_8_wt__source"],"outputs":["add_2__place_f67cdc1905_0__partial"],"nodes":[
-   {"id":"add_2__place_ff5c550248_0","op":"input","outputs":[["add_2__place_ff5c550248_0","f16",[8,2560]]]},
-   {"id":"linear_7_wt__source","op":"input","outputs":[["linear_7_wt__source","f16",[160,2560]]]},
-   {"id":"linear_8_wt__source","op":"input","outputs":[["linear_8_wt__source","f16",[160,2560]]]},
+   {"id":"linear_7_wt","op":"input","outputs":[["linear_7_wt","f16",[2560,160]]]},
+   {"id":"linear_8_wt","op":"input","outputs":[["linear_8_wt","f16",[2560,160]]]},
    {"id":"add_2__place_f67cdc1905_0__partial","op":"loop","attrs":{"body":[
     "for a0 in 0..16:",
     "  for a1 in 0..8:",
     "    for a2 in 0..160:",
     "      for a3 in 0..160 window(parent=a3 in 0..2560, partition=true):",
-    "        in0 = load add_2__place_ff5c550248_0[a1, 160 * a0 + a3]",
-    "        in1 = load linear_7_wt__source[a2, 160 * a0 + a3]",
-    "        f32 v0 = in0 * in1",
+    "        in0 = load linear_7_wt[160 * a0 + a3, a2]",
+    "        in1 = load linear_8_wt[160 * a0 + a3, a2]",
+    "        in2 = load add_2__place_ff5c550248_0[a1, 160 * a0 + a3]",
+    "        f32 v0 = in2 * in1",
     "        acc0 <- add(acc0, v0) over a3",
-    "        in2 = load linear_8_wt__source[a2, 160 * a0 + a3]",
-    "        f32 v1 = in0 * in2",
+    "        f32 v1 = in2 * in0",
     "        acc1 <- add(acc1, v1) over a3",
-    "      add_2__place_f67cdc1905_0__partial[0, a0, a1, a2] = acc0",
-    "      add_2__place_f67cdc1905_0__partial[1, a0, a1, a2] = acc1"
-   ]},"inputs":["add_2__place_ff5c550248_0","linear_7_wt__source","linear_8_wt__source"],"outputs":[["add_2__place_f67cdc1905_0__partial","f32",[2,16,8,160]]]}
+    "      add_2__place_f67cdc1905_0__partial[0, a0, a1, a2] = acc1",
+    "      add_2__place_f67cdc1905_0__partial[1, a0, a1, a2] = acc0"
+   ]},"inputs":["add_2__place_ff5c550248_0","linear_7_wt","linear_8_wt"],"outputs":[["add_2__place_f67cdc1905_0__partial","f32",[2,16,8,160]]]}
   ]},"formed":true},
   {"loop_ir":{"inputs":["add_2__place_f67cdc1905_0__partial"],"outputs":["add_2__place_f67cdc1905_0"],"nodes":[
    {"id":"add_2__place_f67cdc1905_0__partial","op":"input","outputs":[["add_2__place_f67cdc1905_0__partial","f32",[2,16,8,160]]]},
@@ -10128,6 +10102,26 @@
     "    v4 = v1 * v3",
     "    mul_10[a0, a1] = v4"
    ]},"inputs":["add_2__place_f67cdc1905_0","add_2__place_5dec05dbf7_0","linear_9_wt"],"outputs":[["mul_10","f16",[8,2560]]]}
+  ]},"formed":true},
+  {"loop_ir":{"inputs":["add_2__place_f67cdc1905_0","add_2__place_5dec05dbf7_0","linear_9_wt__source"],"outputs":["mul_10"],"nodes":[
+   {"id":"add_2__place_5dec05dbf7_0","op":"input","outputs":[["add_2__place_5dec05dbf7_0","f16",[8]]]},
+   {"id":"add_2__place_f67cdc1905_0","op":"input","outputs":[["add_2__place_f67cdc1905_0","f16",[8,160]]]},
+   {"id":"linear_9_wt__source","op":"input","outputs":[["linear_9_wt__source","f16",[2560,160]]]},
+   {"id":"mul_10","op":"loop","attrs":{"body":[
+    "for a0 in 0..8:",
+    "  in0 = load add_2__place_5dec05dbf7_0[a0]",
+    "  f16 v0 = in0",
+    "  v1 = sigmoid(v0)",
+    "  for a1 in 0..2560:",
+    "    for a2 in 0..160:",
+    "      in1 = load add_2__place_f67cdc1905_0[a0, a2]",
+    "      in2 = load linear_9_wt__source[a1, a2]",
+    "      f32 v2 = in1 * in2",
+    "      acc0 <- add(acc0, v2) over a2",
+    "    f16 v3 = acc0",
+    "    v4 = v1 * v3",
+    "    mul_10[a0, a1] = v4"
+   ]},"inputs":["add_2__place_f67cdc1905_0","add_2__place_5dec05dbf7_0","linear_9_wt__source"],"outputs":[["mul_10","f16",[8,2560]]]}
   ]},"formed":true}
  ],
  "routing": [
@@ -10204,9 +10198,9 @@
   {"parent":153,"arm":{"REDUCE":"g32k"},"children":[154,155]},
   {"parent":148,"arm":{"PLACE@map.1/inner":"cut"},"children":[156,157]},
   {"parent":156,"arm":{"LAYOUT@linear_6_wt":"source"},"children":[158]},
-  {"parent":157,"arm":{"LAYOUT@linear_7_wt":"source","LAYOUT@linear_8_wt":"source"},"children":[159]},
-  {"parent":159,"arm":{"REDUCE":"g16k"},"children":[160,161]},
-  {"parent":150,"arm":{"PLACE@map.1/inner":"cut"},"children":[162,147]}
+  {"parent":157,"arm":{"REDUCE":"g16k"},"children":[159,160]},
+  {"parent":150,"arm":{"PLACE@map.1/inner":"cut"},"children":[161,147]},
+  {"parent":161,"arm":{"LAYOUT@linear_9_wt":"source"},"children":[162]}
  ],
  "rows": [
   {"name":"expert1@nvfp4.k_linear_reduce_c603e5.m1.3dbd6e8fc036",
@@ -10619,7 +10613,7 @@
    "kernel":30,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"COLD_CACHE":true},
    "knobs":{"WORK":"t128","REDUCE":"coop","RASTER":""},
-   "measurements":{"emmy_us":8.191999979317188,"reference_us":8.191999979317188,"reference_backend":"same-input-greedy","tried":2}},
+   "measurements":{"emmy_us":7.680000038817525,"reference_us":8.191999979317188,"reference_backend":"same-input-greedy","tried":2}},
   {"name":"post4096.k_linear_mean_reduce_5afe27.m4096.14bf625969e7.14bf625969e7.601327a981d1",
    "kernel":87,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"COLD_CACHE":true},
@@ -10935,12 +10929,12 @@
    "kernel":152,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
    "knobs":{"WORK":"t512","TILE":"","REDUCE":"coop/v8","STAGE":"","RASTER":""},
-   "measurements":{"emmy_us":11.264000087976456,"reference_us":11.264000087976456,"reference_backend":"same-input-greedy","tried":1}},
+   "measurements":{"emmy_us":10.239999741315842,"reference_us":10.239999741315842,"reference_backend":"same-input-greedy","tried":1}},
   {"name":"post8.k_c0659ddc552b.m8.k_20cca545d655",
    "kernel":149,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
    "knobs":{"WORK":"","TILE":"f4","RASTER":""},
-   "measurements":{"emmy_us":7.168000098317862,"reference_us":6.144000217318535,"reference_backend":"same-input-greedy","tried":1}},
+   "measurements":{"emmy_us":7.168000098317862,"reference_us":7.168000098317862,"reference_backend":"same-input-greedy","tried":1}},
   {"name":"post8.k_c0659ddc552b.m8.k_89d9bd534030",
    "kernel":145,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
@@ -10950,7 +10944,7 @@
    "kernel":154,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
    "knobs":{"WORK":"w1x1","TILE":"mma_m8n8k4_f16_f32/f1x1/k16","REDUCE":"","STAGE":"d1/smem","RASTER":""},
-   "measurements":{"emmy_us":27.648000046610832,"reference_us":27.648000046610832,"reference_backend":"same-input-greedy","tried":1}},
+   "measurements":{"emmy_us":26.623999699950218,"reference_us":26.623999699950218,"reference_backend":"same-input-greedy","tried":1}},
   {"name":"post8.k_c0659ddc552b.m8.k_2727bd956edb",
    "kernel":155,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
@@ -10965,25 +10959,25 @@
    "kernel":158,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
    "knobs":{"WORK":"t512","TILE":"","REDUCE":"coop","STAGE":"","RASTER":""},
-   "measurements":{"emmy_us":7.168000098317862,"reference_us":7.168000098317862,"reference_backend":"same-input-greedy","tried":1}},
-  {"name":"post8.k_c0659ddc552b.m8.k_ebee3c67b7b4",
-   "kernel":160,
+   "measurements":{"emmy_us":6.144000217318535,"reference_us":7.168000098317862,"reference_backend":"same-input-greedy","tried":1}},
+  {"name":"post8.k_c0659ddc552b.m8.k_65f904c98290",
+   "kernel":159,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
    "knobs":{"WORK":"w1x2","TILE":"mma_m8n8k4_f16_f32/f1x1/k8","REDUCE":"","STAGE":"d2/smem","RASTER":""},
    "measurements":{"emmy_us":12.28800043463707,"reference_us":12.28800043463707,"reference_backend":"same-input-greedy","tried":1}},
   {"name":"post8.k_c0659ddc552b.m8.k_0a412c7fec4d",
-   "kernel":161,
+   "kernel":160,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
    "knobs":{"WORK":"","REDUCE":"","RASTER":""},
    "measurements":{"emmy_us":7.168000098317862,"reference_us":7.168000098317862,"reference_backend":"same-input-greedy","tried":1}},
-  {"name":"post8.k_c0659ddc552b.m8.k_1c8050bec228",
+  {"name":"post8.k_c0659ddc552b.m8.k_c0880dbd015a",
    "kernel":162,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
    "knobs":{"WORK":"w1x1","TILE":"mma_m8n8k4_f16_f32/f1x1/k8","REDUCE":"","STAGE":"d2/smem","RASTER":""},
-   "measurements":{"emmy_us":12.28800043463707,"reference_us":12.28800043463707,"reference_backend":"same-input-greedy","tried":1}},
+   "measurements":{"emmy_us":11.264000087976456,"reference_us":12.28800043463707,"reference_backend":"same-input-greedy","tried":1}},
   {"name":"post8.k_c0659ddc552b.m8.k_fd477830e042",
    "kernel":151,
    "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true,"COLD_CACHE":true},
    "knobs":{"WORK":"t512","TILE":"","REDUCE":"coop/r4","STAGE":"","RASTER":""},
-   "measurements":{"emmy_us":12.28800043463707,"reference_us":12.28800043463707,"reference_backend":"same-input-greedy","tried":1}}
+   "measurements":{"emmy_us":11.264000087976456,"reference_us":12.28800043463707,"reference_backend":"same-input-greedy","tried":1}}
  ]}

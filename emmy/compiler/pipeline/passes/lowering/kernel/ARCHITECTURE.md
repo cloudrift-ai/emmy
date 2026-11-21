@@ -934,7 +934,12 @@ table; a run that divides the reduce extent carries no bounds mask (the
 modulo a mask spells blocks every vector load); and before grouping, a load index `(Y + r) / d` whose `Y` is a
 non-negative multiple of a `g` dividing `d`, with `0 < r < g`, reads `Y / d`, so every element of a lane's run reads a
 block-scaled weight's scale at the run's own index and the code loads it once (V100 width-1 fp8 down projection: 181 →
-127 µs). On
+127 µs). A remainder folds the same way: `(Y + r) % d` with `d` dividing `g` is the literal `r % d`, so the two halves
+of a packed pair read the pair table at columns 0 and 1. The body's optimization then reads once what the fold made
+equal, and a quotient `Y / d` of a multiple of `g` that `d` divides counts as a multiple of `g / d` in the alignment
+proof: in a serial loop stepping 8, the bytes at `k / 2` and the next three are one 4-byte load, as they are along a
+cooperative lane (Qwen3.8-Flash-Next's summed fixed-slot down projection on the V100: 16.4 → 14.3 µs at one row,
+63.5 → 51.2 at eight). On
 modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed B, transposed for col-adjacent canonical
 B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
 Copy fills and computed operand fills use these same coupled layouts and accumulator mapping.

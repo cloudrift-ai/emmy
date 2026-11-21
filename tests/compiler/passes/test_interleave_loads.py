@@ -281,3 +281,22 @@ def test_a_fragment_read_between_its_two_loads_keeps_a_pair_apart() -> None:
     )
     paired, changed = _pair_ldmatrix(body)
     assert paired is body and not changed
+
+
+def test_a_block_index_of_a_strided_loop_variable_is_aligned() -> None:
+    """A loop stepping 8 reads a packed weight's byte at ``(k + i) / 2`` for each of its eight copies and the two
+    halves of a pair at ``(k + i) % 2``. The step makes ``k / 2`` a multiple of four and the remainder a literal, so
+    each byte is read once, the four bytes are one load, and a pair's halves are one load."""
+    from emmy.compiler.graph import Tensor
+
+    weights, pairs = Tensor("w", (4, 80), F16), Tensor("t", (256, 2), F16)
+    copies = "\n".join(
+        f"    f16 w{i} = load w[row, (k + {i}) / 2]\n    f16 p{i} = load t[code, (k + {i}) % 2]\n"
+        f"    f16 v{i} = mul(w{i}, p{i})\n    f32 s <- add(s, v{i})"
+        for i in range(8)
+    )
+    op = KernelOp(body=parse_body(f"for k in 0..160 step 8:\n{copies}"), inputs={"w": weights, "t": pairs}, outputs={})
+    found = [stmt for stmt in _vectorize_loads(op, op.body).iter() if isinstance(stmt, Load)]
+    loads = {stmt.input: stmt for stmt in found}
+    assert len(found) == 2, found
+    assert len(loads["w"].names) == 4 and len(loads["t"].names) == 2 and loads["t"].index[1] == Literal(0, "int")
