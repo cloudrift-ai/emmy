@@ -167,6 +167,53 @@ def test_the_first_steps_readers_do_not_take_what_every_step_reads() -> None:
     assert {"q", "tril"} <= set(rolled.inputs), "the output's products are in the step, the matrix they read an input"
 
 
+_RULE_FROM_A_STATE = """
+import torch, torch.nn as nn
+import transformers.models.qwen3_5.modeling_qwen3_5 as scope
+from emmy.compiler.trace.huggingface import _chunk_rule
+class Rule(nn.Module):
+    # the chunk rule from a state it is handed, its queries and keys normalized before it
+    def forward(self, q, k, v, g, beta, state):
+        return _chunk_rule(vars(scope), q, k, v, g, beta, chunk_size=8, initial_state=state, output_final_state=True)
+m = Rule()
+m(torch.randn(1, 32, 2, 16), torch.randn(1, 32, 2, 16), torch.randn(1, 32, 2, 16), -torch.rand(1, 32, 2), torch.rand(1, 32, 2),
+  torch.randn(1, 2, 16, 16) * 0.1)
+"""
+
+
+def test_steps_of_different_sizes_are_not_spliced_with_their_readers(monkeypatch) -> None:
+    """The decay matrix times beta and the inverse times beta are two products of one shape and one body, and the
+    second descends from the first through the whole substitution: a chain of two by their bodies. The first one's
+    readers are then everything that reads the decay matrix, a step of most of the graph beside a step of ten
+    nodes. Steps that are one body hold as many nodes each, so the roll asks that before it splices: a splice of
+    that step over the substitution, still unrolled, took 9 s at this size and did not come back at twice it."""
+    from importlib import import_module
+
+    from emmy.compiler.pipeline import Match, RuleSkipped
+    from emmy.compiler.pipeline.pipeline import Rule
+
+    roll = import_module("emmy.compiler.pipeline.passes.loop.fusion.005_roll_recurrence")
+    graph, _, _ = graph_from_code(_RULE_FROM_A_STATE)
+    graph = Pipeline.build([stage for stage in LOOP_PASSES if stage != "loop/fusion"]).run(graph)
+    spliced: list[int] = []
+    splice = roll.build_merged_region
+    monkeypatch.setattr(roll, "build_merged_region", lambda graph, region, live: spliced.append(len(region)) or splice(graph, region, live))
+    rolled: list[int] = []
+    taken: set[str] = set()
+    for node_id in graph.topological_order():
+        node = graph.nodes[node_id]
+        if isinstance(node.op, LoopOp) and node_id not in taken:
+            match = Match(graph=graph, root_node_id=node_id, rule=Rule(name="test", pattern=[]))
+            try:
+                roll.rewrite(match, node)
+            except RuleSkipped:
+                continue
+            taken |= set(match.consumed)
+            rolled.append(len(match.consumed))
+    assert len(rolled) == 2, "the substitution and the walk"
+    assert max(spliced) < len(graph.nodes) // 4
+
+
 def test_a_step_with_a_float_offset_rolls() -> None:
     """The literal abstraction lifts integer anchors alone: a step's float offset (an epsilon the normal form spells
     inside the sum) stays as spelled instead of truncating to an integer, so the first step advanced zero times is
