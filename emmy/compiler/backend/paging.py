@@ -408,9 +408,11 @@ def with_paging(plan, graph):
     """``plan`` with the inspector and the paging program spliced ahead of every launch that reads or writes a
     paged buffer declared with one slot or more (``cuda.paged_buffers``'s fourth element). Tables, slots and clock
     enter as inputs named ``<buffer>__<table>``; the buffer's ``[pages, words]`` view is ``<buffer>__view``. Buffers
-    that share a page list (:func:`_groups`) take one paging run per launch: the inspectors of the ones the launch
-    touches mark one page list, an inspector another one already spliced repeats is dropped, and the run moves
-    the marked pages for every buffer of the group."""
+    that share a page list (:func:`_groups`) take one paging run for the launches that touch them while what their
+    inspectors read stands: ahead of the first, the inspectors of that launch and of each later one up to the first
+    whose inspector reads a buffer written since mark one page list, an inspector another one already spliced
+    repeats is dropped, and the run moves the marked pages for every buffer of the group. A MoE layer's two expert
+    launches read one selection, so they take one run."""
     from dataclasses import replace  # noqa: PLC0415
     from math import prod  # noqa: PLC0415
 
@@ -437,26 +439,36 @@ def with_paging(plan, graph):
         shape = specs[name].resolve_shape({})
         geometry[name] = _declare(spliced, name, -(-shape[axis] // page), slots, prod(shape) // shape[axis] * page, specs[name].dtype)
     groups = _groups(geometry)
-    for launch in plan.launches:
-        node = graph.nodes[launch.node_id]
+    covered = set()
+    for at, launch in enumerate(plan.launches):
         for names in groups:
-            touched = [name for name in names if f"{name}__pages" in launch.arg_names]
-            if not touched:
+            if (at, names) in covered or not any(f"{name}__pages" in launch.arg_names for name in names):
                 continue
             marks = f"{launch.node_id}__{names[0]}__marks"
-            inspected, moved = set(), 0
-            for name in touched:
-                axis, page, _ = managed[name]
-                inspector, most = _inspector_plan(graph, node, name, axis, page, geometry[name][0], marks)
-                key = (tuple(inspector.inputs), tuple((lc.kernel_name, lc.arg_names) for lc in inspector.launches))
-                if key in inspected:
-                    continue
-                # The inspector reads the plan's own buffers, under their own names; the first clears the page list.
-                renames = {**{buffer: buffer for buffer in inspector.inputs}, inspector.outputs[0]: marks}
-                zero = () if inspected else (marks,)
-                spliced.launches.extend(splice(spliced, inspector, prefix=f"{launch.node_id}.{name}.inspect", renames=renames, zero=zero))
-                inspected.add(key)
-                moved += most
+            inspected, moved, written = set(), 0, set()
+            # The run marks the pages of this launch and of every later one of the group whose inspectors read nothing
+            # written in between, which then take no run of their own.
+            for later_at in range(at, len(plan.launches)):
+                later = plan.launches[later_at]
+                touched = [name for name in names if f"{name}__pages" in later.arg_names]
+                node = graph.nodes[later.node_id]
+                inspectors = [(name, *_inspector_plan(graph, node, name, *managed[name][:2], geometry[name][0], marks)) for name in touched]
+                if any(set(inspector.inputs) & written for _, inspector, _ in inspectors):
+                    break
+                for name, inspector, most in inspectors:
+                    key = (tuple(inspector.inputs), tuple((lc.kernel_name, lc.arg_names) for lc in inspector.launches))
+                    if key in inspected:
+                        continue
+                    # The inspector reads the plan's own buffers, under their own names; the first clears the page list.
+                    renames = {**{buffer: buffer for buffer in inspector.inputs}, inspector.outputs[0]: marks}
+                    zero = () if inspected else (marks,)
+                    prefix = f"{later.node_id}.{name}.inspect"
+                    spliced.launches.extend(splice(spliced, inspector, prefix=prefix, renames=renames, zero=zero))
+                    inspected.add(key)
+                    moved += most
+                if touched:
+                    covered.add((later_at, names))
+                written.update(later.writes or (later.node_id,))
             spliced.launches.extend(_step(spliced, launch.node_id, names, marks, geometry, moved))
         spliced.launches.append(launch)
     return spliced

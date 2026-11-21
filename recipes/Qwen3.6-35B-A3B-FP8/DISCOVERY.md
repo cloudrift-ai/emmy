@@ -54,6 +54,26 @@ The gate is still not measured. What the card showed:
   not deadlock; it runs for hours, and the GPU stays busy after the process is gone until it ends. Both trees' packs
   hold it, and neither the one-row step nor the 64-row chunk holds a launch like it. A prompt of exactly 64 tokens
   is one 64-row chunk (with carried state a chunk holds prompt tokens only), so it never reaches the 4-row chunk.
+- **The gate, measured (a third card, the same day).** Each tree's drafter-off pack served three greedy prompts of
+  exactly 64 tokens and 128 new tokens under `nsys --cuda-graph-trace=node`; the tokens are the same on all three.
+  Kernel time per one-row step, the median of 381 steps:
+
+  | | main | this branch |
+  |---|---|---|
+  | decisions | 4.81 ms | 1.04 ms |
+  | state update | 1.48 ms | 0.55 ms |
+  | page table updates | (in the update) | 1.01 ms |
+  | paging programs | 6.29 ms | 2.60 ms |
+  | page copies | 6.10 ms | 6.44 ms |
+  | the step, first launch to last | 19.3 ms | 15.5 ms |
+
+  2.60 ms misses the 2 ms gate. Each layer runs the paging chain twice, once ahead of each expert launch: the
+  gate-up launch's run moves the layer's experts for all four stacks, and the down launch's run, from the same
+  selection, finds them in place and moves nothing. The second run is half the paging programs and 0.36 ms of copies
+  that move nothing. The page copies are the expert reads themselves, about 6 ms a step in both trees.
+- **One run a layer.** A group's run now marks the pages of every later launch of the group whose inspectors read
+  nothing written since, and those launches take no run. Estimate from the trace: 1.3 ms of paging programs a step
+  and 0.36 ms less copying. Not measured on the card.
 - On the RTX 4080 the parallel scan alone is correct and fast at 65, 257 and 1,000 entries.
 
 ## The FP8 cache staged into shared memory (2026-11-07)

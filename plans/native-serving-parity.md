@@ -649,6 +649,10 @@ What the session changes for the milestones:
     DeltaNet tail, one launch of one block (the uncovered `gdn4-sparse-linear` twin's unsplit fallback), not paging.
     Next card: the same chain with prompts of exactly 64 tokens, which never reach the 4-row chunk. The real fix is
     rows for the four uncovered twins' cuts (a follow-up, also what strict export needs).
+    **Third card, same day:** with 64-token prompts both trees serve, tokens the same. Paging programs per one-row
+    step: 6.29 ms on main, 2.60 ms on the branch; the step 19.3 → 15.5 ms. The gate missed because each layer paged
+    twice (one run per expert launch, the second moving nothing). Now one run covers both launches: estimate
+    1.3 ms. Next card: the same chain on the new tree.
 
 12. **Qwen3.6: slots sized to the verify step's picks.** A verify step's three rows route past the 8 slots, so
     the drafter buys almost nothing (a 44-52 ms drafted step against a 19.6-19.8 ms one-row step). The pager's

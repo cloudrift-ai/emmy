@@ -372,3 +372,35 @@ def test_a_listed_step_moves_the_page_its_host_lists_into_the_one_slot():
             got = np.frombuffer(program.executor.read("w__slots"), dtype=np.float32)[:elements]
             np.testing.assert_array_equal(got, home[page].numpy())
         assert program.executor.buffer("w__table")[0] == table_ptr
+
+
+def test_launches_of_one_page_list_take_one_run_while_their_selection_stands():
+    """Two launches reading both stacks at one selector take one run, ahead of the first; a launch between them that
+    writes the selector gives the second its own run."""
+    from dataclasses import replace
+
+    import torch.nn as nn
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.paging import with_paging
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.trace.torch import trace_module
+
+    class Toy(nn.Module):
+        def forward(self, w, v, sel, x):
+            return w[sel] * x + v[sel][:, :1]
+
+    w, v = torch.arange(ROWS * COLS, dtype=torch.float32).reshape(ROWS, COLS), -torch.arange(ROWS * 2.0).reshape(ROWS, 2)
+    graph = trace_module(Toy(), (w, v, torch.tensor([5, 1]), torch.full((2, COLS), 2.0)))
+    graph.hints.set("cuda.paged_buffers", (("w", 0, 1, 0), ("v", 0, 1, 0)))
+    compiled = CudaBackend().compile(graph)
+    plan = plan_from_graph(compiled)
+    (launch,) = plan.launches
+    paged = {name: (axis, page, PAGE_SLOTS) for name, (axis, page, _) in plan.paged.items()}
+
+    def runs(*launches):
+        spliced = with_paging(replace(plan, launches=list(launches), paged=paged), compiled)
+        return [lc.node_id.split(".")[0] for lc in spliced.launches if lc.node_id.endswith(".page.sub")]
+
+    assert runs(launch, launch) == [launch.node_id]
+    assert runs(launch, replace(launch, writes=("sel",)), launch) == [launch.node_id] * 2
