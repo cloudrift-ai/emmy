@@ -155,8 +155,10 @@ make test                                                        # the whole sui
 ```
 
 Every compile is the deployable one: the code a test builds is the code a served model runs. Under the default fast
-math a pick can be an f16-accumulate atom, so a test that checks numerics and leaves the schedule to the prior pins
-`FAST_MATH` off. The perf tests (`tests/perf`, `-m perf`) are skipped by `make test` and run via
+math a pick can be an f16-accumulate atom, and a product of two f32 operands can take an atom that rounds them (TF32,
+or bf16), so a test that checks numerics and leaves the schedule to the prior pins `FAST_MATH` off. One that holds an
+f32 program to f32 and wants the rest of the default lane pins the gates of those atoms alone
+(`tests.compiler.helpers.F32_PRODUCTS`). The perf tests (`tests/perf`, `-m perf`) are skipped by `make test` and run via
 `make bench-kernels`. `make test` also sets `EMMY_GOLDEN_FILE=` (set, empty): no repository golden is evidence in
 the suite, because it never asks how fast a pick is and importing a card's goldens is work every worker process
 would repeat; a test that needs golden evidence scopes it itself (`--golden PATH`, `golden.records_override`). Every
