@@ -118,6 +118,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.stmt import Accum, Loop
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import (
+    F32_PRODUCTS,
     compile_with_kernels,
     direct_classic_leaf,
     from_pretrained_or_skip,
@@ -265,6 +266,8 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
     not the cold policy."""
     if variant == "mask":
         _pin_mask_direct(monkeypatch)
+    for gate in F32_PRODUCTS:  # the scores and the values are f32 products held to 1e-4
+        monkeypatch.setenv(f"EMMY_{gate}", "0")
     torch.manual_seed(0)
     for cfg in _FLASH_VARIANTS[variant][2]:
         module, args, feed, ref = _flash_feed(variant, *cfg)

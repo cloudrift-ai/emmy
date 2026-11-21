@@ -254,6 +254,12 @@ def grouped_raster_decode(kernel, group: int) -> list[str]:
     ]
 
 
+#: Pins for a test that holds an f32 program's numbers to f32 arithmetic and leaves its schedule to the prior. Under
+#: fast math a product of two f32 operands may take a cell that rounds them (the TF32 atom, the bf16 atoms); the rest
+#: of the default lane stays as a deploy compiles it.
+F32_PRODUCTS = {"TF32_MMA": False, "F32_AS_BF16_MMA": False}
+
+
 def skip_if_no_cuda() -> None:
     """Skip the current test when Emmy cannot compile CUDA kernels."""
     if not has_cuda_toolchain():
