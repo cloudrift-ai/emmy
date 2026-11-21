@@ -205,34 +205,35 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
 
 def test_an_off_precision_gate_stamps_the_same_space() -> None:
     """The stamp seeds a budgeted pool's draw, so two pin states that enumerate the same rows must
-    share it. Explicitly disabling both precision gates matches FAST_MATH=false. The unset
+    share it. Explicitly disabling every precision gate matches FAST_MATH=false. The unset
     default matches FAST_MATH=true, and individual pins still override that umbrella."""
     from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
     from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_MATH, FP8_MMA
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_MATH, FP8_MMA, TF32_MMA
 
     default = schedule_pin_fingerprint()
     with FAST_MATH.pinned("0"):
         clean = schedule_pin_fingerprint()
-    for off in ({"FAST_MATH": False}, {"FAST_MATH": 0}, {"F16_MMA_F32_ACC": 0, "FP8_MMA": 0}):
+    gates_off = {"F16_MMA_F32_ACC": 0, "FP8_MMA": 0, "TF32_MMA": 0}
+    for off in ({"FAST_MATH": False}, {"FAST_MATH": 0}, gates_off):
         with pinned_knobs(off):
             assert schedule_pin_fingerprint() == clean, f"an OFF gate {off} must enumerate the precise space"
     ctx = Context.from_target((12, 0))
     tile = _unmapped_tile(8, 8)
     with pinned_knobs({"FAST_MATH": False}):
         pool = classic_forks(tile, tile.knobs, ctx)[0].pool_id
-    with pinned_knobs({"F16_MMA_F32_ACC": 0, "FP8_MMA": 0}):
+    with pinned_knobs(gates_off):
         assert classic_forks(tile, tile.knobs, ctx)[0].pool_id == pool
-    # The umbrella spells exactly what it enables: one stamp for ``FAST_MATH=1`` and for both gates pinned ON,
-    # and an individual OFF pin under the umbrella is the other gate alone.
+    # The umbrella spells exactly what it enables: one stamp for ``FAST_MATH=1`` and for every gate pinned ON,
+    # and an individual OFF pin under the umbrella is the other gates alone.
     with FAST_MATH.pinned("1"):
         umbrella = schedule_pin_fingerprint()
         with F16_MMA_F32_ACC.pinned("0"):
             f16_off = schedule_pin_fingerprint()
     assert umbrella == default != clean
-    with F16_MMA_F32_ACC.pinned("1"), FP8_MMA.pinned("1"):
+    with F16_MMA_F32_ACC.pinned("1"), FP8_MMA.pinned("1"), TF32_MMA.pinned("1"):
         assert schedule_pin_fingerprint() == umbrella
-    with FAST_MATH.pinned("0"), FP8_MMA.pinned("1"):
+    with FAST_MATH.pinned("0"), FP8_MMA.pinned("1"), TF32_MMA.pinned("1"):
         assert schedule_pin_fingerprint() == f16_off
     assert schedule_pin_fingerprint() == default
 

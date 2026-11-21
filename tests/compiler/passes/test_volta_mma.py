@@ -210,11 +210,14 @@ def test_volta_warp_tiles_respect_accumulator_register_budget() -> None:
 
 def test_volta_chunks_reach_the_width_the_16_deep_atoms_do() -> None:
     """Volta's k4 atom reaches a 128-element K chunk at bk 32, the chunk a k16 atom reaches at bk 8: a skinny GEMM's
-    K-contiguous rows stream in 256 B runs rather than 64 B. No other atom's chunk domain moves."""
+    K-contiguous rows stream in 256 B runs rather than 64 B. The TF32 atom's k8 reaches it at bk 16 by the same rule,
+    and no deeper atom's chunk domain moves."""
     volta = {p.bk for p in warp_tile_moves((VOLTA,))}
     assert volta == {1, 2, 4, 8, 16, 32}
     for name in ATOM_REGISTRY:
-        if ATOM_REGISTRY[name].atom_k > 4:
+        if ATOM_REGISTRY[name].atom_k == 8:
+            assert {p.bk for p in warp_tile_moves((name,))} == {1, 2, 4, 8, 16}, name
+        elif ATOM_REGISTRY[name].atom_k > 8:
             assert {p.bk for p in warp_tile_moves((name,))} == {1, 2, 4, 8}, name
 
 

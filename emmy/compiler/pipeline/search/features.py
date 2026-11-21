@@ -483,7 +483,13 @@ class Featurizer:
         given no context. Computed once per kernel."""
         from emmy.compiler.ir.schedule.classic import ClassicProblem  # noqa: PLC0415
         from emmy.compiler.pipeline.passes.tile._fromloop import scheduled_form  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import (  # noqa: PLC0415
+            F16_MMA_F32_ACC,
+            FP8_MMA,
+            TF32_MMA,
+            TF32_SPLIT_MMA,
+            precision_pin,
+        )
 
         tile = kernel_tile(kernel)
         if tile is None or tile.op is None or self.ctx is None:
@@ -495,6 +501,8 @@ class Featurizer:
             self.ctx,
             allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
             allow_fp8=precision_pin(FP8_MMA) is True,
+            allow_tf32=precision_pin(TF32_MMA) is True,
+            allow_tf32_split=precision_pin(TF32_SPLIT_MMA) is True,
         )
         self._warp_eligible[id(tile)] = (tile, problem.warp_eligible)  # the tile is held, so its id is not reused
         return problem.warp_eligible
@@ -739,8 +747,9 @@ def _geom_feats(
         # KERNEL combine (``c<cta>k``), 0.0 = in-place ATOMIC (``c<cta>a`` / bare). The
         # offline prior's split-K gate reads it.
         "D_finalize_kernel": 1.0 if (splitk > 1 and finalize == "kernel") else 0.0,
-        # A scalar tile on a warp-ELIGIBLE contraction (16-bit operands, atoms offered —
-        # ``Featurizer.warp_eligible``) competes against tensor cores: the
+        # A scalar tile on a warp-ELIGIBLE contraction (operands of 16 bits or fewer, atoms offered —
+        # ``Featurizer.warp_eligible``, which does not count the TF32 atom of an fp32 product) competes against
+        # tensor cores: the
         # roofline bar none of the flat geometry terms can see. 0 on warp rows and on kernels
         # with no warp offer, so fp32 / non-contraction ranking is untouched.
         "D_scalar_on_warp_eligible": 1.0 if (not warp and float(knobs.get("S_warp_eligible", 0.0) or 0.0) > 0) else 0.0,

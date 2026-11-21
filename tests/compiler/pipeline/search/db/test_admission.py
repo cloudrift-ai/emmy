@@ -28,9 +28,11 @@ def test_reason_keeps_a_row_of_either_precision_regime() -> None:
     """A row's precision decisions alone decide its regime, spelled once and not read off this shell."""
     assert admission_reason(_row("k", us=500.0, knobs=_ROW), _STAMPS) is None
     assert admission_reason(_row("k", us=500.0, knobs=_ROW, precision={"FAST_MATH": True}), _STAMPS) is None
-    following = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO")
-    assert REGIME_PINS[""] == {**dict.fromkeys(following, False), "CONTRACT_FMA": True, "COLD_CACHE": False}
-    assert REGIME_PINS["FAST_MATH"] == {**dict.fromkeys(following, True), "CONTRACT_FMA": True, "COLD_CACHE": False}
+    following = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "TF32_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO")
+    # Contraction is on and the split TF32 atom off in both regimes: the umbrella moves neither.
+    own = {"CONTRACT_FMA": True, "TF32_SPLIT_MMA": False, "COLD_CACHE": False}
+    assert REGIME_PINS[""] == {**dict.fromkeys(following, False), **own}
+    assert REGIME_PINS["FAST_MATH"] == {**dict.fromkeys(following, True), **own}
     assert regime_of(False, {"FAST_MATH": True}) == "FAST_MATH" and regime_of() == ""
     # Contraction is on in both regimes, so only turning it off is an independent override.
     assert regime_of(False, {"FAST_MATH": False, "CONTRACT_FMA": True}) == ""

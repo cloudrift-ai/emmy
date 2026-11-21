@@ -316,8 +316,10 @@ in the enumeration where a pin is decided across sites rather than at one. Readi
 it unsatisfiable on exactly the kernels that need it most: attention spells `TILE` at its score contraction and at
 its chunked value channel, and no schedule carries one mma tile at both.
 
-The precision policy (`allow_f16_accumulate`, `allow_fp8`) filters the CATALOG: an f16-accumulate or FP8 atom is
-offered unpinned only where the compile allowed it. A hand pin naming such a tile is an authored, legal choice and
+The precision policy (`allow_f16_accumulate`, `allow_fp8`, `allow_tf32`, `allow_tf32_split`) filters the CATALOG: an
+f16-accumulate, FP8, TF32 or split TF32 atom is offered unpinned only where the compile allowed it. The two TF32
+atoms are the cells of a product whose operands are all f32; an f32 operand beside a 16-bit one keeps the 16-bit
+cell that converts it. A hand pin naming such a tile is an authored, legal choice and
 bypasses the policy; a row a descent follows (`with_row` — measured evidence) does not, so an FP16-accumulate row
 recorded or measured in the standard lane cannot deploy there. Likewise a transposed raster (`gn4`, `gn8`) is never the catalog's own offer and is taken only
 where a row names it.
@@ -380,7 +382,10 @@ operations, and products share FP32 register results within a step. Operand conv
 to shorten their live ranges. All reads finish before the carried slot is updated.
 
 The catalog offers FP32 accumulation and FP16 partial accumulation under `F16_MMA_F32_ACC` (also enabled by
-`FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. For FP16 accumulation,
+`FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. Under their gates it also
+offers the TF32 atom and its split, whose operands are the state's FP32 fragments as they are, moved between lanes
+(`AtomKind.resident_operands`): the TF32 atom reads ten bits of each, like a half, over FP32's range, and the split
+keeps the recurrence as close to the exact one as FP32 arithmetic does. For FP16 accumulation,
 `TILE`'s K chunk is the promotion interval in atom steps: `k4` promotes and clears the partial accumulator every
 64 products on m16n8k16 or 16 on Volta m8n8k4, including a shorter final chunk. An explicit tile row can select
 the arithmetic directly. Register pressure and numerical error depend on the shape and inputs.

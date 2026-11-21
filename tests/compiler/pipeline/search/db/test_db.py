@@ -115,7 +115,10 @@ def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
     assert _held(db, hot, "k", bindings={}, knobs=_ROW).us == 10.0
 
 
-@pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA"])
+@pytest.mark.parametrize(
+    "name",
+    ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "TF32_MMA", "TF32_SPLIT_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA"],
+)
 @pytest.mark.parametrize("umbrella", [False, True])
 def test_independent_precision_regimes_never_replace_or_price_each_other(name, umbrella) -> None:
     from emmy.compiler.pipeline.knob import get
@@ -212,10 +215,12 @@ def test_context_keys_match_the_db_version_and_ignore_later_ambient_pins(monkeyp
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     monkeypatch.setenv("EMMY_FAST_EXP", "1")
     expected = {
-        None: "88164354e165a548540cb600c6ec7370c68fdaf7128e7df553d126e7913c205f",
-        "FAST_EXP": "0751a3a7fb81652aa924315afba0deda93ba340d222710760553cceebaea7196",
-        "F16_MMA_F32_ACC": "1c1ac935521c473ae17d6ad43de685532ec646477d4714b264c053d786cf441c",
-        "FP8_MMA": "38f52eb5cbb1150ba9c5b1d4e14be48df46453bcfd2fe19373193765aa85684f",
+        None: "c8dd8625a08842318e107646481165831d4c1642dafb2f1cbb42d26d400e4965",
+        "FAST_EXP": "24e91e2fb185efc20587a1044672f9f8961b770280dfb15e63fb5da45ee0fef8",
+        "F16_MMA_F32_ACC": "a8385b98649541d85b2a94da03b1ddf218a03a988449f2261973193e55792cfb",
+        "FP8_MMA": "4f40b86ddfbbf92b0342407664c20e32b6ce0f923b84781568083dba811385d0",
+        "TF32_MMA": "0324a43bce9f50819287372446d7e8fa685c3eb495c598d20ce4387ed5641ed2",
+        "TF32_SPLIT_MMA": "ab57d4348f07223d148348cb994dba37035980b5709b974a9f9f6e7b03b69593",
     }
     for name, key in expected.items():
         ctx = Context.from_target((12, 0), precision={name: True} if name else {})

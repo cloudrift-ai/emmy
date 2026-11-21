@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import ScheduleProblem, ScheduleRefused, Site, note_pin_refusal
@@ -553,7 +554,11 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         facts = tile.contractions.get(self.id)
         if facts is None:
             return any(choice.tile.is_warp for choice in self.nodes)
-        return any(self._placed_ok(ReductionSchedule(plan, Reduce())) for plan in _warp_plans(node, facts, self.problem.atoms_of(self.id)))
+        # The reading the priors were fit on is of a cell of 16 bits or fewer: a product of f32 operands keeps the
+        # scalar ranking they learned, and the TF32 cell joins this reading with the featurizer version that refits
+        # them.
+        atoms = tuple(name for name in self.problem.atoms_of(self.id) if ATOM_REGISTRY[name].operand_dtype("a") != F32)
+        return any(self._placed_ok(ReductionSchedule(plan, Reduce())) for plan in _warp_plans(node, facts, atoms))
 
     @cached_property
     def node_set(self) -> frozenset[NodeSchedule]:
@@ -730,7 +735,16 @@ class ClassicKernelSite(Site[ClassicSchedule]):
             if pinned is None or work.spell() == pinned
             for tile in problem.state_tiles
             if tile.spell() == named
-            or (not named and _atom_policy_ok(tile.atom, allow_f16_accumulate=problem.allow_f16_accumulate, allow_fp8=False))
+            or (
+                not named
+                and _atom_policy_ok(
+                    tile.atom,
+                    allow_f16_accumulate=problem.allow_f16_accumulate,
+                    allow_fp8=False,
+                    allow_tf32=problem.allow_tf32,
+                    allow_tf32_split=problem.allow_tf32_split,
+                )
+            )
         )
 
     def _states(self) -> tuple[Stage, ...]:
@@ -845,6 +859,9 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     row: Mapping[str, str] = field(default_factory=frozendict)
     allow_f16_accumulate: bool = True
     allow_fp8: bool = True
+    allow_tf32: bool = True
+    #: Off unless the compile's pin says otherwise, as the gate is (``space.TF32_SPLIT_MMA``).
+    allow_tf32_split: bool = False
     validate_pins: bool = True
     #: A split's finalize tolerates a bare WORK / RASTER / REDUCE pin its own domain cannot take:
     #: it may name the partial's row, so the finalize keeps its catalog instead of offering nothing.
@@ -952,7 +969,13 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
         return tuple(
             name
             for name in self.atoms_of(site)
-            if _atom_policy_ok(ATOM_REGISTRY[name], allow_f16_accumulate=self.allow_f16_accumulate, allow_fp8=self.allow_fp8)
+            if _atom_policy_ok(
+                ATOM_REGISTRY[name],
+                allow_f16_accumulate=self.allow_f16_accumulate,
+                allow_fp8=self.allow_fp8,
+                allow_tf32=self.allow_tf32,
+                allow_tf32_split=self.allow_tf32_split,
+            )
         )
 
     @cached_property

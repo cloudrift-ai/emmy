@@ -311,12 +311,16 @@ def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
 @pytest.mark.xdist_group("cuda")
 def test_the_rolled_kernel_matches_eager_on_the_gpu() -> None:
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     graph, _, (module, _, _) = graph_from_code(_delta(cat=True))
     rng = np.random.default_rng(0)
     arrays = {name: (rng.standard_normal((2, 16) if name == "g" else (2, 16, 8)) * 0.5).astype(np.float32) for name in ("q", "k", "v", "g")}
 
-    result, _ = run_program(Pipeline.build(CUDA_PASSES).run(graph), arrays)
+    # The schedule is the prior's, and the numbers are held to f32: fast math off, since under it a pick may keep
+    # the state in registers behind an atom that reads ten bits of each operand.
+    with pinned_knobs({"FAST_MATH": False}):
+        result, _ = run_program(Pipeline.build(CUDA_PASSES).run(graph), arrays)
 
     reference = module(*(torch.from_numpy(arrays[name]) for name in ("q", "k", "v", "g"))).numpy()
     (out,) = result.outputs.values()

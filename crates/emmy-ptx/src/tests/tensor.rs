@@ -361,6 +361,53 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
     }
 }
 
+/// A product of two fragments of 32-bit floats rounds each operand to TF32 first and multiplies the rounded ones.
+/// The split form also multiplies what each rounding left: three products, the small terms first.
+#[test]
+fn a_product_of_32_bit_floats_rounds_its_operands_and_the_split_multiplies_the_rest() {
+    let body = |ab: &str| {
+        format!(
+            "
+        Smem(name=sa, extents=(16, 64), dtype=f16, align=16)
+        RegFragment(name=fa, role=a, dtype=f32)
+        RegFragment(name=fb, role=b, dtype=f32)
+        RegFragment(name=fc, role=c, dtype=f32)
+        LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 0), role=a, ldm=64)
+        LdmatrixLoad(frag=fb, src_buffer=sa, src_index=(0, 0), role=b, ldm=64)
+        MmaSyncPtx(c_frag=fc, a_frag=fa, b_frag=fb, shape=(16, 8, 8), ab_dtype={ab})
+        "
+        )
+    };
+    for sm in [80, 89, 90, 120] {
+        let plain = warp(&body("tf32"), sm).unwrap();
+        let rounds = only(&plain, &["cvt"]);
+        assert_eq!(rounds.len(), 6, "four registers of A and two of B");
+        assert!(
+            rounds
+                .iter()
+                .all(|line| line.starts_with("cvt.rna.tf32.f32 "))
+        );
+        let products = only(&plain, &["mma"]);
+        assert_eq!(products.len(), 1);
+        assert!(products[0].starts_with("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "));
+
+        let split = warp(&body("tf32x3"), sm).unwrap();
+        // Each operand register is rounded, and what the rounding left is rounded too.
+        assert_eq!(only(&split, &["cvt"]).len(), 12);
+        assert_eq!(only(&split, &["sub"]).len(), 6);
+        // Three products sum one step from zero, and a float add, which rounds to nearest, adds it to the
+        // accumulator: the instruction truncates as it accumulates.
+        let products = only(&split, &["mma"]);
+        assert_eq!(products.len(), 3);
+        let into: Vec<&str> = products
+            .iter()
+            .map(|line| line.split(' ').nth(1).unwrap())
+            .collect();
+        assert!(into.iter().all(|step| *step == into[0]));
+        assert_eq!(only(&split, &["add.f32"]).len(), 4);
+    }
+}
+
 /// A card with the block-scaled product runs a product of 8-bit floats through it with a scale of one on each
 /// side: the same sum at twice the plain form's rate. The module's target then carries the suffix.
 #[test]
@@ -682,6 +729,69 @@ fn an_accumulator_is_a_b_fragment_by_an_exchange_of_packed_pairs() {
             "shl.b32 %r28, %r27, 16",
             "or.b32 %r3, %r24, %r28",
         ]
+    );
+}
+
+/// An operand of 32-bit floats is one accumulator's elements moved between lanes, with no conversion: a lane's
+/// register takes one of two registers of another lane, by a parity of its own. A is the accumulator's eight
+/// columns; B is eight of its sixteen rows, which `part` names.
+#[test]
+fn an_accumulator_is_an_operand_of_32_bit_floats_by_exchanges_alone() {
+    let repack = |rest: &str| {
+        format!(
+            "
+        RegFragment(name=c0, role=c, dtype=f32)
+        FragmentRepack(frag=f, srcs=(c0), {rest})
+        "
+        )
+    };
+    for ab in ["tf32", "tf32x3"] {
+        for sm in [80, 89, 90, 120] {
+            let a = warp(&repack(&format!("ab_dtype={ab}")), sm).unwrap();
+            assert_eq!(
+                only(&a, &["shfl"]).len(),
+                8,
+                "two exchanges a register of A"
+            );
+            assert_eq!(only(&a, &["selp"]).len(), 4);
+            assert!(
+                only(&a, &["cvt"]).is_empty(),
+                "the floats are the operand as they are"
+            );
+            for part in 0..2 {
+                let b = warp(&repack(&format!("ab_dtype={ab}, part={part}, role=b")), sm).unwrap();
+                assert_eq!(only(&b, &["shfl"]).len(), 4);
+                assert_eq!(only(&b, &["selp"]).len(), 2);
+            }
+        }
+    }
+    // The registers a lane takes: of A, the row's two columns from the lane two columns to a lane away in its
+    // own group; of B, the two columns of the first or the second eight rows.
+    let a = code(&repack("ab_dtype=tf32"), 80);
+    let exchanged: Vec<&str> = a
+        .iter()
+        .filter(|line| line.starts_with("shfl"))
+        .map(|line| line.split(", ").nth(1).unwrap())
+        .collect();
+    assert_eq!(
+        exchanged,
+        ["%f0", "%f1", "%f2", "%f3", "%f0", "%f1", "%f2", "%f3"]
+    );
+    for (part, rows) in [
+        (0, ["%f0", "%f1", "%f0", "%f1"]),
+        (1, ["%f2", "%f3", "%f2", "%f3"]),
+    ] {
+        let b = code(&repack(&format!("ab_dtype=tf32, part={part}, role=b")), 80);
+        let exchanged: Vec<&str> = b
+            .iter()
+            .filter(|line| line.starts_with("shfl"))
+            .map(|line| line.split(", ").nth(1).unwrap())
+            .collect();
+        assert_eq!(exchanged, rows);
+    }
+    assert!(
+        refusal(&repack("ab_dtype=tf32, part=2, role=b"), 80).contains("no PTX rule"),
+        "an accumulator has two halves of rows"
     );
 }
 

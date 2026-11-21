@@ -509,9 +509,11 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Define `reg` as `parts`, the lowest first: two halves by one move, bytes by shifts and sums.
+    /// Define `reg` as `parts`, the lowest first: one 32-bit element as it is, two halves by one move, bytes by
+    /// shifts and sums.
     fn pack_into(&mut self, reg: Reg, parts: &[Reg]) {
         let packed = match parts {
+            [whole] => (*whole).into(),
             [low, high] => Operand::Tuple(vec![*low, *high]),
             parts => self.pack(parts).into(),
         };

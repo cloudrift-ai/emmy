@@ -292,7 +292,7 @@ FAST_MATH = Knob(
     KnobType.BOOL,
     hints=(True,),
     help="Fast math is enabled by default: the precision-trading knobs that follow it (FAST_EXP, FAST_DIV, FAST_SQRT, "
-    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA). Pin 0 to disable; individual pins win.",
+    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA, TF32_MMA). Pin 0 to disable; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
 
@@ -322,13 +322,51 @@ FP8_MMA = Knob(
 )
 
 
+TF32_MMA = Knob(
+    "TF32_MMA",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the TF32 tensor-core atom forks (mma_m16n8k8_tf32_f32 — both multiplicands f32 values the "
+    "instruction reads at ten bits of mantissa, the accumulator f32) for a product of two f32 operands, which "
+    "otherwise runs on the scalar tier. Each product keeps about three decimal digits, so the fork family is "
+    "precision-trading: pin 1 to offer, 0 never; unset follows FAST_MATH. "
+    "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
+TF32_SPLIT_MMA = Knob(
+    "TF32_SPLIT_MMA",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the split TF32 tensor-core atom forks (mma_m16n8k8_tf32x3_f32 — each f32 multiplicand as its TF32 "
+    "rounding and what the rounding left, three products a step, each step added to the accumulator by a float add) "
+    "for a product of two f32 operands. Its sums are as close to the exact one as the scalar tier's (measured), so "
+    "FAST_MATH does not move it; it is three times the TF32 atom's instructions, slower than the scalar tier where "
+    "tensor cores accumulate f32 at half rate (an RTX 5090), and the priors cannot tell it from the TF32 atom, so "
+    "it is off unless pinned: pin 1 to offer. "
+    "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
 #: The precision-trading family: the umbrella and the knobs under it (:func:`precision_pin`) — what sorts a
 #: row into the fast-math lane.
-PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA, FAST_DIV, FAST_SQRT, FLUSH_TO_ZERO, CONTRACT_FMA)
+PRECISION_KNOBS = (
+    FAST_MATH,
+    FAST_EXP,
+    F16_MMA_F32_ACC,
+    FP8_MMA,
+    TF32_MMA,
+    TF32_SPLIT_MMA,
+    FAST_DIV,
+    FAST_SQRT,
+    FLUSH_TO_ZERO,
+    CONTRACT_FMA,
+)
 
 #: The precision-trading knobs whose default is their own first hint, not the umbrella's decision: the standard
-#: regime contracts multiply-adds as well, so the umbrella leaves contraction on in both.
-_OWN_DEFAULT = (CONTRACT_FMA,)
+#: regime contracts multiply-adds as well, so the umbrella leaves contraction on in both, and the split TF32 atom
+#: trades no precision the umbrella speaks for, so it stays off in both until a pin offers it.
+_OWN_DEFAULT = (CONTRACT_FMA, TF32_SPLIT_MMA)
 
 #: The regime knobs: the input pins a measured row is filed under beside the card and the kernel — the
 #: precision-trading family and the cache knob. Every reader of a regime iterates this tuple through
