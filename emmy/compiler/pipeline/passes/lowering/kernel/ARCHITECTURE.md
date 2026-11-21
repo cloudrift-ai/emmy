@@ -468,7 +468,10 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 `(b, acc)` channels over one shared A edge, either a computed cone or a materialized load; `_AtomOps.channels` reads
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
-epilogue (`extra_frags`). Epilogue loads substitute the cell base plus each lane's row and column offsets
+epilogue (`extra_frags`). The one A slab holds one value, so channels that multiply different values of the shared
+operand (one matrix under two scales, `(A * s) @ B0` beside `(A * t) @ B1`) are offered no stage and no tensor-core
+tile (`refusals._several_multiplicands`); a program that wants both products on tensor cores puts the second scale on
+its B, as the Gated DeltaNet rule does. Epilogue loads substitute the cell base plus each lane's row and column offsets
 inside their source index expressions, so block-scale quotients and split quotient/remainder coordinates retain
 their arithmetic. A stored value that reads no accumulator (a weight the product is scaled by, kept for another
 reader) is stored the same way: its program runs over the cell's coordinates under the first fragment's name,
