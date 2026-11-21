@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
 from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph, nvfp4_head_stored
-from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, slot_widths
+from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, SUMMED_SLOT_ROWS, slot_widths
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -442,10 +442,11 @@ def capture_twin_graphs(
         # program stays the one-token step's.
         top_k = int(getattr(text, "num_experts_per_tok", 0) or 0)
         chunk = slot_width if expert_slices > 1 and slot_width > 1 and not transposed else 1
-        # A Qwen4Exp program also weights its picks by the router's scores, sums them and adds the shared expert's
-        # output: the layer's routed sum (``ExpertFFN.slots_sum``).
-        summed = getattr(text, "model_type", None) == "qwen4_exp_text"
+        # A Qwen4Exp program of up to ``SUMMED_SLOT_ROWS`` rows also weights its picks by the router's scores, sums
+        # them and adds the shared expert's output: the layer's routed sum (``ExpertFFN.slots_sum``).
+        qwen4_exp = getattr(text, "model_type", None) == "qwen4_exp_text"
         for rows in (1, *slot_widths(chunk)) if top_k else ():
+            summed = qwen4_exp and rows <= SUMMED_SLOT_ROWS
             count = int(parts[1].gate_up_proj.shape[0])
             one = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
             picks = (top_k,) if rows == 1 else (rows, top_k)

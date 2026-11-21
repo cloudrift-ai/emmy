@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 
-from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, slot_widths
+from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, SUMMED_SLOT_ROWS, slot_widths
 from emmy.serving.twins import LayoutConflict, LayoutScope, fork_less_weights, plan_layouts
 
 logger = logging.getLogger(__name__)
@@ -1805,13 +1805,15 @@ class EmmyGenRunner:
                     # One row's k picks; on experts sliced across ranks (resident, in the ``F.linear`` form) also
                     # several rows at once, each against its own picks, at every slot width up to the decode bucket: a
                     # decode step of several tokens then runs one launch set, of the narrowest program that holds it,
-                    # instead of one per row. A Qwen4Exp program also takes the router's scores and the shared
-                    # expert's output and returns the layer's routed sum (``ExpertFFN.slots_sum``).
+                    # instead of one per row. A Qwen4Exp program of up to ``SUMMED_SLOT_ROWS`` rows also takes the
+                    # router's scores and the shared expert's output and returns the layer's routed sum
+                    # (``ExpertFFN.slots_sum``).
                     sliced = expert_slices > 1 and paging is None and not transposed
                     widths = (1, *slot_widths(decode_bucket or 0)) if sliced else (1,)
-                    summed = getattr(text_config, "model_type", None) == "qwen4_exp_text"
-                    wrapper = build_moe_slots_wrapper(expert_w, "slots_sum" if summed else "slots")
+                    qwen4_exp = getattr(text_config, "model_type", None) == "qwen4_exp_text"
                     for rows in widths:
+                        summed = qwen4_exp and rows <= SUMMED_SLOT_ROWS
+                        wrapper = build_moe_slots_wrapper(expert_w, "slots_sum" if summed else "slots")
                         name = pre + ("slots" if rows == 1 else f"slots{rows}")
                         picks = (moe_top_k,) if rows == 1 else (rows, moe_top_k)
                         sums = [torch.zeros(picks, dtype=dtype), torch.zeros(rows, hidden, dtype=dtype)] if summed else []
