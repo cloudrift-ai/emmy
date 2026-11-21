@@ -30,7 +30,7 @@ are the best published results for the recipe engine and precision lane.
 | 8,192 / 256 | 4 | 112.5 tokens/s | 2,176 ms | 26.6 ms |
 
 The full measurement protocol is published in the
-[Gemma 4 optimization record](https://riftstack.ai/research/optimizing-gemma-4-12b-rtx).
+[Gemma 4 optimization record](https://labs.cloudrift.ai/research/optimizing-gemma-4-12b-rtx).
 The grid held context at 16,384 and used the same Emmy FAST_MATH engine, while selecting decode and prefill buckets
 for each concurrency point. The final recipe keeps the warmed interactive default, decode bucket 32; use the retained
 experiment recipe to reproduce the full performance grid.
