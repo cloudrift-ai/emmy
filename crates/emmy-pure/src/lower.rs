@@ -312,6 +312,8 @@ impl Lowering<'_> {
                     unroll: false,
                     seed: true,
                     unrolled: false,
+                    range: None,
+                    step: None,
                 })));
             }
         }
@@ -468,6 +470,8 @@ impl Lowering<'_> {
             unroll: false,
             seed: true,
             unrolled: false,
+            range: term.applied_range(),
+            step: None,
         })));
         self.attach(term, Kind::State, target, &here, &scope, nest, None)
     }
@@ -642,6 +646,8 @@ impl Lowering<'_> {
                 unroll: false,
                 seed: true,
                 unrolled: false,
+                range: None,
+                step: None,
             })));
         }
         Ok(())
@@ -693,6 +699,14 @@ impl Fold {
                 Some(narrowed) => {
                     let mut read = narrowed.step()?.ssa_uses().clone();
                     read.extend(narrowed.exposes().iter().copied());
+                    // A range is evaluated where its term is, so an operand value it reads is taken too.
+                    for bound in narrowed
+                        .applied_range()
+                        .iter()
+                        .flat_map(|(start, end)| [start, end])
+                    {
+                        read.extend(bound.free_vars());
+                    }
                     read
                 }
                 None => HashSet::new(),
@@ -743,6 +757,24 @@ impl Fold {
         Ok(body)
     }
 
+    /// For each axis a term of this tree walks as a block of a partition, the names the block's start reads
+    /// ([`Fold::block_start`]): the block's coordinate.
+    fn range_origins(&self, axes: &[Arc<Axis>]) -> Result<HashMap<Name, HashSet<Name>>> {
+        let mut origins: HashMap<Name, HashSet<Name>> = HashMap::new();
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut pending = vec![self.clone()];
+        while let Some(term) = pending.pop() {
+            if !seen.insert(term.address()) {
+                continue;
+            }
+            if let (Some(axis), Some(start)) = (term.axis(), term.block_start(axes)?) {
+                origins.entry(axis).or_default().extend(start.free_vars());
+            }
+            pending.extend(term.operands().iter().cloned());
+        }
+        Ok(origins)
+    }
+
     fn lower_fresh(
         &self,
         bound: Option<&HashSet<Name>>,
@@ -774,6 +806,7 @@ impl Fold {
         let mut readers: HashMap<Name, usize> = HashMap::new();
         let mut origin: HashMap<Name, (usize, Kind)> = HashMap::new();
         let mut terms: HashMap<usize, Fold> = HashMap::new();
+        let origins = self.range_origins(axes)?;
         let mut seen: HashSet<usize> = HashSet::new();
         let mut pending = vec![self.clone()];
         while let Some(term) = pending.pop() {
@@ -796,8 +829,14 @@ impl Fold {
                     internal.extend(edge.free_axes().iter().copied());
                 }
             }
-            for name in term.free_axes() {
-                *readers.entry(*name).or_default() += 1;
+            // A term read along a block of a partition is evaluated at `start + trip`: over the block's coordinate
+            // too, as it would be were the start written into its index.
+            let mut over: HashSet<Name> = term.free_axes().clone();
+            for axis in term.free_axes() {
+                over.extend(origins.get(axis).into_iter().flatten().copied());
+            }
+            for name in over {
+                *readers.entry(name).or_default() += 1;
             }
             match term.base() {
                 None => {

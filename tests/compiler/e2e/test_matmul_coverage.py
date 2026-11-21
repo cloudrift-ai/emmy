@@ -50,7 +50,7 @@ from emmy.compiler.ir.kernel.ir import (
     Smem,
     TmaLoad,
 )
-from emmy.compiler.ir.stmt import Body, Loop, Select, StridedLoop, pretty_body
+from emmy.compiler.ir.stmt import Body, Loop, Select, pretty_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
@@ -207,7 +207,7 @@ def test_matmul_tile_coverage(variant, monkeypatch):
     has_copy = "__c0_1" in names or "__c1_0" in names  # a replicated register-cell binding
     if has_reg:
         assert has_copy, f"{variant}: expected replicated register cells (__c*)"
-        unrolled = "__u1" in names and not any(loop.unroll for loop in statements(kernels, Loop, StridedLoop))
+        unrolled = "__u1" in names and not any(loop.unroll for loop in statements(kernels, Loop))
         assert unrolled, f"{variant}: the small inner reduce must be unrolled"
     else:
         assert not has_copy, f"{variant}: per-cell tier must not replicate register cells"

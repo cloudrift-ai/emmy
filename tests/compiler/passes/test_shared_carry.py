@@ -15,7 +15,7 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Loop, StridedLoop, Write, parse_body
+from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Loop, Write, parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._fromloop import owned_cells
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -256,10 +256,10 @@ def test_shared_storage_stores_a_scan_s_last_state_once_and_copies_only_the_row_
     assert not op.serial and op.arg_order == ("seed", "out") and op.knobs["STAGE"] == "d1/smem"
     (steps,) = (loop for loop in statements(kernel, Loop) if loop.axis.name == "a0")
     assert not [store for store in steps.body.iter() if isinstance(store, Write) and store.output == "out"]
-    (closing,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_last")
+    (closing,) = (loop for loop in statements(kernel, Loop) if loop.axis.name == "_carry_last")
     assert [store.output for store in closing.body.iter() if isinstance(store, Write)] == ["out"]
-    (copy,) = (loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_carry_copy")
-    assert str(copy.end) == "40 * a0 + 1400" and str(copy.start) == "40 * a0 + thread_idx.x + 1360"
+    (copy,) = (loop for loop in statements(kernel, Loop) if loop.axis.name == "_carry_copy")
+    assert tuple(map(str, copy.range)) == ("40 * a0 + thread_idx.x + 1360", "40 * a0 + 1400")
 
 
 @requires_cuda

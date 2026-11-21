@@ -519,6 +519,30 @@ def test_sdpa_produces_softmax_pattern():
     assert "maximum" in reduce_fns
 
 
+def test_a_causal_sdpa_folds_each_rows_keys_over_a_range():
+    """Causal attention is no mask: the softmax's two reductions and the product with V walk the keys at or before
+    the query's row, and the decomposition mints no fill constant. The numpy meaning of the decomposed graph is
+    the masked attention."""
+    result = _apply(_make_sdpa_graph(seq_len=6, is_causal=True), "010_sdpa.py")
+    ranges = {
+        (n.op.name, tuple(str(bound) for bound in n.op.range)) for n in result.nodes.values() if isinstance(n.op, ReduceOp) and n.op.range
+    }
+    row, product_row = placeholder(1), placeholder(1)
+    assert ranges == {("maximum", ("0", str(row + Literal(1, "int")))), ("sum", ("0", str(product_row + Literal(1, "int"))))}
+    assert sum(isinstance(n.op, ReduceOp) and n.op.range is not None for n in result.nodes.values()) == 3
+    assert not any(isinstance(n.op, ConstantOp) and "mask" in n.op.name for n in result.nodes.values())
+    assert not any(isinstance(n.op, ReduceOp) and n.op.range for n in _apply(_make_sdpa_graph(), "010_sdpa.py").nodes.values())
+
+    rng = np.random.default_rng(0)
+    q, k, v = (rng.standard_normal((1, 6, 8)).astype(np.float32) for _ in range(3))
+    scores = q @ k.transpose(0, 2, 1) / np.sqrt(8.0)
+    scores = np.where(np.tril(np.ones((6, 6), dtype=bool)), scores, -np.inf)
+    weights = np.exp(scores - scores.max(-1, keepdims=True))
+    expected = (weights / weights.sum(-1, keepdims=True)) @ v
+    got = _run(Pipeline.build(["frontend/decomposition"]).run(_make_sdpa_graph(seq_len=6, is_causal=True)), {"Q": q, "K": k, "V": v})
+    np.testing.assert_allclose(got["sdpa_out"], expected, rtol=1e-5, atol=1e-5)
+
+
 def test_sdpa_produces_scale_constant():
     result = _apply(_make_sdpa_graph(), "010_sdpa.py")
     scale_constants = [n for n in result.nodes.values() if isinstance(n.op, ConstantOp) and "scale" in n.op.name]

@@ -19,7 +19,7 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.kernel.ir import MmaSyncPtx
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.classic import refusals
-from emmy.compiler.ir.stmt import Load, StridedLoop
+from emmy.compiler.ir.stmt import Load, Loop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -65,9 +65,10 @@ def _attention(rows, cache=torch.bfloat16, grouped=True):
 
 
 def _lifted(graph, ctx=CTX):
-    """The lifted kernel and its twisted carrier."""
+    """The lifted kernel as the schedule addresses it, the mask its program wrote read as its carrier's range, and
+    that twisted carrier."""
     tiled = Pipeline.build(["tile/lift"]).run(Pipeline.build(LOOP_PASSES).run(graph), ctx=ctx)
-    (root,) = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
+    (root,) = [node.op.scheduled() for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
 
     def folds(node):
         return [node, *(f for e in node.operands for f in folds(e))] if isinstance(node, Fold) else []
@@ -124,7 +125,7 @@ def test_a_key_split_combines_the_slices_partials_not_the_window(rows) -> None:
     assert len(kernels) == 2, sorted(kernels)
     (partial,) = [node for nid, node in kernels.items() if nid.endswith("__partial")]
     (finalize,) = [node for node in kernels.values() if node is not partial]
-    chunked = any("__ck" in loop.axis.name for loop in statements(kernel_ir[partial.id], StridedLoop))
+    chunked = any("__ck" in loop.axis.name for loop in statements(kernel_ir[partial.id], Loop))
     assert statements(kernel_ir[partial.id], MmaSyncPtx) and chunked
     assert np.prod([extent for axis in partial.op.grid for extent in axis]) == KV * SLICES
     assert list(finalize.inputs) == [partial.id]

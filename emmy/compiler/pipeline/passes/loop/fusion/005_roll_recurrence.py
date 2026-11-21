@@ -32,7 +32,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Pre, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of
 
@@ -232,9 +232,8 @@ def _spliced(graph: Graph, region: set[str], state: str, stored: str) -> tuple[B
 def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...], by: int | Var, steps: int = 1) -> Body:
     """The step read ``by`` steps later: every literal of the first step advanced by its delta —
     exactly, for a step number, or as an expression of the step axis for the rolled body. A
-    reduction whose extent grows with the step runs at its widest in the rolled body, and past the
-    step's own bound each accumulate folds its identity instead — the mask the tracer itself
-    spells a partial reduction with, and no wider than a step the chain ran."""
+    reduction whose extent grows with the step takes its widest extent in the rolled body and walks
+    the range of the step it is in, no wider than a step the chain ran."""
 
     def value(literal: int, delta: int) -> Expression:
         if isinstance(by, int):
@@ -252,26 +251,11 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
         return expression
 
     sigma = Sigma({f"__lit{index}": value(literal, delta) for index, (literal, delta) in enumerate(zip(literals, deltas, strict=True))})
-    masked = 0
 
-    def mask(within: Expression):
-        def past_the_bound(stmt: Statement) -> Statement | tuple[Statement, ...]:
-            nonlocal masked
-            if not isinstance(stmt, Accum):
-                if isinstance(stmt, (Write, Carry)):
-                    raise RuleSkipped("a loop whose extent grows with the step stores")
-                return stmt
-            if stmt.op.identity is None:
-                raise RuleSkipped(f"{stmt.op.name} has no identity to fold past a step's bound")
-            idle, contributed = f"{stmt.name}__idle{masked}", f"{stmt.name}__in{masked}"
-            # A branch carries a name: the folded value is bound first unless it is one already.
-            bound = () if isinstance(stmt.value, Var) else (Assign(f"{stmt.name}__v{masked}", stmt.value),)
-            value = stmt.value.name if isinstance(stmt.value, Var) else bound[0].name
-            masked += 1
-            select = Select(name=contributed, branches=(SelectBranch(value, within), SelectBranch(idle, Literal(True, "bool"))))
-            return (Let(name=idle, value=stmt.init), *bound, select, stmt.replace(value=contributed))
-
-        return past_the_bound
+    def folds(stmt: Statement) -> Statement:
+        if isinstance(stmt, (Write, Carry)):
+            raise RuleSkipped("a loop whose extent grows with the step stores")
+        return stmt
 
     def advance(stmt: Statement) -> Statement:
         if isinstance(stmt, Loop):
@@ -282,8 +266,8 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
             if isinstance(by, int) or delta == 0:
                 return stmt.replace(axis=replace(stmt.axis, extent=Dim(literal + delta * (by if isinstance(by, int) else 0))))
             widest = max(literal, literal + delta * (steps - 1))
-            within = BinaryExpression("<", Var(stmt.axis.name), value(literal, delta))
-            return stmt.replace(axis=replace(stmt.axis, extent=Dim(widest)), body=stmt.body.map(mask(within)))
+            walked = (Literal(0, "int"), value(literal, delta))
+            return stmt.replace(axis=replace(stmt.axis, extent=Dim(widest)), range=walked, body=stmt.body.map(folds))
         if stmt.nested():
             return stmt
         return stmt.rewrite(lambda name: name, sigma).map_expressions(lambda expression: expression.rebuild(fold))

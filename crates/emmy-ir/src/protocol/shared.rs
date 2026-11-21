@@ -1,9 +1,9 @@
 //! What the shared statement types answer beyond their fields: the states a loop carries, a reduction's seed, a
-//! sum's terms and its binary form, a select's mask, the literal a statement binds.
+//! sum's terms and its binary form, the literal a statement binds.
 
 use crate::Name;
+use crate::axis::Range;
 use crate::body::Body;
-use crate::elementwise::Operation;
 use crate::expr::Expression;
 use crate::field::{AxisRef, NumOr};
 use crate::statement::*;
@@ -13,7 +13,6 @@ use std::collections::{HashMap, HashSet};
 pub fn seeded_accumulators(stmt: &Statement) -> Vec<Name> {
     let (body, seed) = match stmt {
         Statement::Loop(l) => (&l.body, l.seed),
-        Statement::StridedLoop(l) => (&l.body, l.seed),
         _ => return vec![],
     };
     if !seed || !body.carries().is_empty() {
@@ -77,6 +76,37 @@ impl Loop {
         carried_cells(&self.body)
     }
 
+    /// Where the axis walks: its range, `0..extent` when the loop states none.
+    pub fn walk(&self) -> Range {
+        match &self.range {
+            Some((start, end)) => Range {
+                start: start.clone(),
+                end: end.clone(),
+            },
+            None => Range::whole(&self.axis),
+        }
+    }
+
+    /// How far the axis moves each trip: the step, one when the loop states none.
+    pub fn stride(&self) -> Expression {
+        self.step.clone().unwrap_or_else(|| Expression::int(1))
+    }
+
+    /// The one value the axis takes when the loop is known to take exactly one trip: `0` for a loop of extent one
+    /// without a range, the start of a range whose end is one past it. `None` for any other loop.
+    pub fn one_trip(&self) -> Option<Expression> {
+        match &self.range {
+            None => (self.axis.extent.as_static() == Some(1)).then(|| Expression::int(0)),
+            Some((start, end)) => Range {
+                start: start.clone(),
+                end: end.clone(),
+            }
+            .trips()
+            .filter(|trips| *trips == 1)
+            .map(|_| start.clone()),
+        }
+    }
+
     /// A loop is a reduce loop iff it carries something: an `Accum` in its immediate body, or a state.
     pub fn is_reduce(&self) -> bool {
         self.body
@@ -84,15 +114,6 @@ impl Loop {
             .iter()
             .any(|s| matches!(**s, Statement::Accum(_)))
             || !self.carries().is_empty()
-    }
-}
-
-impl StridedLoop {
-    pub fn is_reduce(&self) -> bool {
-        self.body
-            .stmts()
-            .iter()
-            .any(|s| matches!(**s, Statement::Accum(_)))
     }
 }
 
@@ -108,35 +129,6 @@ impl Accum {
     pub fn init(&self) -> Expression {
         Expression::float(self.op.seed().unwrap_or(0.0))
     }
-}
-
-/// The mask branch of an ordered two-way comparison, or `None` for another `Select` form.
-pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
-    if select.branches.len() != 2 {
-        return None;
-    }
-    let (keep, mask) = (&select.branches[0], &select.branches[1]);
-    let (Some((keep_op, keep_left, keep_right)), Some((mask_op, mask_left, mask_right))) =
-        (keep.select.as_binary(), mask.select.as_binary())
-    else {
-        return None;
-    };
-    let (mut op, mut left, mut right) = (mask_op, mask_left.clone(), mask_right.clone());
-    if *keep_left == right && *keep_right == left {
-        op = op.mirror()?;
-        std::mem::swap(&mut left, &mut right);
-    }
-    if *keep_left != left || *keep_right != right {
-        return None;
-    }
-    use Operation::{Greater, GreaterEqual, Less, LessEqual};
-    if !matches!(
-        (keep_op, op),
-        (Less, GreaterEqual) | (LessEqual, Greater) | (Greater, LessEqual) | (GreaterEqual, Less)
-    ) {
-        return None;
-    }
-    Some(mask.select.clone())
 }
 
 /// The axis a plain Loop IR coordinate expression names, when it is one variable.

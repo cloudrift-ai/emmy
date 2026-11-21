@@ -1217,6 +1217,13 @@ check and the suite read the restamp's report beside the file: a kernel re-keyed
 equal (a golden stores no identity) while the compile meets an identity the file's rows are not keyed by. The
 realization corpus's staleness test is the same restamp (`tests/compiler/realization/ARCHITECTURE.md`). Both are
 GPU-free; the `refresh-golden` skill is the flow around them, including the record run a demoted row needs.
+A row's time was measured on its kernel's code, and the identity is only what names the kernel. So a restamp given a
+PTX baseline (`emmy golden restamp --ptx-baseline DIR`, the baseline written by `emmy golden realize --ptx DIR` on the
+tree before the change) decides each time by the code (`restamp.carried`): every row of the restamped file is
+compiled under its own schedule, and it keeps its measurement exactly when the instructions are the baseline's, byte
+for byte with the comments left out, whether or not its kernel was re-keyed. A row whose code changed, or that no
+longer realizes, becomes a proposal and is named. A change that re-spells kernels without changing what they compile
+to then costs no measurement, and one that changes the code under an unchanged identity does not keep a stale one.
 `emmy golden realize` (`search/golden/realize.py`) asks the other question of a file's rows: every row compiled under
 its own schedule, the row's kernel as the whole program and the file as the evidence, at the file's card, a piece
 rebuilt through the decisions the file records, and the rows the compiler no longer realizes named. `--drop` writes

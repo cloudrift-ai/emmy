@@ -114,7 +114,7 @@ from emmy.compiler.ir.kernel.ir import (
     TreeHalve,
     WarpShuffle,
 )
-from emmy.compiler.ir.stmt import Accum, StridedLoop
+from emmy.compiler.ir.stmt import Accum, Loop
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import (
     compile_with_kernels,
@@ -541,8 +541,9 @@ def test_chunk_tier_skips_the_chunks_a_causal_band_masks(stage):
         backend, compiled, graph, kernels = _stamp_window(_Sdpa(), (q, k, v), window=64)
     assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {list(kernels)}"
     # The chunk loop is bounded at both ends: it starts past zero and stops at a bound of its own.
-    loop = next(loop for loop in statements(kernels, StridedLoop) if "__ck" in loop.axis.name)
-    assert loop.end is not None and loop.start != Literal(0, "int"), loop
+    loop = next(loop for loop in statements(kernels, Loop) if "__ck" in loop.axis.name)
+    start, end, _ = loop.walk()
+    assert end != loop.axis.extent_expression() and start != Literal(0, "int"), loop
     out = _run_flash(backend, compiled, graph, (q, k, v))
     assert np.abs(out.astype(np.float32) - _banded_ref(q, k, v, 64)()).max() < 1e-2
 

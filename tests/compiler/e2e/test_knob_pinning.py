@@ -89,7 +89,7 @@ def test_sgemm_inner_reduce_is_unrolled(monkeypatch):
     (inspects the kernel body). No CUDA needed."""
     from emmy.compiler.context import Context
     from emmy.compiler.ir.kernel import KernelOp
-    from emmy.compiler.ir.stmt import Accum, Loop, StridedLoop
+    from emmy.compiler.ir.stmt import Accum, Loop
     from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 
     g = _build_2d_matmul_graph(_ARTICLE_DIMS)
@@ -97,11 +97,11 @@ def test_sgemm_inner_reduce_is_unrolled(monkeypatch):
         monkeypatch.setenv(f"EMMY_{k}", str(v))
     res = Pipeline.build(KERNEL_PASSES).run(g, ctx=Context.from_target((12, 0)))
     (kernel,) = [n.op for n in res.nodes.values() if isinstance(n.op, KernelOp)]
-    outer = [s for s in kernel.body.iter() if isinstance(s, (Loop, StridedLoop)) and any(isinstance(inner, Accum) for inner in s.body)]
+    outer = [s for s in kernel.body.iter() if isinstance(s, Loop) and any(isinstance(inner, Accum) for inner in s.body)]
     assert len(outer) == 1, "the K-outer pipeline loop stays rolled, and the inner reduce is no loop under it"
     # One copy of the 26 x 4 register tile's folds per K element of the chunk.
     assert sum(isinstance(inner, Accum) for inner in outer[0].body) == 32 * 26 * 4
-    assert not any(s.unroll for s in kernel.body.iter() if isinstance(s, (Loop, StridedLoop)))
+    assert not any(s.unroll for s in kernel.body.iter() if isinstance(s, Loop))
 
 
 def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):

@@ -173,6 +173,22 @@ impl TermRewrite {
             })
             .transpose()?;
         parts.lift = Some(lift);
+        // The range reads the coordinates around the term: it renames and substitutes as an index of the body does.
+        parts.range = fold
+            .range()
+            .map(|(start, end)| {
+                let rewritten = |e: &Expression| {
+                    let moved = e
+                        .substitute(sigma)
+                        .rename(&mut |name| self.names.get(&name).copied());
+                    match &self.folding {
+                        Some(ctx) => moved.simplify(ctx),
+                        None => Ok(moved),
+                    }
+                };
+                Ok::<_, emmy_ir::Error>((rewritten(start)?, rewritten(end)?))
+            })
+            .transpose()?;
         let rewritten = Fold::new(parts)?;
         done.insert(key, rewritten.clone());
         Ok(rewritten)

@@ -59,7 +59,7 @@ from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.schedule.classic.schedule import binds_root
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Statement, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Statement, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.ir import observed_result_names
@@ -548,6 +548,18 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         if below and ctx.sched.get("STAGE", site.node) is not None:
             raise UnbindableProjection(f"lowering of {root_site.path} cannot realize STAGE at {site.path}")
     if tiled:
+        # A tensor-core tile folds a rectangle of every position, so of the warp tiers the chunk tier alone reads a
+        # range, and only its carrier's: the key bounds and the mask of the block a bound cuts. A scalar tile's thread
+        # walks the range of its own cell, so it holds one register cell along each axis the range reads. The schedule
+        # offers no other tile on a term that walks one (``TileOp.contracts``, ``_chunk_refusal``,
+        # ``_plan_node_refusal``).
+        if c.range is not None:
+            reads = {name for bound in c.range for name in bound.free_vars()}
+            one_cell = all(side is None or side.reg == 1 or side.axis.name not in reads for side in tile.mn)
+            if not (c.chunked() and (tile.is_warp or one_cell)):
+                raise UnbindableProjection(f"the tiled lowering of {root_site.path} folds every position of an axis that walks a range")
+        if inner is not None and inner[0].range is not None:
+            raise UnbindableProjection(f"the chunk of {root_site.path} covers a score that walks a range")
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, c.exposes[0])
@@ -685,20 +697,19 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
 # A PLANAR / TWISTED monoid reduce (sum / max / mean / RMSNorm / softmax / the coop-KV TWISTED flash
 # reduce) partitions the reduce axis ``coop`` ways across the CTA's threads (cooperation) and ``reg``
 # ways across per-thread register accumulators (ILP). The serial reduce ``Loop`` becomes a
-# :class:`StridedLoop` of step ``coop·reg``; for ``reg > 1`` its body is replicated ``reg`` times
+# loop of step ``coop·reg``; for ``reg > 1`` its body is replicated ``reg`` times
 # (each copy offset by ``r·coop`` and folding its own accumulator). After the loop: the REG tree
 # folds the ``reg`` accumulators into one (:meth:`Fold.merge`), then — if ``coop > 1`` — the
 # cross-thread combine (:func:`emit_combine`), then the projection. The op tree + ``lower`` are
 # shared with the other tiers; only the partition changes.
 
 
-def _mask_streamed(
-    body: list[Statement], axis: str, offset: int, extent, stream_identity: tuple[str, float] | None = None
-) -> list[Statement]:
-    """Clamp-to-identity a masked tail copy's contribution. Two forms, selected by the CARRIER:
+def _mask_streamed(body: list[Statement], axis: str, offset: int, end, stream_identity: tuple[str, float] | None = None) -> list[Statement]:
+    """Clamp-to-identity a masked tail copy's contribution: one that reads ``offset`` positions on, at or past ``end``,
+    where the fold's walk stops. Two forms, selected by the CARRIER:
 
     **Plain (``id``) carrier** (``stream_identity is None``): mask each ``Accum``'s folded
-    ``value`` — a ``Select`` of the value when ``axis + offset < extent`` else the fold's own
+    ``value`` — a ``Select`` of the value when ``axis + offset < end`` else the fold's own
     identity (``op.identity`` — ``sum`` → 0, ``max`` → −inf), so an out-of-range copy folds a
     no-op. Masking the FOLD (not the load) is what makes a **prologue** correct — ``sum(x·x)``
     past the extent needs the *additive* identity 0, which masking the load to the *multiply*
@@ -718,7 +729,7 @@ def _mask_streamed(
 
     Either way the streamed ``Load`` index is already wrapped in-bounds (``% extent`` via the
     caller's σ), so the read itself is safe."""
-    cond = BinaryExpression("<", BinaryExpression("+", Var(axis), Literal(offset, "int")), extent)
+    cond = BinaryExpression("<", BinaryExpression("+", Var(axis), Literal(offset, "int")), end)
     out: list[Statement] = []
     if stream_identity is not None:
         term, identity = stream_identity
@@ -763,29 +774,29 @@ def _named_value(accum: Accum, name: str) -> str:
 
 
 def _replicate(
-    body: Body, r: int, coop: int, axis: Axis, masked: bool, protected: frozenset[str], stream_identity: tuple[str, float] | None = None
+    body: Body, r: int, coop: int, axis: Axis, end, protected: frozenset[str], stream_identity: tuple[str, float] | None = None
 ) -> list[Statement]:
     """Copy ``r`` of the reduce body for the REG (ILP) fold. Copy 0 is the body verbatim.
     Copy ``r > 0`` suffixes every per-copy SSA name with ``__r{r}`` (its accumulator + temps
     are an independent chain) — EXCEPT the shared iteration coordinates in ``protected`` (the
     grid / reduce / lane axis vars, common to all copies) — and offsets its streamed reads by
-    ``r·coop`` (σ on the reduce axis). A ``masked`` copy wraps the read in-bounds (``% extent``)
-    and clamps the tail contribution to a no-op (:func:`_mask_streamed`; ``stream_identity``
-    selects the twisted-carrier form)."""
+    ``r·coop`` (σ on the reduce axis). With ``end``, where the walk stops short of a whole stride, a copy is masked:
+    it wraps the read in-bounds (``% extent``) and clamps a contribution at or past ``end`` to a no-op
+    (:func:`_mask_streamed`; ``stream_identity`` selects the twisted-carrier form)."""
     if r == 0:
         return list(body)
     offset = r * coop
     shifted = BinaryExpression("+", Var(axis.name), Literal(offset, "int"))
-    index_expression = BinaryExpression("%", shifted, axis.extent_expression()) if masked else shifted
+    index_expression = BinaryExpression("%", shifted, axis.extent_expression()) if end is not None else shifted
     sigma = Sigma({axis.name: index_expression})
     out = copy_cell(body, sigma, f"__r{r}", protected)
-    if not masked:
+    if end is None:
         return out
     if stream_identity is not None:
         term, identity = stream_identity
         # The pivot term is body-defined, so this copy's spelling carries the copy suffix.
         stream_identity = (term if term in protected else f"{term}__r{r}", identity)
-    return _mask_streamed(out, axis.name, offset, axis.extent_expression(), stream_identity)
+    return _mask_streamed(out, axis.name, offset, end, stream_identity)
 
 
 def _restage_loads(stmts: list[Statement], buf: str, smem: str, n_grid: int, grid_vars: tuple) -> list[Statement]:
@@ -949,7 +960,8 @@ def _tile_reduce_axis_transposed(
     if GUARD_REDUCTIONS.narrow((True,))[0]:
         guarded = _guard_reductions._guard(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in (*grid, *ctx.serial)))
         candidate = guarded[len(hoisted)]
-    predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpression) else None
+    stops = candidate.walk()[1]
+    predicate = stops.cond if isinstance(stops, TernaryExpression) else None
 
     def uniform_parts(expression):
         if isinstance(expression, BinaryExpression) and expression.op == "&&":
@@ -959,7 +971,10 @@ def _tile_reduce_axis_transposed(
     uniform = uniform_parts(predicate) if predicate is not None else ()
     axis = rloop.axis
     stride = k_ways * reg
-    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
+    # One loop folds every column a lane owns, and a range may differ between them: the schedule offers a fold
+    # that walks one a single column (``refusals._reductions``).
+    if rloop.range is not None and columns > 1:
+        raise UnbindableProjection(f"a coop-t band folds its {columns} columns in one loop, and {axis.name!r} walks a range")
 
     n_lane = Axis(name=f"{out_ax.name}_ln", extent=lanes_n)
     k_co = Axis(name=f"{axis.name}_co", extent=k_ways) if k_ways > 1 else None
@@ -982,7 +997,7 @@ def _tile_reduce_axis_transposed(
     overhang = not (out_ax.extent.is_static and out_ax.extent.as_static() % span == 0)
 
     protected = _shared_names(rloop, grid, blk_name, n_lane.name, *out_ext.free_vars(), *((k_co.name,) if k_co is not None else ()))
-    copies = _register_copies(op, rloop, reg, k_ways, masked, protected)
+    copies = _register_copies(op, rloop, reg, k_ways, stride, protected)
     tail_stmts = with_store(list(tail), ctx.output, grid, out_val)
 
     # One copy of the prologue, the body and the projection per column. The prologue's names are
@@ -1002,7 +1017,10 @@ def _tile_reduce_axis_transposed(
         # The guarded projection: in range by the guard, so no clamp.
         store = copy_cell(tail_stmts, Sigma({out_ax.name: cell}), suffix, per_column)
         stores += [Cond(cond=BinaryExpression("<", cell, out_ext), body=tuple(store))] if overhang else store
-    strided = _interleaved(axis, start, stride, body)
+    # The lane's loop walks the fold's range at the cell the lane owns.
+    owned = Sigma({out_ax.name: clamp_to(cells[0], out_ext) if overhang else cells[0]})
+    walked = None if rloop.range is None else tuple(owned.apply(bound) for bound in rloop.range)
+    strided = _interleaved(rloop.replace(range=walked), start, stride, body)
     merge = combine_tail(op, reg=reg, coop=k_ways, lane=k_co, inner=(n_lane.name, lanes_n), columns=columns)
     if k_co is not None:
         stores = [Cond(cond=BinaryExpression("==", Var(k_co.name), Literal(0, "int")), body=tuple(stores))]
@@ -1085,17 +1103,26 @@ def _shared_names(rloop, grid, *coordinates: str) -> frozenset[str]:
     return frozenset({axis.name, *(a.name for a in grid), *axis.extent_expression().free_vars(), *coordinates} | (read - defined))
 
 
-def _register_copies(op: Fold, rloop, count: int, unit: int, masked: bool, protected: frozenset[str]) -> list[Statement]:
-    """``count`` copies of the reduce body, copy ``r`` reading ``r * unit`` positions on (:func:`_replicate`). A
-    twisted fold's masked tail clamps its pivot term to the pivot fold's identity (:func:`_mask_streamed`)."""
+def _register_copies(op: Fold, rloop, count: int, unit: int, stride: int, protected: frozenset[str]) -> list[Statement]:
+    """``count`` copies of the reduce body, copy ``r`` reading ``r * unit`` positions on (:func:`_replicate`), for a
+    loop that steps ``stride`` positions a trip. The copies are masked at the walk's end unless the walk is the whole
+    of a static axis the stride divides; a twisted fold's masked tail clamps its pivot term to the pivot fold's
+    identity (:func:`_mask_streamed`)."""
     view = op.as_reduction()
     stream_identity = (str(view.terms[0]), ElementwiseImpl("maximum").identity) if view.twisted else None
-    return [stmt for r in range(count) for stmt in _replicate(rloop.body, r, unit, rloop.axis, masked, protected, stream_identity)]
+    axis = rloop.axis
+    whole = rloop.range is None and axis.extent.is_static and axis.extent.as_static() % stride == 0
+    end = None if count == 1 or whole else rloop.walk()[1]
+    return [stmt for r in range(count) for stmt in _replicate(rloop.body, r, unit, axis, end, protected, stream_identity)]
 
 
-def _interleaved(axis: Axis, start, stride: int, body) -> StridedLoop:
-    """The loop over every ``stride``-th position of ``axis`` from ``start``: one lane's share of an interleaved split."""
-    return StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(body)), unroll=_lane_unroll(axis, stride))
+def _interleaved(loop: Loop, lane, stride: int, body) -> Loop:
+    """Every ``stride``-th position of the walk of ``loop``, from ``lane`` positions past its start: one lane's share
+    of an interleaved split, over the range the loop walks."""
+    first, end, _ = loop.walk()
+    start = lane if first == Literal(0, "int") else BinaryExpression("+", first, lane)
+    unroll = loop.range is None and _lane_unroll(loop.axis, stride)
+    return Loop.strided(axis=loop.axis, start=start, step=Literal(stride, "int"), body=Body(tuple(body)), end=end, unroll=unroll)
 
 
 def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Statement]:
@@ -1108,18 +1135,16 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     coop, run = plan.coop, plan.coop_columns
     assert run == 1 or plan.reg == 1, "a coop band splits its lane over a contiguous run or over ILP chains, not both"
     reg = max(plan.reg, run)
-    axis = rloop.axis
     stride = coop * reg
-    # A run starts at a multiple of ``run`` and the loop guard keeps that start in bounds, so the whole run is in
-    # bounds whenever ``run`` divides the extent; interleaved chains need ``stride`` to divide it.
-    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % (run if run > 1 else stride) == 0)
     start = Literal(0, "int") if lane is None else Var(lane.name)
     if run > 1 and lane is not None:
         start = BinaryExpression("*", start, Literal(run, "int"))
 
     protected = _shared_names(rloop, ctx.grid, *((lane.name,) if lane is not None else ()))
-    copies = _register_copies(op, rloop, reg, 1 if run > 1 else coop, masked, protected)
-    return [_interleaved(axis, start, stride, copies), *combine_tail(op, reg=reg, coop=coop, lane=lane)]
+    # A run starts at a multiple of ``run`` and the loop guard keeps that start in bounds, so the whole run is in
+    # bounds whenever ``run`` divides the extent; interleaved chains need ``stride`` to divide it.
+    copies = _register_copies(op, rloop, reg, 1 if run > 1 else coop, run if run > 1 else stride, protected)
+    return [_interleaved(rloop, start, stride, copies), *combine_tail(op, reg=reg, coop=coop, lane=lane)]
 
 
 def _lane_close(tail: list[Statement], lane: Axis | None, coop: int, ctx: Ctx, out_val: str) -> list[Statement]:
@@ -1133,7 +1158,7 @@ def _lane_close(tail: list[Statement], lane: Axis | None, coop: int, ctx: Ctx, o
     if lane is None:
         body_tail = with_store(tail, ctx.output, ctx.grid, out_val)
     elif any(isinstance(s, Loop) and not s.is_reduce for s in tail):
-        body_tail = [_interleaved(s.axis, Var(lane.name), coop, s.body) if isinstance(s, Loop) and not s.is_reduce else s for s in tail]
+        body_tail = [_interleaved(s, Var(lane.name), coop, s.body) if isinstance(s, Loop) and not s.is_reduce else s for s in tail]
     elif any(isinstance(s, Loop) for s in tail):
         body_tail = list(tail)  # reduce-bearing scalar tail: identical per lane, stores deterministic
     else:
@@ -1206,8 +1231,10 @@ def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Statemen
     previous = tuple(f"{name}__previous" for name in state)
     chunk = Axis(name=f"{axis.name}_chunk", extent=axis.extent)
     coordinate = BinaryExpression("+", Var(chunk.name), Var(lane.name))
-    valid = BinaryExpression("<", coordinate, axis.extent_expression())
-    padded = not (axis.extent.is_static and axis.extent.as_static() % width == 0)
+    # The groups cover the range the fold walks; a lane past its end is padding.
+    first, end, _ = rloop.walk()
+    valid = BinaryExpression("<", coordinate, end)
+    padded = rloop.range is not None or not (axis.extent.is_static and axis.extent.as_static() % width == 0)
     read = Sigma({axis.name: BinaryExpression("%", coordinate, axis.extent_expression()) if padded else coordinate})
     last = max(i for i, stmt in enumerate(rloop.body) if isinstance(stmt, Accum) and stmt.name in state)
     body: list[Statement] = [Assign(other, Var(name), dtype=F32) for name, other in zip(state, previous, strict=True)]
@@ -1233,12 +1260,13 @@ def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Statemen
     body.append(WarpBroadcast(state=state, length=width))
     return [
         *(Init(name=name, identity=seed, dtype=F32) for name, seed in zip(state, op.init, strict=True)),
-        StridedLoop(
+        Loop.strided(
             axis=chunk,
-            start=Literal(0, "int"),
+            start=first,
             step=Literal(width, "int"),
             body=Body(tuple(body)),
-            unroll=_lane_unroll(axis, width),
+            unroll=rloop.range is None and _lane_unroll(axis, width),
+            end=end,
             seed=False,
         ),
     ]

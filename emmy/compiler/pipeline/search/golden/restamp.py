@@ -34,6 +34,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from itertools import product
 from math import prod
+from pathlib import Path
 
 from emmy.compiler import pipeline
 from emmy.compiler.context import Context
@@ -45,7 +46,7 @@ from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.passes.tile._cut import joined_halves
-from emmy.compiler.pipeline.passes.tile._fromloop import serial_form
+from emmy.compiler.pipeline.passes.tile._fromloop import scheduled_form
 from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
@@ -239,6 +240,10 @@ class Report:
     dropped_rows: list[str] = field(default_factory=list)
     respelled_rows: list[str] = field(default_factory=list)
     dropped_keys: list[str] = field(default_factory=list)
+    #: For each row of the restamped file, the position of the row of the file it was restamped from.
+    sources: list[int] = field(default_factory=list)
+    #: Every surviving kernel's ref in the file restamped from, to the ref it is stored under.
+    stored_as: dict[int, int] = field(default_factory=dict)
 
     @property
     def changed(self) -> bool:
@@ -459,12 +464,11 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         tile = tiles.get(identity or "")
         if tile is None:
             return None
-        if tile.carries:
-            tile = serial_form(tile, tile.name)
-        return frozenset(classic_keys(tile))
+        return frozenset(classic_keys(scheduled_form(tile, tile.name)))
 
     rows: list[Row] = []
-    for row in document.rows:
+    report.stored_as = stored_as
+    for source, row in enumerate(document.rows):
         if row.kernel not in stored_as:
             report.dropped_rows.append(f"{row.name}: its kernel is gone")
             continue
@@ -492,8 +496,56 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
                 continue
             latencies[card] = replace(latency, kernels=tuple(dict.fromkeys(stored_as[ref] for ref in latency.kernels)))
         rows.append(replace(fresh_row, latency=latencies or None))
+        report.sources.append(source)
     out = replace(document, kernels=kernels, routing=kept, rows=rows)
     return out, report
+
+
+def carried(
+    path: Path, document: GoldenFile, fresh: GoldenFile, report, baseline: Path, *, jobs: int | None = None
+) -> tuple[GoldenFile, list[str]]:
+    """``fresh``, the restamp of ``document`` already written to ``path``, with every time decided by the code: a row
+    whose kernel compiles under the row's schedule to the PTX ``baseline`` holds for it keeps the measurement
+    ``document`` has, whether or not the restamp re-keyed its kernel; a row whose PTX differs, or that no longer
+    realizes, loses it. A row the baseline holds no PTX for stays as the restamp left it. A whole-target latency is
+    kept when every kernel it timed still stands and every measured row of those kernels kept its code; a kernel of
+    it with no such row decides by the restamp's own rule (re-keyed or not). The second value names each row whose
+    code changed. The report is the restamp's: it says which row of ``document`` each row came from."""
+    import tempfile  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.golden.realize import _DOCUMENTS, ptx_path, realize  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as scratch:
+        realize([path], jobs=jobs, ptx=Path(scratch))
+        _DOCUMENTS.pop(str(path), None)
+        verdict: dict[int, bool] = {}  # a fresh row's index -> whether its code is the baseline's
+        for index, source in enumerate(report.sources):
+            before = ptx_path(baseline, path, source)
+            if before.exists():
+                after = ptx_path(Path(scratch), path, index)
+                verdict[index] = after.exists() and after.read_bytes() == before.read_bytes()
+    same_code: dict[int, bool] = {}  # a fresh kernel's ref -> whether every measured row of it kept its code
+    for index, same in verdict.items():
+        if document.rows[report.sources[index]].measurements is not None:
+            ref = fresh.rows[index].kernel
+            same_code[ref] = same_code.get(ref, True) and same
+    rows, changed = [], []
+    for index, row in enumerate(fresh.rows):
+        old = document.rows[report.sources[index]]
+        if index in verdict and old.measurements is not None:
+            row = replace(row, measurements=old.measurements if verdict[index] else None)
+            if not verdict[index]:
+                changed.append(row.name)
+        latencies = {}
+        for card, latency in (old.latency or {}).items():
+            kernels = [report.stored_as.get(ref) for ref in latency.kernels]
+            kept = (row.latency or {}).get(card)
+            if latency.kernels and None not in kernels and all(same_code.get(ref, kept is not None) for ref in kernels):
+                latencies[card] = replace(latency, kernels=tuple(dict.fromkeys(kernels)))
+            elif kept is not None and all(same_code.get(ref, True) for ref in kept.kernels):
+                latencies[card] = kept
+        rows.append(replace(row, latency=latencies or None))
+    return replace(fresh, rows=rows), changed
 
 
 def _respelled(

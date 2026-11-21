@@ -21,10 +21,15 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.expression import Builtin
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import Sync
-from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
+
+
+def _free(stmt: Statement) -> bool:
+    """Whether ``stmt`` is a loop this pass spreads: one that folds nothing and walks its whole axis by one."""
+    return isinstance(stmt, Loop) and not stmt.is_reduce and stmt.range is None and stmt.step is None
 
 
 def rewrite(root: Node) -> KernelOp:
@@ -33,7 +38,7 @@ def rewrite(root: Node) -> KernelOp:
     if len(tiles) != 1 or tiles[0].axes or tiles[0].block_threads is not None or tiles[0].spread:
         raise RuleSkipped("not a single-cell scalar tile")
     (tile,) = tiles
-    if not any(isinstance(stmt, Loop) and not stmt.is_reduce for stmt in tile.body):
+    if not any(_free(stmt) for stmt in tile.body):
         raise RuleSkipped("no free loop to spread")
     body: list[Statement] = []
     written: set[str] = set()
@@ -41,9 +46,9 @@ def rewrite(root: Node) -> KernelOp:
         if written & _reads(stmt):
             body.append(Sync())
             written.clear()
-        if isinstance(stmt, Loop) and not stmt.is_reduce:
+        if _free(stmt):
             body.append(
-                StridedLoop(axis=stmt.axis, start=Builtin("thread_idx.x"), step=Builtin("block_dim.x"), body=stmt.body, seed=stmt.seed)
+                Loop.strided(axis=stmt.axis, start=Builtin("thread_idx.x"), step=Builtin("block_dim.x"), body=stmt.body, seed=stmt.seed)
             )
             written |= _writes(stmt)
         else:

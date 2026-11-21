@@ -20,7 +20,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Cond, Init, Load, Loop, StridedLoop, Write, parse_body
+from emmy.compiler.ir.stmt import Accum, Assign, Cond, Init, Load, Loop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 from tests.compiler.terms import contraction, projection, reduction, slab
@@ -79,6 +79,11 @@ def _flat(stmts) -> list:
     return out
 
 
+def _strided(stmt) -> bool:
+    """Whether ``stmt`` is a loop that states a step: a partitioned fold's lane loop."""
+    return isinstance(stmt, Loop) and stmt.step is not None
+
+
 def _names_read(stmts) -> set[str]:
     return {n for s in stmts for n in (*s.deps(), *(v for e in s.expressions() for v in e.free_vars()))}
 
@@ -86,12 +91,12 @@ def _names_read(stmts) -> set[str]:
 def test_a_partitioned_chain_member_emits_the_provider_chain_ahead_of_the_strided_loop() -> None:
     bound = factorize(_chain_tile(Reduce.of(coop=64)), root=None)
     stmts = list(bound.body)
-    loops = [i for i, s in enumerate(stmts) if isinstance(s, StridedLoop)]
+    loops = [i for i, s in enumerate(stmts) if _strided(s)]
     assert len(loops) == 1, "the partitioned member emits one strided fold"
     i_ws = next(i for i, s in enumerate(stmts) if isinstance(s, Load) and s.input == "cutbuf")
     assert i_ws < loops[0], "the provider chain must precede the partitioned loop"
     strided = stmts[loops[0]]
-    assert strided.start == Var("k_co") and strided.step.value == 64
+    assert strided.walk()[0] == Var("k_co") and strided.step.value == 64
     assert any(isinstance(s, (WarpShuffle, TreeHalve, Smem)) for s in _flat(stmts)), "the cross-thread combine must close the fold"
     assert any(a.name == "k_co" and a.extent.as_static() == 64 for a in bound.axes)
     assert bound.block_threads == 64
@@ -123,7 +128,7 @@ def test_a_transposed_band_on_a_chain_member_binds_serial() -> None:
     as a PLAIN coop band would mint one kernel from two knob spellings."""
     bound = factorize(_two_member_tile(Reduce.of(coop=32, coop_transposed=True), Reduce()), root=None)
     flat = _flat(bound.body)
-    assert not any(isinstance(s, StridedLoop) for s in flat), "a transposed band is not offered the chain arm"
+    assert not any(_strided(s) for s in flat), "a transposed band is not offered the chain arm"
     assert any(isinstance(s, Loop) for s in flat), "the member still folds serially per cell"
     assert not any(a.name.endswith("_co") for a in bound.axes)
     assert bound.block_threads is None
@@ -133,7 +138,7 @@ def test_a_transposed_root_emits_its_computed_provider_at_the_lane_owned_cell() 
     red = _reduce(_K, "acc", _provider(), "x")
     bound = factorize(_stamped(red, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8)}), root=None)
     stmts = list(bound.body)
-    loop = next(i for i, stmt in enumerate(stmts) if isinstance(stmt, StridedLoop))
+    loop = next(i for i, stmt in enumerate(stmts) if _strided(stmt))
     provider = next(i for i, stmt in enumerate(stmts) if isinstance(stmt, Load) and stmt.input == "cutbuf")
     assert provider < loop
     assert "m" not in stmts[provider].index[0].free_vars()
@@ -148,7 +153,7 @@ def test_transposed_columns_keep_the_serial_provider_loop_coordinate() -> None:
     red = _reduce(_K, "acc", provider, "x")
     bound = factorize(_stamped(red, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8, columns=2)}, axes=(_K, _J)), root=None)
     flat = _flat(bound.body)
-    assert any(isinstance(stmt, Loop) and stmt.axis.name == "j" for stmt in flat)
+    assert any(isinstance(stmt, Loop) and stmt.step is None and stmt.axis.name == "j" for stmt in flat)
     assert "j__v1" not in _names_read(flat)
     assert "stat__v1" in _names_read(flat)
 
@@ -161,7 +166,7 @@ def test_transposed_columns_fold_their_own_copy_of_a_provider_carrier_the_loop_r
     bound = factorize(_stamped(red, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8, columns=2)}, axes=(_K, _J)), root=None)
     flat = _flat(bound.body)
     assert sorted(stmt.name for stmt in flat if isinstance(stmt, Accum) and stmt.name.startswith("stat")) == ["stat", "stat__v1"]
-    loop = next(stmt for stmt in bound.body if isinstance(stmt, StridedLoop))
+    loop = next(stmt for stmt in bound.body if _strided(stmt))
     assert {"stat", "stat__v1"} <= _names_read(loop.body)
 
 
@@ -179,7 +184,7 @@ def test_block_uniform_demand_guards_the_collective_but_keeps_its_seeds_visible(
     (guard,) = [stmt for stmt in bound.body if isinstance(stmt, Cond) and any(isinstance(s, TreeHalve) for s in _flat(stmt.body))]
     assert guard.cond == Var("m").lt(3)
     assert any(isinstance(stmt, Init) and stmt.name == "acc" for stmt in bound.body)
-    assert not next(stmt for stmt in guard.body if isinstance(stmt, StridedLoop)).seed
+    assert not next(stmt for stmt in guard.body if _strided(stmt)).seed
 
 
 def test_lane_varying_demand_does_not_guard_a_collective() -> None:
@@ -193,7 +198,7 @@ def test_disabling_coordinate_guards_keeps_the_collective_unconditional(monkeypa
     monkeypatch.setenv("EMMY_GUARD_REDUCTIONS", "0")
     bound = _transposed_masked("m < 3")
     assert any(isinstance(stmt, TreeHalve) for stmt in bound.body)
-    assert next(stmt for stmt in bound.body if isinstance(stmt, StridedLoop)).seed
+    assert next(stmt for stmt in bound.body if _strided(stmt)).seed
 
 
 def _two_member_root() -> tuple[Fold, Fold, Fold]:
@@ -214,11 +219,11 @@ def _two_member_tile(plan_a: Reduce, plan_b: Reduce) -> TileOp:
 def test_two_partitioned_members_share_one_lane_axis() -> None:
     bound = factorize(_two_member_tile(Reduce.of(coop=64), Reduce.of(coop=64)), root=None)
     stmts = list(bound.body)
-    loops = [i for i, s in enumerate(stmts) if isinstance(s, StridedLoop)]
+    loops = [i for i, s in enumerate(stmts) if _strided(s)]
     assert len(loops) == 2, "each partitioned member emits its own strided fold"
     i_mid = next(i for i, s in enumerate(stmts) if isinstance(s, Assign) and "mid" in s.defines())
     assert loops[0] < i_mid < loops[1], "the between-members segment emits in body order"
-    assert [s.start for s in stmts if isinstance(s, StridedLoop)] == [Var("k_co"), Var("k_co")]
+    assert [s.walk()[0] for s in stmts if _strided(s)] == [Var("k_co"), Var("k_co")]
     assert [a.name for a in bound.axes if a.name.endswith("_co")] == ["k_co"]
 
 
@@ -228,8 +233,8 @@ def test_an_ilp_only_member_beside_a_cooperating_one_starts_at_zero() -> None:
     deterministic. Only the cooperating member contributes the shared lane axis."""
     bound = factorize(_two_member_tile(Reduce.of(coop=64), Reduce.of(reg=2)), root=None)
     stmts = list(bound.body)
-    strided = [s for s in stmts if isinstance(s, StridedLoop)]
-    assert [(s.axis.name, s.start, s.step.value) for s in strided] == [("k", Var("k_co"), 64), ("j", Literal(0, "int"), 2)]
+    strided = [s for s in stmts if _strided(s)]
+    assert [(s.axis.name, s.walk()[0], s.step.value) for s in strided] == [("k", Var("k_co"), 64), ("j", Literal(0, "int"), 2)]
     assert [a.name for a in bound.axes if a.name.endswith("_co")] == ["k_co"]
     assert bound.block_threads == 64
     assert "acc2__r1" in {n for s in _flat(bound.body) for n in s.defines()}, "the ILP-only member still replicates"
@@ -245,8 +250,8 @@ def test_a_contraction_chain_member_binds_through_the_chain_arm() -> None:
     bound = factorize(_stamped(projection((con,), results=("acc",)), {con: Reduce.of(coop=64)}), root=None)
 
     flat = _flat(list(bound.body))
-    strided = [s for s in flat if isinstance(s, StridedLoop)]
-    assert [(s.axis.name, s.start, s.step.value) for s in strided] == [("k", Var("k_co"), 64)]
+    strided = [s for s in flat if _strided(s)]
+    assert [(s.axis.name, s.walk()[0], s.step.value) for s in strided] == [("k", Var("k_co"), 64)]
     assert [a.name for a in bound.axes if a.name.endswith("_co")] == ["k_co"]
     assert bound.block_threads == 64
     assert any(isinstance(s, (WarpShuffle, TreeHalve, Smem)) for s in flat), "the cross-thread combine must close the fold"
@@ -269,8 +274,8 @@ def test_a_partitioned_second_projection_root_is_the_bound_root() -> None:
     root = projection((first, second), parse_body("out = add(acc, acc2)"), results=("out",))
     bound = factorize(_stamped(root, {second: Reduce.of(coop=64)}, axes=(_K, _J)), root=None)
 
-    strided = [stmt for stmt in _flat(bound.body) if isinstance(stmt, StridedLoop)]
-    assert [(stmt.axis.name, stmt.start, stmt.step.value) for stmt in strided] == [("j", Var("j_co"), 64)]
+    strided = [stmt for stmt in _flat(bound.body) if _strided(stmt)]
+    assert [(stmt.axis.name, stmt.walk()[0], stmt.step.value) for stmt in strided] == [("j", Var("j_co"), 64)]
     assert bound.block_threads == 64
 
 
@@ -299,11 +304,11 @@ def test_the_walk_offers_and_the_binder_realizes_two_partitioned_members(monkeyp
 
     (scheduled_tile,) = both[0].expand()
     bound = factorize(scheduled_tile, root=None)
-    strided = [s for s in bound.body if isinstance(s, StridedLoop)]
+    strided = [s for s in bound.body if _strided(s)]
     assert len(strided) == 2, "each partitioned member emits its own strided fold"
     lanes = [a for a in bound.axes if a.name.endswith("_co")]
     assert len(lanes) == 1, "cooperating members share ONE lane axis"
     width = lanes[0].extent.as_static()
     assert [s.step.value for s in strided] == [width, width], "both folds stride by the one inventory's width"
-    assert [s.start for s in strided] == [Var(lanes[0].name), Var(lanes[0].name)]
+    assert [s.walk()[0] for s in strided] == [Var(lanes[0].name), Var(lanes[0].name)]
     assert bound.block_threads == width

@@ -136,7 +136,7 @@ def _stamp_stmt(s: Statement, ctx: _StampCtx) -> Statement:
         if s.dtype is not None:
             ctx.ssa_dtypes[s.name] = s.dtype
         return s
-    # Block-structured stmts (Tile / Loop / StridedLoop / Cond, …):
+    # Block-structured stmts (Tile / Loop / Cond, …):
     # recurse through children via the generic ``nested()`` / ``with_bodies()``
     # protocol — no isinstance ladder.
     nested = s.nested()
