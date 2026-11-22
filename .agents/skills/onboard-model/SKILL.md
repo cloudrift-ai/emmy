@@ -199,6 +199,17 @@ validation and lower every entry again from the committed file. Keep it even whe
 fails later. A partial inventory never goes under `golden/`: keep it and its diagnostics outside the repository, and
 never create an empty golden. If the model has no recipe directory, create an `onboarding`/`untested` shell first.
 
+**Promote into the hardware golden.** The priors train on the hardware goldens alone; a recipe golden is evidence for
+compiles of that model, never training data. When the card has a hardware golden
+(`emmy/compiler/pipeline/search/golden/records/<gpu-slug>_<compute-cap>.json`), copy the recipe golden's measured rows
+into it so the prior learns them: open it with `GoldenFile.edit(path)`, add each target's traced program, then each
+kernel with `add_kernel`, each decision with `add_routing` and each measured row with `upsert_row`, using the
+references `add_kernel` returns. Where the hardware golden already records the same kernel at the same sizes, keep the
+faster priced route, and record the loser again on the card rather than editing it. Then `emmy golden check` the
+hardware golden, run `emmy candidates restamp` and `emmy candidates build` for its candidate file, and refit both priors
+(AGENTS.md finalization step 22). A card without a hardware golden leaves the rows out of the prior; say so in the
+report.
+
 ## 3. Create and validate a conservative baseline
 
 Create or update the shared experiment recipe with a conservative feasible baseline — the smallest tensor-parallel size
