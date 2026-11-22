@@ -1,8 +1,9 @@
-# Two compiler bugs the full-coverage record run found
+# Compiler and bench bugs the full-coverage record run found
 
-Status: open, 2026-11-19. Found on the RTX PRO 6000 Server Edition card while recording every hardware-golden
-program on every card. Both programs were paused there and left out of that card's golden. Neither bug was fixed in
-the record PR, because each needs a lowering or codegen change that moves kernels on other cards.
+Status: open, 2026-11-22. Found while recording every hardware-golden program on every card. Bugs 1 and 2 were found
+on the RTX PRO 6000 Server Edition; their programs were left out of the goldens. Bugs 3 to 6 showed up later in the
+same run. None was fixed in the record PR: 1 and 2 need a lowering or codegen change that moves kernels on other
+cards, and 3 to 6 change what the bench or the record measures.
 
 ## 1. Reduce loop not in canonical Loop IR (DeepSeek-V4-Flash)
 
@@ -27,7 +28,12 @@ emmy run --golden _data/W.json --kernel k_979e61c3fcbf --bench --tune 40
 
 On the A100 the seed kernel is `k_386084c79684` and the loop the error names is `a8`.
 
-On the RTX 4090 it shows a third way: an unpinned whole-target compile of `k_073f8b9d560e` (recorded under the source golden's arm) raises it in `_route_candidates` → `parallel_expand` → `_cut.realize` → `_join_pieces` → `_splice_pieces` → `lift_kernel`, while building a joined cut splice, with `EMMY_FAST_MATH=1` and no pins. A CPU scan of the 4090 working golden's 770 kernels raised it for 5 kernels lowered on their own: `k_2f65af085a5c`, `k_7f47a8a301f7`, `k_f20a172513b9`, `k_d8c5f1cd17b7`, `k_54265a53efa9`. A kernel lowered on its own needs no GPU, so the lift of one of these is the smallest reproducer:
+On the RTX 4090 it shows a third way: an unpinned whole-target compile of `k_073f8b9d560e` (recorded under the source
+golden's arm) raises it in `_route_candidates` → `parallel_expand` → `_cut.realize` → `_join_pieces` →
+`_splice_pieces` → `lift_kernel`, while building a joined cut splice, with `EMMY_FAST_MATH=1` and no pins. A CPU scan
+of the 4090 working golden's 770 kernels raised it for 5 kernels lowered on their own: `k_2f65af085a5c`,
+`k_7f47a8a301f7`, `k_f20a172513b9`, `k_d8c5f1cd17b7`, `k_54265a53efa9`. A kernel lowered on its own needs no GPU, so
+the lift of one of these is the smallest reproducer:
 
 ```bash
 emmy compile --golden <4090 working golden> --kernel k_2f65af085a5c
@@ -71,7 +77,9 @@ EMMY_KNOBS="PLACE=fuse,REDUCE=" emmy run --golden emmy/compiler/pipeline/search/
   --kernel k_6d8ebf7490dd --bench
 ```
 
-It is not sm_120-only. On the V100 (sm_70) both programs fault in their **unpinned** greedy on every bench, with the error naming no kernel, so nothing gets disqualified and neither program ever benches clean. The V100 reproducer: the same commands on a scratch copy of the program traced into the V100 working golden. Run
+It is not sm_120-only. On the V100 (sm_70) both programs fault in their **unpinned** greedy on every bench, with the
+error naming no kernel, so nothing gets disqualified and neither program ever benches clean. The V100 reproducer: the
+same commands on a scratch copy of the program traced into the V100 working golden. Run
 under `compute-sanitizer --tool memcheck` to get the faulting instruction and address; `EMMY_DUMP_DIR` gives the
 kernel's PTX to match it against.
 
@@ -82,3 +90,52 @@ decisions one at a time to the next-best value until the fault goes away; that n
 **Done when.** Both kernels run clean under memcheck under the failing schedule, `--strict` passes against eager,
 and a realization-corpus case pins the schedule that faulted (it must pass `correct`). Re-record the two programs on
 the Server Edition and the 5090.
+
+## 3. A cut piece's knob is recorded at one site address and restamped at another
+
+**What fails.** The record writes a cut piece's `REDUCE` key at the site address the piece has inside its seed
+program (`REDUCE@map.1/inner`). The restamp lifts the piece alone, where the same site is `@inner`, re-spells the
+key, and drops the row's time, so the row becomes a proposal. Re-recording reproduces it every time. Seen on the SE
+(`k_1be59c38438d` piece `k_3fff7d74df56`, the w1x4 row at 12.1 µs) and once on the 5090. The SE route stays priced
+only because the piece has another measured row in the fresh spelling (w1x2, 17.0 µs).
+
+**Reproducer.** Record the seed on the SE working golden, then `emmy golden restamp` the file: the w1x4 row loses its
+time.
+
+**Done when.** The record and the restamp spell a cut piece's site the same way, and a test records a cut piece's
+keyed row and restamps it with no change.
+
+## 4. A bench worker that respawns loses the tune's inputs
+
+**What fails.** After one hung kernel trips the 2 s launch watchdog, the bench worker respawns, and every later
+pinned row of that tune fails with `InputsCacheMissError: run_inputs ... not cached in this worker (respawned?)`. The
+tune measures nothing after that point. It lost 4 tunes on the SE (`k_f595a539af1a`, `k_eb32a4713740` among them).
+
+**Done when.** A respawned worker gets the run's inputs again, and a test that kills the worker mid-tune still
+measures the rows after it.
+
+## 5. A standalone piece draws `position` near zero
+
+**What fails.** When an attention piece that reads `position` is benched alone, the input draw finds no query or key
+tensors to derive the positions from, so `position` is drawn standard-normal, near zero. Nearly every causal chunk is
+then masked and skipped. On the RTX 4090, `k_e81edb934a14` runs 3.2 µs alone against 16.2 µs inside its program. A
+tune of such a piece is up to 4x optimistic, and its candidate rows look faster than the golden's.
+
+**Where to look.** The position draw in the CUDA backend's compare module. A piece has the sizes its parent program
+gave it; the positions can be drawn from those.
+
+**Done when.** A piece benched alone draws positions in the range its program draws, and its tune time is within
+noise of its in-program time.
+
+## 6. The record does not pick a faster tuned schedule
+
+**What fails.** On the H100 and the A100, a tune at a piece's own sizes finds a faster schedule, but recording the seed
+again keeps the slower one. H100: `k_9c0f10f0f3f8` piece `k_62c28411cac8` tuned `WORK=t32` at 6,060 µs, and the
+record kept the golden's `t64` at 9,898 µs (`k_8f532d791362`: 5,963 vs 10,018). A100: the `pre-sym` and `post16` tunes
+found fast rows for every piece, but the seeds' recorded time did not move.
+
+**Where to look.** Either the tune rows are filed under other sizes or another regime than the piece has inside its
+program, so the pick never sees them, or the golden's imported row wins the pick. Compare the tune row's join key with
+the key the record's pick asks for.
+
+**Done when.** A record after a tune picks the tuned row when it is faster, and a test pins that.
