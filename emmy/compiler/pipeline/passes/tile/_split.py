@@ -473,10 +473,9 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp) -> list[DeferredF
 
 def state_ports(tile: TileOp, prefix: str) -> tuple[Tensor, ...]:
     """The buffers the classic realization of ``tile``'s carried states owns, named under
-    ``prefix`` — one per state over ``(time, *free, *cells)``, the index ``states_as_buffers``
-    writes. The lift adds them to the node; register storage drops them again. A size-one free axis has no loop
-    in the Loop IR the index comes from, so the buffer has no axis for it either. A state the term stores that
-    way itself (``stored_states``) has that output for its buffer and no port."""
+    ``prefix`` — one per state over the step and the state's cell, the index ``serial_form`` writes. The lift
+    adds them to the node; register storage drops them again. A state the term stores that way itself
+    (``stored_states``) has that output for its buffer and no port."""
     if not tile.states:
         return ()
     stored = {state for loop, above in carrying_loops(tile.loop_body) for state in stored_states(loop, above)}

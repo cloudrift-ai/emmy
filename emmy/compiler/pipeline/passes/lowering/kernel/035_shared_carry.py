@@ -36,6 +36,13 @@ _resolve = import_module("emmy.compiler.pipeline.passes.lowering.kernel.045_merg
 _materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
 
 
+def _lead(axes: tuple, split: int, batch: tuple[str, ...]) -> int | None:
+    """How many leading grid axes hold the state's ``batch``: the batch itself, beside a size-one axis that holds no
+    cell (the row the lift binds). ``None`` where the batch does not stand first."""
+    counts = (n for n in range(split + 1) if tuple(a.name for a in axes[:n] if a.extent != 1 or a.name in batch) == batch)
+    return next(counts, None)
+
+
 def _resident(op, program, retained=frozenset()):
     loop, carry, batch = program
     if len(op.serial) != 1 or op.serial[0] != loop.axis or len(op.body) != 1 or not isinstance(op.body[0], Tile):
@@ -48,9 +55,10 @@ def _resident(op, program, retained=frozenset()):
     while threads < tile.block_threads and split:
         split -= 1
         threads *= tile.axes[split].extent.as_static()
-    if threads != tile.block_threads or tuple(a.name for a in tile.axes[: len(batch)]) != batch:
+    lead = _lead(tile.axes, split, batch)
+    if threads != tile.block_threads or lead is None:
         return None
-    grid = tile.axes[len(batch) : split]
+    grid = tile.axes[lead:split]
     if not grid:
         return None
     state = shared_state(op, program)
@@ -156,7 +164,7 @@ def _resident(op, program, retained=frozenset()):
         closing = (Loop.strided(Axis("_carry_last", prod(shape)), Builtin("thread_idx.x"), threads, (ended, *stores)),)
     # One padding column per row keeps column-strided reads of the state off one bank.
     body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), tensor.dtype), initialize, Sync(), *step, *closing)
-    return replace(op, serial=(), body=Body((tile.replace(axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
+    return replace(op, serial=(), body=Body((tile.replace(axes=(*tile.axes[:lead], *tile.axes[split:]), body=Body(body)),)))
 
 
 def _cells(cell, shape):

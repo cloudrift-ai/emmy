@@ -95,7 +95,7 @@ which is the granularity of the tile IR's nodes, so a body and its chain spellin
 cones, the edges between them and the seams `030_cut` offers do not depend on how a program was spelled
 (`test_total_lift.py` pins it). `010_lift` takes the loop that carries a Loop IR state as the kernel's serial axis
 (`Placement.serial`) and its body as the term, one step, with the `Carry` among the kernel's stores. The classic
-schedule's fork realizes that kernel over a state buffer (`states_as_buffers`): the state a buffer the node owns and
+schedule's fork realizes that kernel over a state buffer (`serial_form`): the state a buffer the node owns and
 keeps every step of, a load of the state a load of that buffer one launch back (the seed at the first), and the
 `Carry` a store of its value at this step. The step's own algebra is untouched, so a contraction over the previous
 state is a contraction whose B slab is that buffer. A serial

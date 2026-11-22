@@ -90,12 +90,12 @@ the step's own matrix had. That decides where the split pays. A step that is its
 walk does the same products one after another. A step that changes one row of its state is the identity plus a
 rank-one term, the dense form does not keep that, and its walk is cheaper than any composition of dense maps.
 
-The classic schedule realizes the carrying loop as ordered launches with a global state buffer: at its fork it
-lifts the kernel's Loop IR again with the state as a buffer the node owns and the loop as the kernel's **serial
-axis** (`Placement.serial`, `lift_serial`), each launch reading the previous launch's stores one step back. That
-form is a realization of the kernel, not another kernel: the kernel keeps the lifted tile's identity, the one its
-fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
-no cell; a seed tensor keeps that dim, and every storage reads it with `0` there (`seed_index`). Register
+The classic schedule realizes the steps as ordered launches along the kernel's **serial axis**
+(`Placement.serial`) with a global state buffer: at its fork the kernel's term is taken with the state as a buffer
+the node owns (`serial_form`), each slab over the state a load of that buffer one launch back, the seed at the
+first, and the state's update a write to it. That form is a realization of the kernel, not another kernel: the
+kernel keeps the lifted tile's identity, the one its fork and its golden rows name. A size-one dim the Loop IR
+spelled `0` in the state's cell stays a dim of the buffer, as the seed tensor keeps it. Register
 storage reads the carrying kernel's step itself and realizes the loop inside each CTA when the state rows are
 independent. An unmapped classic fallback takes the same serial form during materialization. Every reader of a
 kernel's schedule sites takes the kernel through one more step, `TileOp.scheduled` (`scheduled_form`): a block of a
