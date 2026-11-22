@@ -21,7 +21,6 @@ from emmy.compiler.ir.stmt import (
     Let,
     Load,
     Loop,
-    Pre,
     Select,
     Write,
     dtype_promote,
@@ -117,7 +116,7 @@ def _resident(op, program, retained=frozenset()):
     step = rewrite(tile.body)
     snapshots = tuple(s for s in snapshots if s not in final)
     if port in retained and port not in written:
-        snapshots += (Write(port, (Var(loop.axis.name), *carry.index), (carry.value,)),)
+        snapshots += (Write(port, (Var(loop.axis.name), *carry.cell), (carry.value,)),)
     snapshot = _parallel_copy(op, program, step, shared, parity, shape, batch, tile.block_threads, tensor.dtype, snapshots)
     if snapshot is not None:
         copying, step, predicate, lagging = snapshot
@@ -273,7 +272,7 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
     if not isinstance(selected, Select) or len(selected.branches) != 2:
         return None
     previous = defs.get(selected.branches[1].value)
-    if not isinstance(previous, Pre) or previous.carrier != carry.name or previous.index != carry.index:
+    if not isinstance(previous, Load) or previous.input != carry.name or tuple(previous.index[1:]) != tuple(carry.cell):
         return None
     if any(not _stores_state(op, loop, carry, store, dtype) for store in outputs):
         return None
@@ -335,7 +334,7 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
     start, end = Builtin("thread_idx.x"), None
     # With no snapshot to store, the buffer a step writes differs from the state it reads only in the cells the
     # step before changed: where the predicate bounds those along the state's leading cell, only they are copied.
-    rows = _bounds(predicate, next(e.name for e in carry.index if isinstance(e, Var) and e.name not in batch), {*batch, loop.axis.name})
+    rows = _bounds(predicate, next(name for name in carry.cells if name not in batch), {*batch, loop.axis.name})
     lagging = not outputs and None not in rows
     if lagging:
         before = {loop.axis.name: Var(loop.axis.name) - Literal(1, "int")}

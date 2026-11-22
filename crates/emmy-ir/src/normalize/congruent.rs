@@ -11,7 +11,7 @@ use crate::statement::Statement;
 
 /// `body` with every congruent state that can go gone: its update dropped and its reads reading the group's first
 /// member. Congruent states hold one value at every step, so a read is the first member's wherever its value is the
-/// same version. A carried state is read through `pre`, the step before wherever it sits, so every read can go. An
+/// same version. A carried state is read by loads, the step before wherever one sits, so every read can go. An
 /// accumulator read in its own scope reads the old value ahead of its update and the new one behind it, which the
 /// first member's update may not match; such a member stays until placement, numbering the group alike, has merged
 /// those reads into the first member's, and its reads after the loop then read the first member's final value.
@@ -46,25 +46,20 @@ fn reads(stmt: &Arc<Statement>, name: Name) -> bool {
     found
 }
 
-/// Whether the congruent state `name` can go now: a carried state is read only through `pre`; an accumulator is read
-/// nowhere in the scope that updates it but by its update.
+/// Whether the congruent state `name` can go now: a carried state always; an accumulator is read nowhere in the
+/// scope that updates it but by its update.
 fn can_go(body: &Body, name: Name) -> bool {
-    let mut carried = false;
-    body.walk(&mut |here| {
-        carried |= matches!(&**here.stmt(), Statement::Carry(c) if c.name == name)
-    });
-    if carried {
-        let mut plain = false;
-        body.walk(&mut |here| {
-            let stmt = here.stmt();
-            plain |= !matches!(&**stmt, Statement::Pre(_))
-                && !updates(stmt, name)
-                && (stmt.deps().contains(&name)
-                    || stmt.expressions().iter().any(|e| e.reads(name)));
-        });
-        return !plain;
+    if carried(body, name) {
+        return true;
     }
     scope_of(body, name).is_some_and(|scope| !scope.stmts().iter().any(|stmt| reads(stmt, name)))
+}
+
+/// Whether `name` is a carried state of `body`.
+fn carried(body: &Body, name: Name) -> bool {
+    let mut found = false;
+    body.walk(&mut |here| found |= matches!(&**here.stmt(), Statement::Carry(c) if c.name == name));
+    found
 }
 
 /// The body whose own statements hold the update of the accumulator `name`.
@@ -78,8 +73,18 @@ fn scope_of(body: &Body, name: Name) -> Option<Body> {
         .find_map(|child| scope_of(&child, name))
 }
 
-/// `body` without the updates of the states `alias` names, every read of one reading what it maps to.
+/// `body` without the updates of the states `alias` names, every read of one reading what it maps to: a carried state
+/// is a buffer its loads name, an accumulator a value.
 fn rebuilt(body: &Body, alias: &HashMap<Name, Name>) -> Body {
+    let buffers: HashMap<Name, Name> = alias
+        .iter()
+        .filter(|(name, _)| carried(body, **name))
+        .map(|(name, first)| (*name, *first))
+        .collect();
+    without(body, alias).rename_buffers(&buffers)
+}
+
+fn without(body: &Body, alias: &HashMap<Name, Name>) -> Body {
     let rename = |_: crate::statement::Roles, name: Name| alias.get(&name).copied();
     let empty = HashMap::new();
     let stmts = body
@@ -106,7 +111,7 @@ fn rebuilt(body: &Body, alias: &HashMap<Name, Name>) -> Body {
             } else {
                 with_bodies(
                     &renamed,
-                    nested.iter().map(|child| rebuilt(child, alias)).collect(),
+                    nested.iter().map(|child| without(child, alias)).collect(),
                 )
             }
         })
@@ -209,17 +214,17 @@ mod tests {
     for t in 0..8:
       for i in 0..4:
         u = load U[t, i]
-        h1p = pre h1[i]
+        h1p = load h1[t - 1, i]
         n1 = add(h1p, u)
-        h1[i] <- n1 seed 0
+        h1[t, i] <- n1 seed 0
         w = load U[t, i]
-        h2p = pre h2[i]
+        h2p = load h2[t - 1, i]
         n2 = add(h2p, w)
-        h2[i] <- n2 seed SEED
+        h2[t, i] <- n2 seed SEED
     for j in 0..4:
-      a = pre h1[j]
+      a = load h1[7, j]
       Y[j] = a
-      b = pre h2[j]
+      b = load h2[7, j]
       Z[j] = b
         ";
 

@@ -155,9 +155,6 @@ impl Placer<'_> {
         for name in stmt.external_reads() {
             out.extend(self.read_of(&name));
         }
-        if let Statement::Pre(p) = stmt {
-            out.extend(self.read_of(&p.carrier));
-        }
         out
     }
     fn settle(&mut self, names: &[Name], depth: usize, marks: &Marks) {
@@ -283,9 +280,6 @@ impl Placer<'_> {
             for name in stmt.external_writes() {
                 self.bump(&name, depth);
             }
-            if let Statement::Carry(c) = &**stmt {
-                self.bump(&c.name, depth);
-            }
             if is_protocol(stmt) {
                 self.bump(&Name::from(""), depth);
             }
@@ -301,9 +295,6 @@ impl Placer<'_> {
             nested.iter().flat_map(|child| child.iter_stmts()).collect();
         let mut writes: HashSet<Name> = members.iter().flat_map(|m| m.external_writes()).collect();
         for member in &members {
-            if let Statement::Carry(c) = &**member {
-                writes.insert(c.name);
-            }
             // Storage a member updates in place is written on the back edge, as a buffer is.
             writes.extend(member.updates());
             if is_protocol(member) {
@@ -464,9 +455,6 @@ pub fn place_values_numbered(body: &Body, numbering: &Numbering) -> Result<Body>
     let mut updated: HashSet<Name> = HashSet::new();
     body.walk(&mut |here| {
         written.extend(here.stmt().external_writes());
-        if let Statement::Carry(c) = &**here.stmt() {
-            written.insert(c.name);
-        }
         updated.extend(here.stmt().updates());
     });
     written.extend(updated.iter().copied());

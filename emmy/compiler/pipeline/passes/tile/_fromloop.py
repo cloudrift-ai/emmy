@@ -31,7 +31,6 @@ from emmy.compiler.ir.stmt import (
     Let,
     Load,
     Loop,
-    Pre,
     Select,
     SelectBranch,
     Statement,
@@ -71,8 +70,8 @@ class _Level:
     exposed: dict = field(default_factory=dict)
     consumed: set = field(default_factory=set)
     drained: set = field(default_factory=set)
-    #: The carried states in scope, each with the axis of the loop carrying it — what a ``Pre``
-    #: read below this level names (:meth:`Fold.carrier_read`).
+    #: The carried states in scope, each with the axis of the loop carrying it — what a load of one
+    #: below this level names (:meth:`Fold.carrier_read`).
     carriers: dict = field(default_factory=dict)
 
 
@@ -601,7 +600,7 @@ def _observers(step: tuple, stored: tuple[str, ...], names: tuple[str, ...], axi
     while pending:
         value = pending.pop()
         stmt = defined.get(value)
-        if stmt is None or isinstance(stmt, (Load, Pre, Loop)):
+        if stmt is None or isinstance(stmt, (Load, Loop)):
             raise ValueError(f"a per-step store may only observe the carried state {names}, not {value!r}")
         if id(stmt) in taken:
             continue
@@ -621,8 +620,8 @@ def _values_in_scope(levels: tuple) -> frozenset[str]:
 
 def _slabs(step: tuple, carriers: dict, known: frozenset[str]) -> tuple[tuple[Fold, ...], Body]:
     """The step's reads as terms and what remains of it: every ``Load`` over COORDINATES becomes a
-    SLAB — a term declaring the coordinates it indexes — and every ``Pre`` a CARRIER READ, a slab
-    over the carried state naming the axis of the loop carrying it. A data-dependent GATHER — an
+    SLAB — a term declaring the coordinates it indexes — and a load of a carried state a CARRIER READ, a slab
+    over the state naming the axis of the loop carrying it. A data-dependent GATHER — an
     index reading a VALUE, one the step computes (the packed-pair table read by a decoded code) or
     one an enclosing level holds (``known``: an expert's weights picked by a routed index) — is a
     statement of its cone: the value it reads is not an axis, and a slab would declare it as one.
@@ -632,17 +631,17 @@ def _slabs(step: tuple, carriers: dict, known: frozenset[str]) -> tuple[tuple[Fo
     defined = {name for stmt in step for name in stmt.defines()} | known
     gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expression.free_vars() & defined for expression in stmt.index)}
     slabs = tuple(
-        Fold.carrier_read(stmt, carriers[stmt.carrier]) if isinstance(stmt, Pre) else Fold.slab(stmt)
+        Fold.carrier_read(stmt, carriers[stmt.input]) if stmt.input in carriers else Fold.slab(stmt)
         for stmt in step
-        if isinstance(stmt, (Load, Pre)) and id(stmt) not in gathers
+        if isinstance(stmt, Load) and id(stmt) not in gathers
     )
-    return slabs, Body(stmt for stmt in step if not isinstance(stmt, (Load, Pre)) or id(stmt) in gathers)
+    return slabs, Body(stmt for stmt in step if not isinstance(stmt, Load) or id(stmt) in gathers)
 
 
 def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tuple[Write, ...]]:
     """Lift a loop that CARRIES A STATE into a fold whose ⊕ is the action ``next``: the cell loops
     are the fold's ``cells``, each ``Carry`` a state whose lift result is its value and whose seed
-    is the fold's ``init``, a ``Pre`` a carrier-read slab the way a ``Load`` is a slab. A per-step
+    is the fold's ``init``, a load of the state a carrier read. A per-step
     ``Write`` streams a value of the step — one the step defines, or one an operand exposes (the
     state a step read) — and that value enters the lift as a fresh ``<value>__obs`` copy, so every
     streamed value is a result of the fold's own and the store, rewritten to read it, rides the
@@ -666,16 +665,16 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     flat = Body(flatten(loop.body))
     defined = tuple(stmt for stmt in flat if isinstance(stmt, Carry))
     if any(
-        carry.cells != defined[0].cells or [isinstance(e, Var) for e in carry.index] != [isinstance(e, Var) for e in defined[0].index]
+        carry.cells != defined[0].cells or [isinstance(e, Var) for e in carry.cell] != [isinstance(e, Var) for e in defined[0].cell]
         for carry in defined
     ):
         raise ValueError(f"loop {loop.axis.name!r}: every carried state is one value per cell over the same cell axes")
     # A position where normalization dropped a size-one axis is ``0`` in every index over the
-    # state; the term's cells are the axes alone, so the reads and the definition drop it too.
-    unit = tuple(position for position, e in enumerate(defined[0].index) if not isinstance(e, Var))
+    # state; the term's cells are the axes alone, so the loads and the definition drop it too. The step is first.
+    unit = tuple(1 + position for position, e in enumerate(defined[0].cell) if not isinstance(e, Var))
 
     def strip(stmt: Statement) -> Statement:
-        if isinstance(stmt, Carry) or (isinstance(stmt, Pre) and stmt.carrier in loop.carries):
+        if isinstance(stmt, Carry) or (isinstance(stmt, Load) and stmt.input in loop.carries):
             return stmt.replace(index=tuple(e for position, e in enumerate(stmt.index) if position not in unit))
         return stmt
 
@@ -739,7 +738,7 @@ def stored_states(loop: Loop, outer: tuple[Axis, ...]) -> dict[str, tuple[Carry,
         if value not in carries:
             continue
         carry = carries[value]
-        cells = {cell.name for cell in carry.index if isinstance(cell, Var)}
+        cells = set(carry.cells)
         names = [expression.name for expression in stmt.index if isinstance(expression, Var)]
         plain = all(isinstance(expression, Var) or expression == Literal(0, "int") for expression in stmt.index)
         if plain and len(set(names)) == len(names) and set(names) == fixed | cells:
@@ -755,8 +754,8 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
 
     The loop that carries a state becomes the kernel's time: one launch per step, in order. The
     buffer keeps every step, indexed by the step, the free axes outside the loop and the cell. A
-    ``Pre`` read is a load one step back, the seed where there is no step before the first; the
-    ``Carry`` is a store of its value at this step. A state the term already stores that way
+    load of the state is a load of the buffer one step back, the seed where there is no step before the first;
+    the ``Carry`` is a store of its value at this step. A state the term already stores that way
     (:func:`stored_states`) keeps that output as its buffer: the read is a read of it one step
     back, the ``Carry`` stores nothing twice, and ``shapes`` names no buffer for it. Nothing of the
     step's own algebra changes, so the rest of the nest lifts as it always did. ``inputs`` are the
@@ -764,22 +763,24 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
     """
     serial: list[Axis] = []
     shapes: dict[str, tuple] = {}
+    states = {carry.name for carry in Body.coerce(body).carries}
 
-    def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str], stored: dict) -> tuple[Statement, ...]:
+    def read(stmt: Load, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str], stored: dict) -> tuple[Statement, ...]:
         step = Var(time.name)
         after_first = BinaryExpression(">", step, Literal(0, "int"))
         previous = TernaryExpression(after_first, step - Literal(1, "int"), Literal(0, "int"))
-        if stmt.carrier in stored:
-            carry, write = stored[stmt.carrier]
-            cells = {cell.name: at for cell, at in zip(carry.index, stmt.index, strict=True) if isinstance(cell, Var)}
+        at = stmt.index[1:]
+        if stmt.input in stored:
+            carry, write = stored[stmt.input]
+            cells = {cell.name: read for cell, read in zip(carry.cell, at, strict=True) if isinstance(cell, Var)}
             buffer, index = write.output, tuple(expression.substitute({time.name: previous, **cells}) for expression in write.index)
         else:
-            buffer, index = f"{prefix}__{stmt.carrier}", (previous, *(Var(axis.name) for axis in outer), *stmt.index)
+            buffer, index = f"{prefix}__{stmt.input}", (previous, *(Var(axis.name) for axis in outer), *at)
         held, seed = f"{stmt.name}__prev", f"{stmt.name}__seed"
-        start = seeds[stmt.carrier]
+        start = seeds[stmt.input]
         # The seed is a buffer of the state's shape (the tensor an unrolled loop started from) or a constant.
         if isinstance(start, str):
-            cell = (*(Var(axis.name) for axis in outer), *stmt.index)
+            cell = (*(Var(axis.name) for axis in outer), *at)
             seeded: Statement = Load(names=(seed,), input=start, index=seed_index(cell, inputs[start].shape))
         else:
             seeded = Let(name=seed, value=Literal(start))
@@ -792,15 +793,15 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
     def define(stmt: Carry, time: Axis, outer: tuple[Axis, ...], stored: dict) -> tuple[Statement, ...]:
         if stmt.name in stored:
             return ()
-        index = (Var(time.name), *(Var(axis.name) for axis in outer), *stmt.index)
+        index = (Var(time.name), *(Var(axis.name) for axis in outer), *stmt.cell)
         return (Write(output=f"{prefix}__{stmt.name}", index=index, values=(stmt.value,)),)
 
     def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float | str], stored: dict) -> Body:
         out: list[Statement] = []
         for stmt in stmts:
-            if isinstance(stmt, Pre):
-                if stmt.carrier not in seeds:
-                    raise ValueError(f"a read of {stmt.carrier!r} outside the loop that carries it has no launch to run in")
+            if isinstance(stmt, Load) and stmt.input in states:
+                if stmt.input not in seeds:
+                    raise ValueError(f"a read of {stmt.input!r} outside the loop that carries it has no launch to run in")
                 out.extend(read(stmt, time, outer, seeds, stored))
             elif isinstance(stmt, Carry):
                 out.extend(define(stmt, time, outer, stored))
@@ -961,15 +962,16 @@ def owned_cells(body, carry):
                     need(name, wanted)
         elif isinstance(stmt, (Carry, Write)):
             need(stmt.value, {frozenset()})
-    reads = tuple(stmt for stmt in body.iter() if isinstance(stmt, Pre))
+    states = {stmt.name for stmt in body.carries}
+    reads = tuple(stmt for stmt in body.iter() if isinstance(stmt, Load) and stmt.input in states)
     owned = []
-    for dim, cell in enumerate(carry.index):
+    for dim, cell in enumerate(carry.cell):
         if not isinstance(cell, Var):
             continue
         for read in reads:
-            if read.carrier != carry.name:
+            if read.input != carry.name:
                 return ()
-            coordinate = read.index[dim]
+            coordinate = read.index[1 + dim]
             for path in demand.get(read.name, {frozenset()}):
                 value = coordinate
                 while isinstance(value, TernaryExpression) and conjuncts(value.cond) <= path:
@@ -994,14 +996,14 @@ def carried_program(op):
                 loop = loops[0]
                 carries = tuple(s for s in loop.body.iter() if isinstance(s, Carry))
                 if len(carries) != 1 or any(
-                    not isinstance(s, (Loop, Let, Load, Pre, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
+                    not isinstance(s, (Loop, Let, Load, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
                 ):
                     return None
                 carry = carries[0]
                 if any(s.atomic for s in loop.body.iter() if isinstance(s, Write)):
                     return None
                 # A store keeps every step, at the step and the cell, or the cell alone: the state the loop ends with.
-                cells = tuple(e for e in carry.index if isinstance(e, Var))
+                cells = tuple(e for e in carry.cell if isinstance(e, Var))
                 if any(
                     tuple(e for e, n in zip(s.index, source.outputs[s.output].shape, strict=True) if n != 1)
                     not in ((Var(loop.axis.name), *cells), cells)

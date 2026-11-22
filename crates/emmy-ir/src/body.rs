@@ -476,7 +476,8 @@ impl Body {
             let mut out = Vec::new();
             self.walk(&mut |here| {
                 let names = match &**here.stmt() {
-                    Statement::Accum(_) | Statement::Carry(_) => here.stmt().defines(),
+                    Statement::Accum(a) => vec![a.name],
+                    Statement::Carry(c) => vec![c.name],
                     stmt => stmt.updates(),
                 };
                 for name in names {

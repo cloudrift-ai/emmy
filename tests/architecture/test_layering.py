@@ -199,7 +199,7 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     """The statement module's interface is this list. A name added here is a decision, not a convenience."""
     import emmy.compiler.ir.stmt as stmt
 
-    statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
+    statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Init", "Let", "Write", "Select", "SelectBranch"]
     statement_types += ["ZeroPrologue", "Loop", "Cond"]
     containers = ["Body", "Identity", "OutputSpec"]
     functions = ["canonicalize_identity", "free_names", "exposed_defines"]

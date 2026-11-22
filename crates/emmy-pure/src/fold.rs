@@ -434,14 +434,14 @@ fn check_reduce(parts: &Parts, lift: &Lambda, base: &Lambda) -> Result<()> {
             continue;
         }
         if let Some(read) = edge.as_carrier_read()
-            && let Statement::Pre(pre) = &**read
-            && base.results().contains(&pre.carrier)
-            && pre.index.len() != parts.cells.len()
+            && let Statement::Load(load) = &**read
+            && base.results().contains(&load.input)
+            && load.index.len() != parts.cells.len() + 1
         {
             return Err(Error::Value(format!(
-                "carrier read {}[{}] against a state with {} cell axes",
-                pre.carrier,
-                pre.index.len(),
+                "carrier read {}[{}] against a state with the step and {} cell axes",
+                load.input,
+                load.index.len(),
                 parts.cells.len()
             )));
         }
@@ -804,22 +804,25 @@ impl Fold {
         Ok(self.0.combine.get_or_init(|| combine).clone())
     }
 
-    /// The one `Load` of a SLAB — no operands, no monoid, a body of one load — or `None`.
+    /// The one `Load` of a SLAB — no operands, no monoid, a body of one load of an input — or `None`.
     pub fn as_slab(&self) -> Option<&Arc<Statement>> {
-        let body = self.0.lift.body();
-        if !self.0.operands.is_empty() || self.0.base.is_some() || body.len() != 1 {
-            return None;
-        }
-        matches!(&*body.stmts()[0], Statement::Load(_)).then(|| &body.stmts()[0])
+        self.leaf_load(false)
     }
 
-    /// The one `Pre` of a CARRIER READ — a slab over an enclosing fold's carried state at some cell — or `None`.
+    /// The one `Load` of a CARRIER READ — an enclosing fold's carried state one step back, at some cell — or `None`.
+    /// Its lift binds the state it reads (`Lambda::carrier`), which is what tells it from a slab.
     pub fn as_carrier_read(&self) -> Option<&Arc<Statement>> {
+        self.leaf_load(true)
+    }
+
+    fn leaf_load(&self, of_state: bool) -> Option<&Arc<Statement>> {
         let body = self.0.lift.body();
         if !self.0.operands.is_empty() || self.0.base.is_some() || body.len() != 1 {
             return None;
         }
-        matches!(&*body.stmts()[0], Statement::Pre(_)).then(|| &body.stmts()[0])
+        (matches!(&*body.stmts()[0], Statement::Load(_))
+            && self.0.lift.carrier().is_some() == of_state)
+            .then(|| &body.stmts()[0])
     }
 
     /// The coordinates this term is evaluated over as seen from outside: the lift's trailing params (past the axis
@@ -837,10 +840,8 @@ impl Fold {
                 .iter()
                 .copied()
                 .collect();
-            if let Some(read) = self.as_carrier_read()
-                && let Statement::Pre(pre) = &**read
-            {
-                space.remove(&pre.carrier);
+            if let Some(carrier) = self.0.lift.carrier() {
+                space.remove(&carrier);
             }
             if !self.carries() {
                 for edge in &self.0.operands {

@@ -39,14 +39,14 @@ def _body(n=40, *, masked=True, extra_reader=False, last=False, seed="`seed`"):
                 for r in 0..{n}:
                     for c in 0..{n}:
                         for k in 0..{n}:
-                            left = pre state[{owner}, {row if masked else "r"}, k]
-                            right = pre state[{owner}, k, c]
+                            left = load state[t - 1, {owner}, {row if masked else "r"}, k]
+                            right = load state[t - 1, {owner}, k, c]
                             product = multiply(left, right)
                             sum <- add(sum, product)
-                        old = pre state[b, r, c]
+                        old = load state[t - 1, b, r, c]
                         updated = add(old, sum)
                         {value}
-                        state[b, r, c] <- next seed {seed}
+                        state[t, b, r, c] <- next seed {seed}
                         out[{"" if last else "t, "}b, r, c] = next{extra}
         """
     )

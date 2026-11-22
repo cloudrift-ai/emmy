@@ -3,7 +3,7 @@
 A scalar ``Accum`` lives inside the loops over the cells, so a step sees only its own cell. A delta
 rule's step contracts over the previous state (``k @ S``), which needs the loop over the steps
 OUTSIDE the cells and the state kept across them. ``Carry`` spells that: the statement defines
-the next value of one cell, a ``Pre`` read sees what the previous step left at any cell, and the
+the next value of one cell, a load one step back sees what the previous step left at any cell, and the
 loop that carries it is read off the body.
 """
 
@@ -37,15 +37,15 @@ def _step(out_index: str, seed: float | str = 0.0, u_index: str = "c, i, j", ste
                 for j in 0..{N}:
                     for k in 0..{N}:
                         w = load W[i, k]
-                        other = pre S[k, j]
+                        other = load S[c - 1, k, j]
                         p = multiply(w, other)
                         mixed <- add(mixed, p)
                     u = load U[{u_index}]
-                    own = pre S[i, j]
+                    own = load S[c - 1, i, j]
                     kept = multiply(own, decay)
                     moved = add(kept, mixed)
                     next = add(moved, u)
-                    S[i, j] <- next seed {seed}
+                    S[c, i, j] <- next seed {seed}
                     out[{out_index}] = {stored}
         """
     )
@@ -166,7 +166,7 @@ def _unit_seeded_graph() -> Graph:
     for name, shape in inputs:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
     names = [name for name, _ in inputs]
-    step = LoopOp(body=parse_body(str(_step("c, i, j", "S0")).replace("S[", "S[0, ")))
+    step = LoopOp(body=parse_body(str(_step("c, i, j", "S0")).replace("S[c - 1, ", "S[c - 1, 0, ").replace("S[c, ", "S[c, 0, ")))
     graph.add_node(step, names, Tensor("out", (STEPS, N, N), "f32"), node_id="out")
     graph.inputs, graph.outputs = names, ["out"]
     return graph
@@ -285,11 +285,11 @@ def _fold_then_read() -> LoopOp:
             for c in 0..3:
                 for i in 0..4:
                     u = load U[c, i]
-                    own = pre S[i]
+                    own = load S[c - 1, i]
                     next = add(own, u)
-                    S[i] <- next seed 0
+                    S[c, i] <- next seed 0
             for r in 0..4:
-                last = pre S[r]
+                last = load S[2, r]
                 out[r] = last
             """
         )
@@ -311,15 +311,15 @@ def test_a_carried_state_round_trips_the_wire() -> None:
     assert decode(encode(body)) == body
 
 
-_DEFINE = "S[i] <- u seed 0"
+_DEFINE = "S[c, i] <- u seed 0"
 
 
 @pytest.mark.parametrize(
     ("stmts", "message"),
     [
-        ((_DEFINE,), "no loop carries its cells"),  # every enclosing loop is a cell loop
-        ((_DEFINE, "bad = exp(S)", "bad_out[c, i] = bad"), "read one cell with Pre"),
-        ((_DEFINE, "bad = pre S[i, 0]"), "no state with 2 cell axes"),
+        ((_DEFINE,), "no loop carries it"),  # no loop over the step it names stands around it
+        ((_DEFINE, "bad = exp(S)", "bad_out[c, i] = bad"), "'S' not defined"),  # a state is a buffer: a load reads a cell
+        ((_DEFINE, "bad = load S[c - 1, i, 0]", "bad_out[c, i] = bad"), "is read at a step and 1 cell axes"),
         ((_DEFINE, _DEFINE), "one statement defines a carried state"),
     ],
 )

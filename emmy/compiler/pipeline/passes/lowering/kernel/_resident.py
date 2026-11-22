@@ -40,7 +40,7 @@ from emmy.compiler.ir.kernel.ir import (
     fragment_args,
 )
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Cond, Let, Load, Loop, Pre, Select
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Let, Load, Loop, Select
 from emmy.compiler.pipeline.passes.tile._fromloop import conjuncts
 from emmy.compiler.target import FLAGGED_WHOLE
 
@@ -127,6 +127,7 @@ class _Blocks:
         self.tile, self.atom, self.period, self.row_base, self.state = tile, atom, period, row_base, state
         self.carrying, self.batch = tile.resident_state.fold, tile.resident_state.batch
         self.time = self.carrying.axis
+        (self.carried,) = self.carrying.base.results
         self.layout = atom.fragment_layout
         self.extents = {axis.name: axis.extent.as_static() for axis in (*tile.axes, *tile.place.free)}
         self.ranges = SimplifyCtx(ranges={name: Interval(0, extent - 1) for name, extent in self.extents.items()})
@@ -241,7 +242,7 @@ class _Blocks:
         for stmt in members:
             if isinstance(stmt, Select):
                 frags[stmt.name] = self.fragment(node, stmt.name, row, col, rb, cb)
-            elif isinstance(stmt, Pre):
+            elif isinstance(stmt, Load) and stmt.input == self.carried:
                 if rb is not None or tuple(_given(e, self.given) for e in stmt.index[-2:]) != (Var(col), Var(row)):
                     raise Unresident("a read of the state off its own row and column")
                 frags[stmt.name] = self.state[cb // self.atom.atom_n]

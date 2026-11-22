@@ -9,7 +9,7 @@ use emmy_ir::dtype::DType;
 use emmy_ir::elementwise::Operation;
 use emmy_ir::expr::{Builtin, Expr, Expression, Interval, Num, SimplifyCtx};
 use emmy_ir::field::NumOr;
-use emmy_ir::statement::{Carry, CpAsyncCopy, Load, Pre, Smem, Statement, Write, ZeroPrologue};
+use emmy_ir::statement::{Carry, CpAsyncCopy, Load, Smem, Statement, Write, ZeroPrologue};
 use emmy_ir::{Name, Result};
 
 use emmy_ir::fragment::volta_slab_index;
@@ -872,10 +872,10 @@ impl Lowerer {
             for stmt in &stmts {
                 match &**stmt {
                     Statement::Carry(carry) if carry.name == *name => {
-                        self.cell(*name, &carry.index, ctx)?;
+                        self.cell(*name, carry.cell(), ctx)?;
                     }
-                    Statement::Pre(pre) if pre.carrier == *name => {
-                        self.cell(*name, &pre.index, ctx)?;
+                    Statement::Load(load) if load.input == *name => {
+                        self.cell(*name, &load.index[1..], ctx)?;
                     }
                     _ => {}
                 }
@@ -901,7 +901,7 @@ impl Lowerer {
 
     /// The next value of one cell of a carried state, which reads see from the next step on.
     pub(super) fn carry(&mut self, carry: &Carry) -> Result<()> {
-        let (_, next) = self.cell(carry.name, &carry.index, &SimplifyCtx::empty())?;
+        let (_, next) = self.cell(carry.name, carry.cell(), &SimplifyCtx::empty())?;
         let ty = self.carried[&carry.name].ty;
         let val = self.lookup(carry.value)?;
         if val.ty != ty {
@@ -913,12 +913,18 @@ impl Lowerer {
         Ok(())
     }
 
-    /// A read of one cell of a carried state: what the step before left, the seed on the first.
-    pub(super) fn pre(&mut self, pre: &Pre) -> Result<()> {
-        let (now, _) = self.cell(pre.carrier, &pre.index, &SimplifyCtx::empty())?;
-        let ty = self.carried[&pre.carrier].ty;
+    /// Whether `name` is a carried state of a loop met so far.
+    pub(super) fn carries(&self, name: Name) -> bool {
+        self.carried.contains_key(&name)
+    }
+
+    /// A load of one cell of a carried state: what the step before left, the seed on the first. The cell is the
+    /// index past the step, which the register does not hold: it holds the step a read sees.
+    pub(super) fn carried_read(&mut self, load: &Load) -> Result<()> {
+        let (now, _) = self.cell(load.input, &load.index[1..], &SimplifyCtx::empty())?;
+        let ty = self.carried[&load.input].ty;
         let val = self.named(Val::reg(now, ty));
-        self.bind(pre.name, val);
+        self.bind(load.names[0], val);
         Ok(())
     }
 }

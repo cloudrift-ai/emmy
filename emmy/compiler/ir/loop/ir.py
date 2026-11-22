@@ -52,7 +52,6 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  #
     Let,
     Load,
     Loop,
-    Pre,
     Select,
     SelectBranch,
     Statement,
@@ -342,9 +341,8 @@ def _validate(loop: LoopOp) -> None:
             if isinstance(stmt, Accum):
                 defined.add(stmt.name)
             elif isinstance(stmt, Loop):
-                # A carried state is live across the loop that CARRIES it, from outside the loops
-                # over its cells — a step reads it before the nest that defines it.
-                defined.update(stmt.carries)
+                # A carried state is a buffer of the kernel's own, live across the loop that CARRIES it and after
+                # it — a step loads it before the nest that defines it.
                 celled.update({name: len(shape) for name, shape in stmt.carries.items()})
         exported_accs: set[str] = set()
         for stmt in stmts:
@@ -352,8 +350,6 @@ def _validate(loop: LoopOp) -> None:
                 for arg in sorted(stmt.value.free_vars()):
                     if arg not in defined:
                         raise ValueError(f"Assign {stmt.name!r}: {arg!r} not defined")
-                    if arg in celled:
-                        raise ValueError(f"Assign {stmt.name!r}: {arg!r} is a carried state — read one cell with Pre")
                 if stmt.name in defined:
                     raise ValueError(f"Assign {stmt.name!r}: name already defined")
                 defined.add(stmt.name)
@@ -364,6 +360,8 @@ def _validate(loop: LoopOp) -> None:
                     raise ValueError(f"Load {stmt.name!r}: source {stmt.input!r} must be a non-empty string")
                 if stmt.name in defined:
                     raise ValueError(f"Load {stmt.name!r}: name already defined")
+                if stmt.input in celled and len(stmt.index) != 1 + celled[stmt.input]:
+                    raise ValueError(f"Load {stmt.name!r}: the state {stmt.input!r} is read at a step and {celled[stmt.input]} cell axes")
                 defined.add(stmt.name)
             elif isinstance(stmt, Carry):
                 if stmt.value not in defined:
@@ -372,16 +370,10 @@ def _validate(loop: LoopOp) -> None:
                     raise ValueError(f"Carry {stmt.name!r}: one statement defines a carried state")
                 if stmt.name not in celled:
                     raise ValueError(
-                        f"Carry {stmt.name!r}: no loop carries its cells {tuple(str(e) for e in stmt.index)} — each is a bare "
-                        "axis (or the 0 of a size-one axis) bound by a loop inside the one over the steps"
+                        f"Carry {stmt.name!r}: no loop carries it at {tuple(str(e) for e in stmt.index)} — the first "
+                        "coordinate is the axis of the loop over the steps, around the statement"
                     )
                 exported_accs.add(stmt.name)
-            elif isinstance(stmt, Pre):
-                if len(stmt.index) != celled.get(stmt.carrier, -1):
-                    raise ValueError(f"Pre {stmt.name!r}: {stmt.carrier!r} is no state with {len(stmt.index)} cell axes in scope")
-                if stmt.name in defined:
-                    raise ValueError(f"Pre {stmt.name!r}: name already defined")
-                defined.add(stmt.name)
             elif isinstance(stmt, Accum):
                 for arg in sorted(stmt.value.free_vars()):
                     if arg not in defined and arg != stmt.name:

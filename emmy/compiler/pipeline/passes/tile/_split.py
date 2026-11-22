@@ -47,7 +47,7 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Select, SelectBranch, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.ir.tile.split import merged, split_axis
@@ -314,9 +314,12 @@ def _step_maps(step: Body, state: str, mixed: int | None, column, stores) -> tup
     at one, and from zero it is nothing. Any other read is the identity's own entry, one where its mixed
     coordinate is ``column``. No walk, and no contraction against a seed."""
 
+    def reads_state(stmt) -> bool:
+        return isinstance(stmt, Load) and stmt.input == state
+
     def contracts(loop: Loop) -> bool:
-        reads = [stmt for stmt in loop.body if isinstance(stmt, Pre) and stmt.carrier == state]
-        if not loop.is_reduce or not reads or mixed is None or any(read.index[mixed] != Var(loop.axis.name) for read in reads):
+        reads = [stmt for stmt in loop.body if reads_state(stmt)]
+        if not loop.is_reduce or not reads or mixed is None or any(read.index[1 + mixed] != Var(loop.axis.name) for read in reads):
             return False
         linear = {read.name for read in reads}
         for stmt in loop.body:
@@ -334,7 +337,7 @@ def _step_maps(step: Body, state: str, mixed: int | None, column, stores) -> tup
                     or stmt.value.name not in linear
                 ):
                     return False
-            elif not isinstance(stmt, Load | Let | Pre):
+            elif not isinstance(stmt, Load | Let):
                 return False
         return True
 
@@ -347,7 +350,7 @@ def _step_maps(step: Body, state: str, mixed: int | None, column, stores) -> tup
                     continue
                 at = Sigma({stmt.axis.name: column})
                 for inner in stmt.body:
-                    if isinstance(inner, Pre):
+                    if reads_state(inner):
                         out.append(Let(name=inner.name, value=1.0))
                     elif isinstance(inner, Accum):
                         out.append(Assign(inner.name, inner.value))
@@ -357,11 +360,11 @@ def _step_maps(step: Body, state: str, mixed: int | None, column, stores) -> tup
                 if (inner := resolved(stmt.body, identity)) is None:
                     return None
                 out.append(stmt.replace(body=Body(inner)))
-            elif isinstance(stmt, Pre) and stmt.carrier == state:
+            elif reads_state(stmt):
                 if not identity or mixed is None:
                     out.append(Let(name=stmt.name, value=1.0 if identity else 0.0))
                 else:
-                    hit = BinaryExpression("==", stmt.index[mixed], column)
+                    hit = BinaryExpression("==", stmt.index[1 + mixed], column)
                     out += [Let(name=f"{stmt.name}_one", value=1.0), Let(name=f"{stmt.name}_zero", value=0.0)]
                     branches = (SelectBranch(f"{stmt.name}_one", hit), SelectBranch(f"{stmt.name}_zero", Literal(True, "bool")))
                     out.append(Select(name=stmt.name, branches=branches))
@@ -530,14 +533,16 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
     starts = [f"{out.name}__start{level or ''}" for level in range(pairs + 1)]
 
     def indexed(stmts: Body, lead: tuple[Axis, ...], seed: str) -> Body:
-        # The state under the lead coordinates too — a part, a probe — and seeded from ``seed``.
+        # The state under the lead coordinates too — a part, a probe — and seeded from ``seed``. Its step is the
+        # trip of the sliced loop, whatever the step of the whole walk a part's statements read.
         prefix = tuple(Var(axis.name) for axis in lead)
+        trip = Var(loop.axis.name)
 
         def rewrite(stmt):
             if isinstance(stmt, Carry):
-                return stmt.replace(index=(*prefix, *stmt.index), seed=seed)
-            if isinstance(stmt, Pre) and stmt.carrier == state:
-                return stmt.replace(index=(*prefix, *stmt.index))
+                return stmt.replace(index=(trip, *prefix, *stmt.cell), seed=seed)
+            if isinstance(stmt, Load) and stmt.input == state:
+                return stmt.replace(index=(trip - Literal(1, "int"), *prefix, *stmt.index[1:]))
             return stmt
 
         return stmts.map(rewrite)
@@ -708,7 +713,7 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
 
     def prior(index: tuple, name: str) -> tuple:
         if not single:
-            return (Pre(name=name, carrier=carried, index=index),)
+            return (Load(names=(name,), input=carried, index=(here - Literal(1, "int"), *index)),)
         if isinstance(seed, str):
             return (Load(names=(name,), input=seed, index=seed_index(index, shapes[seed])),)
         return (Let(name=name, value=seed),)
@@ -725,7 +730,7 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
                 *offset(pairs, where, own, "_b"),
                 *prior(own, "_from"),
                 Assign("_next", apply("add", value, "_b")),
-                *(() if single else (Carry(name=carried, value="_next", index=own, seed=seed),)),
+                *(() if single else (Carry(name=carried, value="_next", index=(here, *own), seed=seed),)),
                 kept,
             )
         ),
@@ -784,8 +789,8 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
     if steps == 1:
 
         def started(stmt):
-            if isinstance(stmt, Pre) and stmt.carrier == state:
-                return Load(names=(stmt.name,), input=starts[0], index=(here, *stmt.index))
+            if isinstance(stmt, Load) and stmt.input == state:
+                return Load(names=(stmt.name,), input=starts[0], index=(here, *stmt.index[1:]))
             return None if isinstance(stmt, Carry) else stmt
 
         once = Body(tuple(stmt.substitute(Sigma({loop.axis.name: here})) for stmt in loop.body))

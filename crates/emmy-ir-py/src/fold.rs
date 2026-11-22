@@ -1044,7 +1044,7 @@ impl PyFold {
         PyFold::wrap(py, &self.fold.canonical().py()?)
     }
 
-    /// The one `Pre` of a carrier read, the lift body's own statement, or `None`.
+    /// The one `Load` of a carrier read, the lift body's own statement, or `None`.
     fn as_carrier_read<'py>(slf: &Bound<'py, Self>) -> PyResult<Option<Bound<'py, PyAny>>> {
         match slf.get().fold.as_carrier_read() {
             None => Ok(None),

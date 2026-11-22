@@ -286,6 +286,19 @@ impl Lambda {
         Lambda::closing(Vec::new(), &Body::new(members), vec![name])
     }
 
+    /// The carried state this lambda reads, where it is a carrier read: one load of a buffer the lambda binds first,
+    /// which no coordinate of the load reads. A slab binds the coordinates its index reads and nothing else.
+    pub fn carrier(&self) -> Option<Name> {
+        let [stmt] = self.0.body.stmts() else {
+            return None;
+        };
+        let Statement::Load(load) = &**stmt else {
+            return None;
+        };
+        let first = self.0.params.first()?;
+        (*first == load.input && !load.index.iter().any(|e| e.reads(*first))).then_some(*first)
+    }
+
     /// α-rename params, body and results through one map, in lockstep. A map that keeps every name apart keeps the
     /// formation checks true, so its result is formed without running them again; one that merges names is checked.
     pub fn rename(&self, mapping: &HashMap<Name, Name>) -> Result<Lambda> {
@@ -308,10 +321,16 @@ impl Lambda {
             sigma: &empty,
             axis_fn: None,
         };
-        let renamed = self
+        let mut renamed = self
             .0
             .body
             .map_each(&mut |stmt| Statement::rewrite(stmt, &rewrite));
+        // A carrier read binds the state its load names as a buffer: the load follows the param.
+        if let Some(carrier) = self.carrier()
+            && let Some(new) = mapping.get(&carrier)
+        {
+            renamed = renamed.rename_buffers(&HashMap::from([(carrier, *new)]));
+        }
         if image.len() != spelled.len() {
             return Lambda::new(params, &renamed, results);
         }

@@ -725,13 +725,13 @@ impl Fold {
         })
     }
 
-    /// A read of a carried state as a term: a lift of one `Pre` binding the state, the carrying axis, and the cell
-    /// coordinates its index reads.
+    /// A read of a carried state as a term: a lift of one `Load` of the state one step back, binding the state, the
+    /// carrying axis, and the cell coordinates its index reads.
     pub fn carrier_read(read: Arc<Statement>, axis: Name) -> Result<Fold> {
-        let Statement::Pre(pre) = &*read else {
-            return Err(Error::Type("a carrier read is one Pre".into()));
+        let Statement::Load(load) = &*read else {
+            return Err(Error::Type("a carrier read is one Load".into()));
         };
-        let (carrier, own) = (pre.carrier, pre.name);
+        let (carrier, own) = (load.input, load.names[0]);
         Fold::new(Parts {
             lift: Some(Lambda::closing(
                 vec![carrier, axis],
@@ -768,10 +768,10 @@ impl Fold {
         let own: Vec<Expression> = self.cells().iter().map(|c| Expression::var(c)).collect();
         let mut mixed: HashSet<usize> = HashSet::new();
         for read in &reads {
-            let Statement::Pre(pre) = &**read else {
+            let Statement::Load(load) = &**read else {
                 continue;
             };
-            for (position, expression) in pre.index.iter().enumerate() {
+            for (position, expression) in load.index.iter().skip(1).enumerate() {
                 if own.get(position) != Some(expression) {
                     mixed.insert(position);
                 }
@@ -989,8 +989,11 @@ impl Fold {
         let body = match self.combine()? {
             None => lift.body().clone(),
             Some(_) if self.carries() => {
-                let index: Vec<Expression> =
-                    self.cells().iter().map(|c| Expression::var(c)).collect();
+                let axis = self.axis().expect("a carried state binds its step");
+                let index: Vec<Expression> = std::iter::once(&axis)
+                    .chain(self.cells())
+                    .map(|c| Expression::var(c))
+                    .collect();
                 let base = self.base().expect("a carried state has a base");
                 let mut stmts = lift.body().stmts().to_vec();
                 for ((state, value), seed) in
@@ -1081,20 +1084,20 @@ fn affine_classes(
         None => (None, None),
     };
     if let Some(read) = term.as_carrier_read() {
-        let Statement::Pre(pre) = &**read else {
-            unreachable!("a carrier read is a Pre")
+        let Statement::Load(load) = &**read else {
+            unreachable!("a carrier read is a Load")
         };
-        if pre.carrier == state {
+        if load.input == state {
             reads.push(read.clone());
         }
         let varies = kept.is_some()
-            && pre.index.iter().enumerate().any(|(i, e)| {
+            && load.index.iter().skip(1).enumerate().any(|(i, e)| {
                 Some(i) != position && kept_name.is_some_and(|n| e.free_vars().contains(&n))
             });
         let out: Classes = HashMap::from([(
-            pre.name,
+            load.names[0],
             (
-                if pre.carrier == state {
+                if load.input == state {
                     Kind::Affine
                 } else {
                     Kind::Free

@@ -99,10 +99,6 @@ impl Scope<'_> {
             Statement::Assign(assign) => self.value(&assign.value, declared(assign.dtype)?)?,
             Statement::Accum(accum) => self.operand(&accum.value, declared(accum.dtype)?)?,
             Statement::Carry(carry) => self.name(&carry.value, declared(carry.dtype)?)?,
-            Statement::Pre(pre) => {
-                let dtype = self.dtype(&pre.carrier);
-                self.types.insert(pre.name, dtype);
-            }
             Statement::Let(binding) => {
                 // An index with no dtype is an integer whose width the flat-index step decides.
                 if binding.dtype.is_none() && binding.value.as_literal().is_some() {

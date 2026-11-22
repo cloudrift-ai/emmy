@@ -79,6 +79,10 @@ pub(crate) struct SequentialScope {
     inherited_axes: HashMap<Name, Name>,
     owned: HashSet<Name>,
     fixed: HashSet<Name>,
+    /// The carried states in scope, each to its sequential name. A state is a buffer of the body's own, so its
+    /// update and its loads name it as a buffer: they take the name through a rename of buffers, and a value
+    /// spelled like the state takes none.
+    states: HashMap<Name, Name>,
 }
 
 impl SequentialScope {
@@ -107,7 +111,9 @@ impl SequentialScope {
             let scalar = child.escaping_states();
             for here in child.of_types(&[StatementType::Accum, StatementType::Carry]) {
                 match &**here.stmt() {
-                    Statement::Carry(c) => exported.push(c.name),
+                    Statement::Carry(c) if !self.states.contains_key(&c.name) => {
+                        self.states.insert(c.name, counters.fresh(&c.name, "acc"));
+                    }
                     Statement::Accum(a) if scalar.contains(&a.name) => exported.push(a.name),
                     _ => {}
                 }
@@ -141,7 +147,7 @@ impl SequentialScope {
                     defined.insert(name, *new);
                 }
             }
-            return Statement::rename_roles(stmt, &|roles, name| {
+            let renamed = Statement::rename_roles(stmt, &|roles, name| {
                 let definition = if roles.contains_any(DEFINES) {
                     defined.get(&name).copied()
                 } else {
@@ -149,6 +155,7 @@ impl SequentialScope {
                 };
                 definition.or_else(|| names.get(&name).copied())
             });
+            return Statement::rename_buffers(&renamed, &self.states);
         }
         for name in &exported {
             self.allocate(counters, name, "acc");
@@ -176,6 +183,7 @@ impl SequentialScope {
                 inherited_axes: axes.clone(),
                 owned: HashSet::new(),
                 fixed: exported.iter().cloned().collect(),
+                states: self.states.clone(),
             };
             let members: Vec<Arc<Statement>> = child
                 .stmts()
@@ -211,6 +219,22 @@ fn renamed(body: &Body, kept: Option<HashSet<Name>>) -> Body {
     for name in body.definitions().keys() {
         reserved.remove(name);
     }
+    // A carried state is named among the buffers: it takes the name of none the body reads or writes.
+    let states: HashSet<Name> = body
+        .carries()
+        .iter()
+        .flat_map(|here| here.stmt().local_decls())
+        .collect();
+    if !states.is_empty() {
+        body.walk(&mut |here| {
+            let stmt = here.stmt();
+            let buffers = stmt
+                .external_reads()
+                .into_iter()
+                .chain(stmt.external_writes());
+            reserved.extend(buffers.filter(|name| !states.contains(name)));
+        });
+    }
     let mut counters = Counters {
         counts: HashMap::new(),
         reserved,
@@ -222,6 +246,7 @@ fn renamed(body: &Body, kept: Option<HashSet<Name>>) -> Body {
         inherited_axes: HashMap::new(),
         owned: HashSet::new(),
         fixed: HashSet::new(),
+        states: HashMap::new(),
     };
     body.rebuilt(
         body.stmts()
@@ -830,17 +855,20 @@ Q[] = y",
         let step = |lines: &str| {
             text(
                 &normalize_body(&body(&format!(
-                    "for c in 0..3:\n  for i in 0..4:\n    u = load U[c, i]\n{lines}\nfor r in 0..4:\n  last = pre S[r]\n  out[r] = last"
+                    "for c in 0..3:\n  for i in 0..4:\n    u = load U[c, i]\n{lines}\nfor r in 0..4:\n  last = load S[2, r]\n  out[r] = last"
                 )))
                 .unwrap(),
             )
         };
         let read_first =
-            step("    own = pre S[i]\n    next = add(own, u)\n    S[i] <- next seed 0");
+            step("    own = load S[c - 1, i]\n    next = add(own, u)\n    S[c, i] <- next seed 0");
         let update_first =
-            step("    S[i] <- next seed 0\n    own = pre S[i]\n    next = add(own, u)");
+            step("    S[c, i] <- next seed 0\n    own = load S[c - 1, i]\n    next = add(own, u)");
         assert_eq!(read_first, update_first);
-        assert!(read_first.contains("v0 = pre acc0[a1]\n"), "{read_first}");
+        assert!(
+            read_first.contains("in0 = load acc0[a0 - 1, a1]\n"),
+            "{read_first}"
+        );
     }
 
     /// An accumulator is read where it stands: a read ahead of its update takes the step before and stays ahead of
@@ -943,11 +971,11 @@ Q[] = y",
   if c < 2:
     for i in 0..4:
       u = load U[c, i]
-      own = pre S[i]
+      own = load S[c - 1, i]
       next = add(own, u)
-      S[i] <- next seed 0
+      S[c, i] <- next seed 0
 for r in 0..4:
-  last = pre S[r]
+  last = load S[2, r]
   out[r] = last",
         ));
         assert!(normal.is_ok(), "{normal:?}");

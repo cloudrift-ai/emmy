@@ -831,6 +831,25 @@ impl Accum {
 
 #[pymethods]
 impl Carry {
+    /// The axis of the loop that carries the state: the first coordinate, the step.
+    #[getter]
+    fn step<'py>(slf: &Bound<'py, Self>) -> PyResult<Option<Bound<'py, PyString>>> {
+        let carry: &emmy_ir::statement::Carry = inner(slf.as_super().get())?;
+        Ok(carry.step().map(|name| PyString::new(slf.py(), name)))
+    }
+
+    /// The cell this statement defines: the coordinates past the step.
+    #[getter]
+    fn cell<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let carry: &emmy_ir::statement::Carry = inner(slf.as_super().get())?;
+        let cell: PyResult<Vec<_>> = carry
+            .cell()
+            .iter()
+            .map(|e| crate::expression::PyExpression::wrap(slf.py(), e))
+            .collect();
+        PyTuple::new(slf.py(), cell?)
+    }
+
     /// The axes of the cell this statement defines.
     #[getter]
     fn cells<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {

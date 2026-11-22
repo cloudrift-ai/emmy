@@ -19,7 +19,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Accum, Loop, Pre
+from emmy.compiler.ir.stmt import Accum, Loop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
@@ -83,12 +83,14 @@ def test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state() -
     # Four chunks: the last chunk's state is never read, so three steps are carried.
     assert steps.axis.extent.as_static() == 3 and list(steps.carries) == [carry.name for carry in rolled.body.carries]
     # Every input is read at a step-relative offset.
-    assert all(steps.axis.name in load.index[1].free_vars() for load in rolled.body.loads)
+    states = {carry.name for carry in rolled.body.carries}
+    assert all(steps.axis.name in load.index[1].free_vars() for load in rolled.body.loads if load.input not in states)
     # A chunk's output reads the state its step starts with and nothing of another step, so the step computes it:
     # the kernel stores that output every step, and of the states the one the loop ends with.
     last, outs = rolled.outputs.values()
     assert len(outs.shape) == len(last.shape) + 1 and outs.shape[0].as_static() == 3
-    assert "q" in rolled.inputs and len(rolled.body.iter_of_type(Pre)) == 2, "the state's own step, and the output's product"
+    read_back = [load for load in rolled.body.loads if load.input in states]
+    assert "q" in rolled.inputs and len(read_back) == 2, "the state's own step, and the output's product"
     # Each of those outputs is one stored step read back, and the last chunk's reads the stored state.
     readers = {node.id: node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp) and outs.name in node.inputs}
     reads = sorted(load.index[0].value for op in readers.values() for load in op.body.loads if load.input == outs.name)

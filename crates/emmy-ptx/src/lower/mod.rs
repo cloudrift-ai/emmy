@@ -617,6 +617,7 @@ impl Lowerer {
             Statement::Grid(grid) => self.grid(stmt, grid, ctx),
             Statement::Loop(node) => self.loop_(stmt, node, ctx),
             Statement::Cond(cond) => self.cond(cond, rest, ctx),
+            Statement::Load(load) if self.carries(load.input) => self.carried_read(load),
             Statement::Load(load) => self.load(load, ctx),
             Statement::Write(write) => self.write(write, ctx),
             Statement::Assign(assign) => self.assign(assign, rest, ctx),
@@ -625,7 +626,6 @@ impl Lowerer {
             Statement::Accum(accum) => self.accum(accum, ctx),
             Statement::Init(init) => self.init_(init),
             Statement::Carry(carry) => self.carry(carry),
-            Statement::Pre(pre) => self.pre(pre),
             Statement::ZeroPrologue(zero) => self.zero_prologue(zero, ctx),
             Statement::Smem(smem) => self.smem(smem),
             Statement::CpAsyncCopy(copy) => self.cp_async(copy, ctx),
@@ -735,7 +735,7 @@ impl Lowerer {
         if node.seed {
             self.seed(&node.body)?;
         }
-        let carried: Vec<Name> = carried_cells(&node.body)
+        let carried: Vec<Name> = carried_cells(&node.axis.name, &node.body)
             .into_iter()
             .map(|(name, _)| name)
             .collect();

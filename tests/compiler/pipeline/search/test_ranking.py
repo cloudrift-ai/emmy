@@ -125,10 +125,10 @@ def test_work_counts_a_statement_only_as_often_as_its_value_changes() -> None:
             for j in 0..8:
               for k in 0..8:
                 a = load w[{index}]
-                p = pre s[k, j]
+                p = load s[t - 1, k, j]
                 x = a * p
                 acc <- add(acc, x) over k
-              s[i, j] <- acc seed s0
+              s[t, i, j] <- acc seed s0
         """
     rank_one = structure_features(parse_body(textwrap.dedent(step.format(index="t, k"))))
     dense = structure_features(parse_body(textwrap.dedent(step.format(index="t, i, k"))))
