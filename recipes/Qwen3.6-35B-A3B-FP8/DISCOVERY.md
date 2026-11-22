@@ -72,8 +72,12 @@ The gate is still not measured. What the card showed:
   selection, finds them in place and moves nothing. The second run is half the paging programs and 0.36 ms of copies
   that move nothing. The page copies are the expert reads themselves, about 6 ms a step in both trees.
 - **One run a layer.** A group's run now marks the pages of every later launch of the group whose inspectors read
-  nothing written since, and those launches take no run. Estimate from the trace: 1.3 ms of paging programs a step
-  and 0.36 ms less copying. Not measured on the card.
+  nothing written since, and those launches take no run. A fourth card (2026-11-22) measured it with the same chain:
+  tokens the same as main's on all three prompts, and per one-row step (median of 381) decisions 0.55 ms, state
+  update 0.27 ms, page table updates 0.54 ms: **1.36 ms of paging programs, under the 2 ms gate.** The other compute
+  matches the third card (6.45 ms against 6.36). The page copies took 10.9 ms against 6.25: this host moves 25.6 GB/s
+  from pinned host memory to the card (an i9-13900KF desktop board), and the same tokens move the same pages, so the
+  copies follow the link, not the change. The third host's bandwidth was not recorded.
 - On the RTX 4080 the parallel scan alone is correct and fast at 65, 257 and 1,000 entries.
 
 ## The FP8 cache staged into shared memory (2026-11-07)
