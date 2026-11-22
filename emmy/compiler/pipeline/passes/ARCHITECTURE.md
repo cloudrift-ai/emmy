@@ -95,8 +95,8 @@ which is the granularity of the tile IR's nodes, so a body and its chain spellin
 cones, the edges between them and the seams `030_cut` offers do not depend on how a program was spelled
 (`test_total_lift.py` pins it). `010_lift` reads a Loop IR carried state as a fold that carries it, and the classic
 schedule's fork realizes that fold as a serial kernel (`states_as_buffers`): the loop that carries the state becomes
-`Placement.serial`, the state a buffer the node owns and keeps every step of, a `Pre` read a load one launch back (the
-seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is untouched, so a
+`Placement.serial`, the state a buffer the node owns and keeps every step of, a load of the state a load of that buffer
+one launch back (the seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is untouched, so a
 contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
 kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
 to completion before the next kernel's first, so pieces could not interleave step by step. Where the state lives
@@ -849,7 +849,7 @@ stores per replaced buffer into its reader.
 
 **A step's own readers roll with it.** A node outside the steps that reads the state a step starts from, or a value
 the step computes from it, and nothing of any other step, is computed in that step: it joins the step's region
-with whatever only such readers read, and its read of the state is the step's `Pre` read. A chunk's output
+with whatever only such readers read, and its read of the state is the step's load of the state one step back. A chunk's output
 (`query @ state + …`) is the case: left outside, it takes its state from a store of every step, which the kernel
 then has to write and a second kernel has to read back. A node that reads two steps (the stack of every step's
 output) reads the stores, and so does a reader of the state the chain ends with, which no step starts from. What

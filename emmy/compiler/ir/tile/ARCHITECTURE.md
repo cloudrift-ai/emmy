@@ -26,7 +26,7 @@ error.
 | `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements; for a carried state the seed (a constant or a buffer name) and the action `next` |
 | `operands` | explicit materialized or computed inputs used by later transforms |
 | `observe` | optional per-step observer — the scan spelling: a pure `λ(k, state…)` evaluated after each combine |
-| `cells` | a carried state's cell axes in the order every carrier read indexes them — the Loop IR `Carry` index |
+| `cells` | a carried state's cell axes in the order every carrier read indexes them — the cell of the Loop IR `Carry` |
 
 `Fold.defines()` exposes the fold results to its containing lambda. This is what lets later statements in an SDPA
 cell read the maximum, denominator, or nested QK result without extracting or relocating any subtree.
@@ -49,9 +49,10 @@ what the step computed — on every component, and its `cells` are the state's c
 real monoid, but the composed map has a bounded form only for a closed family (an affine step composes as a
 matmul), so the term stores that ⊕'s action on the seed, the one form every step has; `next` has no identity, so
 every partition arm refuses the fold by the gate it already applies and it lowers as the serial walk. The step
-reads the carrier at other cells through **carrier reads**: a slab over one `Pre` (`Fold.carrier_read`, recognized
-by `as_carrier_read()` beside `as_slab()`) binding the state, the carrying axis and the cell coordinates, so a
-contraction over the previous state (`Σ_k W[i,k] · pre S[k,j]`) is an ordinary nested fold whose B is the carrier.
+reads the carrier at other cells through **carrier reads**: a slab over one load of the state one step back
+(`Fold.carrier_read`, recognized by `as_carrier_read()` beside `as_slab()`: its lift binds the state it reads
+first) binding the state, the carrying axis and the cell coordinates, so a contraction over the previous state
+(`Σ_k W[i,k] · S[c - 1,k,j]`) is an ordinary nested fold whose B is the carrier.
 A per-step output is a further result of the lift — a `<value>__obs` copy of what the step defines or an operand
 exposes, or a pass-through of a value an output sweep beside the cells computes — stored inside the loop.
 `Fold.lower` opens the carrying loop outside the loops over the cells, with a nest of its own for the step's
@@ -132,7 +133,8 @@ finished evaluating its outputs. The domain and choices are described in
    position after the node, where output-spec extraction claims it as an ordinary boundary write;
 5. a loop that carries a state (`Loop.carries`) lifts to a fold folding the action `next`: the chain of loops
    down to the `Carry` gives `cells`, each `Carry` a state whose lift result is its value and whose seed is the
-   fold's `init`, each `Pre` a carrier-read slab, and a free loop beside the chain stays an output sweep of the step.
+   fold's `init`, each load of the state a carrier read, and a free loop beside the chain stays an output sweep of
+   the step.
 
 There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, or raw-loop fallback at this
 boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a later fork over this complete tree.
