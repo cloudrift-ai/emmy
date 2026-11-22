@@ -112,18 +112,17 @@ def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
 
 
 def _swept_root_refusal(tile: TileOp, node) -> str | None:
-    """Why no output tile realizes this contraction, whatever its plan: it is a kernel root whose own output
-    coordinate an output sweep rides, or ``None``.
+    """Why no output tile realizes this contraction, whatever its plan: an output sweep rides one of its own
+    output coordinates, or ``None``.
 
     The grid binds a sweep only where every store rides it at one extent (``promoted_sweep``). Two sibling roots
     whose stores ride different widths (a chunk's ``q·S`` over 128 value columns beside its ``q·kᵀ`` over 64 chunk
     positions) keep their sweeps as serial loops, so a root's N axis is no grid axis and its register cells have
-    no coordinate to own. The binder declines such a row (``_factor._refuse_partitioned_sweep``); the offer leaves
-    it out, so the prior never ranks it and a pin naming it says why."""
-    from emmy.compiler.ir.tile.ops import kernel_roots  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
-
+    no coordinate to own. The binder declines such a row, as a root (``_factor._refuse_partitioned_sweep``) or as a
+    product the projection lowers serially; the offer leaves it out, so the prior never ranks it and a pin naming
+    it says why."""
     swept = {axis.name for spec in tile.output_specs for axis in spec.sweep} & node.free_axes
-    if not swept or not any(node is root for root in kernel_roots(tile.op)):
+    if not swept:
         return None
     return f"its output sweep {sorted(swept)[0]!r} stays a serial loop the grid does not bind, so no tile cell owns that coordinate"
 

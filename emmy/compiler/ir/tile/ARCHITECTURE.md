@@ -52,7 +52,7 @@ the kernel's stores do. A per-step output is a store like any other, and the clo
 around the step, which is the Loop IR the roll wrote. A parallel loop the source spelled around the carrying one
 runs one recurrence per trip, so its coordinate joins the state's cell and the steps still stand outermost.
 
-A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@scan=g<n>k[<p>]`, bare
+A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@map.1/scan=g<n>k[<p>]`, bare
 where the step has no reduction of its own; offered by `030_cut` through `_split.realize_carry_split`). It needs
 the step AFFINE in the state and column-wise (`Fold.affine`, asked of the step with the state's name, cells and
 next value: every load of the state keeps the cell's own coordinate at every position but one), because then a
@@ -499,7 +499,8 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
   row the binder would refuse is never enumerated.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
   when it has one applicable site and carries the site's route (`TILE@map.1/twist.1/inner`, the same grammar as
-  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node, and one more at the state's route (`scan`) for
+  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node, and one more at the state's route
+  (`map.1/scan`) for
   the storage of a carried state, and follows the same rule; register storage spells its geometry as the `TILE` of
   that route. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
   and semantically refused schedules.

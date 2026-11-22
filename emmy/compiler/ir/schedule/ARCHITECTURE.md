@@ -357,7 +357,7 @@ fresh piece re-enters the same rule. `030_cut` presents its restricted structura
 
 `STAGE` names where a site keeps a value it reads more than once: an operand reused along an axis, or the state a
 kernel carries across the steps of a loop. A carrying kernel therefore has one more `STAGE` site, the kernel site's
-own, keyed at the state's route, `scan` (`classic_state_keys`; bare when the row has no other `STAGE` site). It
+own, keyed at the state's route, `map.1/scan` (`classic_state_keys`; bare when the row has no other `STAGE` site). It
 takes three values. Empty keeps the state in a global buffer, one launch per step. `d1/smem` keeps it in shared
 memory and runs the steps inside one launch; the schedule offers it where the state reads prove CTA ownership, both
 buffers fit the card's shared memory, and the row runs a one-dimensional cooperative thread tile (`holds_state`).

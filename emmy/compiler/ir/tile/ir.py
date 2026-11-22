@@ -519,10 +519,11 @@ class TileOp(Op):
     def state_routes(self) -> tuple[str, ...]:
         """The route each carried state this kernel keeps between steps is addressed by, its own or, for its serial
         form (:attr:`Placement.serial`), those of the carrying kernel that form was lifted from. A state is a value
-        the kernel reads again at every step, so each route is a ``STAGE`` site: ``scan``, numbered past the first."""
+        the kernel reads again at every step, so each route is a ``STAGE`` site. No node of the term is the state, so
+        the route is a spelling: ``map.<n>/scan`` for the ``n``-th state, which is what every stored row names."""
         carrying = self._carrying
         count = len(carrying.states) if carrying is not None else 0
-        return tuple("scan" if not position else f"scan.{position + 1}" for position in range(count))
+        return tuple(f"map.{position + 1}/scan" for position in range(count))
 
     @cached_property
     def resident_state(self) -> ResidentState | None:

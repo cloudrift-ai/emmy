@@ -151,9 +151,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   over its cells; its steps are ordered and its step is any computation, so it has no op. In Tile IR the kernel's
   term is one step and the loop that carries the state is the kernel's serial axis: the `Carry` rides among the
   kernel's stores, and a slab over a load of the state is how the step reads it at any cell.
-  A step affine in the state splits **across the sequence** (`REDUCE=g<n>k`, at the state's route `scan` where the
-  step has a reduction of its own): a probe reads
-  each part's affine map off two walks from known seeds, a prefix carries the state across the parts, and the walk
+  A step affine in the state splits **across the sequence** (`REDUCE=g<n>k`, at the state's route `map.1/scan`
+  where the step has a reduction of its own): a probe reads each part's affine map off two walks from known seeds, a
+  prefix carries the state across the parts, and the walk
   runs every part from its start. A part of one step reads its map off the step with no probe. The parts' maps can
   first be composed pairwise, each composition a matrix product kernel over half the maps (`g<n>k<p>`, `p`
   compositions).
@@ -204,8 +204,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Route** — The spelling a structural knob key addresses a node of the fold tree by: from the root, each departure
   names the node stood on and the 1-based stored operand taken (`map.1`), and the last segment names the kind of the
   node arrived at — `PLACE@map.1/twist.1/inner.2/map`, `TILE@map.1/twist.1/inner`. Kinds are the term's derived
-  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site. A carrying
-  fold reads as `scan`, and its route is where a row spells the storage of the carried state (`STAGE@…/scan`).
+  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site. A carried
+  state has a route too, though no node is the state: `map.1/scan`, where a row spells its storage
+  (`STAGE@map.1/scan`).
 - **Twist recipe** — A twisted monoid stated as data (`ir/pure/twist.py`): a componentwise base monoid with its
   per-element lift, conjugated by a bijection ψ (transport of structure — associativity is inherited), beside which
   the recipe stores what conjugation does not give stably: one pattern per channel (the per-element map a dependent

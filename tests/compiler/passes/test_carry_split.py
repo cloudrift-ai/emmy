@@ -88,11 +88,11 @@ def test_the_walk_is_offered_its_split_and_declines_it_by_default() -> None:
 
     forks = split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node)
     offered = ("", "g2k", "g4k", "g8k", "g8k1", "g8k2", "g8k3")  # the catalog's widths, then one step a part to every depth
-    assert [fork.knobs for fork in forks] == [{"REDUCE@scan": v} for v in offered]
+    assert [fork.knobs for fork in forks] == [{"REDUCE@map.1/scan": v} for v in offered]
     # A measured row and a stored decision reach the arm of their own depth, not the first of their width.
     from emmy.compiler.pipeline.search.pins import spelled_arm  # noqa: PLC0415
 
-    assert [spelled_arm(forks, {"REDUCE@scan": v})[1] for v in offered] == [fork.knobs for fork in forks]
+    assert [spelled_arm(forks, {"REDUCE@map.1/scan": v})[1] for v in offered] == [fork.knobs for fork in forks]
 
     squared = _step("c, i, j", steps=STEPS).map(
         lambda s: parse_body("kept = multiply(own, own)") if isinstance(s, Assign) and s.name == "kept" else s
@@ -153,7 +153,7 @@ def test_the_split_parts_match_the_sequential_walk(parts: int) -> None:
     np.testing.assert_allclose(arrays["out"], _reference(arrays), rtol=1e-4, atol=1e-5)
 
 
-SCAN = "REDUCE@scan"  # the carrying site: a bare pin would reach the product pieces too
+SCAN = "REDUCE@map.1/scan"  # the carrying site: a bare pin would reach the product pieces too
 
 
 @pytest.mark.parametrize("pin", ["g2k1", "g4k1", "g4k2", "g8k1", "g8k3"])

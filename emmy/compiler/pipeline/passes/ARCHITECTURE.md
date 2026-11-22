@@ -101,7 +101,7 @@ keeps every step of, a load of the state a load of that buffer one launch back (
 state is a contraction whose B slab is that buffer. A serial
 kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
 to completion before the next kernel's first, so pieces could not interleave step by step. Where the state lives
-is the row's `STAGE` at the state's route (`scan`), a site of the same schedule. Register storage realizes the ordered axis
+is the row's `STAGE` at the state's route (`map.1/scan`), a site of the same schedule. Register storage realizes the ordered axis
 inside a CTA when every state read stays within its warp's rows. Shared storage does when the complete state
 belongs to one CTA per independent batch and fits the card's shared-memory limit; kernel lowering realizes it,
 keeping the scheduled reduction order and requested snapshots while moving the ordered axis into the CTA. Global
