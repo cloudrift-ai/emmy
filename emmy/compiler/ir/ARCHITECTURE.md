@@ -473,9 +473,9 @@ step defines, so the loads and the definition of one step are order-free. The st
 coordinate names (`carried_cells`), which is therefore a reduce loop the free-axis order never sorts under the
 cells, and its shape is the loops over its cells. The Loop IR rendering keeps two slots of the cell shape and
 commits the second after each step; how many slots survive and where they are stored is a schedule's question, not
-the statement's. The Tile lift keeps the state in the term: a `Fold` whose ⊕ is the action `next`, with the cell of
-the `Carry` as its `cells` and a load of the state as a carrier read (`ir/tile/ARCHITECTURE.md`).
-The classic schedule realizes the loop as a serial launch axis over a state buffer, or, where the row's `STAGE` keeps
+the statement's. The Tile lift takes the loop that carries a state as the kernel's serial axis: the term is one
+step, the `Carry` one of the kernel's stores, and a load of the state a slab (`ir/tile/ARCHITECTURE.md`).
+The classic schedule realizes the steps as launches in order over a state buffer, or, where the row's `STAGE` keeps
 the state in shared memory or registers, inside a CTA as a loop.
 
 **A loop may walk a range.** A `Loop` states where its axis walks when that is not all of it: a start and an exclusive

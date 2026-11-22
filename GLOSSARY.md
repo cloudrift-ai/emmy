@@ -148,12 +148,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   step: `Carry` (`S[step, cell] <- value seed …`) defines one cell at one step and names the seed, and a `Load` reads
   it as it reads any buffer, one step back inside the loop that carries it (`S[step - 1, cell]`, the seed on the first
   step) and the last step after it. The loop that carries it is the one its first coordinate names, outside the loops
-  over its cells; its steps are ordered and its step is any computation, so it has no op. In Tile IR it is a `Fold`
-  that **carries**: its ⊕ is the action `next` (the state becomes what the step computed — the free monoid of step
-  maps stored through its action on the seed, the one form every step has), its `cells` the cell of the `Carry`, its
-  `init` the seed, and a **carrier read** — a slab over one such load — is how the step reads the carrier at other
-  cells.
-  A step affine in the state splits **across the sequence** (`REDUCE=g<n>k` on the carrying site): a probe reads
+  over its cells; its steps are ordered and its step is any computation, so it has no op. In Tile IR the kernel's
+  term is one step and the loop that carries the state is the kernel's serial axis: the `Carry` rides among the
+  kernel's stores, and a slab over a load of the state is how the step reads it at any cell.
+  A step affine in the state splits **across the sequence** (`REDUCE=g<n>k`, at the state's route `scan` where the
+  step has a reduction of its own): a probe reads
   each part's affine map off two walks from known seeds, a prefix carries the state across the parts, and the walk
   runs every part from its start. A part of one step reads its map off the step with no probe. The parts' maps can
   first be composed pairwise, each composition a matrix product kernel over half the maps (`g<n>k<p>`, `p`

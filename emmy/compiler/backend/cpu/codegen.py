@@ -383,8 +383,6 @@ class _Fn:
             return binary[op](*args)
         if op in ("copy", "pad"):
             return args[0]
-        if op == "next":
-            return args[1]
         if op == "where":
             return b.select(b.fcmp_unordered("!=", args[0], ir.Constant(F32, 0.0)), args[1], args[2])
         if op == "reciprocal":

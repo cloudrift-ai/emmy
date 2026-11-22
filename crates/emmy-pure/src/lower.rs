@@ -133,7 +133,6 @@ struct Lowering<'a> {
     coordinates: Vec<(Name, Arc<Axis>)>,
     bound: HashSet<Name>,
     internal: HashSet<Name>,
-    declared: Vec<Name>,
     origin: HashMap<Name, (usize, Kind)>,
     terms: HashMap<usize, Fold>,
     indexed: HashSet<Name>,
@@ -442,9 +441,6 @@ impl Lowering<'_> {
             return self.place_map(term, &loops, path, nest, node, scope, stmts, step);
         };
         let here = node.clone().unwrap_or_default();
-        if term.carries() {
-            return self.place_carried(term, axis, nest, &here, &scope, stmts);
-        }
         let inner = self.new_list();
         let mut inner_scope = scope.clone();
         inner_scope.insert(axis);
@@ -562,95 +558,6 @@ impl Lowering<'_> {
             };
             self.lists[target].extend(step.stmts().iter().cloned());
             self.attach(term, Kind::Step, target, &here, &scope, nest, None)?;
-        }
-        Ok(())
-    }
-
-    fn place_carried(
-        &mut self,
-        term: &Fold,
-        axis: Name,
-        nest: usize,
-        node: &[Name],
-        scope: &HashSet<Name>,
-        stmts: Option<usize>,
-    ) -> Result<()> {
-        if self
-            .owned
-            .get(&(term.address(), Kind::State))
-            .is_some_and(|s| !s.is_empty())
-        {
-            return Err(Error::Value(
-                "a carried state is stored per step, never after its loop".into(),
-            ));
-        }
-        let mut inside = scope.clone();
-        inside.insert(axis);
-        let reads: HashSet<Name> = term
-            .operands()
-            .iter()
-            .flat_map(|e| e.free_axes().iter().copied())
-            .collect();
-        let cells: Vec<Name> = term
-            .cells()
-            .iter()
-            .filter(|c| !inside.contains(c))
-            .copied()
-            .collect();
-        let extras: Vec<Name> = self
-            .declared
-            .iter()
-            .filter(|n| reads.contains(n) && !inside.contains(n) && !term.cells().contains(n))
-            .copied()
-            .collect();
-        let missing: Vec<Name> = std::iter::once(axis)
-            .chain(cells.iter().copied())
-            .chain(extras.iter().copied())
-            .filter(|n| !self.has_coordinate(n) && !self.bound.contains(n))
-            .collect();
-        if !missing.is_empty() {
-            let listed: Vec<String> = missing.iter().map(|n| format!("'{n}'")).collect();
-            return Err(Error::Value(format!(
-                "lower: no extent for [{}] — the kernel's axis table names a carried state's axis and cells",
-                listed.join(", ")
-            )));
-        }
-        let mut opened = cells.clone();
-        opened.extend(extras);
-        let local = self.new_nest(opened, inside.clone());
-        let (placed, _) = self.placed(term)?;
-        let mut within = inside.clone();
-        within.extend(cells.iter().copied());
-        for edge in placed {
-            let path = if edge.free_axes().is_subset(&within) {
-                Some(cells.clone())
-            } else {
-                None
-            };
-            self.place(&edge, &Vec::new(), path.as_deref(), local)?;
-        }
-        let target = self.sink(local, &cells);
-        let step = term.step()?;
-        self.lists[target].extend(step.stmts().iter().cloned());
-        self.attach(term, Kind::Observed, target, &cells, &within, local, None)?;
-        let body = self.assemble(local, &[])?;
-        let outer = match stmts {
-            Some(list) => list,
-            None => self.sink(nest, node),
-        };
-        if self.bound.contains(&axis) {
-            self.lists[outer].extend(body.stmts().iter().cloned());
-        } else {
-            let coordinate = self.coordinate(&axis).cloned().expect("checked above");
-            self.lists[outer].push(Arc::new(Statement::Loop(Loop {
-                axis: coordinate,
-                body,
-                unroll: false,
-                seed: true,
-                unrolled: false,
-                range: None,
-                step: None,
-            })));
         }
         Ok(())
     }
@@ -825,12 +732,6 @@ impl Fold {
             if let Some(axis) = term.axis() {
                 internal.insert(axis);
             }
-            if term.carries() {
-                internal.extend(term.cells().iter().copied());
-                for edge in term.operands() {
-                    internal.extend(edge.free_axes().iter().copied());
-                }
-            }
             // A term read along a block of a partition is evaluated at `start + trip`: over the block's coordinate
             // too, as it would be were the start written into its index.
             let mut over: HashSet<Name> = term.free_axes().clone();
@@ -854,11 +755,6 @@ impl Fold {
                     }
                     if let Some(observe) = term.observe() {
                         for name in observe.results() {
-                            origin.insert(*name, (term.address(), Kind::Observed));
-                        }
-                    }
-                    if term.carries() {
-                        for name in &term.exposes()[base.results().len()..] {
                             origin.insert(*name, (term.address(), Kind::Observed));
                         }
                     }
@@ -981,7 +877,6 @@ impl Fold {
             coordinates,
             bound: bound.clone(),
             internal,
-            declared,
             origin,
             terms,
             indexed,

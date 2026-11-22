@@ -71,8 +71,6 @@ def observed_result_names(op) -> frozenset[str]:
             continue
         if node.observe is not None:
             names.update(node.observe.results)
-        if node.carries:  # a carried state's per-step outputs stream the same way
-            names.update(node.exposes[len(node.base.results) :])
         stack.extend(node.operands)
         stack.extend(s for s in node.lift.body if isinstance(s, Fold))
     return frozenset(names)

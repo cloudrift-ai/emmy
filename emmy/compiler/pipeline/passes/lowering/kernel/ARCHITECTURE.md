@@ -851,7 +851,7 @@ that range at the step before instead of the whole state.
 
 ## A register-held state that a step keeps part of
 
-`_resident` builds the kernel of a `STAGE=d1/reg` row: the carrying fold's term, evaluated a block of fragments at a
+`_resident` builds the kernel of a `STAGE=d1/reg` row: the step's term, evaluated a block of fragments at a
 time. When the state's next value is a choice whose last branch is the state as it stands (the update's predicate
 selects one row of a triangular inverse), the step does not compute the earlier branch for the whole state:
 

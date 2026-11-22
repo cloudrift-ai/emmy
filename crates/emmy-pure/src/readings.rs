@@ -8,10 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use emmy_ir::body::Body;
 use emmy_ir::elementwise::ElementwiseOp;
-use emmy_ir::expr::{Expr, ExprClass, Expression, Num};
-use emmy_ir::field::NumOr;
+use emmy_ir::expr::{Expr, ExprClass, Expression};
 use emmy_ir::normalize::{AffineTerms, affine_sum, affine_terms, ties};
-use emmy_ir::statement::{Accum, Assign, Carry, PURE, Statement};
+use emmy_ir::statement::{Accum, Assign, PURE, Statement};
 use emmy_ir::{Error, Name, Result};
 
 use crate::fold::{Fold, Parts, Seed};
@@ -67,8 +66,8 @@ pub struct Reduction {
     pub ops: Option<Vec<ElementwiseOp>>,
 }
 
-/// A carried state's step read as affine in the state and column-wise: the position the carrier reads mix, and the
-/// own position a probe packs basis vectors along (both `None` for a diagonal map).
+/// A carried state's step read as affine in the state and column-wise: the position the loads of the state mix, and
+/// the own position a probe packs basis vectors along (both `None` for a diagonal map).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Affine {
     pub state: Name,
@@ -159,13 +158,9 @@ impl Fold {
     }
 
     /// This term restricted to the results `names` (exposed names), same operands and params, body cut to what those
-    /// results need. Twisted, observed and carried states stay whole: their components depend on each other.
+    /// results need. Twisted and observed states stay whole: their components depend on each other.
     pub fn exposing(&self, names: &[Name]) -> Result<Fold> {
-        if self.exposes() == names
-            || self.twist().is_some()
-            || self.observe().is_some()
-            || self.carries()
-        {
+        if self.exposes() == names || self.twist().is_some() || self.observe().is_some() {
             return Ok(self.clone());
         }
         if let Some(found) = self
@@ -608,7 +603,7 @@ impl Fold {
         let Some(base) = self.base() else {
             return Ok(None);
         };
-        if self.twist().is_some() || self.observe().is_some() || self.carries() {
+        if self.twist().is_some() || self.observe().is_some() {
             return Ok(None);
         }
         let Some(pluses) = base.components() else {
@@ -719,23 +714,6 @@ impl Fold {
                 Vec::new(),
                 &Body::new(vec![load.clone()]),
                 names,
-            )?),
-            ..Parts::default()
-        })
-    }
-
-    /// A read of a carried state as a term: a lift of one `Load` of the state one step back, binding the state, the
-    /// carrying axis, and the cell coordinates its index reads.
-    pub fn carrier_read(read: Arc<Statement>, axis: Name) -> Result<Fold> {
-        let Statement::Load(load) = &*read else {
-            return Err(Error::Type("a carrier read is one Load".into()));
-        };
-        let (carrier, own) = (load.input, load.names[0]);
-        Fold::new(Parts {
-            lift: Some(Lambda::closing(
-                vec![carrier, axis],
-                &Body::new(vec![read.clone()]),
-                vec![own],
             )?),
             ..Parts::default()
         })
@@ -964,8 +942,7 @@ impl Fold {
     }
 
     /// The per-step statements this fold derives: the injected lift's body, then the combine applied at the singleton
-    /// (each `Accum` over the reduce axis) or a carried state's `Carry`s, then an observer's tap. A map's step is its
-    /// lift body.
+    /// (each `Accum` over the reduce axis), then an observer's tap. A map's step is its lift body.
     pub fn step(&self) -> Result<Body> {
         if let Some(found) = self.memos().step.get() {
             return Ok(found.clone());
@@ -973,32 +950,6 @@ impl Fold {
         let lift = self.injected()?.clone();
         let body = match self.combine()? {
             None => lift.body().clone(),
-            Some(_) if self.carries() => {
-                let axis = self.axis().expect("a carried state binds its step");
-                let index: Vec<Expression> = std::iter::once(&axis)
-                    .chain(self.cells())
-                    .map(|c| Expression::var(c))
-                    .collect();
-                let base = self.base().expect("a carried state has a base");
-                let mut stmts = lift.body().stmts().to_vec();
-                for ((state, value), seed) in
-                    base.results().iter().zip(lift.results()).zip(self.init())
-                {
-                    let seed = match seed {
-                        Seed::Int(v) => NumOr::Num(Num::Int(*v)),
-                        Seed::Float(v) => NumOr::Num(Num::Float(*v)),
-                        Seed::Buffer(n) => NumOr::Value(*n),
-                    };
-                    stmts.push(Arc::new(Statement::Carry(Carry {
-                        name: *state,
-                        value: *value,
-                        index: index.clone().into(),
-                        seed,
-                        dtype: None,
-                    })));
-                }
-                Body::new(stmts)
-            }
             Some(_) => {
                 let axis = self.axis().expect("a combine binds an axis");
                 let mut stmts = lift.body().stmts().to_vec();
@@ -1194,8 +1145,7 @@ fn affine_classes(
                 let (kind, varies) = of(&env, own);
                 let folded = kind == Kind::Free
                     || (kind == Kind::Affine
-                        && (term.carries()
-                            || ops.as_ref().is_some_and(|ops| ops[index].name() == "add")));
+                        && ops.as_ref().is_some_and(|ops| ops[index].name() == "add"));
                 out.insert(
                     *exposed,
                     if folded {

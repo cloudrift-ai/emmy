@@ -23,10 +23,9 @@ error.
 | --- | --- |
 | `axis` | reduction axis; `None` for the root pointwise projection |
 | `lift` | pure per-element `Lambda`; nested reductions occupy their original structural position here |
-| `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements; for a carried state the seed (a constant or a buffer name) and the action `next` |
+| `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements |
 | `operands` | explicit materialized or computed inputs used by later transforms |
 | `observe` | optional per-step observer — the scan spelling: a pure `λ(k, state…)` evaluated after each combine |
-| `cells` | a carried state's cell axes in the order every carrier read indexes them — the cell of the Loop IR `Carry` |
 
 `Fold.defines()` exposes the fold results to its containing lambda. This is what lets later statements in an SDPA
 cell read the maximum, denominator, or nested QK result without extracting or relocating any subtree.
@@ -43,27 +42,22 @@ the observer stmts (`observed_result_names` + the `observed=` reconstitution arm
 order-visible. A root without a provider chain offers a cooperative warp prefix scan beside the serial plan;
 register partials, transposed bands and cross-CTA splits remain unavailable.
 
-A recurrence is a fold that **carries a state** (`Fold.carries`): its ⊕ is the action `next` — the state becomes
-what the step computed — on every component, and its `cells` are the state's coordinates in the order the Loop IR
-`Carry` indexes them, batch and cell alike. A recurrence folds the free monoid of step maps under composition, a
-real monoid, but the composed map has a bounded form only for a closed family (an affine step composes as a
-matmul), so the term stores that ⊕'s action on the seed, the one form every step has; `next` has no identity, so
-every partition arm refuses the fold by the gate it already applies and it lowers as the serial walk. The step
-reads the carrier at other cells through **carrier reads**: a slab over one load of the state one step back
-(`Fold.carrier_read`, recognized by `as_carrier_read()` beside `as_slab()`: its lift binds the state it reads
-first) binding the state, the carrying axis and the cell coordinates, so a contraction over the previous state
-(`Σ_k W[i,k] · S[c - 1,k,j]`) is an ordinary nested fold whose B is the carrier.
-A per-step output is a further result of the lift — a `<value>__obs` copy of what the step defines or an operand
-exposes, or a pass-through of a value an output sweep beside the cells computes — stored inside the loop.
-`Fold.lower` opens the carrying loop outside the loops over the cells, with a nest of its own for the step's
-sweeps; the closed program is the Loop IR the roll wrote.
+A recurrence is a kernel that **carries a state** (`TileOp.carries`). Its term is ONE STEP, an ordinary term, and
+the loop that carries the state is the kernel's serial axis (`Placement.serial`), outermost: the steps run in order,
+whatever runs them. The state is a buffer the kernel keeps for itself. Its update, the Loop IR `Carry`, rides among
+the kernel's stores (`TileOp.states` names the ones that are), and the step reads it through slabs like any other:
+a load of the state one step back, at any cell, so a contraction over the previous state
+(`Σ_k W[i,k] · S[c - 1,k,j]`) is an ordinary nested fold whose B is that slab. Nothing in the term says "state":
+the kernel's stores do. A per-step output is a store like any other, and the closed program opens the serial loop
+around the step, which is the Loop IR the roll wrote. A parallel loop the source spelled around the carrying one
+runs one recurrence per trip, so its coordinate joins the state's cell and the steps still stand outermost.
 
-A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@…/scan=g<n>k[<p>]`,
-offered by `030_cut` through `_split.realize_carry_split`). It needs the step AFFINE in the state and column-wise
-(`Fold.affine`: every carrier read keeps the cell's own coordinate at every position but one), because then a
+A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@scan=g<n>k[<p>]`, bare
+where the step has no reduction of its own; offered by `030_cut` through `_split.realize_carry_split`). It needs
+the step AFFINE in the state and column-wise (`Fold.affine`, asked of the step with the state's name, cells and
+next value: every load of the state keeps the cell's own coordinate at every position but one), because then a
 part's steps compose as an affine map `S ← A·S + b`. A step that is not affine (one that multiplies two reads of
-its state) offers nothing and stays one kernel. So does a walk under a free loop of more than one coordinate, and
-one whose stores the parts cannot write side by side.
+its state) offers nothing and stays one kernel. So does a walk whose stores the parts cannot write side by side.
 
 The split is up to five kinds of kernel, each lifted from Loop IR like the walk:
 
@@ -102,7 +96,7 @@ axis** (`Placement.serial`, `lift_serial`), each launch reading the previous lau
 form is a realization of the kernel, not another kernel: the kernel keeps the lifted tile's identity, the one its
 fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
 no cell; a seed tensor keeps that dim, and every storage reads it with `0` there (`seed_index`). Register
-storage reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
+storage reads the carrying kernel's step itself and realizes the loop inside each CTA when the state rows are
 independent. An unmapped classic fallback takes the same serial form during materialization. Every reader of a
 kernel's schedule sites takes the kernel through one more step, `TileOp.scheduled` (`scheduled_form`): a block of a
 split walks from zero, and every term keeps its range, stated of its axis as a tier walks it. Like the serial form
@@ -131,10 +125,9 @@ finished evaluating its outputs. The domain and choices are described in
 4. a per-step `Write` over the carried state (the `025_lower_scan` shape) peels into an observer — the fold gains
    `observe` with fresh `<state>__obs` results, and the store, rewritten to read the observed name, rides the stream
    position after the node, where output-spec extraction claims it as an ordinary boundary write;
-5. a loop that carries a state (`Loop.carries`) lifts to a fold folding the action `next`: the chain of loops
-   down to the `Carry` gives `cells`, each `Carry` a state whose lift result is its value and whose seed is the
-   fold's `init`, each load of the state a carrier read, and a free loop beside the chain stays an output sweep of
-   the step.
+5. a loop that carries a state (`Loop.carries`) is peeled with the parallel loops, as the kernel's serial axis: its
+   body lifts as any step does, each `Carry` a store the boundary extracts beside the writes, each load of the
+   state a slab.
 
 There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, or raw-loop fallback at this
 boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a later fork over this complete tree.
@@ -506,7 +499,7 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
   row the binder would refuse is never enumerated.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
   when it has one applicable site and carries the site's route (`TILE@map.1/twist.1/inner`, the same grammar as
-  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node, and one more at the carrying fold's route for
+  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node, and one more at the state's route (`scan`) for
   the storage of a carried state, and follows the same rule; register storage spells its geometry as the `TILE` of
   that route. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
   and semantically refused schedules.

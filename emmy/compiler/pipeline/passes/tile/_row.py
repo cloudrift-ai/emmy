@@ -323,7 +323,6 @@ def _renamable(region: Fold, names: set[str]) -> bool:
     return not any(
         site.node.observe is not None
         or site.node.axis in names
-        or set(site.node.cells) & names
         or set(site.node.lift.results) & names
         or {*site.node.lift.body.definitions, *site.node.lift.body.axis_names} & names
         for site in sites(region)
@@ -422,7 +421,6 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
         )
         if bound & names or any(
             site.node.observe is not None
-            or set(site.node.cells) & owned
             or set(site.node.lift.results) & owned
             or any(set(stmt.deps()) & owned for stmt in site.node.lift.body.iter() if not isinstance(stmt, Load))
             for site in sites(region)

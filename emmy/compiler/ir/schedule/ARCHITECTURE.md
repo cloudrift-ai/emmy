@@ -357,7 +357,7 @@ fresh piece re-enters the same rule. `030_cut` presents its restricted structura
 
 `STAGE` names where a site keeps a value it reads more than once: an operand reused along an axis, or the state a
 kernel carries across the steps of a loop. A carrying kernel therefore has one more `STAGE` site, the kernel site's
-own, keyed at the route of the carrying fold (`classic_state_keys`; bare when the row has no other `STAGE` site). It
+own, keyed at the state's route, `scan` (`classic_state_keys`; bare when the row has no other `STAGE` site). It
 takes three values. Empty keeps the state in a global buffer, one launch per step. `d1/smem` keeps it in shared
 memory and runs the steps inside one launch; the schedule offers it where the state reads prove CTA ownership, both
 buffers fit the card's shared memory, and the row runs a one-dimensional cooperative thread tile (`holds_state`).
@@ -369,11 +369,11 @@ matrix-loop schedule below; other schedules do not yet offer it.
 
 Register storage is a choice of the classic kernel site, not a schedule model of its own. It is offered for a static
 ordered loop with one matrix state, pointwise operations, and additive
-matrix contractions, read off the fold that carries the state (`Fold.carries`, its `cells` ending in the column
-and the warp-owned row). The row spells the register geometry as the `TILE` of the carrying fold's route
+matrix contractions, read off the kernel's step and its state's update (`TileOp.resident_state`: the state's cells
+end in the column and the warp-owned row). The row spells the register geometry as the `TILE` of the state's route
 (`classic_state_tile_keys`) and leaves every site of the step off, since the loop runs inside the CTA and the step
 is not scheduled apart. The structural reading proves that each warp's rows are independent through every
-contraction, that every carrier read takes the previous step at the warp's own rows, and that output matrices
+contraction, that every load of the state takes the previous step at the warp's own rows, and that output matrices
 share the same batch coordinates. Other recurrences retain the classic schedule, which realizes the carrying loop
 as one launch per step over a state buffer. A zero-axis root derived from a step keeps the time coordinate as a
 trailing lambda parameter whenever its body still reads it. Unit batch coordinates are omitted only from ownership
