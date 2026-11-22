@@ -44,6 +44,7 @@ from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_rank
 from emmy.compiler.pipeline.search.prior.catboost_model import DEFAULT_SCALE, CatBoostModel, new_ranker
 from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
+from emmy.compiler.pipeline.search.progress import Progress
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +191,20 @@ class CatBoostTrainer:
             thread_count=-1,
             nan_mode="Min",  # absent (NaN) features get their own split-off bucket — see catboost_model
         )
-        booster.fit(Pool(np.concatenate(x), np.concatenate(y), group_id=np.concatenate(gid)))
+        booster.fit(Pool(np.concatenate(x), np.concatenate(y), group_id=np.concatenate(gid)), callbacks=[_Iterations(self.iterations)])
         return CatBoostModel(booster=booster, cols=self.feature_names, scale=self.scale)
+
+
+class _Iterations:
+    """A CatBoost callback that counts the boosting iterations into a :class:`~emmy.compiler.pipeline.search.progress.Progress` line."""
+
+    def __init__(self, total: int) -> None:
+        self.progress = Progress("catboost iterations", total, "iterations")
+
+    def after_iteration(self, info) -> bool:
+        self.progress.done = info.iteration
+        self.progress.tick()
+        return True  # keep boosting
 
 
 @dataclass(frozen=True)
