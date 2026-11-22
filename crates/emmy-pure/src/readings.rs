@@ -28,7 +28,6 @@ pub struct Memos {
     chunked: OnceLock<bool>,
     per_state: OnceLock<Option<Fold>>,
     reduction: OnceLock<Option<Reduction>>,
-    affine: OnceLock<Option<Affine>>,
     merge: Mutex<HashMap<Vec<Name>, Body>>,
     step: OnceLock<Body>,
 }
@@ -742,30 +741,16 @@ impl Fold {
         })
     }
 
-    /// The affine reading of this carried state, or `None`.
-    pub fn affine(&self) -> Result<Option<Affine>> {
-        if let Some(found) = self.memos().affine.get() {
-            return Ok(found.clone());
-        }
-        let found = self.find_affine()?;
-        Ok(self.memos().affine.get_or_init(|| found).clone())
-    }
-
-    fn find_affine(&self) -> Result<Option<Affine>> {
-        let Some(base) = self.base() else {
-            return Ok(None);
-        };
-        if !self.carries() || base.results().len() != 1 {
-            return Ok(None);
-        }
-        let state = base.results()[0];
+    /// The affine reading of this step in the carried `state` its loads read one step back, or `None`: `value` is
+    /// the state's next value among what the term exposes, `cells` the axes of the state's cell.
+    pub fn affine(&self, state: Name, cells: &[Name], value: Name) -> Result<Option<Affine>> {
         let mut reads: Vec<Arc<Statement>> = Vec::new();
         let classes = affine_classes(self, state, &mut reads, &mut HashMap::new(), None)?;
-        let kind = classes.get(&state).map_or(Kind::Free, |c| c.0);
+        let kind = classes.get(&value).map_or(Kind::Free, |c| c.0);
         if !matches!(kind, Kind::Affine | Kind::Free) || reads.is_empty() {
             return Ok(None);
         }
-        let own: Vec<Expression> = self.cells().iter().map(|c| Expression::var(c)).collect();
+        let own: Vec<Expression> = cells.iter().map(|c| Expression::var(c)).collect();
         let mut mixed: HashSet<usize> = HashSet::new();
         for read in &reads {
             let Statement::Load(load) = &**read else {
@@ -784,11 +769,11 @@ impl Fold {
                 kept: None,
             }));
         }
-        if mixed.len() != 1 || self.cells().len() < 2 {
+        if mixed.len() != 1 || cells.len() < 2 {
             return Ok(None);
         }
         let position = *mixed.iter().next().expect("one mixed position");
-        let kept = (0..self.cells().len())
+        let kept = (0..cells.len())
             .filter(|&p| p != position)
             .max()
             .expect("two cells");
@@ -797,9 +782,9 @@ impl Fold {
             state,
             &mut Vec::new(),
             &mut HashMap::new(),
-            Some((self.cells()[kept], kept)),
+            Some((cells[kept], kept)),
         )?;
-        if varies.get(&state).is_some_and(|c| c.1) {
+        if varies.get(&value).is_some_and(|c| c.1) {
             return Ok(None);
         }
         Ok(Some(Affine {
@@ -1068,7 +1053,7 @@ enum Kind {
 type Classes = HashMap<Name, (Kind, bool)>;
 
 /// How every value `term` exposes depends on the carried `state` — free, affine or neither — beside whether it varies
-/// with the kept cell coordinate `kept` (its name and position). The carrier reads of the state met are collected.
+/// with the kept cell coordinate `kept` (its name and position). The loads of the state met are collected.
 fn affine_classes(
     term: &Fold,
     state: Name,
@@ -1083,31 +1068,6 @@ fn affine_classes(
         Some((n, p)) => (Some(n), Some(p)),
         None => (None, None),
     };
-    if let Some(read) = term.as_carrier_read() {
-        let Statement::Load(load) = &**read else {
-            unreachable!("a carrier read is a Load")
-        };
-        if load.input == state {
-            reads.push(read.clone());
-        }
-        let varies = kept.is_some()
-            && load.index.iter().skip(1).enumerate().any(|(i, e)| {
-                Some(i) != position && kept_name.is_some_and(|n| e.free_vars().contains(&n))
-            });
-        let out: Classes = HashMap::from([(
-            load.names[0],
-            (
-                if load.input == state {
-                    Kind::Affine
-                } else {
-                    Kind::Free
-                },
-                varies,
-            ),
-        )]);
-        memo.insert(term.address(), out.clone());
-        return Ok(out);
-    }
     let mut env: Classes = HashMap::new();
     for b in term.bindings() {
         let edge = &term.operands()[b.operand];
@@ -1166,6 +1126,15 @@ fn affine_classes(
             Statement::Assign(a) => {
                 let class = classify(&env, &a.value, &of);
                 env.insert(a.name, class);
+            }
+            // A load of the state reads it one step back, at the cell past the step.
+            Statement::Load(load) if load.input == state => {
+                reads.push(stmt.clone());
+                let varies = kept.is_some()
+                    && load.index.iter().skip(1).enumerate().any(|(i, e)| {
+                        Some(i) != position && kept_name.is_some_and(|n| e.free_vars().contains(&n))
+                    });
+                env.insert(load.names[0], (Kind::Affine, varies));
             }
             Statement::Load(load) => {
                 let coordinates: Vec<(Kind, bool)> = load

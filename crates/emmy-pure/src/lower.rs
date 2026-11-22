@@ -59,6 +59,7 @@ impl Store {
     fn values(&self) -> &[Name] {
         match &*self.write {
             Statement::Write(write) => &write.values,
+            Statement::Carry(carry) => std::slice::from_ref(&carry.value),
             _ => &[],
         }
     }
@@ -67,6 +68,7 @@ impl Store {
     fn reads(&self) -> Vec<Expression> {
         let mut out: Vec<Expression> = match &*self.write {
             Statement::Write(write) => write.index.to_vec(),
+            Statement::Carry(carry) => carry.index.to_vec(),
             _ => Vec::new(),
         };
         out.extend(self.when.iter().cloned());

@@ -41,6 +41,7 @@ from frozendict import frozendict
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.body_op import BodyOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop.analysis import BodyAnalysis, Scope  # noqa: F401 — public Loop IR aliases
 from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  # noqa: F401 — public Loop IR aliases
     Accum,
@@ -373,6 +374,8 @@ def _validate(loop: LoopOp) -> None:
                         f"Carry {stmt.name!r}: no loop carries it at {tuple(str(e) for e in stmt.index)} — the first "
                         "coordinate is the axis of the loop over the steps, around the statement"
                     )
+                if any(not isinstance(entry, Var) and entry != Literal(0, "int") for entry in stmt.cell):
+                    raise ValueError(f"Carry {stmt.name!r}: a cell coordinate is a bare axis, or the 0 of a size-one axis")
                 exported_accs.add(stmt.name)
             elif isinstance(stmt, Accum):
                 for arg in sorted(stmt.value.free_vars()):

@@ -1142,9 +1142,20 @@ impl PyFold {
         })
     }
 
-    /// The `AffineView` of this carried state, or `None`.
-    fn affine(&self) -> PyResult<Option<PyAffineView>> {
-        Ok(self.fold.affine().py()?.map(|view| PyAffineView { view }))
+    /// The `AffineView` of this step in the carried `state`, `value` its next value and `cells` its cell axes, or
+    /// `None`.
+    fn affine(
+        &self,
+        state: &Bound<'_, PyAny>,
+        cells: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<PyAffineView>> {
+        let found = self.fold.affine(
+            name_from_py(state)?,
+            &names_of(cells)?,
+            name_from_py(value)?,
+        );
+        Ok(found.py()?.map(|view| PyAffineView { view }))
     }
 
     /// Whether an atom tier could fold this term whole.

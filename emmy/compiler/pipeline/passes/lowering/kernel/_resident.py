@@ -126,8 +126,8 @@ class _Blocks:
     def __init__(self, tile, atom, period: int, row_base, state: tuple[str, ...]):
         self.tile, self.atom, self.period, self.row_base, self.state = tile, atom, period, row_base, state
         self.carrying, self.batch = tile.resident_state.fold, tile.resident_state.batch
-        self.time = self.carrying.axis
-        (self.carried,) = self.carrying.base.results
+        self.time, self.carry = tile.resident_state.time, tile.resident_state.carry
+        self.carried = self.carry.name
         self.layout = atom.fragment_layout
         self.extents = {axis.name: axis.extent.as_static() for axis in (*tile.axes, *tile.place.free)}
         self.ranges = SimplifyCtx(ranges={name: Interval(0, extent - 1) for name, extent in self.extents.items()})
@@ -180,7 +180,7 @@ class _Blocks:
         one step back as the warp's own fragment of it. A zero takes none: a fragment is declared zero. Choosing
         the seed inside the step would hold every block twice, the state and the chosen value, and read the seed
         from memory every step."""
-        seed = self.carrying.init[0]
+        seed = self.carry.seed
         if seed == 0:
             return []
         if isinstance(seed, str):
@@ -391,8 +391,8 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     ``warps`` warps a CTA, a narrow accumulator promoted every ``period`` atom steps."""
     if tile.resident_state is None:
         raise Unresident("one state of static shape, its rows and columns whole fragments")
-    fold, batch, col, row, stored = tile.resident_state
-    time = tile.axis_of(fold.axis)
+    fold, carry, step, batch, col, row, outputs, stored = tile.resident_state
+    time = tile.axis_of(step)
     row_base = Literal(atom.atom_m, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
     state = tuple(f"_state{j}" for j in range(tile.axis_of(col).extent.as_static() // atom.atom_n))
     blocks = _Blocks(tile, atom, period, row_base, state)
@@ -409,9 +409,9 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     late: list = []
     last = BinaryExpression("==", Var(time.name), Literal(time.extent.as_static() - 1, "int"))
 
-    every_step = [any(time.name in entry.free_vars() for entry in spec.write.index) for spec in tile.output_specs]
+    every_step = [any(time.name in entry.free_vars() for entry in spec.write.index) for spec in outputs]
     for every, spec, (col_dim, row_dim, out_col, out_row) in sorted(
-        zip(every_step, tile.output_specs, stored, strict=True), key=lambda output: not output[0]
+        zip(every_step, outputs, stored, strict=True), key=lambda output: not output[0]
     ):
         (value,) = spec.write.values
         for cb in range(0, extents[out_col], atom.atom_n):
@@ -432,7 +432,7 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
                     n_guard=(Literal(cb, "int"), Literal(extents[out_col], "int")),
                 )
             )
-    following = [blocks.fragment(fold, fold.lift.results[0], row, col, None, j * atom.atom_n) for j in range(len(state))]
+    following = [blocks.fragment(fold, carry.value, row, col, None, j * atom.atom_n) for j in range(len(state))]
     # A block of the state is overwritten after the last statement that reads it or its next value: where a block's
     # next value reads that block alone, right after it, and the next value's registers are free for the block after.
     step = list(blocks.out)
@@ -466,7 +466,7 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     loop = Loop.strided(axis=time, start=Literal(0, "int"), step=Literal(1, "int"), body=Body(tuple(step)), unroll=unroll)
     rows = extents[row]
     axes = (
-        *tile.place.free,
+        *(axis for axis in tile.place.free if axis.name not in carry.cells),
         *(tile.axis_of(name) for name in batch),
         Axis("_rb", -(-rows // (warps * atom.atom_m))),
         Axis("_rw", warps),

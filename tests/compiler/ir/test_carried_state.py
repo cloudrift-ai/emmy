@@ -16,6 +16,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ir import loaded_buffers
@@ -140,14 +141,14 @@ def test_a_carrying_loop_under_an_outer_loop_keeps_that_coordinate_in_its_port()
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
-    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2]
+    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2, N, N]
     (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
     assert tuple(dim.as_static() for dim in state.shape) == (STEPS, 2, N, N)
     serial = serial_form(tile, node.id)
     assert serial.inputs == tile.inputs and serial.outputs == tile.outputs
     (spec,) = (spec for spec in serial.output_specs if spec.write.output == state.name)
-    (carrying,) = (site.node for site in tile.sites if site.node.carries)
-    assert len(spec.write.index) == len(state.shape) and [axis.name for axis in serial.place.serial] == [carrying.axis]
+    assert len(spec.write.index) == len(state.shape)
+    assert [axis.extent for axis in serial.place.serial] == [axis.extent for axis in tile.place.serial]
 
     arrays = _inputs(batch=2)
     for closed in (LoopOp(body=tile.loop_body), LoopOp(body=serial.loop_body)):
@@ -211,25 +212,27 @@ def test_a_state_the_term_stores_every_step_needs_no_port() -> None:
 
 
 def test_the_lift_carries_the_state_in_the_term() -> None:
-    """The term carries the state: the kernel root folds the action ``next`` over the steps, its
-    cells the two free coordinates the block is indexed by, its seed the loop's; the step's ``W @ S``
-    stays a contraction, its B a read of the carrier one step back. The node gains the state's port
-    for the classic realization, and the closed program spells the carrying loop outside the cells."""
+    """The kernel's term is one step and the loop that carries the state its serial axis: the state is a store of
+    the kernel into a buffer of its own, over the two free coordinates the block is indexed by, with the loop's
+    seed; the step's ``W @ S`` stays a contraction, its B a slab over the state one step back. The node gains the
+    state's port for the classic realization, and the closed program spells the carrying loop outside the cells."""
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph())
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
-    assert tile.carries and not tile.place.serial and not tile.place.free
-    (root,) = (site.node for site in tile.sites if site.node.carries)  # under the projection passing its streamed value on
-    assert root.init == (0.0,) and len(root.cells) == 2
-    assert tile.axis_of(root.axis).extent.as_static() == STEPS and all(tile.axis_of(cell).extent.as_static() == N for cell in root.cells)
+    assert tile.carries and [axis.extent.as_static() for axis in tile.place.serial] == [STEPS]
+    carry = tile.states[0].write
+    assert carry.seed == 0.0 and [tile.axis_of(cell).extent.as_static() for cell in carry.cells] == [N, N]
+    assert {axis.name for axis in tile.place.free} == set(carry.cells)
     (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
     assert tuple(dim.as_static() for dim in state.shape) == (STEPS, N, N) and lifted.outputs == ["out"]
-    assert not [load for load in loaded_buffers(root) if load.input == state.name], "the term reads no buffer of its own"
-    (mix,) = (edge for edge in root.operands if edge.axis is not None)
-    assert mix.as_contraction() is not None and any(edge.as_carrier_read() is not None for edge in mix.operands)
+    assert not [load for load in loaded_buffers(tile.op) if load.input == state.name], "the term reads no buffer of the node"
+    (mix,) = (site.node for site in tile.sites if site.node.axis is not None)
+    assert mix.as_contraction() is not None and any(
+        slab is not None and slab.load.input == carry.name for slab in map(Fold.as_slab, mix.operands)
+    )
     (carrying,) = (loop for loop in tile.loop_body if isinstance(loop, Loop))
-    assert list(carrying.carries) == list(root.base.results)
+    assert list(carrying.carries) == [carry.name]
 
     arrays = _inputs()
     closed = LoopOp(body=tile.loop_body)

@@ -850,6 +850,20 @@ impl Carry {
         PyTuple::new(slf.py(), cell?)
     }
 
+    /// The buffer this statement stores into, as a `Write` names its own: the state.
+    #[getter]
+    fn output<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyString>> {
+        let carry: &emmy_ir::statement::Carry = inner(slf.as_super().get())?;
+        Ok(PyString::new(slf.py(), &carry.name))
+    }
+
+    /// The values this statement stores, as a `Write` lists its own: the one value.
+    #[getter]
+    fn values<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let carry: &emmy_ir::statement::Carry = inner(slf.as_super().get())?;
+        PyTuple::new(slf.py(), [PyString::new(slf.py(), &carry.value)])
+    }
+
     /// The axes of the cell this statement defines.
     #[getter]
     fn cells<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {

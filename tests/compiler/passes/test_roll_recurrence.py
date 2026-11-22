@@ -509,7 +509,7 @@ def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(
     arrays = {
         name: (rng.standard_normal(tuple(tensor.shape)) * 0.3).astype(np.float32) for name, tensor in zip(names, example, strict=True)
     }
-    with pinned_knobs({"STAGE@map.1/scan": "d1/reg", "TILE@map.1/scan": f"{atom}/f1x4/k4", "WORK": "w2x1"}):
+    with pinned_knobs({"STAGE@scan": "d1/reg", "TILE@scan": f"{atom}/f1x4/k4", "WORK": "w2x1"}):
         compiled, kernels = compile_with_kernels(graph)
     # The kernel whose products read the state's own fragments: it stores the outputs and the last state.
     (walk,) = (kernel for kernel in kernels.values() if statements(kernel, FragmentRepack))
@@ -582,7 +582,7 @@ def test_a_substitution_keeps_the_rows_so_far_in_registers(atom: str, bound: flo
     n = 32
     graph, _, (module, example, _) = graph_from_code(_ROWS.format(n=n))
     matrix = (np.random.default_rng(0).standard_normal(tuple(example[0].shape)) * 0.2).astype(np.float32)
-    with pinned_knobs({"STAGE@map.1/scan": "d1/reg", "TILE@map.1/scan": f"{atom}/f1x4/k4", "WORK": "w2x1"}):
+    with pinned_knobs({"STAGE@scan": "d1/reg", "TILE@scan": f"{atom}/f1x4/k4", "WORK": "w2x1"}):
         compiled, kernels = compile_with_kernels(graph)
     (walk,) = (kernel for kernel in kernels.values() if statements(kernel, FragmentRepack))
     assert len(statements(walk, MmaSyncPtx)) == (n - 1) * (n // ATOM_REGISTRY[atom].atom_k)

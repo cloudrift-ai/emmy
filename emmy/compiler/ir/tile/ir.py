@@ -51,7 +51,7 @@ from emmy.compiler.ir.schedule.views import (
     NodeId,
     contraction_facts,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, OutputSpec, Statement, Write
+from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Loop, OutputSpec, Statement, Write
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, chain_members, kernel_roots, refused_roots
@@ -227,7 +227,7 @@ def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | No
     tail: list[OutputSpec] = []
     while inner:
         last = inner[-1]
-        if isinstance(last, Write):
+        if isinstance(last, (Write, Carry)):
             tail.insert(0, OutputSpec(write=inner.pop(), sweep=path))
             continue
         if guarded_store(last) is not None:
@@ -260,7 +260,7 @@ def extract_output_specs(stmts) -> tuple[tuple[Statement, ...], tuple[OutputSpec
     stores: list[OutputSpec] = []
     while rest:
         last = rest[-1]
-        if isinstance(last, Write):
+        if isinstance(last, (Write, Carry)):  # a carried state's update is the kernel's store into its own buffer
             stores.insert(0, OutputSpec(write=rest.pop()))
             continue
         if guarded_store(last) is not None:
@@ -301,12 +301,18 @@ def _reads_move_with(edge: Fold, coord: str, ctx: SimplifyCtx) -> bool:
 class ResidentState(NamedTuple):
     """The one state a kernel keeps between steps, as register fragments hold it (:attr:`TileOp.resident_state`)."""
 
+    #: The step: the kernel's term.
     fold: Fold
+    #: The state's update, and the axis of the steps.
+    carry: Carry
+    time: str
     #: The cells a block holds one position of, ahead of the state's matrix.
     batch: tuple[str, ...]
     col: str
     row: str
-    #: Per output of the kernel: where its matrix's columns and rows stand in the store's index, and their axes.
+    #: The kernel's outputs, and per output where its matrix's columns and rows stand in the store's index, and their
+    #: axes.
+    outputs: tuple[OutputSpec, ...]
     stored: tuple[tuple[int, int, str, str], ...]
 
 
@@ -499,20 +505,26 @@ class TileOp(Op):
         return self.split_consumed or carries_partition(self)
 
     @cached_property
+    def states(self) -> tuple[OutputSpec, ...]:
+        """The stores of this kernel into a carried state of its own, one per state: the term is one step, the state
+        a buffer the kernel keeps for itself, and a slab of the term reads it one step back."""
+        return tuple(spec for spec in self.output_specs if isinstance(spec.write, Carry))
+
+    @cached_property
     def carries(self) -> bool:
-        """Whether this kernel carries a state: a fold of its tree folds the action ``next``
-        (:attr:`Fold.carries`), so its steps run in order inside one loop and the kernel stays one
-        kernel — the classic schedule realizes the loop as one launch per step over a state buffer,
+        """Whether this kernel carries a state (:attr:`states`), so its steps run in order along its serial axis and
+        the kernel stays one kernel — the classic schedule realizes the steps as one launch each over a state buffer,
         the register schedule as a loop inside each CTA."""
-        return any(site.node.carries for site in self.sites)
+        return bool(self.states)
 
     @cached_property
     def state_routes(self) -> tuple[str, ...]:
-        """The route of every fold whose carried state this kernel keeps between steps: the carrying folds of the
-        kernel itself, or, for its serial form (:attr:`Placement.serial`), of the carrying kernel that form was
-        lifted from. A state is a value its fold reads again at every step, so each route is a ``STAGE`` site."""
+        """The route each carried state this kernel keeps between steps is addressed by, its own or, for its serial
+        form (:attr:`Placement.serial`), those of the carrying kernel that form was lifted from. A state is a value
+        the kernel reads again at every step, so each route is a ``STAGE`` site: ``scan``, numbered past the first."""
         carrying = self._carrying
-        return tuple(site.path for site in carrying.sites if site.node.carries) if carrying is not None else ()
+        count = len(carrying.states) if carrying is not None else 0
+        return tuple("scan" if not position else f"scan.{position + 1}" for position in range(count))
 
     @cached_property
     def resident_state(self) -> ResidentState | None:
@@ -523,25 +535,25 @@ class TileOp(Op):
         fragment's sixteen rows divide and column counts its eight divide, and every output a matrix over the state's
         rows (:func:`_matrix_coordinates`). What the step computes is the lowering's to accept or decline."""
         carrying = self._carrying
-        folds = [site.node for site in carrying.sites if site.node.carries] if carrying is not None else []
-        if len(folds) != 1 or any(not axis.extent.is_static for axis in (*carrying.axes, *carrying.place.free)):
+        states = carrying.states if carrying is not None else ()
+        if len(states) != 1 or any(not axis.extent.is_static for axis in (*carrying.axes, *carrying.place.free)):
             return None
-        if any(axis.extent.as_static() != 1 for axis in carrying.place.free):
+        carry, (time,) = states[0].write, carrying.place.serial
+        cells = carry.cells
+        if len(cells) < 2 or any(axis.extent.as_static() != 1 for axis in carrying.place.free if axis.name not in cells):
             return None
-        (fold,) = folds
-        if len(fold.base.results) != 1 or len(fold.cells) < 2:
-            return None
-        *batch, col, row = fold.cells
-        extent = {axis.name: axis.extent.as_static() for axis in carrying.axes}
-        outside = frozenset((*batch, fold.axis, *(axis.name for axis in carrying.place.free)))
-        at = tuple(_matrix_coordinates(spec.write.index, outside) for spec in carrying.output_specs)
-        if any(len(spec.write.values) != 1 for spec in carrying.output_specs) or None in at:
+        *batch, col, row = cells
+        extent = {axis.name: axis.extent.as_static() for axis in (*carrying.axes, *carrying.place.free)}
+        outside = frozenset((*batch, time.name, *(axis.name for axis in carrying.place.free if axis.name not in cells)))
+        outputs = tuple(spec for spec in carrying.output_specs if spec is not states[0])
+        at = tuple(_matrix_coordinates(spec.write.index, outside) for spec in outputs)
+        if any(len(spec.write.values) != 1 for spec in outputs) or None in at:
             return None
         if extent[row] % 16 or any(extent[rows] != extent[row] for _, _, _, rows in at):
             return None
         if any(extent[name] % 8 for name in (col, *(cols for _, _, cols, _ in at))):
             return None
-        return ResidentState(fold, tuple(batch), col, row, at)
+        return ResidentState(carrying.op, carry, time.name, tuple(batch), col, row, outputs, at)
 
     @cached_property
     def _carrying(self) -> TileOp | None:
