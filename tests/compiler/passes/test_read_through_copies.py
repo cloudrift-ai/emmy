@@ -5,12 +5,13 @@ no region holds stores its buffer where the one loop that reads it would only ha
 A loop that only re-lays out or widens a buffer was stored wherever a kernel outside its region read it: for a kernel
 that carries a state, which is in no region, and for a second region. The reader now reads the buffer behind the
 copy, and the copy is stored for no one. On the other side of such a kernel, the loop that puts its outputs where the
-program wants them was a kernel of its own.
+program wants them, rounded to the dtype it wants them at, was a kernel of its own.
 """
 
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -21,8 +22,8 @@ from emmy.compiler.dtype import BF16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import parse_body
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.ir.stmt import Assign, parse_body
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline, RuleSkipped
 from tests.compiler.helpers import requires_cuda
 
 _RULE = importlib.import_module("emmy.compiler.pipeline.passes.loop.fusion.008_read_through_copies")
@@ -121,12 +122,36 @@ def test_only_a_copy_that_keeps_every_value_and_whose_source_stands_is_read_thro
     assert _RULE.copied(_copy_graph(F32, stored_over=True), "c") is None
 
 
+_STEPS = """
+import torch, torch.nn as nn
+class Steps(nn.Module):
+    # a walk whose step computes its output, the outputs put back in sequence order{also}
+    def forward(self, q, k, v, state):
+        B, T, D = q.shape
+        outs = []
+        for c in range(T // 4):
+            kc = k[:, c*4:(c+1)*4]
+            new = v[:, c*4:(c+1)*4] - kc @ state
+            outs.append(q[:, c*4:(c+1)*4] @ state)
+            state = state + kc.transpose(1, 2) @ new
+        return torch.stack(outs, 1).reshape(B, T, D){cast}, state{first}
+m = Steps()
+m(torch.randn(2, 16, 8), torch.randn(2, 16, 8), torch.randn(2, 16, 8), torch.randn(2, 8, 8))
+"""
+
+
+def _steps(also: str = "", first: str = "", cast: str = "") -> str:
+    return _STEPS.format(also=also, first=first, cast=cast)
+
+
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 @pytest.mark.parametrize(
-    "code", [_walk(), _walk(bf16=True), _two_regions(), _two_regions(bf16=True)], ids=["walk", "walk-bf16", "regions", "regions-bf16"]
+    "code",
+    [_walk(), _walk(bf16=True), _two_regions(), _two_regions(bf16=True), _steps(cast=".to(torch.bfloat16)")],
+    ids=["walk", "walk-bf16", "regions", "regions-bf16", "steps-rounded"],
 )
-def test_readers_through_a_copy_match_eager_on_the_gpu(code: str) -> None:
+def test_copies_read_and_stored_through_match_eager_on_the_gpu(code: str) -> None:
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
@@ -143,40 +168,29 @@ def test_readers_through_a_copy_match_eager_on_the_gpu(code: str) -> None:
     want = module(*example)
     want = want if isinstance(want, tuple) else (want,)
     for got, reference in zip(result.outputs.values(), want, strict=True):
-        np.testing.assert_allclose(np.asarray(got).reshape(reference.shape), reference.float().numpy(), rtol=1e-4, atol=1e-5)
+        got, rtol = np.asarray(got), 1e-4
+        if reference.dtype == torch.bfloat16:  # the bits, held to one step of bf16
+            got, rtol = torch.from_numpy(got.astype(np.uint16)).view(torch.bfloat16).float().numpy(), 2.0**-7
+        np.testing.assert_allclose(got.reshape(reference.shape), reference.float().numpy(), rtol=rtol, atol=1e-5)
 
 
-_STEPS = """
-import torch, torch.nn as nn
-class Steps(nn.Module):
-    # a walk whose step computes its output, the outputs put back in sequence order{also}
-    def forward(self, q, k, v, state):
-        B, T, D = q.shape
-        outs = []
-        for c in range(T // 4):
-            kc = k[:, c*4:(c+1)*4]
-            new = v[:, c*4:(c+1)*4] - kc @ state
-            outs.append(q[:, c*4:(c+1)*4] @ state)
-            state = state + kc.transpose(1, 2) @ new
-        return torch.stack(outs, 1).reshape(B, T, D), state{first}
-m = Steps()
-m(torch.randn(2, 16, 8), torch.randn(2, 16, 8), torch.randn(2, 16, 8), torch.randn(2, 8, 8))
-"""
-
-
-def test_a_walk_stores_its_outputs_where_their_one_reader_would_move_them() -> None:
-    graph, _, _ = graph_from_code(_STEPS.format(also="", first=""))
+@pytest.mark.parametrize("cast", ["", ".to(torch.bfloat16)"], ids=["moved", "rounded"])
+def test_a_walk_stores_its_outputs_where_their_one_reader_would_move_them(cast: str) -> None:
+    graph, _, _ = graph_from_code(_steps(cast=cast))
     graph = Pipeline.build(LOOP_PASSES).run(graph)
 
     (walk,) = _loops(graph)
     # Each step stores its four rows of the joined tensor, at a row the step moves, and nothing joins them after.
     assert walk.op.body.carries and set(graph.outputs) == {tensor.name for tensor in walk.outputs}
-    (rows,) = (write.index[1] for write in walk.op.body.writes if len(write.index) == 3 and len(write.index[1].free_vars()) == 2)
-    assert "4" in str(rows)
+    (joined,) = (write for write in walk.op.body.writes if len(write.index) == 3 and len(write.index[1].free_vars()) == 2)
+    assert "4" in str(joined.index[1])
+    # A reader that rounded what it moved is gone the same way: the walk rounds the value it stores.
+    rounded = [stmt.dtype for stmt in walk.op.body.iter() if isinstance(stmt, Assign) and stmt.name == joined.value]
+    assert rounded == ([BF16] if cast else []) and graph.buffer(joined.output).dtype == (BF16 if cast else F32)
 
 
 def test_a_buffer_read_elsewhere_is_stored_as_it_is() -> None:
-    graph, _, _ = graph_from_code(_STEPS.format(also=", and the first one alone", first=", outs[0]"))
+    graph, _, _ = graph_from_code(_steps(also=", and the first one alone", first=", outs[0]"))
     graph = Pipeline.build(LOOP_PASSES).run(graph)
 
     # Two loops read the steps' outputs: the walk keeps its own buffer, and the join is a kernel.
@@ -184,12 +198,21 @@ def test_a_buffer_read_elsewhere_is_stored_as_it_is() -> None:
     assert len(_loops(graph)) > 1 and not set(graph.outputs) <= {tensor.name for tensor in walk.outputs}
 
 
-def _moved(body: str):
-    return _STORE.moved(LoopOp(body=parse_body(body)))
+def _stored_through(reader: str, kept: Tensor, shape: tuple = (3, 1, 4)) -> str:
+    """The loop that stores ``s``, three steps of four cells, once the rule took ``reader``, the one loop that reads
+    ``s`` and stores ``kept``."""
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (3, 4), F32), node_id="x")
+    steps = "for a0 in 0..3:\n  for a1 in 0..4:\n    in0 = load x[a0, a1]\n    v0 = exp(in0)\n    s[a0, 0, a1] = v0"
+    graph.add_node(LoopOp(body=parse_body(steps)), ["x"], Tensor("s", shape, F32), node_id="s")
+    graph.add_node(LoopOp(body=parse_body(reader)), ["s"], kept, node_id=kept.name)
+    graph.inputs, graph.outputs = ["x"], [kept.name]
+    fragment = _STORE.rewrite(SimpleNamespace(graph=graph), graph.nodes[kept.name])
+    (stored,) = _loops(fragment)
+    return str(stored.op.body)
 
 
-def test_only_a_loop_that_moves_every_cell_once_is_stored_through() -> None:
-    chosen = """
+_CHOSEN = """
 for a0 in 0..3:
   for a1 in 0..4:
     in0 = load s[0, 0, a1]
@@ -201,11 +224,47 @@ for a0 in 0..3:
       in2 when true
     c[4 * a0 + a1] = v0
 """
-    # The steps read back by position and chosen by the joined coordinate are one read at that coordinate.
-    source, cell, write = _moved(chosen)
-    assert source == "s" and [str(entry) for entry in cell] == ["a0", "0", "a1"] and write.output == "c"
-    # A step missing from the choice, a value computed on the way, a cell read twice: each stays a kernel.
-    assert _moved(chosen.replace("in1 = load s[1, 0, a1]", "in1 = load s[0, 0, a1]")) is None
-    assert _moved("for a0 in 0..4:\n  in0 = load s[a0]\n  v0 = exp(in0)\n  c[a0] = v0") is None
-    assert _moved("for a0 in 0..4:\n  for a1 in 0..2:\n    in0 = load s[a0]\n    c[a0, a1] = in0") is None
-    assert _moved("for a0 in 0..4:\n  in0 = load s[3 - a0]\n  c[a0] = in0") is None
+# The same choice as a region writes it whose last loop is not the join: over the joined coordinate, the step a digit.
+_JOINED = """
+for a0 in 0..12:
+  in0 = load s[0, 0, a0 % 4]
+  in1 = load s[1, 0, a0 % 4]
+  in2 = load s[2, 0, a0 % 4]
+  v0 = select:
+    in0 when 0 == a0 / 4
+    in1 when 1 == a0 / 4
+    in2 when true
+  bf16 v1 = v0
+  c[a0] = v1
+"""
+
+
+def test_a_loop_that_moves_every_cell_once_is_stored_through() -> None:
+    # The steps read back by position and chosen by the joined coordinate are one read at that coordinate: the
+    # producer stores each step's cells at the step's place in the join.
+    assert "c[4 * a0 + a1] = v0" in _stored_through(_CHOSEN, Tensor("c", (12,), F32))
+    # A reader that rounds what it moves is gone too, and the producer rounds what it stores.
+    stored = _stored_through(_JOINED, Tensor("c", (12,), BF16))
+    assert "bf16 v1 = v0" in stored and "c[4 * a0 + a1] = v1" in stored
+    transposed = "for a0 in 0..4:\n  for a1 in 0..3:\n    in0 = load s[a1, 0, a0]\n    bf16 v0 = in0\n    c[a0, a1] = v0"
+    stored = _stored_through(transposed, Tensor("c", (4, 3), BF16))
+    assert "bf16 v1 = v0" in stored and "load x[a1, a0]" in stored and "c[a0, a1] = v1" in stored
+
+
+@pytest.mark.parametrize(
+    ("reader", "shape"),
+    [
+        (_CHOSEN.replace("in1 = load s[1, 0, a1]", "in1 = load s[0, 0, a1]"), (12,)),
+        (_CHOSEN, (16,)),
+        ("for a0 in 0..3:\n  for a1 in 0..4:\n    in0 = load s[a0, 0, a1]\n    v0 = exp(in0)\n    c[a0, a1] = v0", (3, 4)),
+        ("for a0 in 0..3:\n  for a1 in 0..4:\n    in0 = load s[a0, 0, a1]\n    bf16 v0 = in0\n    f32 v1 = v0\n    c[a0, a1] = v1", (3, 4)),
+        ("for a0 in 0..3:\n  for a1 in 0..4:\n    for a2 in 0..2:\n      in0 = load s[a0, 0, a1]\n      c[a0, a1, a2] = in0", (3, 4, 2)),
+        ("for a0 in 0..3:\n  for a1 in 0..4:\n    in0 = load s[2 - a0, 0, a1]\n    c[a0, a1] = in0", (3, 4)),
+        ("for a0 in 0..3:\n  for a1 in 0..2:\n    in0 = load s[a0, 0, a1]\n    c[a0, a1] = in0", (3, 2)),
+    ],
+    ids=["a-step-missing", "a-step-more-stored", "computed", "rounded-twice", "read-twice", "reversed", "a-part"],
+)
+def test_a_loop_that_does_more_than_move_every_cell_once_keeps_its_kernel(reader: str, shape: tuple) -> None:
+    stored = (4, 1, 4) if shape == (16,) else (3, 1, 4)
+    with pytest.raises(RuleSkipped):
+        _stored_through(reader, Tensor("c", shape, F32), shape=stored)

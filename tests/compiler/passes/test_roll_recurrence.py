@@ -486,13 +486,17 @@ m(torch.randn(2, 3, 16, 32), torch.randn(2, 3, 16, 32), torch.randn(2, 3, 16, 32
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.parametrize("join", ["torch.stack(outs, dim=1)", "torch.stack(outs, dim=1).flatten(1, 2)"], ids=["stacked", "in-sequence"])
+@pytest.mark.parametrize(
+    "join",
+    ["torch.stack(outs, dim=1)", "torch.stack(outs, dim=1).flatten(1, 2)", "torch.stack(outs, dim=1).flatten(1, 2).to(torch.bfloat16)"],
+    ids=["stacked", "in-sequence", "in-sequence-rounded"],
+)
 @pytest.mark.parametrize(("atom", "bound"), [("mma_m16n8k16_f16_f32", 2e-3), ("mma_m16n8k8_tf32x3_f32", 2e-6)])
 def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(atom: str, bound: float, join: str) -> None:
     """The outputs' two products roll into the step, so one launch computes them from the state its registers hold:
     the kernel stores each chunk's output and the state the loop ends with, and no state between. It stores an
     output where the program joins them: a step's rows of one tensor, at a row the step moves when the chunks are
-    put back in sequence."""
+    put back in sequence, and rounded where the program holds them at 16 bits."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.ir.kernel.ir import FragmentApply, FragmentRepack, MmaSyncPtx, RegStore  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
@@ -520,9 +524,12 @@ def test_a_walk_that_reads_its_outputs_in_the_step_keeps_its_state_in_registers(
     result, _ = CudaBackend().run(compiled, input_data=arrays)
     exact = module.double()(*(torch.from_numpy(arrays[name]).double() for name in names))
     for got, want in zip(result.outputs.values(), exact, strict=True):
-        want = want.numpy()
-        error = np.asarray(got).reshape(want.shape) - want
-        assert float(np.sqrt(np.mean(error**2))) < bound * float(np.sqrt(np.mean(want**2)))
+        got, held = np.asarray(got), bound
+        if want.dtype == torch.bfloat16:  # the bits the walk stored, held to a step of bf16
+            got, held = torch.from_numpy(got.astype(np.uint16)).view(torch.bfloat16).double().numpy(), max(bound, 2.0**-8)
+        want = want.double().numpy()
+        error = got.reshape(want.shape) - want
+        assert float(np.sqrt(np.mean(error**2))) < held * float(np.sqrt(np.mean(want**2)))
 
 
 _ROWS = """

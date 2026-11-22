@@ -6,9 +6,8 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import LoopOp, observes_running_accumulator, splice_graph
-from emmy.compiler.ir.stmt import Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Load
 
 
 def carries_state(op: LoopOp) -> bool:
@@ -23,26 +22,9 @@ def joins_a_region(op: LoopOp) -> bool:
     return not (carries_state(op) or observes_running_accumulator(op))
 
 
-def moved_load(body: Body) -> tuple[Load, Write] | None:
-    """``(the read, the store)`` of a body that computes nothing: loops around one read of a buffer as it is stored
-    and one store of the value read."""
-    if len(body.loads) != 1 or len(body.writes) != 1 or any(not isinstance(stmt, (Loop, Load, Write)) for stmt in body.iter()):
-        return None
-    (load,), (write,) = body.loads, body.writes
-    return (load, write) if plain_load(load) and tuple(write.values) == tuple(load.names) else None
-
-
 def plain_load(load: Load) -> bool:
     """Whether ``load`` reads one value of a buffer as it is stored: no dtype of its own, no carried state."""
     return load.dtype is None and not load.carried and len(load.names) == 1
-
-
-def coordinates(index: tuple) -> tuple[str, ...] | None:
-    """The coordinates ``index`` names, where every entry is a coordinate or a literal and none stands twice: the
-    index a substitution of its coordinates inverts. ``None`` for any other."""
-    names = tuple(entry.name for entry in index if isinstance(entry, Var))
-    plain = all(isinstance(entry, (Var, Literal)) for entry in index) and len(set(names)) == len(names)
-    return names if plain else None
 
 
 def writes_in_place(node: Node) -> bool:

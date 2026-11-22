@@ -662,10 +662,13 @@ of a packed buffer.
 A buffer is stored where its one reader would only have moved it (`020_store_through_copies`). After the regions are
 merged, a kernel whose one reader computes nothing and reads every cell once — the steps of a walk stacked into one
 tensor and put back in sequence order — stores each value at the cell that reader would have moved it to, and the
-reader is gone. The reader of a walk's steps reads each step back by its position and chooses among them by the
-stacked coordinate; that choice is one read at that coordinate. A join that chooses by a range of rows (`torch.cat`)
-is not read that way and stays a kernel. The copy the roll makes of the state its loop ends with, where the graph
-exports that state and no loop reads it, is such a reader too.
+reader is gone. A reader may round what it moves, as the cast of a walk's f32 outputs to a 16-bit model's dtype does:
+the producer then rounds the value it stores. The reader of a walk's steps reads each step back by its position and
+chooses among them by the stacked coordinate, or by the digit of a joined coordinate that the step is; that choice is
+one read at that coordinate. That the reader moves every cell once is the layout proof of an output equivalence
+cluster, below, and the producer's stores move through that layout as a cluster's source's do. A join that chooses by
+a range of rows (`torch.cat`) is not read that way and stays a kernel. The copy the roll makes of the state its loop
+ends with, where the graph exports that state and no loop reads it, is such a reader too.
 
 **Measured evidence this rule is spending.** Dropping the work-growth cap and the merge-ordering pass is a deliberate
 trade: both existed because of a measurement, and neither measurement has been retaken. A merge that splices a compute

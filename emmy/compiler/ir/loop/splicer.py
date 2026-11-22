@@ -171,7 +171,8 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
         source_node = graph.producer(source)
         if source_node is None:
             continue
-        retargeted = _retarget_equivalent_output(graph, loops[source_node.id], cluster)
+        layouts = [(strides, graph.buffer(name)) for strides, name in zip(cluster.inverse_strides, cluster.buffers[1:], strict=True)]
+        retargeted = stored_through(loops[source_node.id], graph.buffer(source), layouts)
         if retargeted is None:
             continue
         loops[source_node.id] = retargeted
@@ -278,15 +279,23 @@ def _layout_copy_inverse(graph, node, output: str) -> tuple[str, tuple[int, ...]
     destination = graph.buffer(output)
     if source is None or destination is None or source.dtype != destination.dtype:
         return None
+    strides = layout_strides(node.op, load.index, write.index, source, destination)
+    return None if strides is None else (load.input, strides)
+
+
+def layout_strides(op: LoopOp, load_index: tuple, write_index: tuple, source, destination) -> tuple[int, ...] | None:
+    """The stride of each dimension of ``source`` in the flat address of ``destination``, where ``op``'s loops move
+    every cell of the one, read at ``load_index``, to a cell of the other, stored at ``write_index``; ``-1`` stands
+    for a leading symbolic dimension both carry. ``None`` where the loops are no such layout."""
     # A shared leading symbolic dimension — the token axis of a serving twin — is carried through
     # as itself: the copy reads and writes it by one coordinate, and the static dimensions behind
     # it are the layout the proof is about.
     leading = _shared_leading_symbolic(source.shape, destination.shape)
-    load_index, write_index = load.index, write.index
+    lead_axis = None
     if leading:
         if len(load_index) < 2 or len(write_index) < 2 or load_index[0] != write_index[0] or not isinstance(load_index[0], Var):
             return None
-        load_index, write_index = load_index[1:], write_index[1:]
+        lead_axis, load_index, write_index = load_index[0].name, load_index[1:], write_index[1:]
     source_shape, destination_shape = source.shape[leading:], destination.shape[leading:]
     source_dims = tuple(dim.as_static() for dim in source_shape if dim.is_static)
     destination_strides = _static_strides(destination_shape)
@@ -296,7 +305,7 @@ def _layout_copy_inverse(graph, node, output: str) -> tuple[str, tuple[int, ...]
     destination_numel = math.prod(dim.as_static() for dim in destination_shape)
     if source_numel != destination_numel:
         return None
-    extents = _loop_extents(node.op, leading=load.index[0].name if leading else None)
+    extents = _loop_extents(op, leading=lead_axis)
     if extents is None or math.prod(extents.values()) != destination_numel:
         return None
     if len(load_index) != len(source_dims) or len(write_index) != len(destination_strides):
@@ -320,7 +329,7 @@ def _layout_copy_inverse(graph, node, output: str) -> tuple[str, tuple[int, ...]
         inverse[index] = stride
         stride *= source_dims[index]
         remaining.remove(index)
-    return load.input, tuple(([-1] if leading else []) + inverse)
+    return tuple(([-1] if leading else []) + inverse)
 
 
 def _shared_leading_symbolic(source_shape, destination_shape) -> int:
@@ -389,17 +398,17 @@ def _unflatten(flat: Expression, shape, ctx: SimplifyCtx) -> tuple[Expression, .
     return tuple(_flat_digit(flat, stride, dim.as_static(), ctx) for stride, dim in zip(strides, shape, strict=True))
 
 
-def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCluster) -> LoopOp | None:
-    """Retarget the source Writes through a chain of equivalent output layouts."""
-    source, output = cluster.buffers[0], cluster.buffers[-1]
-    source_tensor = graph.buffer(source)
+def stored_through(op: LoopOp, source_tensor, layouts: list[tuple[tuple[int, ...], object]]) -> LoopOp | None:
+    """``op`` with its stores of ``source_tensor`` moved through a chain of layouts — each the strides of
+    :func:`layout_strides` and the tensor laid out — into the last of them."""
+    source, output = source_tensor.name, layouts[-1][1].name
     source_writes = [write for write in op.body.writes if write.output == source]
-    if source_tensor is None or not source_writes:
+    if not source_writes:
         return None
     # A leading symbolic dimension the chain carries through (``_layout_copy_inverse``) is the
     # producer's own leading coordinate at every step; the proof runs on the static rest.
-    leading = 1 if any(inverse and inverse[0] == -1 for inverse in cluster.inverse_strides) else 0
-    if leading and any(not inverse or inverse[0] != -1 for inverse in cluster.inverse_strides):
+    leading = 1 if any(inverse and inverse[0] == -1 for inverse, _ in layouts) else 0
+    if leading and any(not inverse or inverse[0] != -1 for inverse, _ in layouts):
         return None
     lead_axis = None
     if leading:
@@ -413,12 +422,7 @@ def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCl
     if any(not write.is_scalar or len(write.index) != len(source_tensor.shape) for write in source_writes):
         return None
 
-    steps: list[tuple[tuple[int, ...], object]] = []
-    for inverse, destination in zip(cluster.inverse_strides, cluster.buffers[1:], strict=True):
-        tensor = graph.buffer(destination)
-        if tensor is None:
-            return None
-        steps.append((inverse[leading:], tensor.shape[leading:]))
+    steps = [(inverse[leading:], tensor.shape[leading:]) for inverse, tensor in layouts]
 
     ctx = _extent_ctx(extents)
     replacement: dict[int, Write] = {}

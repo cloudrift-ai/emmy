@@ -682,7 +682,7 @@ which stores only its last state, is 53 of the 195. None of these picks is the p
 takes a thread tile and runs 919, and one 128-wide reduce takes a CTA per output cell and runs 336.
 
 The rule itself, taken alone as serving calls it (48 heads, four chunks of 64, bf16 inputs, a state handed in),
-compiles to nine kernels and runs 58 under kernel pins and 115 by the prior's own picks on an RTX 5090. Three things
+compiles to eight kernels and runs 53 under kernel pins and 111 by the prior's own picks on an RTX 5090. Three things
 carry that:
 
 - **The substitution on tensor cores.** It is spelled as a row of memory times the rows so far, which register
@@ -692,8 +692,8 @@ carry that:
   state itself kept in f32.
 - **The readout in the walk.** The rule reads each chunk's output in its scan, and the roll takes a step's own
   readers into the kernel that carries the state (`passes/ARCHITECTURE.md`): the readout's products run from the
-  registers that hold the state, no state but the last is stored, and no kernel copies the walk's operands in or
-  moves its outputs after it. The walk is 28 of the 58.
+  registers that hold the state, no state but the last is stored, and no kernel copies the walk's operands in, or
+  moves its outputs or rounds them to the model's dtype after it. The walk is 27 of the 53.
 - **The system's products on tensor cores.** The kernel that builds the system also stores outputs of other shapes,
   so its grid is not the product's own; the product reaches a tensor-core tile through a cut into a kernel of its
   own, which is offered.
