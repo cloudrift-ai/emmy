@@ -6,8 +6,9 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expression import BinaryExpression, Literal
 from emmy.compiler.ir.loop import LoopOp, observes_running_accumulator, splice_graph
-from emmy.compiler.ir.stmt import Load
+from emmy.compiler.ir.stmt import Body, Load, Select
 
 
 def carries_state(op: LoopOp) -> bool:
@@ -17,7 +18,8 @@ def carries_state(op: LoopOp) -> bool:
 
 def joins_a_region(op: LoopOp) -> bool:
     """Whether a region may hold ``op``. A kernel that carries a state is in none: the splice inlines a store into
-    its readers, and a state is stored once per step, not once. Neither is an ordered prefix output
+    its readers, and a state is stored once per step, not once. It takes the kernels around it into its step once
+    the regions are merged (``015_merge_into_step``). Neither is an ordered prefix output in a region
     (:func:`observes_running_accumulator`)."""
     return not (carries_state(op) or observes_running_accumulator(op))
 
@@ -25,6 +27,29 @@ def joins_a_region(op: LoopOp) -> bool:
 def plain_load(load: Load) -> bool:
     """Whether ``load`` reads one value of a buffer as it is stored: no dtype of its own, no carried state."""
     return load.dtype is None and not load.carried and len(load.names) == 1
+
+
+def chosen_cell(body: Body, select: Select, shape: tuple) -> tuple | None:
+    """The one cell ``select`` reads of a buffer of ``shape``: its branches are reads at cells that differ in one
+    position, a literal there, one for every cell of that dimension, and each is chosen where one expression of the
+    coordinates equals its literal — the read at that expression."""
+    reads = {load.names[0]: load.index for load in body.loads}
+    cells = [reads.get(branch.value) for branch in select.branches]
+    if any(cell is None for cell in cells) or len({len(cell) for cell in cells}) != 1 or len(cells) < 2:
+        return None
+    differing = [at for at, entries in enumerate(zip(*cells, strict=True)) if len(set(entries)) > 1]
+    if len(differing) != 1 or not all(isinstance(cell[differing[0]], Literal) for cell in cells):
+        return None
+    (at,) = differing
+    *tests, otherwise = (branch.select for branch in select.branches)
+    if otherwise != Literal(True, "bool") or not all(isinstance(test, BinaryExpression) and test.op == "==" for test in tests):
+        return None
+    sides = [(test.right, test.left) if isinstance(test.left, Literal) else (test.left, test.right) for test in tests]
+    if len({chosen for chosen, _ in sides}) != 1 or any(position != cell[at] for (_, position), cell in zip(sides, cells, strict=False)):
+        return None
+    if not shape[at].is_static or sorted(cell[at].value for cell in cells) != list(range(shape[at].as_static())):
+        return None
+    return (*cells[0][:at], sides[0][0], *cells[0][at + 1 :])
 
 
 def writes_in_place(node: Node) -> bool:
@@ -53,6 +78,15 @@ def _packed(graph: Graph, node: Node) -> bool:
     weight — is already stored, and a region reads it as an ordinary external input.
     """
     return any((tensor := graph.buffer(buf)) is not None and tensor.dtype.logical_elems > 1 for buf in node.buffer_names())
+
+
+def stops_a_region(graph: Graph, node: Node) -> bool:
+    """Whether the buffers ``node`` writes have to exist as it writes them (:func:`regions`): one is packed, one is
+    stored in another buffer's memory, or a kernel stores over one."""
+    over = any(
+        stored.alias == name for name in node.buffer_names() for user in graph.buffer_users(name) for stored in graph.nodes[user].outputs
+    )
+    return over or _packed(graph, node) or writes_in_place(node)
 
 
 def regions(graph: Graph) -> dict[str, frozenset[str]]:
@@ -228,8 +262,11 @@ def live_outputs_of(graph: Graph, region: set[str]) -> tuple[str, ...]:
     return tuple(live)
 
 
-def build_merged_region(graph: Graph, region: set[str], live_outputs: tuple[str, ...]) -> LoopOp | None:
-    """Splice one maximal region, sharing equal upstream demands across roots."""
+def build_merged_region(
+    graph: Graph, region: set[str], live_outputs: tuple[str, ...], ops: dict[str, LoopOp] | None = None
+) -> LoopOp | None:
+    """Splice one maximal region, sharing equal upstream demands across roots. ``ops`` gives a member the loop it is
+    spliced as where that is not the node's own."""
     order = [nid for nid in graph.topological_order() if nid in region]
     sub = Graph()
     external: list[str] = []
@@ -245,7 +282,7 @@ def build_merged_region(graph: Graph, region: set[str], live_outputs: tuple[str,
         sub.add_node(InputOp(), [], ext_t, node_id=ext_id)
     for nid in order:
         node = graph.nodes[nid]
-        sub.add_node(node.op, list(node.inputs), outputs=node.outputs, node_id=nid)
+        sub.add_node((ops or {}).get(nid, node.op), list(node.inputs), outputs=node.outputs, node_id=nid)
     sub.outputs = list(live_outputs)
 
     result = splice_graph(sub)

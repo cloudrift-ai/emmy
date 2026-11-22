@@ -122,8 +122,10 @@ def _reads(term) -> set[str]:
 
 
 def _seams(graph: Graph) -> dict[str, str]:
-    """Every seam of ``graph``'s tiles and its placement: a seam whose cone reads constants alone — a weight's
-    decode — stays inside its consumer, so the weight streams once at its stored width; every other seam is cut."""
+    """Every seam of ``graph``'s tiles and its placement, each a pin of its own kernel (a site's spelling is read
+    off one kernel's tree, and on another's it names another edge): a seam whose cone reads constants alone — a
+    weight's decode — stays inside its consumer, so the weight streams once at its stored width; every other seam is
+    cut."""
     from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams  # noqa: PLC0415
 
     constants = {nid for nid, node in graph.nodes.items() if isinstance(node.op, ConstantOp)}
@@ -133,7 +135,8 @@ def _seams(graph: Graph) -> dict[str, str]:
             for site in cuttable_seams(node.op):
                 reads = _reads(site.node)
                 for spelling in (site.spelling, *site.aliases):
-                    found[spelling] = "fuse" if reads and reads <= constants else "cut"
+                    _, _, at = spelling.partition("@")
+                    found[f"PLACE@{node.op.name}" + (f"/{at}" if at else "")] = "fuse" if reads and reads <= constants else "cut"
     return found
 
 

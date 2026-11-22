@@ -1,9 +1,10 @@
 """Store a buffer where its one reader would only have copied it.
 
-It runs after ``010_merge_loop_ops``, so every loop it sees is a kernel: a region already merged, or a kernel no
-region holds — one that carries a state, an ordered prefix — whose readers are therefore another kernel. Where such a
-reader computes nothing, it only moves every cell to where the program wants it: the steps of a walk stacked into one
-tensor, its tokens put back in sequence order, a transpose. The producer then stores each value at the cell the
+It runs after ``010_merge_loop_ops`` and ``015_merge_into_step``, so every loop it sees is a kernel: a region
+already merged, or a kernel no region holds — one that carries a state, an ordered prefix — whose readers are another
+kernel where they did not join its step. Where such a reader computes nothing, it only moves every cell to where the
+program wants it: the state a walk ends with in another layout, the steps of a scan put in sequence order, a
+transpose. The producer then stores each value at the cell the
 reader would have moved it to, and the reader is gone with the buffer between them. A reader may round what it moves
 to the dtype the program holds it at, as the cast of a walk's f32 outputs to a 16-bit model's dtype does: the
 producer then rounds the value it stores. A reader that computes anything else keeps its kernel.
@@ -20,36 +21,13 @@ from dataclasses import replace
 
 from emmy.compiler.dtype import DataType
 from emmy.compiler.graph import Graph, Node
-from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp, layout_strides, stored_through
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Statement, Write
+from emmy.compiler.ir.stmt import Assign, Load, Loop, Select, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._region import plain_load, wrap_multi_output_fragment
+from emmy.compiler.pipeline.passes.loop.fusion._region import chosen_cell, plain_load, wrap_multi_output_fragment
 
 PATTERN = [Pattern("reader", LoopOp)]
-
-
-def _chosen(body: Body, select: Select, shape: tuple) -> tuple | None:
-    """The one cell ``select`` reads of a buffer of ``shape``: its branches are reads at cells that differ in one
-    position, a literal there, one for every cell of that dimension, and each is chosen where one expression of the
-    coordinates equals its literal — the read at that expression."""
-    reads = {load.names[0]: load.index for load in body.loads}
-    cells = [reads.get(branch.value) for branch in select.branches]
-    if any(cell is None for cell in cells) or len({len(cell) for cell in cells}) != 1 or len(cells) < 2:
-        return None
-    differing = [at for at, entries in enumerate(zip(*cells, strict=True)) if len(set(entries)) > 1]
-    if len(differing) != 1 or not all(isinstance(cell[differing[0]], Literal) for cell in cells):
-        return None
-    (at,) = differing
-    *tests, otherwise = (branch.select for branch in select.branches)
-    if otherwise != Literal(True, "bool") or not all(isinstance(test, BinaryExpression) and test.op == "==" for test in tests):
-        return None
-    sides = [(test.right, test.left) if isinstance(test.left, Literal) else (test.left, test.right) for test in tests]
-    if len({chosen for chosen, _ in sides}) != 1 or any(position != cell[at] for (_, position), cell in zip(sides, cells, strict=False)):
-        return None
-    if not shape[at].is_static or sorted(cell[at].value for cell in cells) != list(range(shape[at].as_static())):
-        return None
-    return (*cells[0][:at], sides[0][0], *cells[0][at + 1 :])
 
 
 def moved(graph: Graph, op: LoopOp) -> tuple[str, tuple, Write, DataType | None] | None:
@@ -69,7 +47,7 @@ def moved(graph: Graph, op: LoopOp) -> tuple[str, tuple, Write, DataType | None]
     if rounds:
         value = (rounds[0].value.name,) if value == (rounds[0].name,) else None
     if selects:
-        cell = _chosen(body, selects[0], graph.buffer(loads[0].input).shape) if value == (selects[0].name,) else None
+        cell = chosen_cell(body, selects[0], graph.buffer(loads[0].input).shape) if value == (selects[0].name,) else None
     else:
         cell = tuple(loads[0].index) if len(loads) == 1 and value == tuple(loads[0].names) else None
     return None if cell is None else (loads[0].input, cell, writes[0], rounds[0].dtype if rounds else None)

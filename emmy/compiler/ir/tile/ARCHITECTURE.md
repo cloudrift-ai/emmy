@@ -52,8 +52,9 @@ the kernel's stores do. A per-step output is a store like any other, and the clo
 around the step, which is the Loop IR the roll wrote. A parallel loop the source spelled around the carrying one
 runs one recurrence per trip, so its coordinate joins the state's cell and the steps still stand outermost.
 
-A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@map.1/scan=g<n>k[<p>]`, bare
-where the step has no reduction of its own; offered by `030_cut` through `_split.realize_carry_split`). It needs
+A kernel that carries a state takes the cuts of any kernel at the seams whose cone reads no state (`030_cut`), and
+a state has one kernel-set decision of its own, the **split across the sequence** (`REDUCE@map.1/scan=g<n>k[<p>]`,
+bare where the step has no reduction of its own; offered by `030_cut` through `_split.realize_carry_split`). It needs
 the step AFFINE in the state and column-wise (`Fold.affine`, asked of the step with the state's name, cells and
 next value: every load of the state keeps the cell's own coordinate at every position but one), because then a
 part's steps compose as an affine map `S ← A·S + b`. A step that is not affine (one that multiplies two reads of

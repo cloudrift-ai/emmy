@@ -671,6 +671,16 @@ cluster, below, and the producer's stores move through that layout as a cluster'
 a range of rows (`torch.cat`) is not read that way and stays a kernel. The copy the roll makes of the state its loop
 ends with, where the graph exports that state and no loop reads it, is such a reader too.
 
+The kernels around a kernel that carries a state join its step (`015_merge_into_step`). Once the regions of plain
+loops are merged, such a kernel is one step under the loop that carries the state, and a kernel beside it joins where
+it can run there. A kernel only the step reads is computed where the step reads it, as a splice inlines any producer.
+A kernel that reads what the step stores joins where each of its trips reads one step: its loop over the coordinate
+the step is a digit of becomes the step and the trips of that step, and it then stores from inside the step, at a
+cell the step moves. The splice is the region's own, with every `Carry` a store it keeps. What no step can run stays
+a kernel: a reader of the state the loop ends with, a fold over the steps, another kernel that carries a state, and
+the kernel that fills the buffer the state starts from. Which of the merged kernels are worth keeping apart is a
+cut's decision, taken on the merged kernel (`030_cut`, below).
+
 **Measured evidence this rule is spending.** Dropping the work-growth cap and the merge-ordering pass is a deliberate
 trade: both existed because of a measurement, and neither measurement has been retaken. A merge that splices a compute
 producer into a still-open contraction product lands that product in gmem; on a 1-layer Qwen3-0.6B trunk at seq 512 the
@@ -856,8 +866,7 @@ then has to write and a second kernel has to read back. A node that reads two st
 output) reads the stores, and so does a reader of the state the chain ends with, which no step starts from. What
 the recurrence itself descends from, and what the readers of two steps both read (the matrix a chunk's output
 multiplies by, computed before the loop), is an input of the rolled body. Where the steps with their readers are not
-one body at a stride, the steps roll alone. A kernel that carries a state takes no cut, so a reader its storage cannot
-evaluate keeps the whole kernel off that storage; and a kernel that stores its last state beside a per-step output is
+one body at a stride, the steps roll alone. A kernel that stores its last state beside a per-step output is
 offered no split across the sequence, since parts side by side cannot write that mix.
 
 **A step at the edge of its matrix rolls with the rest.** A step that writes one row masks its store to that row, and
@@ -869,8 +878,9 @@ to it) decides; where it is not that step, the chain rolls without it. Only the 
 A chain whose states alternate two
 bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
 alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion
-splices whole, up to the splicer's construction bound. A kernel that carries a state is a fusion region of its own
-(`carries_state`): the splice inlines a store into its readers, and a state is stored once per step.
+splices whole, up to the splicer's construction bound. A kernel that carries a state is in no region of plain
+loops (`carries_state`): the splice inlines a store into its readers, and a state is stored once per step. It takes
+the kernels around it into its step afterwards (`015_merge_into_step`, above).
 
 ## Kernel boundaries after maximal fusion
 
@@ -884,9 +894,12 @@ that canonical input:
   workspace at the address it computes, so each weight is read once. A channel that reads a coordinate only as
   `i // d` where another reads it plainly (GQA's k beside q) is computed by its own piece, once per group of `d`.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
-  an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
-  until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
+  are not. A kernel that carries a state offers the seams whose cone reads no state: such a cone is the same at
+  whichever step reads it, so its kernel computes every step's cells ahead, the step among the workspace's
+  coordinates where the cone reads it, and the kernel that keeps the state reads them back. A cone that reads the
+  state runs inside the step and is no seam. Closure reads the complete lowered statement stream through `Body`'s
+  scope-aware dependence analysis: an axis bound by one loop does not scope its siblings, and dead-but-still-emitted
+  statements retain their free axes until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
   materializes the cone feeding that
   operand into its own kernel and the contraction reads it back as an ordinary load. Every channel that computes
   one contraction — the same cone, weight and reduction once its free operand indices are abstracted — is one seam

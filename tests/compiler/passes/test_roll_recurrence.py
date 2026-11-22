@@ -169,7 +169,8 @@ def test_the_first_steps_readers_do_not_take_what_every_step_reads() -> None:
     # walk stores each where the stack wants it (``loop/fusion/020_store_through_copies``).
     assert [dim.as_static() for dim in last.shape] == [2, 8, 8] and [dim.as_static() for dim in outs.shape] == [2, 4, 4, 8]
     assert set(graph.outputs) == set(rolled.outputs), "no kernel after the walk"
-    assert {"q", "tril"} <= set(rolled.inputs), "the output's products are in the step, the matrix they read an input"
+    # The matrix the outputs' products read is computed in the step too (``loop/fusion/015_merge_into_step``).
+    assert set(rolled.inputs) == {"q", "k", "v", "state"}, "the output's products and the matrix they read are in the step"
 
 
 _RULE_FROM_A_STATE = """
@@ -555,14 +556,14 @@ def test_a_step_at_the_edge_of_its_matrix_rolls_with_the_rest() -> None:
     """A step that writes row ``i`` masks its store by ``i <= row < i + 1``. At the last row the normal form drops
     the bound the extent already gives, so that step's body no longer spells like the others. It is still the first
     step advanced, and the roll takes it: every row's step is in the kernel that carries the state, and what is left
-    beside it computes no product."""
+    beside it, the reader of the last state, computes no product."""
     n = 16
     rolled = Pipeline.build(LOOP_PASSES).run(graph_from_code(_ROWS.format(n=n))[0])
     loops = [node.op for node in rolled.nodes.values() if isinstance(node.op, LoopOp)]
     (scan,) = (op for op in loops if op.body.carries)
     (steps,) = (stmt for stmt in scan.body if isinstance(stmt, Loop))
     assert steps.axis.extent.as_static() == n - 1
-    assert len(loops) == 3 and not [op for op in loops if op is not scan and op.body.iter_of_type(Accum)]
+    assert len(loops) == 2 and not [op for op in loops if op is not scan and op.body.iter_of_type(Accum)]
 
     got, reference = _lifted_output(_ROWS.format(n=8), "a")
     np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)

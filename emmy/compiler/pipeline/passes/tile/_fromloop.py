@@ -683,18 +683,21 @@ def _peel(body: Body) -> tuple[list, list, list[Statement]]:
 
 
 def _under(cell: list[Statement], outer: tuple[Axis, ...]) -> Body:
-    """``cell`` with every carried state indexed by the ``outer`` coordinates too, behind the step: a parallel
-    loop around the one that carries a state runs the recurrence once per trip, each from the seed, so the state has
-    a cell for each, and the steps may then stand outside it."""
+    """``cell`` with every carried state indexed by the ``outer`` coordinates too, behind the step, where its cell
+    does not hold them already: a parallel loop around the one that carries a state runs the recurrence once per
+    trip, each from the seed, so the state has a cell for each, and the steps may then stand outside it."""
     body = Body(cell)
-    lead = tuple(Var(axis.name) for axis in outer if axis.extent != 1)
-    states = {carry.name for carry in body.carries}
-    if not lead or not states:
+    lead = {
+        carry.name: tuple(Var(axis.name) for axis in outer if axis.extent != 1 and not any(entry == Var(axis.name) for entry in carry.cell))
+        for carry in body.carries
+    }
+    if not any(lead.values()):
         return body
 
     def indexed(stmt: Statement) -> Statement:
-        if isinstance(stmt, Carry) or (isinstance(stmt, Load) and stmt.input in states):
-            return stmt.replace(index=(stmt.index[0], *lead, *stmt.index[1:]))
+        name = stmt.name if isinstance(stmt, Carry) else stmt.input if isinstance(stmt, Load) else None
+        if lead.get(name):
+            return stmt.replace(index=(stmt.index[0], *lead[name], *stmt.index[1:]))
         return stmt
 
     return body.map(indexed)

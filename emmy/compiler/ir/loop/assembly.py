@@ -266,6 +266,11 @@ class Splicer(BodyBuilder):
     # -- Seed: every selected root Write, with its value queued -------------
 
     def _seed(self) -> None:
+        # A carried state's definition is a store no reader asks for: every one a loop holds is kept, where it
+        # stands, and its value demanded like a root's. A load of the state is an ordinary load.
+        for tag, meta in self.loops.items():
+            for carry, scope in meta.carries:
+                self.insert(carry.replace(value=self._ensure_dep(carry.value, tag, Sigma(), scope)), scope)
         for root_tag, output in self.roots:
             root = self.loops.get(root_tag)
             if root is None:

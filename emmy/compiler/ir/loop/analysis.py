@@ -43,6 +43,8 @@ class BodyAnalysis:
       that loop. Only present where the loop states one.
     - ``writes``: every ``Write`` stmt paired with the ``Scope`` it sits
       in — one entry per output, in body order.
+    - ``carries``: every ``Carry`` paired with its ``Scope`` the same way: a carried state's definition,
+      a store no reader outside the body asks for.
     - ``guards``: the predicate of the bare ``Cond`` a ``Write`` sits in, by the write's identity: a
       store that runs only where its guard holds (a scatter pointed past the end stores nothing).
     - ``live_axes``: SSA name → axis names transitively reachable through
@@ -59,6 +61,7 @@ class BodyAnalysis:
     live_axes: dict[str, frozenset[str]]
     guards: dict[int, Expression] = field(default_factory=dict)
     reduce_ranges: dict[str, tuple[Expression, Expression]] = field(default_factory=dict)
+    carries: tuple[tuple[Carry, Scope], ...] = ()
 
     @classmethod
     def from_body(cls, body: Body, enclosing: tuple[Axis, ...] = ()) -> BodyAnalysis:
@@ -69,6 +72,7 @@ class BodyAnalysis:
         reduce_axes: dict[str, Axis] = {}
         reduce_ranges: dict[str, tuple[Expression, Expression]] = {}
         writes: list[tuple[Write, Scope]] = []
+        carries: list[tuple[Carry, Scope]] = []
         guards: dict[int, Expression] = {}
 
         def walk(stmts: Body, scope: Scope, walked: tuple[Expression, Expression] | None = None) -> None:
@@ -93,7 +97,9 @@ class BodyAnalysis:
                         scopes[s.name] = scope
                 elif isinstance(s, Write):
                     writes.append((s, scope))
-                elif not isinstance(s, Carry):
+                elif isinstance(s, Carry):
+                    carries.append((s, scope))
+                else:
                     # Every other defining leaf — a load, an assignment, a selection, a call, a ``Let`` binding a
                     # literal or an index — binds its names at this scope; one it does not define reads as external.
                     for name in s.defines():
@@ -113,6 +119,7 @@ class BodyAnalysis:
             live_axes=bound.axis_dependencies,
             guards=guards,
             reduce_ranges=reduce_ranges,
+            carries=tuple(carries),
         )
 
     def observes_running_accumulator(self, write: Write, scope: Scope) -> bool:
