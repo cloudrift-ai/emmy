@@ -996,8 +996,9 @@ The dataset DB is the tune DB's tables in a file of their own, never read by a c
 every subcommand — never a default, so nothing here can touch the tune DB (`_data/dataset.db` in the examples, under
 the ignored `_data/`).
 `import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a golden file or
-a tune DB file; `--repository` adds every repository golden — the hardware goldens and each maintained recipe's, the
-set the priors are fit on under `--fresh` (README, "Fit the priors"). A golden file is the DB's shape, so the import
+a tune DB file; `--repository` adds every hardware golden, the set the priors are fit on under `--fresh` (README, "Fit
+the priors"). A recipe's golden is no training data: its rows reach the priors once promoted into the card's hardware
+golden. A golden file is the DB's shape, so the import
 goes row for row (`golden.evidence.import_file`), each row under the context of its own regime and the exact identity
 computed from its stored kernel (one whose body no longer lowers is skipped with a warning). A tune DB is an instance
 of the same schema: the rows it measured itself are copied under the keys it holds them by

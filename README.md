@@ -130,11 +130,12 @@ Successful measurements are saved so later compiles can reuse them when the kern
 ### Fit the priors
 
 The schedule prior ranks kernel schedules; the placement prior chooses how to split work into kernels. Both guide
-compilation when no compatible measurement is available. You can refit them from the repository's golden files in a
-[source checkout](#contributing), without a GPU:
+compilation when no compatible measurement is available. You can refit them from the hardware goldens in a
+[source checkout](#contributing), without a GPU. A recipe's golden is no training data until its rows are promoted
+into the card's hardware golden.
 
 ```bash
-# Load the repository goldens into a separate database
+# Load the hardware goldens into a separate database
 emmy db import --db _data/dataset.db --fresh --repository
 
 # Export a dataset for each prior

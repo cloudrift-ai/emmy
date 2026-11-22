@@ -1034,8 +1034,8 @@ one way in.
   none of whose rows is a measurement — a restamped one keeps its schedules and loses its microseconds — is held and
   simply contributes no row.
 - **Importing goes row for row.** `emmy db import` reads the golden files and tune DBs named on its command line, or
-  every repository golden (`--repository`: the hardware goldens and each maintained recipe's, the priors' training
-  set — README, "Fit the priors"); nothing by default. A golden file goes to the golden importer
+  every hardware golden (`--repository`: the priors' training set, which a recipe golden's rows join only once
+  promoted into the card's hardware golden — README, "Fit the priors"); nothing by default. A golden file goes to the golden importer
   (`golden.evidence.import_file`) once per regime it holds: `record_kernel`, `record_routing`, `record_perf`, each
   under the exact identity computed from the stored kernel's Loop IR, then `record_constants` for each target the
   rows reach. A stored kernel whose body no longer lowers is skipped with a warning, with its rows; a stale file is

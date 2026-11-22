@@ -8,7 +8,8 @@ commit away from the repository. No compile ever reads it, so what is imported i
 
 - ``import SOURCES…`` loads golden files and tune DB files (the way a card's measurements from a rented GPU reach the
   dataset). Nothing is loaded by default: the sources are named on the command line, or ``--repository`` names the
-  repository goldens, the README's "Fit the priors" workflow. A golden file is the DB's shape, so the import is a copy
+  hardware goldens, the README's "Fit the priors" workflow: the priors train on those alone, and a recipe golden's
+  row reaches them once it is promoted into its card's hardware golden. A golden file is the DB's shape, so the import is a copy
   (``golden.evidence.import_file``); a stale file is what ``emmy golden check`` names. A tune DB is an instance of
   the same schema, so the rows it measured itself are copied row for row (``SearchDB.import_measured``). A source's
   rows are filed under its kind and digest (``golden:`` for a golden file, ``tune:`` for a tune DB), and one the
@@ -52,8 +53,8 @@ def register_db_command(subparsers) -> None:
     pi.add_argument(
         "--repository",
         action="store_true",
-        help="Also import every repository golden — the hardware goldens and each maintained recipe's — the set the priors are "
-        "fit on and the reproduction gate holds them to (README, 'Fit the priors').",
+        help="Also import every hardware golden, the set the priors are fit on (README, 'Fit the priors'). A recipe's "
+        "golden is no training data: its rows reach the priors once promoted into the card's hardware golden.",
     )
     pi.set_defaults(func=handle_db_import)
 
@@ -105,10 +106,9 @@ def handle_db_import(args) -> None:
     path = Path(args.db).expanduser()
     sources = [Path(s).expanduser() for s in args.sources]
     if getattr(args, "repository", False):
-        from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden.repository import hardware_golden_paths  # noqa: PLC0415
 
-        with repository_golden_paths() as paths:
-            sources.extend(sorted(paths))
+        sources.extend(hardware_golden_paths())
     if not sources:
         logger.error("nothing to import: name a source, or --repository")
         sys.exit(2)
