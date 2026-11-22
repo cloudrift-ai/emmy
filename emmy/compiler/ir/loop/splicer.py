@@ -15,7 +15,8 @@ permutation bijections. The computed source's Write retargets through the
 layout chain, so a terminal layout does not force reduction reconstruction at
 its loads.
 
-Algorithm. Seed: every selected root ``Write``. Each iteration pops
+Algorithm. Seed: every selected root ``Write``, and every ``Carry`` a loop
+holds, a carried state's definition, kept where it stands. Each iteration pops
 one pending dep and emits its def, queueing that def's own deps.
 Resolution dispatches on the statement type:
 
