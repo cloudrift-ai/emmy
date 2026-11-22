@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from emmy.compiler.backend.paging import DECISIONS, MOVES, STATE, PageCopy, PagingProgram, PagingUpdate, PageTableUpdate
+from emmy.compiler.backend.paging import DECISIONS, MOVES, STATE, PageCopy, PageTableUpdate, PagingProgram, PagingUpdate
 from tests.compiler.helpers import requires_cuda
 
 PAGES, SLOTS, ELEMS, MOVED = 12, 3, 4, 4
@@ -29,7 +29,8 @@ class _Step(torch.nn.Module):
 
     def forward(self, marks, table, slot_page, page_slot, age, host, slot_address, clock, pages, slots):
         moves = torch.zeros(MOVED, dtype=torch.int64)
-        hit_slot, miss_slot, evicted_page, moved_page, moved_slot = self.decide(marks, slot_page, page_slot, age, clock, moves, moves.clone())
+        decided = self.decide(marks, slot_page, page_slot, age, clock, moves, moves.clone())
+        hit_slot, miss_slot, evicted_page, moved_page, moved_slot = decided
         slot_page, page_slot, age, clock = self.update(slot_page, page_slot, age, clock, hit_slot, miss_slot, evicted_page)
         table = self.table(table, host, slot_address, miss_slot, evicted_page)
         return table, slot_page, page_slot, age, self.copy(moved_page, moved_slot, pages, slots), clock

@@ -248,7 +248,10 @@ thread block, 34 us a run at 256 pages on the RTX 5090. Buffers of one program w
 share one page list (`paging._groups`): a MoE layer's expert codes and scales are read at one expert's index, so a
 launch that reads them takes one inspector, one decision and one state update over the first buffer's tables by
 name, then each buffer's page table update and copy. Their slots move in step, so every program that pages one of
-them pages them all. The programs are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
+them pages them all. One run serves every later launch of the group whose inspector reads nothing written since the
+first: its inspector marks the same page list ahead of the run, and the launch takes no run of its own. A MoE layer's
+gate-up and down launches read one selection, so they take one run; a run per launch paged the layer twice, the
+second moving nothing. The programs are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
 golden holds their rows at those sizes, so a serving compile picks the recorded kernels whatever its geometry. Each
 launch's inspector is a slice of a kernel, with no program a record run could bench. The pager's kernels lower with
 strict evidence off: a fork no row decides — an inspector's, or a kernel with nothing to re-bench alone — takes the

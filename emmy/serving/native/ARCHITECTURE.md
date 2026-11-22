@@ -148,10 +148,10 @@ both programs as they load (runtime `ARCHITECTURE.md`, "Cached generation"). The
 off the device, once, and the device holds the resident experts and the slots once; the trunk, the KV cache and the
 Gated DeltaNet state stay where they are. A prefill chunk lists more experts than the slots hold, and reads the misses
 past them in place over the link. The budget is fixed at preparation: a reused pack keeps the slots and resident experts
-it was prepared with. A layer's expert buffers share one page list, so each launch reading them takes one inspector
-and one paging run for all of them: 13 launches, then a page table update and a copy per buffer (3 each), so a paged
-launch adds 19 launches with 16-bit experts and 25 with FP8 ones, decode and prefill chunk alike, where a run per
-buffer added 28 and 56.
+it was prepared with. A layer's expert buffers share one page list, and its two expert launches read one selection,
+so the layer takes one paging run for both: an inspector per launch, 12 launches of decisions and state update, then
+a page table update and a copy per buffer (3 each). A paged layer adds 20 launches per step with 16-bit experts and 26
+with FP8 ones, decode and prefill chunk alike, where a run per launch added 38 and 50.
 
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
