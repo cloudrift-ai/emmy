@@ -23,7 +23,7 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Select, Statement
+from emmy.compiler.ir.stmt import Accum, Body, Let, Load, Loop, Select, Statement
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import (
     build_merged_region,
@@ -76,11 +76,12 @@ def _width(entry, step: str, extents: dict[str, int]) -> int | None:
 
 
 def stepped_stores(body: Body) -> tuple[Loop, _Stepped] | None:
-    """The loop that carries ``body``'s state, where it is the whole of the body and its steps are counted, and each
-    buffer the step stores at a cell that holds the step."""
-    if len(body) != 1 or not isinstance(body[0], Loop) or not body[0].carries or not body[0].axis.extent.is_static:
+    """The loop that carries ``body``'s state, where nothing but literals stands beside it and its steps are
+    counted, and each buffer the step stores at a cell that holds the step."""
+    loops = [stmt for stmt in body if not isinstance(stmt, Let)]
+    if len(loops) != 1 or not isinstance(loops[0], Loop) or not loops[0].carries or not loops[0].axis.extent.is_static:
         return None
-    loop, extents = body[0], _extents(body)
+    loop, extents = loops[0], _extents(body)
     if extents is None:
         return None
     found: dict[str, set[tuple[int, int]]] = {}
@@ -159,14 +160,13 @@ def in_step(graph: Graph, reader: LoopOp, stepped: _Stepped, steps: int) -> tupl
         op = LoopOp(body=Body((Loop(axis=Axis(step, steps), body=body.map(cut)),)))
     except ValueError:
         return None
-    if len(op.body) != 1 or not isinstance(op.body[0], Loop):
-        return None
+    loops = [stmt for stmt in op.body if not isinstance(stmt, Let)]
     inner = _extents(op.body)
-    if inner is None:
+    if len(loops) != 1 or not isinstance(loops[0], Loop) or inner is None:
         return None
     places: _Stepped = {}
     for write in op.body.writes:
-        widths = [(at, found) for at, entry in enumerate(write.index) if (found := _width(entry, op.body[0].axis.name, inner))]
+        widths = [(at, found) for at, entry in enumerate(write.index) if (found := _width(entry, loops[0].axis.name, inner))]
         if len(widths) != 1 or places.setdefault(write.output, widths[0]) != widths[0]:
             return None
     return op, places
