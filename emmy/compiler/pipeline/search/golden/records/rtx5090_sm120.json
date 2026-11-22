@@ -195851,5 +195851,16 @@
    "bindings":{"num_tokens":512},
    "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
    "knobs":{"REDUCE@map.1/reduce":"","REDUCE@map.1/reduce.2/map.1/inner":"","WORK":"","TILE":"","STAGE":"","RASTER":""},
-   "measurements":{"emmy_us":460.07999777793884,"reference_us":454.6319991350174,"reference_backend":"same-input-greedy","tried":50}}
+   "measurements":{"emmy_us":460.07999777793884,"reference_us":454.6319991350174,"reference_backend":"same-input-greedy","tried":50}},
+  {"name":"k_9e1456e6e012.k_528d54214836.c0",
+   "kernel":1632,
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f8","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.0587499709799886,"reference_us":2.078418154269457,"reference_backend":"same-input-greedy"}},
+  {"name":"k_86e9bc9bd715.k_b4ff9aebba47.c0",
+   "kernel":2006,
+   "bindings":{"num_tokens":512},
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f4","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":0.8587377378717065,"reference_us":2.063133753836155,"reference_backend":"same-input-greedy"}}
  ]}

@@ -187279,5 +187279,21 @@
    "kernel":192,
    "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
    "knobs":{"TILE@map.1/inner":"f1x12","TILE@map.1/inner.2/map.1/inner":"","REDUCE@map.1/inner":"","REDUCE@map.1/inner.2/map.1/inner":"","STAGE@map.1/inner":"d1/smem","STAGE@map.1/inner.2/map.1/inner":"","WORK":"t16x16","RASTER":"gm8"},
-   "measurements":{"emmy_us":330.159991979599,"reference_us":1052.2559881210327,"reference_backend":"same-input-greedy","tried":74}}
+   "measurements":{"emmy_us":330.159991979599,"reference_us":1052.2559881210327,"reference_backend":"same-input-greedy","tried":74}},
+  {"name":"k_86e9bc9bd715.k_b4ff9aebba47.c0",
+   "kernel":2146,
+   "bindings":{"num_tokens":512},
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f4","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.0418558958917856,"reference_us":2.1859765984117985,"reference_backend":"same-input-greedy"}},
+  {"name":"k_849cd231ef4b.k_849cd231ef4b.c0",
+   "kernel":290,
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","REDUCE@map.1/inner":"","REDUCE@map.2/twist":"","REDUCE@map.2/twist.1/inner":"","REDUCE@map.3/reduce":"","STAGE@map.1/inner":"","STAGE@map.2/twist.1/inner":"d3/smem-tma","TILE@map.1/inner":"","TILE@map.2/twist.1/inner":"f1x14","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":"t16x16"},
+   "measurements":{"emmy_us":19369.983673095703,"reference_us":20056.79988861084,"reference_backend":"same-input-greedy"}},
+  {"name":"k_08c84e989ea1.k_4fa3dbc32aa9.c0",
+   "kernel":1214,
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.4112896751612425,"reference_us":1.6644848510622978,"reference_backend":"same-input-greedy"}}
  ]}
