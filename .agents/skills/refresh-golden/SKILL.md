@@ -201,7 +201,8 @@ GLOSSARY "Candidate file"), which carries the golden's programs, kernels and dec
 `emmy candidates restamp` and then `emmy candidates build`, which copies the golden's tables again and keeps the
 candidate rows whose group the golden still holds.
 Keep the prior reproduction gate green (AGENTS.md finalization step 22): a refreshed hardware golden refits both priors
-in the same PR; a refreshed recipe golden the shipped priors do not reproduce is refit for or tagged `prior-pending`.
+in the same PR. The gate holds only hardware goldens: a refreshed recipe golden bears on the priors only through the
+rows promoted into the card's hardware golden, which then refits.
 
 ## Record-run traps
 
