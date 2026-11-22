@@ -96,7 +96,7 @@ jobs:
 
       - uses: ./.github/actions/setup-emmy
 
-      - name: Export the repository goldens
+      - name: Export the hardware goldens
         run: |
           ./venv/bin/emmy db import --db _data/ci-prior.db --fresh --repository
           ./venv/bin/emmy db export --db _data/ci-prior.db _data/ci-prior --space "$SPACE"

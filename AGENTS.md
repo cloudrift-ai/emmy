@@ -403,11 +403,10 @@ Then update the documentation:
 
 Then run the gates, in this order, after every edit above is in:
 
-22. **Keep the prior reproduction gate green.** A PR that changes a hardware golden refits both priors (README, "Fit
-    the priors") and commits the weights. A PR that adds or changes a recipe golden — model onboarding, a re-record —
-    leaves the weights to nightly refresh while the gate passes; when it does not, either refit or tag the recipe
-    `prior-pending`, which skips its golden in the gate until a refit reproduces it, and that refit drops the tag.
-    Never lower the tolerance, and never tag a hardware golden's failure away.
+22. **Keep the prior reproduction gate green.** The priors train on the hardware goldens, and the gate holds them to
+    those alone. A PR that changes a hardware golden refits both priors (README, "Fit the priors") and commits the
+    weights. A recipe golden bears on neither: its rows reach the priors once promoted into the card's hardware
+    golden, which is a hardware golden change. Never lower the tolerance.
 23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a repository golden stops being the fresh lowering, `emmy golden restamp`
     applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the PR body —
