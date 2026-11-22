@@ -44,6 +44,7 @@ import statistics
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_dual_rank
 from emmy.compiler.pipeline.search.prior.report import Summary, rank_metrics
+from emmy.compiler.pipeline.search.progress import Progress
 
 # The ``skipped`` reason for golden kinds the fitter has no group builder for
 # (attention / rms_norm / softmax) — counted per card as ``out_of_scope``, distinct from
@@ -140,9 +141,11 @@ def run_folds(groups: list[GoldenGroup], *, trainer, k: int = DEFAULT_FOLDS) -> 
     train_acc: dict[str, tuple[GoldenGroup, list[int], list[int]]] = {}
     fold_medians: dict[str, dict] = {}
 
+    folds = Progress("cross-validation", k, "folds")
     for f in range(k):
         train = [c for c in groups if by_shape[c.shape] != f]
         hold = [c for c in groups if by_shape[c.shape] == f]
+        folds.advance()
         if not hold:
             continue
         model = trainer.fit(train)

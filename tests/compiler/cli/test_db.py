@@ -86,6 +86,29 @@ def test_export_writes_a_dataset_the_readers_load(tmp_path):
     assert (tmp_path / "dataset" / "manifest.json").read_bytes() == first
 
 
+def test_import_and_export_time_their_phases_and_name_the_slowest_pools(tmp_path, caplog):
+    """Both commands log a timing summary at the end; the export also writes it beside the manifest, never into
+    it: every phase it ran, the pools per card, and each slow pool by kernel, card, sizes and the rows it
+    enumerated."""
+    import json
+    import logging
+
+    golden = _golden(tmp_path, "current", 500.0)
+    with caplog.at_level(logging.INFO, logger="emmy.progress"):
+        handle_db_import(Namespace(sources=[str(golden)], db=str(tmp_path / "dataset.db"), fresh=True))
+    assert "timing: emmy db import" in caplog.text and f"source={golden.name}" in caplog.text
+    args = Namespace(out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1)
+    handle_db_export(args)
+    timing = json.loads((tmp_path / "dataset" / "timing.json").read_text())
+    phases = {p["name"]: p for p in timing["phases"]}
+    assert list(phases) == ["read golden pools", "golden pools", "measured groups", "write dataset"]
+    [slowest] = phases["golden pools"]["slowest"]
+    card = CARDS[tuple(corpus.load_case(corpus.CASES_DIR / _CASE).document.compute_cap)]
+    assert slowest["card"] == card and slowest["kernel"] and slowest["rows"] >= 1 and slowest["total"] >= 1 and "sizes" in slowest
+    assert phases["golden pools"]["by_card"] == {card: 1} and timing["counts"]["schedule pools"] == {card: 1}
+    assert "timing" not in json.loads((tmp_path / "dataset" / "manifest.json").read_text())["provenance"]
+
+
 def test_placement_export_reads_the_instance_alone(tmp_path):
     """A placement export opens no golden file: what a layout fork is offered on came in with the import."""
     from emmy.compiler.pipeline.search.dataset import Dataset

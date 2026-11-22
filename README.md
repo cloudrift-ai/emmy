@@ -150,6 +150,9 @@ emmy eval prior _data/schedule
 emmy eval prior _data/placement
 ```
 
+Each command logs a progress line about every 30 seconds and a timing summary at the end, with the slowest pools; the
+export and the fit also write that summary to `timing.json` beside their output.
+
 To experiment without replacing the shipped weights, fit a separate candidate and compare it on the same dataset:
 
 ```bash

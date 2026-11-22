@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from multiprocessing import get_context
 
 from emmy import config
 from emmy.compiler.pipeline.search.dataset import GoldenPool
+from emmy.compiler.pipeline.search.progress import timed_map
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +111,20 @@ def reproduce_schedule(pools: Sequence[GoldenPool], *, kernel: str | None = None
     """The schedule verdicts of every matmul pool (the kernels whose schedule the greedy ranks), one per pool, in
     the pools' order. ``jobs`` compiles that many pools side by side, one pool per spawned worker process, each
     drawing its cold pools in-process so the workers do not multiply."""
+    from emmy.compiler.pipeline.search.ranking import describe_pool  # noqa: PLC0415
+
     tasks = [pool for pool in pools if pool.kernel.formed and not (kernel and kernel not in pool.kernel.name)]
-    if jobs == 1:
-        verdicts = map(_schedule_verdict, tasks)
-    else:
-        context = get_context("spawn")
-        with ProcessPoolExecutor(jobs, mp_context=context, initializer=config.set_workers, initargs=(1,)) as workers:
-            verdicts = list(workers.map(_schedule_verdict, tasks, chunksize=1))
+    verdicts = timed_map(
+        _schedule_verdict,
+        tasks,
+        name="schedule reproduction",
+        jobs=jobs,
+        mp_context=get_context("spawn"),
+        initializer=config.set_workers,
+        initargs=(1,),
+        describe=lambda pool, _verdict: describe_pool(pool),
+        card=lambda pool: pool.gpu,
+    )
     return [verdict for verdict in verdicts if verdict is not None]
 
 
@@ -147,7 +154,7 @@ def reproduce_placement(
     ranks a recorded arm first, as a deploy would take it there. The recorded decisions in scope are those of
     ``among`` — every placement pool of the golden, where ``pools`` is a slice of them — or of ``pools`` itself.
     ``jobs`` walks that many pools side by side, one pool per spawned worker process, in the pools' order."""
-    from emmy.compiler.pipeline.search.ranking import placement_decisions  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import describe_pool, placement_decisions  # noqa: PLC0415
 
     among = pools if among is None else among
     tasks = [
@@ -155,11 +162,15 @@ def reproduce_placement(
         for pool in pools
         if pool.kernel.formed and not (kernel and kernel not in pool.kernel.name)
     ]
-    if jobs == 1:
-        verdicts = map(_placement_verdicts, tasks)
-    else:
-        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
-            verdicts = list(workers.map(_placement_verdicts, tasks, chunksize=1))
+    verdicts = timed_map(
+        _placement_verdicts,
+        tasks,
+        name="placement reproduction",
+        jobs=jobs,
+        mp_context=get_context("spawn"),
+        describe=lambda task, found: {**describe_pool(task[0]), "forks": len(found)},
+        card=lambda task: task[0].gpu,
+    )
     return [verdict for found in verdicts for verdict in found]
 
 

@@ -184,7 +184,7 @@ def test_decode_batches_of_sliced_experts_ride_the_fixed_slots(rows, slices, pat
         _slots_ok=True,
         _expert_slices=slices,
         _decode_bucket=16,
-        _moe_combine_slots=lambda moe, xn, ids: taken.append("slots") or xn,
+        _moe_combine_slots=lambda moe, xn, ids, shared: taken.append("slots") or xn,
         _moe_combine=lambda moe, xn, ids: taken.append("routed") or xn,
     )
     runner.moe_slot_width = EmmyGenRunner.moe_slot_width.fget(runner)
