@@ -90,8 +90,7 @@ def stamp_types(body: Body, buf_dtypes: dict[str, DataType], known: dict[str, Da
 def _with_states(body: Body, buf_dtypes: dict[str, DataType]) -> dict[str, DataType]:
     """``buf_dtypes`` with the carried states of ``body``: a state is a buffer of the body's own, at the dtype its
     ``Carry`` declares, f32 where it declares none."""
-    carries = body.carries
-    return {**buf_dtypes, **{carry.name: carry.dtype or F32 for carry in carries}} if carries else buf_dtypes
+    return {**buf_dtypes, **{carry.name: carry.dtype or F32 for carry in body.carries}}
 
 
 def value_dtypes(body: Body) -> dict[str, DataType]:

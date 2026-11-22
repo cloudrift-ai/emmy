@@ -353,8 +353,7 @@ def _declared(stmt: Statement, dtype) -> str:
 def _(stmt: Load, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
     if stmt.input in ctx.states:
-        # A carried state: the slot the previous step left, at the cell past the step. After the loop that slot
-        # holds the last step.
+        # A carried state: the slot the previous step left (the last step, after the loop), at the cell past the step.
         dtype = ctx.ssa_dtypes[stmt.input]
         ctx.ssa_dtypes[stmt.name] = dtype
         return [f"{pad}{type_name(dtype)} {stmt.name} = {stmt.input}[{render_index(stmt.input, stmt.index[1:], ctx)}];"]

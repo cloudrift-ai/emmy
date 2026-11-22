@@ -533,10 +533,9 @@ def realize_carry_split(match: Match, root: Node, cta: int, pairs: int = 0) -> G
     starts = [f"{out.name}__start{level or ''}" for level in range(pairs + 1)]
 
     def indexed(stmts: Body, lead: tuple[Axis, ...], seed: str) -> Body:
-        # The state under the lead coordinates too — a part, a probe — and seeded from ``seed``. Its step is the
-        # trip of the sliced loop, whatever the step of the whole walk a part's statements read.
-        prefix = tuple(Var(axis.name) for axis in lead)
-        trip = Var(loop.axis.name)
+        # The state under the lead coordinates too — a part, a probe — and seeded from ``seed``, its step the trip of
+        # the sliced loop.
+        prefix, trip = tuple(Var(axis.name) for axis in lead), Var(loop.axis.name)
 
         def rewrite(stmt):
             if isinstance(stmt, Carry):
