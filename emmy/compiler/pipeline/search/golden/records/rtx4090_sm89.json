@@ -175016,5 +175016,21 @@
    "kernel":918,
    "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
    "knobs":{"WORK":"t64","TILE":"","REDUCE":"coop/v4","STAGE":"","RASTER":""},
-   "measurements":{"emmy_us":2.507113851606846,"reference_us":2.735213143751025,"reference_backend":"same-input-greedy","tried":41}}
+   "measurements":{"emmy_us":2.507113851606846,"reference_us":2.735213143751025,"reference_backend":"same-input-greedy","tried":41}},
+  {"name":"k_53edd135f543.k_53edd135f543.c0",
+   "kernel":120,
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","REDUCE":"coop/v2","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":"t256"},
+   "measurements":{"emmy_us":9.489066898822784,"reference_us":9.947428479790688,"reference_backend":"same-input-greedy"}},
+  {"name":"k_53edd135f543.k_53edd135f543.c0",
+   "kernel":120,
+   "pins":{"FAST_MATH":false,"FAST_EXP":false,"F16_MMA_F32_ACC":false,"FP8_MMA":false,"FAST_DIV":false,"FAST_SQRT":false,"FLUSH_TO_ZERO":false,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"False","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","REDUCE":"coop/v16","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":"t8x16"},
+   "measurements":{"emmy_us":9.380346164107323,"reference_us":9.954622946679592,"reference_backend":"same-input-greedy"}},
+  {"name":"k_d678d1e6a7a1.c0",
+   "kernel":390,
+   "bindings":{"num_tokens":1},
+   "pins":{"FAST_MATH":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f2","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":0.8973742369562387,"reference_us":0.9032204980030656,"reference_backend":"same-input-greedy"}}
  ]}

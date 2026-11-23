@@ -193286,5 +193286,15 @@
    "kernel":814,
    "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
    "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f2","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
-   "measurements":{"emmy_us":1.186418579891324,"reference_us":1.432239543646574,"reference_backend":"same-input-greedy"}}
+   "measurements":{"emmy_us":1.186418579891324,"reference_us":1.432239543646574,"reference_backend":"same-input-greedy"}},
+  {"name":"k_f5e33267ddf1.k_29f06d57d998.c0",
+   "kernel":820,
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f2","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.1893658665940166,"reference_us":1.4280976029112935,"reference_backend":"same-input-greedy"}},
+  {"name":"k_a6f5e10b18f7.c0",
+   "kernel":423,
+   "pins":{"FAST_MATH":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f2","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.1649,"reference_us":1.169387367554009,"reference_backend":"same-input-greedy"}}
  ]}

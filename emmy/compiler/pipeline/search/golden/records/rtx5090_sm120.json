@@ -195862,5 +195862,15 @@
    "bindings":{"num_tokens":512},
    "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
    "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f4","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
-   "measurements":{"emmy_us":0.8587377378717065,"reference_us":2.063133753836155,"reference_backend":"same-input-greedy"}}
+   "measurements":{"emmy_us":0.8587377378717065,"reference_us":2.063133753836155,"reference_backend":"same-input-greedy"}},
+  {"name":"k_b6f8528d3346.k_1a28f25ae52c.c0",
+   "kernel":2242,
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f2","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.0036589810624719,"reference_us":2.0556654781103134,"reference_backend":"same-input-greedy"}},
+  {"name":"k_c901399d975e.k_240a722f496e.c0",
+   "kernel":2276,
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f4","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":0.843,"reference_us":1.2213749578222632,"reference_backend":"same-input-greedy"}}
  ]}

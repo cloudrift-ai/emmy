@@ -187295,5 +187295,15 @@
    "kernel":1214,
    "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
    "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
-   "measurements":{"emmy_us":1.4112896751612425,"reference_us":1.6644848510622978,"reference_backend":"same-input-greedy"}}
+   "measurements":{"emmy_us":1.4112896751612425,"reference_us":1.6644848510622978,"reference_backend":"same-input-greedy"}},
+  {"name":"k_604e6011838a.k_e15e6a942feb.c0",
+   "kernel":962,
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.61702127661556,"reference_us":1.700721331872046,"reference_backend":"same-input-greedy"}},
+  {"name":"k_695d803d1b1b.k_d4dad3dbd9cf.c0",
+   "kernel":1191,
+   "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
+   "knobs":{"FAST_EXP":"True","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f4","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.0932,"reference_us":1.4538397081196308,"reference_backend":"same-input-greedy"}}
  ]}
