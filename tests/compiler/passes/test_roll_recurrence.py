@@ -192,8 +192,8 @@ def _read_at(offset: int, scale: str = "g") -> str:
 
 
 def test_the_proof_gives_how_far_each_integer_moves_and_names_what_differs() -> None:
-    """Two programs are one step where every integer of the first moves as far again in each later one. The proof
-    gives the first program at any step, and says which integer or which buffer keeps a program from being one."""
+    """Programs are one step where every integer of the first moves as far again in each later one. The proof gives
+    the first program at any step, and says which integer or which buffer keeps a program from being one."""
     from importlib import import_module
 
     from emmy.compiler.ir.stmt import parse_body
@@ -201,12 +201,35 @@ def test_the_proof_gives_how_far_each_integer_moves_and_names_what_differs() -> 
     roll = import_module("emmy.compiler.pipeline.passes.loop.fusion._recurrence")
     steps = [LoopOp(body=parse_body(_read_at(4 * index))).body for index in range(3)]
     proved = roll.prove(*steps)
-    assert 4 in proved.deltas and roll._spelling(LoopOp(body=proved.at(2)).body) == roll._spelling(steps[2])
-    with pytest.raises(roll.Unproven, match="step 2 .* its integer . is 9, where 0 moving 4 a step gives 8"):
+    assert proved.moving == [(0, 4)] and proved.steps == 3
+    assert roll._spelling(LoopOp(body=proved.at(2)).body) == roll._spelling(steps[2])
+    assert "4 * `step`" in str(LoopOp(body=proved.at("step", 3)).body)
+    with pytest.raises(roll.Unproven, match="step 2 .* an integer of step 2 is 9, where 0 moving 4 a step gives 8"):
         roll.prove(steps[0], steps[1], LoopOp(body=parse_body(_read_at(9))).body)
     with pytest.raises(RuleSkipped, match=r"step 1 reads \['h'\] where step 0 reads \['g'\]") as other:
         roll.prove(steps[0], LoopOp(body=parse_body(_read_at(4, "h"))).body)
     assert not isinstance(other.value, roll.Unproven), "other buffers are other computations, not a step unproved"
+
+
+def test_a_step_the_normal_form_spells_otherwise_is_held_to_the_step_with_its_number_put_in() -> None:
+    """The step at the edge of its matrix: its mask lost the bound the extent already gives, so it is not the first
+    step's statements with other integers. It is the step with its step number put in, in normal form."""
+    from importlib import import_module
+
+    from emmy.compiler.ir.stmt import parse_body, prove_steps
+
+    roll = import_module("emmy.compiler.pipeline.passes.loop.fusion._recurrence")
+
+    def row(index: int) -> str:
+        return (
+            f"for a0 in 0..5:\n  in0 = load x[a0]\n  in1 = load s[a0]\n  v0 = select:\n"
+            f"    in0 when {index} <= a0 && a0 < {index + 1}\n    in1 when true\n  out[a0] = v0"
+        )
+
+    steps = [LoopOp(body=parse_body(row(index))).body for index in range(1, 5)]
+    assert "a0 < 5" not in str(steps[3]), "the last row's mask ends where the axis does"
+    assert prove_steps(steps).steps == 3, "the statements of the first three are one step's"
+    assert sorted(roll.prove(*steps).moving) == [(1, 1), (2, 1)]
 
 
 def test_steps_of_different_sizes_are_not_spliced_with_their_readers(monkeypatch) -> None:

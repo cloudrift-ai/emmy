@@ -11,8 +11,8 @@ structure is still plain. The states are a chain of same-shaped nodes of one bod
 on the last; what lies between two of them is one step; and the steps differ only in the integer
 literals they read and mask at — an offset, a slice bound — each advancing affinely with the step.
 
-Each step is spliced into one body by the fusion rule's own splicer, the first step's body with its
-literals advanced by ``j`` must normalize to step ``j``'s, and only then is the chain replaced — by
+Each step is spliced into one body by the fusion rule's own splicer, the steps must be the first step's body with
+its integers moved ``j`` steps on (:func:`prove`), and only then is the chain replaced — by
 one kernel that carries the state (``Carry``) from the tensor the loop started with, stores what
 each step defined (the last state alone, where nothing but the next step reads a state), and by one
 slice of those stores per replaced buffer. A chain whose states alternate two bodies (a Sinkhorn row
@@ -27,7 +27,7 @@ gives, is taken with the chain where it is the first step advanced (:func:`_chai
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import lru_cache
 
 from emmy.compiler.dim import Dim
@@ -35,10 +35,9 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
-from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Statement, Write, prove_steps
 from emmy.compiler.pipeline import Match, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of
 
@@ -280,52 +279,6 @@ def _spliced(graph: Graph, region: set[str], state: str, stored: str) -> tuple[B
     return LoopOp(body=Body(merged.body).rename_buffers(names)).body, live, tuple(constants)
 
 
-def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...], by: int | Var, steps: int = 1) -> Body:
-    """The step read ``by`` steps later: every literal of the first step advanced by its delta —
-    exactly, for a step number, or as an expression of the step axis for the rolled body. A
-    reduction whose extent grows with the step takes its widest extent in the rolled body and walks
-    the range of the step it is in, no wider than a step the chain ran."""
-
-    def value(literal: int, delta: int) -> Expression:
-        if isinstance(by, int):
-            return Literal(literal + delta * by, "int")
-        return (
-            BinaryExpression("+", Literal(literal, "int"), BinaryExpression("*", by, Literal(delta, "int")))
-            if delta
-            else Literal(literal, "int")
-        )
-
-    def fold(expression: Expression) -> Expression:
-        # The abstraction lifts every affine anchor, so a zero one comes back as ``+ 0``.
-        if isinstance(expression, BinaryExpression) and expression.op == "+" and expression.right == Literal(0, "int"):
-            return expression.left
-        return expression
-
-    sigma = Sigma({f"__lit{index}": value(literal, delta) for index, (literal, delta) in enumerate(zip(literals, deltas, strict=True))})
-
-    def folds(stmt: Statement) -> Statement:
-        if isinstance(stmt, (Write, Carry)):
-            raise RuleSkipped("a loop whose extent grows with the step stores")
-        return stmt
-
-    def advance(stmt: Statement) -> Statement:
-        if isinstance(stmt, Loop):
-            expression = stmt.axis.extent.expression
-            if not (isinstance(expression, Var) and expression.name.startswith("__lit")):
-                return stmt
-            literal, delta = literals[int(expression.name[5:])], deltas[int(expression.name[5:])]
-            if isinstance(by, int) or delta == 0:
-                return stmt.replace(axis=replace(stmt.axis, extent=Dim(literal + delta * (by if isinstance(by, int) else 0))))
-            widest = max(literal, literal + delta * (steps - 1))
-            walked = (Literal(0, "int"), value(literal, delta))
-            return stmt.replace(axis=replace(stmt.axis, extent=Dim(widest)), range=walked, body=stmt.body.map(folds))
-        if stmt.nested():
-            return stmt
-        return stmt.rewrite(lambda name: name, sigma).map_expressions(lambda expression: expression.rebuild(fold))
-
-    return abstract.map(advance)
-
-
 def _spelling(body: Body) -> tuple[str, tuple[str, ...]]:
     """What two steps must agree on to be one computation: the body's structure, blind to the names
     of values and axes and to the order of commutative operands, and the buffer that fills each of its roles.
@@ -339,56 +292,29 @@ class Unproven(RuleSkipped):
     state — and are not proved to be one: the difference :func:`prove` names."""
 
 
-@dataclass(frozen=True)
-class Advance:
-    """What :func:`prove` found: the body the programs share once their integer literals are taken out, the first
-    program's literals, and how far each moves from one program to the next."""
+def prove(*programs: Body):
+    """The proof that ``programs`` are one step taken again and again, and that step at any place in the walk
+    (the proof's ``at``): each program is the first with every integer of its coordinate expressions and static
+    extents moved as far as it moves from the first to the second, as many times as the program is steps later.
 
-    abstract: Body
-    literals: tuple[int, ...]
-    deltas: tuple[int, ...]
-
-    def at(self, by: int | Var, steps: int = 1) -> Body:
-        """The first program ``by`` steps later (:func:`_advanced`)."""
-        return _advanced(self.abstract, self.literals, self.deltas, by, steps)
-
-    def difference(self, body: Body, by: int) -> str | None:
-        """How ``body`` differs from the first program ``by`` steps later, or ``None`` where it is that program:
-        the two spell alike once the advanced body is in normal form, as ``body`` is."""
-        if _spelling(LoopOp(body=self.at(by)).body) == _spelling(body):
-            return None
-        if _literal_free_key(body) != self.abstract.structural_key(structural=False):
-            ours, theirs = dict(_census(self.abstract)), dict(_census(body))
-            unlike = (kind for kind in sorted(ours | theirs) if ours.get(kind) != theirs.get(kind))
-            kinds = ", ".join(f"{kind} {ours.get(kind, 0)} against {theirs.get(kind, 0)}" for kind in unlike)
-            return f"it is another body ({kinds or 'the same statements, arranged otherwise'})"
-        held = _literals_abstracted(body)[1]
-        for at, (literal, delta, found) in enumerate(zip(self.literals, self.deltas, held, strict=False)):
-            if found != literal + delta * by:
-                return f"its integer {at} is {found}, where {literal} moving {delta} a step gives {literal + delta * by}"
-        return "it holds the integers the steps before it give, and the normal form spells it otherwise"
-
-
-def prove(*programs: Body) -> Advance:
-    """The proof that ``programs`` are one step taken again and again: each is the first with every integer literal
-    moved as far as it moves from the first to the second, as many times as the program is steps later. The first
-    two give the body and the moves; every program, those two among them, is then held to it. Raises
-    :class:`Unproven` with the first difference."""
-    first, second = programs[0], programs[1]
+    The crate's proof (``prove_steps``) pairs the statements of two programs by what they compute and where they
+    nest, never by where they stand, and holds for the programs that are the first one's statements with other
+    integers. It stops at a program the normal form spells otherwise: the step at the edge of its matrix, whose
+    mask lost the bound the extent already gives. Such a program is held to the step with its step number put in,
+    in normal form. Raises :class:`Unproven` with the first difference."""
     reads = [frozenset(load.input for load in body.loads) for body in programs]
     for index, read in enumerate(reads):
         if read != reads[0]:
             # Steps that read other buffers are other computations: the layers of a model, each with its weights.
             raise RuleSkipped(f"step {index} reads {sorted(read - reads[0])} where step 0 reads {sorted(reads[0] - read)}")
-    abstract, literals = _literals_abstracted(first)
-    later = _literals_abstracted(second)[1]
-    if _literal_free_key(second) != _literal_free_key(first) or len(later) != len(literals):
-        proved = Advance(abstract, literals, (0,) * len(literals))
-        raise Unproven(f"step 1 is not step 0 a step later: {proved.difference(second, 0) or 'it holds other integers'}")
-    proved = Advance(abstract, literals, tuple(b - a for a, b in zip(literals, later, strict=True)))
-    for index, body in enumerate(programs):
-        if (difference := proved.difference(body, index)) is not None:
-            raise Unproven(f"step {index} is not step 0 {index} steps later: {difference}")
+    try:
+        proved = prove_steps(list(programs))
+    except ValueError as why:
+        raise Unproven(f"step 1 is not step 0 a step later: {why}") from None
+    for index in range(proved.steps, len(programs)):
+        if _spelling(LoopOp(body=proved.at(index)).body) != _spelling(programs[index]):
+            why = proved.stopped if index == proved.steps else "it is another body with its step number put in"
+            raise Unproven(f"step {index} is not step 0 {index} steps later: {why}")
     return proved
 
 
@@ -503,7 +429,7 @@ def _replaced(match: Match, chain: list[Node], regions: list[set[str]], states: 
         raise RuleSkipped("the steps are not alike")
 
     spliced = [_spliced(graph, region, state, stored.id) for region, state, stored in zip(regions, states, chain, strict=True)]
-    step, kept, constants = spliced[0]
+    _, kept, constants = spliced[0]
     # Fused whole, a chain re-derives a state only when a step reads it at another cell, or when a
     # state is read by anything but the next step. Without either it is straight-line code, which
     # fusion inlines once; rolling it would only store every state.
@@ -525,7 +451,11 @@ def _replaced(match: Match, chain: list[Node], regions: list[set[str]], states: 
 
     seed: float | str = 0.0 if _is_zero(graph, states[0]) else states[0]
     stores = tuple(f"{chain[0].id}__steps{index}" for index in range(len(kept)))
-    body = _rolled(proved.at(Var("step"), len(regions)), len(regions), seed, every)
+    try:
+        step = proved.at("step", len(regions))
+    except ValueError as why:
+        raise RuleSkipped(str(why)) from None
+    body = _rolled(step, len(regions), seed, every)
     back = {f"{_STEP}{i}": name for i, name in enumerate(stores)}
     back.update((f"{_CONST}{index}", name) for index, (name, _) in enumerate(constants))
     rolled = LoopOp(body=body.rename_buffers(back))

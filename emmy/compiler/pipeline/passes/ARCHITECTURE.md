@@ -836,16 +836,25 @@ chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-d
 `O(j)`. No cut repairs that — a cut materializes within one target, and chunk `j+1`'s target recomputes what chunk
 `j`'s stored.
 
-`loop/fusion/005_roll_recurrence` rolls it BEFORE fusion inlines it, while the structure is still plain. The states
+The merge rule rolls it where it would have inlined it (`loop/fusion/_recurrence`, entered from
+`010_merge_loop_ops`): before it splices a region it rolls every recurrence the graph holds, and the regions it
+splices are those of the graph the rolls leave, since a kernel that carries a state is in no region. A roll changes
+the regions after the rules ahead of the merge have read them, so once every recurrence has rolled the merge asks for
+the pass's rules to be scanned again from the first (`Match.rescan`): the loops around the new kernel read through
+the copies of their new regions before any of them is spliced. The states
 are a chain of nodes of one shape — the same body once its integer literals are taken out (load
 anchors, mask bounds, static loop extents) — each depending on the last. A step is what lies between two of
 them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
 reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
 shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a
 Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Each step is spliced into one body by the
-fusion rule's own splicer under step-independent buffer names, the literals'
-deltas are read off the first two, and the first step advanced `j` times must spell step `j`'s body for every `j`:
-the same structure, and the same buffer in each of its roles, whichever way round a product spells its two reads. A
+fusion rule's own splicer under step-independent buffer names, and the steps must be one step taken again and again
+(`prove`). The proof is the crate's (`numbering::prove`, `ir/ARCHITECTURE.md`): the steps number alike with the
+integers of their coordinate expressions and static extents apart, statement by statement and scope by scope, and
+every such integer moves by one amount per step. It pairs statements by what they compute and where they nest, never
+by where they stand. A step the normal form spells otherwise, the one at the edge of its matrix whose mask lost the
+bound the extent already gives, is held to the step with its step number put in, in normal form. Steps that read
+other buffers are other computations, the layers of a model each with its weights, and are no chain at all. A
 chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one it
 writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
 straight-line code that fusion inlines once, and rolling it would only store every state. This is a structural

@@ -208,6 +208,8 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     functions += ["reduce_strength"]
     # The input check of a code generator: the body says every type and every conversion, and asks for nothing.
     functions += ["check_types", "check_input"]
+    # The proof that bodies are one step taken again and again, which the roll of a recurrence asks of its copies.
+    functions += ["prove_steps"]
     # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
     steps = list(_STEPS)
     assembly = ["Call", "Subroutine"]

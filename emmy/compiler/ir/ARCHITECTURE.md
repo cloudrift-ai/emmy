@@ -944,6 +944,15 @@ ahead of its update — the previous step's value — is keyed by use, like ever
 the body is spelled. The same number applied to the same coordinate expressions in one scope is one instance — what
 placement computes once.
 
+`value_numbers_apart` is the same numbering with the integer of every affine coordinate expression taken apart: an
+index `a + 64` is the form `a`, shared as a parameter is, and the integer 64, a parameter of its own at every place
+one is written; a loop's static extent is a parameter of the loop. An offset inside a reduction then never reaches a
+number. No identity reads this mode. `numbering::prove` reads it for the copies of an unrolled step: their scope
+trees are one tree once those integers are left out, every integer moves by one amount per step, and the first copy
+with its integers moved to step `j` has copy `j`'s tree with every integer keyed by its value. `Proved::at` is the
+step at a step number or under the axis of the loop that walks, where a reduction that grows with the step walks a
+range of it.
+
 ### Structural identity — `emmy-ir`'s `identity.rs`
 
 `Body.identity()` takes the executable normal form (`normalize_body`) and keys its scope tree (`values.digest`):
@@ -1051,7 +1060,7 @@ recurrence left unrolled — each stage re-demanded under compositions of σs, D
 being the live case — multiplies bindings per stage instead of deduplicating, and such a merge cannot be constructed
 at any budget. The first binding past `_BINDING_RATIO` times the region's statement count raises `UnfusableStmt`,
 which names the loop. Fusion never catches it: its regions are decided before any is spliced, so a region that
-multiplies is a recurrence for `loop/fusion/005_roll_recurrence` to roll, not a region to shrink — shrinking made the
+multiplies is a recurrence for the merge rule to roll (`loop/fusion/_recurrence`), not a region to shrink — shrinking made the
 kernel set depend on the order the producers were visited in. This is a termination bound, not a fusion-quality gate:
 placement still owns every cut on a merge that CAN be built.
 

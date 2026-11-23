@@ -985,20 +985,67 @@ pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> PyResult<String>
     Ok(promoted.text().to_string())
 }
 
-/// Each integer [`prove_steps`] found moving: the place it is written at, its first value, its move per step.
-type Moves = Vec<(i64, i64, i64)>;
+/// The proof that bodies are one step taken again and again (`emmy_ir::numbering::Proved`), and that step at any
+/// place in the walk.
+#[pyclass(frozen, module = "emmy.compiler.ir.stmt", name = "Advance")]
+pub struct PyAdvance {
+    proved: emmy_ir::numbering::Proved,
+}
 
-/// The proof that `bodies` are one step taken again and again (`emmy_ir::numbering::prove`): how many integers the
-/// first body's coordinate expressions add, and for each that moves, the place it is written at, its value in the
-/// first body and how far it moves per step. A `ValueError` names the first difference that keeps them from it.
+#[pymethods]
+impl PyAdvance {
+    /// How many of the bodies, from the first, are the step: at least two.
+    #[getter]
+    fn steps(&self) -> usize {
+        self.proved.steps
+    }
+
+    /// Why the body after those is no such step, where there is one.
+    #[getter]
+    fn stopped(&self) -> Option<String> {
+        self.proved.stopped.clone()
+    }
+
+    /// Every integer that moves: its value in the first body and its move per step.
+    #[getter]
+    fn moving(&self) -> Vec<(i64, i64)> {
+        self.proved.moving()
+    }
+
+    /// How many integers the first body's coordinate expressions and static extents hold.
+    #[getter]
+    fn integers(&self) -> usize {
+        self.proved.integers()
+    }
+
+    /// The step at `by`: a step number, or the name of the axis of the loop that walks the steps, which then
+    /// takes `steps` of them.
+    #[pyo3(signature = (by, steps = 1))]
+    fn at<'py>(
+        &self,
+        py: Python<'py>,
+        by: &Bound<'py, PyAny>,
+        steps: usize,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let by = match by.extract::<i64>() {
+            Ok(step) => emmy_ir::numbering::By::Step(step),
+            Err(_) => emmy_ir::numbering::By::Axis(by.extract::<String>()?.as_str().into()),
+        };
+        let body = self.proved.at(&by, steps).map_err(PyValueError::new_err)?;
+        PyBody::wrap(py, &body)
+    }
+}
+
+/// The proof that `bodies` are one step taken again and again, as far as they are (`emmy_ir::numbering::prove`).
+/// A `ValueError` says why the second body is not the first a step later.
 #[pyfunction]
-pub fn prove_steps(bodies: Vec<Bound<'_, PyAny>>) -> PyResult<(usize, Moves)> {
+pub fn prove_steps(bodies: Vec<Bound<'_, PyAny>>) -> PyResult<PyAdvance> {
     let bodies: Vec<Body> = bodies
         .iter()
         .map(PyBody::from_iterable)
         .collect::<PyResult<_>>()?;
     match emmy_ir::numbering::prove(&bodies) {
-        Ok(proved) => Ok((proved.sites, proved.moves)),
+        Ok(proved) => Ok(PyAdvance { proved }),
         Err(why) => Err(PyValueError::new_err(why)),
     }
 }
@@ -1007,6 +1054,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBody>()?;
     m.add_class::<PyCone>()?;
     m.add_class::<PySubroutine>()?;
+    m.add_class::<PyAdvance>()?;
     m.add_function(wrap_pyfunction!(parse_body, m)?)?;
     m.add_function(wrap_pyfunction!(pretty_body, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_body, m)?)?;

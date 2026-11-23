@@ -30,7 +30,19 @@ pub struct Numbering {
     pub buffers: Vec<Name>,
     pub states: Vec<Name>,
     pub operands: HashMap<Number, Vec<Number>>,
+    /// The integers taken apart ([`value_numbers_apart`]), in the order they were met: a parameter names one by
+    /// its place in this list.
+    pub sites: Vec<Site>,
     pub(super) trees: std::sync::Mutex<HashMap<usize, Vec<Number>>>,
+}
+
+/// One integer [`value_numbers_apart`] took apart: the node that holds it — the affine coordinate expression that
+/// adds it, or the axis of the loop whose static extent it is — and its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Site {
+    pub place: usize,
+    pub extent: bool,
+    pub value: i64,
 }
 
 impl Numbering {
@@ -133,8 +145,6 @@ struct Context<'a> {
     depths_of: HashMap<Param, Vec<usize>>,
     /// Whether the integer a coordinate expression adds is a parameter of its own ([`value_numbers_apart`]).
     apart: bool,
-    /// How many such integers have been taken apart: each is named by its place in that count.
-    sites: i64,
 }
 
 fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
@@ -205,14 +215,24 @@ impl Context<'_> {
 
     /// With offsets apart, the static extent of a loop as a parameter of the loop: a reduction over one more
     /// element than the last is the same loop a step later.
-    fn extent_apart(&mut self, axis: &crate::axis::Axis, params: &mut Vec<Param>) {
+    fn extent_apart(&mut self, axis: &Arc<crate::axis::Axis>, params: &mut Vec<Param>) {
         if let (true, Some(extent)) = (self.apart, Context::static_extent(axis)) {
-            params.push(Param::new(Key::tuple([
-                Key::tag(Tag::Expr),
-                Key::tuple([Key::str(OFFSET), Key::Int(extent), Key::Int(self.sites)]),
-            ])));
-            self.sites += 1;
+            params.push(self.site(Arc::as_ptr(axis) as usize, true, extent));
         }
+    }
+
+    /// The parameter an integer taken apart is, and its record among the numbering's sites.
+    fn site(&mut self, place: usize, extent: bool, value: i64) -> Param {
+        let at = self.out.sites.len() as i64;
+        self.out.sites.push(Site {
+            place,
+            extent,
+            value,
+        });
+        Param::new(Key::tuple([
+            Key::tag(Tag::Expr),
+            Key::tuple([Key::str(OFFSET), Key::Int(value), Key::Int(at)]),
+        ]))
     }
 
     fn depth_of(&self, name: Name) -> Option<usize> {
@@ -469,11 +489,7 @@ impl Context<'_> {
                 Key::Int(index as i64),
             ]));
         }
-        params.push(Param::new(Key::tuple([
-            Key::tag(Tag::Expr),
-            Key::tuple([Key::str(OFFSET), Key::Int(offset), Key::Int(self.sites)]),
-        ])));
-        self.sites += 1;
+        params.push(self.site(Arc::as_ptr(&e.0) as usize, false, offset));
         parts.push(Key::tuple([
             Key::tag(Tag::Coordinate),
             Key::Int(params.len() as i64 - 1),
@@ -1213,7 +1229,6 @@ fn numbered(
         defined_by: HashMap::new(),
         depths_of: HashMap::new(),
         apart,
-        sites: 0,
     };
     context.visit(body);
     context.out

@@ -840,7 +840,7 @@ per-cell path. Each shared row is padded by one column, so column-strided reads 
 The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks between
 shared and global storage; ownership, supported geometry and the card's shared-memory limit decide only legality.
 
-A store that does not read the step is the state a rolled scan ends with (`loop/fusion/005_roll_recurrence`): every
+A store that does not read the step is the state a rolled scan ends with (`loop/fusion/_recurrence`): every
 step would write the same cells, and only the last step's are read. Both storages write it once. The ordered launches
 store it behind the last launch (`036_keep_last_store`). The shared layout stores it from its buffer after the loop
 over the steps, and declines a store that is not the state itself at the state's data type. With no snapshot left to
