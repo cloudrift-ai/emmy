@@ -24,6 +24,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Assign, parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline, RuleSkipped
+from emmy.compiler.pipeline.passes.loop.fusion._region import copied
 from tests.compiler.helpers import requires_cuda
 
 _RULE = importlib.import_module("emmy.compiler.pipeline.passes.loop.fusion.008_read_through_copies")
@@ -114,12 +115,12 @@ def _copy_graph(dtype, stored_over: bool = False) -> Graph:
 
 
 def test_only_a_copy_that_keeps_every_value_and_whose_source_stands_is_read_through() -> None:
-    cells, read = _RULE.copied(_copy_graph(F32), "c")
+    cells, read = copied(_copy_graph(F32), "c")
     assert [str(cell) for cell in cells] == ["a0", "a1"] and read.input == "x"
     # A copy to a narrower float rounds: it is arithmetic, and its reader reads the rounded buffer.
-    assert _RULE.copied(_copy_graph(BF16), "c") is None
+    assert copied(_copy_graph(BF16), "c") is None
     # A kernel stores over the source: the copy holds the values from before that store.
-    assert _RULE.copied(_copy_graph(F32, stored_over=True), "c") is None
+    assert copied(_copy_graph(F32, stored_over=True), "c") is None
 
 
 _STEPS = """

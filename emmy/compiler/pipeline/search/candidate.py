@@ -248,7 +248,7 @@ class Candidate:
             dump.on_rule(pass_, rule, record, text)
 
     def _advance_if_last(self, match: Match, *, applied: bool = False) -> None:
-        if match.is_last and not (applied and match.rule.fixpoint):
+        if match.is_last and not match.rescan and not (applied and match.rule.fixpoint):
             self.cursor.advance(self.graph)
 
 

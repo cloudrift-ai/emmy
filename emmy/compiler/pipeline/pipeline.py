@@ -264,6 +264,9 @@ class Match:
     # splice — see ``Graph.splice``). ``None`` defaults to ``root_node_id``.
     output: str | dict[str, str] | None = None
     is_last: bool = False
+    # Set by a rewrite that cannot go on until the earlier rules of its pass have seen the graph as it now stands:
+    # the pass's rules are scanned again from the first, before any later match of this batch is tried.
+    rescan: bool = False
     # Strong snapshot of every consumed node. The ``is_alive`` check uses
     # object identity to detect removal followed by a different node at the
     # same graph id. Holding the object itself prevents CPython from recycling
@@ -686,6 +689,13 @@ class Run:
             return None
         for match in matches:
             options = cand.try_rewrite(match)
+            if match.rescan:
+                # The scan so far changed the graph, or the earlier rules would have nothing new to see and the
+                # rule asking would ask again for ever.
+                if cur.n_applied == 0:
+                    raise RuntimeError(f"{match.rule.name!r} asked for another scan of a pass that applied nothing")
+                cur.rule_idx, cur.n_applied = 0, 0
+                return None
             if options is _REWRITE_APPLIED:
                 if match.rule.fixpoint:
                     return None

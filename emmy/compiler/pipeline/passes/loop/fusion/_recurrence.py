@@ -1,4 +1,8 @@
-"""Roll an unrolled recurrence into ONE kernel that carries its state, before fusion inlines it.
+"""Roll an unrolled recurrence into ONE kernel that carries its state, where fusion would have inlined it.
+
+``010_merge_loop_ops`` asks this before it splices a region (:func:`roll`): the copies of one step, each reading
+the state the copy before it stored, are rolled first, and the regions of the graph that leaves are what it splices.
+Two programs are one step where :func:`prove` says so.
 
 A Python loop over chunks leaves the tracer unrolled: step ``j``'s kernels read the state step
 ``j − 1`` stored, so fusing them whole makes every later state re-derive every earlier one, and a
@@ -22,7 +26,8 @@ gives, is taken with the chain where it is the first step advanced (:func:`_chai
 
 from __future__ import annotations
 
-from dataclasses import replace
+import logging
+from dataclasses import dataclass, replace
 from functools import lru_cache
 
 from emmy.compiler.dim import Dim
@@ -34,10 +39,10 @@ from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, V
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Statement, Write
-from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline import Match, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of
 
-PATTERN = [Pattern("first", LoopOp)]
+logger = logging.getLogger(__name__)
 
 _STATE, _STEP, _CONST = "carried_state", "carried_step", "carried_const"
 #: The longest step tried, in states: one, or two for a chain whose states alternate two bodies.
@@ -329,6 +334,64 @@ def _spelling(body: Body) -> tuple[str, tuple[str, ...]]:
     return identity.key, tuple(identity.arguments)
 
 
+class Unproven(RuleSkipped):
+    """Programs that pass for the copies of one step — as many nodes each, reading the same buffers beside their
+    state — and are not proved to be one: the difference :func:`prove` names."""
+
+
+@dataclass(frozen=True)
+class Advance:
+    """What :func:`prove` found: the body the programs share once their integer literals are taken out, the first
+    program's literals, and how far each moves from one program to the next."""
+
+    abstract: Body
+    literals: tuple[int, ...]
+    deltas: tuple[int, ...]
+
+    def at(self, by: int | Var, steps: int = 1) -> Body:
+        """The first program ``by`` steps later (:func:`_advanced`)."""
+        return _advanced(self.abstract, self.literals, self.deltas, by, steps)
+
+    def difference(self, body: Body, by: int) -> str | None:
+        """How ``body`` differs from the first program ``by`` steps later, or ``None`` where it is that program:
+        the two spell alike once the advanced body is in normal form, as ``body`` is."""
+        if _spelling(LoopOp(body=self.at(by)).body) == _spelling(body):
+            return None
+        if _literal_free_key(body) != self.abstract.structural_key(structural=False):
+            ours, theirs = dict(_census(self.abstract)), dict(_census(body))
+            unlike = (kind for kind in sorted(ours | theirs) if ours.get(kind) != theirs.get(kind))
+            kinds = ", ".join(f"{kind} {ours.get(kind, 0)} against {theirs.get(kind, 0)}" for kind in unlike)
+            return f"it is another body ({kinds or 'the same statements, arranged otherwise'})"
+        held = _literals_abstracted(body)[1]
+        for at, (literal, delta, found) in enumerate(zip(self.literals, self.deltas, held, strict=False)):
+            if found != literal + delta * by:
+                return f"its integer {at} is {found}, where {literal} moving {delta} a step gives {literal + delta * by}"
+        return "it holds the integers the steps before it give, and the normal form spells it otherwise"
+
+
+def prove(*programs: Body) -> Advance:
+    """The proof that ``programs`` are one step taken again and again: each is the first with every integer literal
+    moved as far as it moves from the first to the second, as many times as the program is steps later. The first
+    two give the body and the moves; every program, those two among them, is then held to it. Raises
+    :class:`Unproven` with the first difference."""
+    first, second = programs[0], programs[1]
+    reads = [frozenset(load.input for load in body.loads) for body in programs]
+    for index, read in enumerate(reads):
+        if read != reads[0]:
+            # Steps that read other buffers are other computations: the layers of a model, each with its weights.
+            raise RuleSkipped(f"step {index} reads {sorted(read - reads[0])} where step 0 reads {sorted(reads[0] - read)}")
+    abstract, literals = _literals_abstracted(first)
+    later = _literals_abstracted(second)[1]
+    if _literal_free_key(second) != _literal_free_key(first) or len(later) != len(literals):
+        proved = Advance(abstract, literals, (0,) * len(literals))
+        raise Unproven(f"step 1 is not step 0 a step later: {proved.difference(second, 0) or 'it holds other integers'}")
+    proved = Advance(abstract, literals, tuple(b - a for a, b in zip(literals, later, strict=True)))
+    for index, body in enumerate(programs):
+        if (difference := proved.difference(body, index)) is not None:
+            raise Unproven(f"step {index} is not step 0 {index} steps later: {difference}")
+    return proved
+
+
 def _rolled(step: Body, steps: int, seed: float | str, every: bool) -> Body:
     """The step under a loop that carries its state: the state read becomes a load of the state one step
     back, its store the state's definition, and every kept buffer gains the step as its leading axis. A state
@@ -361,7 +424,26 @@ def _slice(tensor: Tensor, source: str, step: int | None) -> LoopOp:
     return LoopOp(body=body)
 
 
-def rewrite(match: Match, first: Node) -> Graph:
+def roll(match: Match) -> Graph | None:
+    """The fragment that rolls a recurrence the graph holds, or ``None`` where it holds none: the first of its
+    loops, in topological order, that starts a chain :func:`prove` proves."""
+    graph = match.graph
+    loops = [node for node_id in graph.topological_order() if isinstance((node := graph.nodes[node_id]).op, LoopOp)]
+    # A chain is two states of one shape that hold the same statements: most loops have no such second.
+    kinds = [(node.outputs[0].shape, node.outputs[0].dtype, _census(node.op.body)) for node in loops]
+    alike = {kind: kinds.count(kind) for kind in set(kinds)}
+    for node, kind in zip(loops, kinds, strict=True):
+        if alike[kind] < 2:
+            continue
+        try:
+            return roll_from(match, node)
+        except RuleSkipped as why:
+            logger.debug("no recurrence rolls from %s: %s", node.id, why)
+    return None
+
+
+def roll_from(match: Match, first: Node) -> Graph:
+    """The fragment that rolls the recurrence whose first state ``first`` stores."""
     graph = match.graph
     if first.outputs[0].dtype != F32:
         raise RuleSkipped("a carried state is f32")
@@ -439,18 +521,11 @@ def _replaced(match: Match, chain: list[Node], regions: list[set[str]], states: 
         raise RuleSkipped("the steps keep different buffers")
     if any(tuple(value for _, value in read) != tuple(value for _, value in constants) for _, _, read in spliced):
         raise RuleSkipped("the steps read different constants")
-    abstract, literals = _literals_abstracted(step)
-    second, later = _literals_abstracted(spliced[1][0])
-    if _literal_free_key(second) != _literal_free_key(abstract) or len(later) != len(literals):
-        raise RuleSkipped("the second step is not the first step's body")
-    deltas = tuple(b - a for a, b in zip(literals, later, strict=True))
-    for index, (body, _, _) in enumerate(spliced):
-        if _spelling(LoopOp(body=_advanced(abstract, literals, deltas, index)).body) != _spelling(body):
-            raise RuleSkipped(f"step {index} is not the first step advanced {index} times")
+    proved = prove(*(body for body, _, _ in spliced))
 
     seed: float | str = 0.0 if _is_zero(graph, states[0]) else states[0]
     stores = tuple(f"{chain[0].id}__steps{index}" for index in range(len(kept)))
-    body = _rolled(_advanced(abstract, literals, deltas, Var("step"), len(regions)), len(regions), seed, every)
+    body = _rolled(proved.at(Var("step"), len(regions)), len(regions), seed, every)
     back = {f"{_STEP}{i}": name for i, name in enumerate(stores)}
     back.update((f"{_CONST}{index}", name) for index, (name, _) in enumerate(constants))
     rolled = LoopOp(body=body.rename_buffers(back))

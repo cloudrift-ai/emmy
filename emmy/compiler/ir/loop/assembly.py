@@ -236,7 +236,7 @@ class Splicer(BodyBuilder):
     # COMPOSITIONS of σs, so bindings multiply per stage instead of deduplicating (DeepSeek-V4's
     # 20-iteration Sinkhorn chain drove 4.5M distinct bindings from 2,287 input statements and
     # never finished). Such a merge cannot be constructed at any budget; the first binding past
-    # the bound raises, and the answer is the roller (``loop/fusion/005_roll_recurrence``), never
+    # the bound raises, and the answer is the roller (``loop/fusion/_recurrence``), never
     # a smaller region — a termination bound, not a fusion-quality gate: placement still owns
     # every cut on a merge that CAN be built.
     # Whole layers legitimately take over a hundred bindings per source statement: the tracer

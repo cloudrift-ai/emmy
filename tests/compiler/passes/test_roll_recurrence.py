@@ -1,4 +1,4 @@
-"""An unrolled recurrence rolls into one kernel that carries its state, before fusion inlines it.
+"""An unrolled recurrence rolls into one kernel that carries its state, where fusion would have inlined it.
 
 A chunked delta rule traces as a Python loop, so fused whole, chunk ``j``'s consumer re-derives every
 earlier state. The fusion stage reads the chain of states instead: one step between two of them, the
@@ -21,7 +21,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Accum, Loop
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline, RuleSkipped
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
 _DELTA = """
@@ -187,6 +187,28 @@ m(torch.randn(1, 32, 2, 16), torch.randn(1, 32, 2, 16), torch.randn(1, 32, 2, 16
 """
 
 
+def _read_at(offset: int, scale: str = "g") -> str:
+    return f"for a0 in 0..4:\n  in0 = load x[a0 + {offset}]\n  in1 = load {scale}[0]\n  v0 = in0 * in1\n  out[a0] = v0"
+
+
+def test_the_proof_gives_how_far_each_integer_moves_and_names_what_differs() -> None:
+    """Two programs are one step where every integer of the first moves as far again in each later one. The proof
+    gives the first program at any step, and says which integer or which buffer keeps a program from being one."""
+    from importlib import import_module
+
+    from emmy.compiler.ir.stmt import parse_body
+
+    roll = import_module("emmy.compiler.pipeline.passes.loop.fusion._recurrence")
+    steps = [LoopOp(body=parse_body(_read_at(4 * index))).body for index in range(3)]
+    proved = roll.prove(*steps)
+    assert 4 in proved.deltas and roll._spelling(LoopOp(body=proved.at(2)).body) == roll._spelling(steps[2])
+    with pytest.raises(roll.Unproven, match="step 2 .* its integer . is 9, where 0 moving 4 a step gives 8"):
+        roll.prove(steps[0], steps[1], LoopOp(body=parse_body(_read_at(9))).body)
+    with pytest.raises(RuleSkipped, match=r"step 1 reads \['h'\] where step 0 reads \['g'\]") as other:
+        roll.prove(steps[0], LoopOp(body=parse_body(_read_at(4, "h"))).body)
+    assert not isinstance(other.value, roll.Unproven), "other buffers are other computations, not a step unproved"
+
+
 def test_steps_of_different_sizes_are_not_spliced_with_their_readers(monkeypatch) -> None:
     """The decay matrix times beta and the inverse times beta are two products of one shape and one body, and the
     second descends from the first through the whole substitution: a chain of two by their bodies. The first one's
@@ -196,10 +218,10 @@ def test_steps_of_different_sizes_are_not_spliced_with_their_readers(monkeypatch
     loaded by path, so the splices are counted on the rule driven by hand."""
     from importlib import import_module
 
-    from emmy.compiler.pipeline import Match, RuleSkipped
+    from emmy.compiler.pipeline import Match
     from emmy.compiler.pipeline.pipeline import Rule
 
-    roll = import_module("emmy.compiler.pipeline.passes.loop.fusion.005_roll_recurrence")
+    roll = import_module("emmy.compiler.pipeline.passes.loop.fusion._recurrence")
     graph, _, _ = graph_from_code(_RULE_FROM_A_STATE)
     graph = Pipeline.build([stage for stage in LOOP_PASSES if stage != "loop/fusion"]).run(graph)
     spliced: list[int] = []
@@ -212,7 +234,7 @@ def test_steps_of_different_sizes_are_not_spliced_with_their_readers(monkeypatch
         if isinstance(node.op, LoopOp) and node_id not in taken:
             match = Match(graph=graph, root_node_id=node_id, rule=Rule(name="test", pattern=[]))
             try:
-                roll.rewrite(match, node)
+                roll.roll_from(match, node)
             except RuleSkipped:
                 continue
             taken |= set(match.consumed)
