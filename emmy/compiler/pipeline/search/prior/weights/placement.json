@@ -240,16 +240,16 @@
   },
   "space": "placement",
   "sources": {
+   "golden:06d39f668a82": 1482,
    "golden:1d647d3cec2e": 1645,
    "golden:227ae724736b": 9,
-   "golden:25fd2ec9bc89": 1935,
-   "golden:48d9f182eff1": 1480,
    "golden:755313e9c694": 10,
    "golden:7fde4e5dce52": 854,
    "golden:9a266d9848a9": 9,
-   "golden:ab1717f9f0f6": 60,
-   "golden:bf6f93d593a8": 1571,
-   "golden:e5501c0b0cd9": 1384
+   "golden:a0bf3f3555b1": 1574,
+   "golden:b377f332625d": 1386,
+   "golden:d2cd977f6824": 61,
+   "golden:dc4f58a72394": 1937
   },
   "pool_sample": 2000,
   "groups": {
