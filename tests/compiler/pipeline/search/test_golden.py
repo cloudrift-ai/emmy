@@ -17,6 +17,7 @@ import pytest
 from emmy.compiler.pipeline.search import golden
 from emmy.compiler.pipeline.search.golden import GoldenFile, restamp, scope_digest
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, document_of, repository_golden_paths
+from tests.compiler.helpers import golden_lane
 
 
 def _golden_id(path: Path) -> str:
@@ -29,7 +30,7 @@ def _program_parameters():
     with repository_golden_paths() as paths:
         for path in sorted(paths, key=_golden_id):
             for index in sorted({kernel.traced for kernel in document_of(path).targets()}):
-                parameters.append(pytest.param(path, index, id=f"{_golden_id(path)}/program-{index}"))
+                parameters.append(pytest.param(path, index, id=f"{_golden_id(path)}/program-{index}", marks=golden_lane(path)))
     return parameters
 
 
@@ -129,7 +130,7 @@ def test_lora_serving_golden_replays_nested_cuts() -> None:
 
 def _file_parameters():
     with repository_golden_paths() as paths:
-        return [pytest.param(path, id=_golden_id(path)) for path in sorted(paths, key=_golden_id)]
+        return [pytest.param(path, id=_golden_id(path), marks=golden_lane(path)) for path in sorted(paths, key=_golden_id)]
 
 
 @pytest.mark.parametrize("path", _file_parameters())

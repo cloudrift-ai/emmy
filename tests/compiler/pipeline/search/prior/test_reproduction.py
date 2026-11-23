@@ -27,6 +27,7 @@ import pytest
 
 from emmy import config
 from emmy.compiler.pipeline.search.golden.repository import hardware_golden_paths
+from tests.compiler.helpers import golden_lane
 
 #: The fraction of a slice's pools whose recorded decision the shipped prior must re-decide, in either space. The
 #: CatBoost priors re-decide every one: each slice of the 2026-10-01 refit reproduces all of its pools.
@@ -80,7 +81,7 @@ KNOWN_MISSES: dict[tuple[str, str, int], str] = {}
 
 def _marks(path: Path, space: str, k: int) -> tuple:
     reason = KNOWN_MISSES.get((path.name, space, k))
-    return (pytest.mark.xfail(reason=reason, strict=True),) if reason else ()
+    return golden_lane(path) + ((pytest.mark.xfail(reason=reason, strict=True),) if reason else ())
 
 
 def _parameters():

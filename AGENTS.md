@@ -164,8 +164,8 @@ pytest session, `make test` or direct, also runs on a fresh tune DB (the root `t
 points `EMMY_TUNE_DB` at one unless the caller names one), so no test picks from a machine's stored measurements; a
 test that needs a DB sets its own.
 
-The default suite holds every repository golden — the hardware goldens and each maintained recipe's model golden —
-to the fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
+The suite holds every repository golden — the hardware goldens and each maintained recipe's model golden — to the
+fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
 per traced program so the work scatters over the xdist workers and a failure names the kernels, decisions and rows the
 compiler now disagrees with. Lowering is GPU-free, so a stale golden is detectable on any machine. There is no list of
 expected failures. The fix is `emmy golden restamp PATH`: every kernel takes the body a fresh lowering gives it, every
@@ -173,8 +173,10 @@ decision is taken again on the fresh parent, a row whose kernel was re-keyed —
 two kernels — keeps its schedule and loses its microseconds (a proposal, no evidence until a record run on the card
 measures it again), a kernel no fresh kernel writes is dropped with its rows. A golden stores no identity, so a change
 to how identity is computed re-keys nothing. The `refresh-golden` skill owns the whole flow, including the
-record run and the delete-or-re-record decision. Never re-record a row to make a red node green. The nightly
-`onboard-model` workflow still owns a model golden's exact-GPU replay.
+record run and the delete-or-re-record decision. Never re-record a row to make a red node green. `make test`
+holds the RTX 5090's goldens; every other card's carry the off-lane `goldens` marker and run in the nightly refresh
+(`pytest tests/ -m goldens`), so run that before a change that may re-key them. The nightly `onboard-model` workflow
+still owns a model golden's exact-GPU replay.
 
 When running a large subset (e.g. `tests/compiler/`), pass the same `-n auto --dist=loadgroup` flags `make test` uses to
 parallelize (add `-p no:randomly` for a stable order):

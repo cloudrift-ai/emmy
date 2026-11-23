@@ -13,13 +13,19 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import normalize_body, parse_body
 from emmy.compiler.pipeline.search.golden import GoldenFile
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, repository_golden_paths
+from tests.compiler.helpers import golden_lane
 from tests.compiler.realization import helpers as corpus
 
 
 def _golden_parameters():
     with repository_golden_paths() as paths:
         return [
-            pytest.param(path, id=path.stem if path.parent == _RECORDS_DIR else f"{path.parent.parent.name}/{path.stem}") for path in paths
+            pytest.param(
+                path,
+                marks=golden_lane(path),
+                id=path.stem if path.parent == _RECORDS_DIR else f"{path.parent.parent.name}/{path.stem}",
+            )
+            for path in paths
         ]
 
 
