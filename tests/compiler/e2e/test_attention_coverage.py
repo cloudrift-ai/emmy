@@ -113,6 +113,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
     TreeHalve,
     WarpShuffle,
+    WgmmaDescriptor,
 )
 from emmy.compiler.ir.stmt import Accum, StridedLoop
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -122,6 +123,7 @@ from tests.compiler.helpers import (
     from_pretrained_or_skip,
     requires_cuda,
     requires_sm,
+    requires_sm90,
     statements,
 )
 
@@ -520,6 +522,34 @@ def test_chunk_tier_stages_a_symbolic_key_extent(transport):
     copies = statements(kernels, TmaLoad if transport == "smem-tma" else CpAsyncCopy)
     assert copies, f"the streamed value moves through {transport}"
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
+
+
+@requires_cuda
+@requires_sm90
+def test_wgmma_score_takes_a_symbolic_query_extent():
+    """A warp-group score fills its query slab once per 64-row tile, and a symbolic row count
+    leaves the last tile overhanging: the fill copies the last valid row into the tail and the
+    store guard discards those rows. One kernel, run below and above a tile and off its multiples.
+    The static overhang is the corpus case ``attention/sdpa-hd128-wgmma-score-overhanging-query-sm90``."""
+    torch.manual_seed(0)
+    k, v = (torch.randn(1, 2, 256, 128, dtype=torch.float16) for _ in range(2))
+    row = {
+        **_CHUNK_ROW,
+        "WORK": "w4x1",
+        "TILE@map.1/twist": "wgmma_m64n128k16_f16_f32/f1x16/k4",
+        "TILE@map.1/twist.1/inner": "wgmma_m64n64k16_f16_f32/f1x8/k4",
+        "STAGE@map.1/twist": "d2/smem-async",
+    }
+    dynamic = {"q": {2: torch.export.Dim("rows", min=4, max=4096)}, "k": {}, "v": {}}
+    with pinned_knobs(row):
+        backend, compiled, _graph, kernels = _trace(
+            _Sdpa(), (torch.randn(1, 2, 128, 128, dtype=torch.float16), k, v), dynamic_shapes=dynamic
+        )
+    assert statements(kernels, WgmmaDescriptor), "the score reads its operands through descriptors"
+    for rows in (31, 100, 700):
+        feed = {"q": torch.randn(1, 2, rows, 128, dtype=torch.float16).numpy(), "k": k.numpy(), "v": v.numpy()}
+        cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
+        assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2, f"rows={rows}"
 
 
 # --------------------------------------------------------------------------- #

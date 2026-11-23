@@ -167,6 +167,12 @@ class GoldenGroup(Group):
     # single-golden functions exactly. Stored as the indices themselves: the metrics take indices, so a
     # per-row marker column would only be an encoding to decode back on every read.
     golden_ids: tuple[int, ...] = field(kw_only=True)
+    # The labeled negatives: rows measured more than ``ranking.POSITIVE_WITHIN`` slower than the pool's fastest
+    # verified row — a verified row another one beats, or a candidate from the card's candidate file. Never a positive.
+    negative_ids: tuple[int, ...] = field(default=(), kw_only=True)
+    # Every row with a measurement: the positives, the negatives and the candidates measured between them (or faster
+    # than the golden: a stale golden). The trainer's uniform draw takes none of them as an unlabeled negative.
+    measured_ids: tuple[int, ...] = field(default=(), kw_only=True)
     # The golden pools this group was built from — one, or several that packed identically and folded — each with
     # its kernel's definition and its verified rows, so a dataset carries what the deploy check re-lowers.
     pools: tuple[GoldenPool, ...] = field(default=(), kw_only=True)
@@ -201,10 +207,13 @@ class GoldenGroup(Group):
         goldens: int | Sequence[int],
         total: int | None = None,
         pools: Sequence[GoldenPool] = (),
+        negatives: Sequence[int] = (),
+        measured: Sequence[int] = (),
     ) -> GoldenGroup:
         """The same over an already-packed pool — the entry point for a builder that had to pack before it
         could know which goldens landed in it, which is every builder that deduplicates pools. ``goldens`` is
-        one row index or several, in any order, with duplicates; what is stored is the sorted set.
+        one row index or several, in any order, with duplicates; what is stored is the sorted set, and so for
+        ``negatives`` (less any positive: two folded pools can disagree about one row) and ``measured``.
 
         ``tier`` must agree with the routing stamp the rows carry, and disagreeing is a hard error. The two
         reach here by different routes — the stamp through the featurizer, the tier from the source record's
@@ -231,5 +240,7 @@ class GoldenGroup(Group):
             matrix,
             len(matrix) if total is None else total,
             golden_ids=ids,
+            negative_ids=tuple(sorted({int(i) for i in negatives} - set(ids))),
+            measured_ids=tuple(sorted({int(i) for i in measured})),
             pools=tuple(pools),
         )

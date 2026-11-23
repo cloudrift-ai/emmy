@@ -163,7 +163,8 @@ When the restamp leaves nothing, or drops the kernels a deploy needs (a serving 
 
 - **Still a maintained recipe** — the `onboard-model` skill re-traces the inventory on the card, records it
   (`emmy run --golden PATH --bench --record` / `--record-greedy`) and promotes the winners. Start from a fresh
-  `emmy trace` inventory; the old file is history, not a seed.
+  `emmy trace` inventory; the old file is history, not a seed. Its measured rows reach the priors only once they are
+  promoted into the card's hardware golden (the `onboard-model` skill, "Promote into the hardware golden").
 - **A kernel regrouped into a bigger one** (a whole layer fused into one) — the unpinned greedy may hang on it.
   Loop fusion stays maximal, so the fix is a cut, never a smaller region. Find one without scheduling:
   `emmy compile --golden PATH --realization NAME --ir tile --passes dolftp` under `EMMY_KNOBS="PLACE@<seam>=cut,…"`
@@ -200,7 +201,8 @@ GLOSSARY "Candidate file"), which carries the golden's programs, kernels and dec
 `emmy candidates restamp` and then `emmy candidates build`, which copies the golden's tables again and keeps the
 candidate rows whose group the golden still holds.
 Keep the prior reproduction gate green (AGENTS.md finalization step 22): a refreshed hardware golden refits both priors
-in the same PR; a refreshed recipe golden the shipped priors do not reproduce is refit for or tagged `prior-pending`.
+in the same PR. The gate holds only hardware goldens: a refreshed recipe golden bears on the priors only through the
+rows promoted into the card's hardware golden, which then refits.
 
 ## Record-run traps
 

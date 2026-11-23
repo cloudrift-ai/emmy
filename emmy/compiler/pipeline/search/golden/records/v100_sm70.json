@@ -1768,5 +1768,10 @@
    "kernel":63,
    "pins":{"FAST_MATH":false},
    "knobs":{"WORK":"w1x2","TILE":"mma_m8n8k4_f16_f32/f1x2/k8","REDUCE":"","STAGE":"d2/smem","LOOPIFY":"0","RASTER":""},
-   "measurements":{"emmy_us":44.17828470468521,"reference_us":44.324569404125214,"reference_backend":"same-input-greedy","tried":7}}
+   "measurements":{"emmy_us":44.17828470468521,"reference_us":44.324569404125214,"reference_backend":"same-input-greedy","tried":7}},
+  {"name":"pre16.k_linear_mean_reduce_3eb29d.m16.725632290d2b.c0",
+   "kernel":47,
+   "pins":{"FAST_MATH":false},
+   "knobs":{"FAST_EXP":"False","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f2","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.5762696275487542,"reference_us":2.047999994829297,"reference_backend":"same-input-greedy"}}
  ]}

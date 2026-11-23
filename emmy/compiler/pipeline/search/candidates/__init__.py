@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -78,6 +79,23 @@ def space_size(pool: GoldenPool) -> int:
         logger.debug("%s does not lower on its own (%s: %s)", pool.name, type(exc).__name__, exc)
         return 0
     return size
+
+
+def measured_rows(paths: Sequence[Path]) -> dict[tuple, tuple[GoldenRow, ...]]:
+    """The measured rows of the candidate files at ``paths`` by card and group — ``(gpu, exact identity, sizes,
+    regime)``, the key a golden pool of the dataset export joins on — each filed under its file's source."""
+    from emmy.compiler.pipeline.search.golden.evidence import file_source  # noqa: PLC0415
+
+    out: dict[tuple, tuple[GoldenRow, ...]] = {}
+    for path in paths:
+        document = GoldenFile.load(path)
+        source = file_source("candidate", path)
+        for key, rows in _groups(document).items():
+            measured = [row for row in rows if row.measured]
+            out[(document.gpu_name, *key)] = tuple(
+                GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.measurements.emmy_us, source) for row in measured
+            )
+    return out
 
 
 def _groups(document: GoldenFile) -> dict[tuple, list[Row]]:

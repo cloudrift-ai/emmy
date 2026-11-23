@@ -779,7 +779,7 @@ def _sibling_sigma(sibling: Side | None) -> dict[str, Expression]:
     return {} if sibling is None else {sibling.axis.name: _side_base(sibling)}
 
 
-def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bool, sibling: Side | None = None):
+def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bool, sibling: Side | None = None, ragged: bool = False):
     """The **one** cp.async slab gmem-index factory, for either operand and either tier. The slab's
     inner (contiguous) dim maps to the contraction ``k_axis``, its outer dim to the stationary ``tile``
     axis (``m`` for A, ``n`` for B). For A the tile axis is the slab ROW (K the col); for B they swap
@@ -794,12 +794,13 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
             tc, kc = (row, col) if tile_is_row else (col, row)
             t = BinaryExpression("+", tile_base, tc)
             k = BinaryExpression("+", k0, kc)
-            # A SYMBOLIC K's last chunk overhangs the extent. Here K is the slab's OUTER dim (the
+            # A ``ragged`` K's last chunk overhangs the extent: a symbolic K, or a static one the
+            # chunk does not divide. Here K is the slab's OUTER dim (the
             # contiguous copy chunk runs along the tile axis), so the overhanging row clamps to the
             # last valid one exactly as a masked tile row does — a duplicate row is copied and the
             # compute fill zeroes the matching A lanes, so it folds to nothing. The K-major
             # orientations have no such row and stay refused (``computed_operand_cover``).
-            if not tile_is_row and not k_axis.extent.is_static:
+            if not tile_is_row and ragged:
                 k = clamp_to(k, k_axis.extent_expression())
             sig = Sigma(
                 {
@@ -913,7 +914,10 @@ def _slab_operands(
         # through σ untouched — the stage resolvers gated them tile/K-invariant). The flash K/V
         # ``(1, 1, bn, head_dim)`` convention, extended to the matmul tiers.
         box = (1,) * (len(index_srcs[i]) - 2) + block if len(index_srcs[i]) > 2 else None
-        index = _slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row, sibling=sibling)
+        ragged = not k_axis.extent.is_static or k_axis.extent.as_static() % bk_elems != 0
+        index = _slab_index(
+            index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row, sibling=sibling, ragged=ragged
+        )
         ops.append(
             Operand(
                 tag=tag,
@@ -3440,10 +3444,12 @@ class _FlashOps(_MmaOps):
 
     def _query_slab(self, mn) -> list[Statement]:
         """Fill the query's slab once, ahead of the chunk loop: it does not move with the chunk.
-        A cp.async copy the CTA waits on and barriers before the first score reads it."""
-        m, _ = mn
-        if m.mask:
-            raise ValueError("the wgmma score stages a whole query tile (an overhanging query tile is not staged)")
+        A cp.async copy the CTA waits on and barriers before the first score reads it. A query tile
+        that overhangs the rows copies the last valid row into its tail (the slab factory's clamp),
+        and the store guard discards those rows. Empty for the carrier whose A edge is a stored
+        tile — that shape has no query (:meth:`_query`)."""
+        if self.inner is None:
+            return []
         query = self._query_operand(mn)
         elem = self._score_atom.operand_dtype("a")
         cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)

@@ -128,6 +128,83 @@ def test_random_input_values_draw_routed_expert_weights_at_weight_scale():
     assert 0.9 < float(_random_input_values(np.random.default_rng(7), (1024,), "f16", name="x").std()) < 1.1
 
 
+def test_weight_scale_inputs_are_drawn_as_a_checkpoint_scale():
+    """A stored kernel reads an FP8 weight's block scale as an input, and a program reads an NVFP4 expert's per-tensor
+    scale as one. Drawn at unit std, a gated MLP's FP16 output is infinity or zero but for a few elements: the eager
+    reference holds NaN, or two orders of the same FP32 sum disagree on those."""
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.compare import _random_source_values
+    from emmy.compiler.dtype import decode_f8
+    from emmy.compiler.loader.synthesize import scale_input_leaves
+
+    dtypes = {
+        "x": "f16",
+        "p_gate_weight_bits": "f8e4m3",
+        "p_gate_weight_scale": "f32",
+        "x_scale": "f32",
+        "q_bits": "f4e2m1x2",
+        "q_scale": "f16",
+        "w_gate_up": "f4e2m1x2",
+        "w_gate_up_scale": "f8e4m3",
+        "w_gate_up_scale_2": "f32",
+        "w_down": "f8e4m3",
+        "w_down_scale": "f32",
+        "attn_out_static_fp8_scale": "f32",
+    }
+    leaves = scale_input_leaves(dtypes)
+    assert leaves == {
+        "p_gate_weight_scale": "weight_scale_inv",
+        "w_gate_up_scale_2": "weight_scale_2",
+        "w_down_scale": "weight_scale_inv",
+        "attn_out_static_fp8_scale": "activation_scale",
+    }
+    scale = _random_source_values(np.random.default_rng(7), (136, 1, 40, 1), "f32", name=leaves["p_gate_weight_scale"])
+    assert scale.dtype == np.float32
+    assert 0.02 <= float(scale.min()) * 448 and float(scale.max()) * 448 <= 0.08
+    # The largest e2m1 code (6) times an e4m3 block scale (drawn as a checkpoint's from its dtype) times this
+    # per-tensor scale is one to four weight std (0.02): each 16-value block's amax.
+    scale_2 = _random_source_values(np.random.default_rng(7), (64, 1), "f32", name=leaves["w_gate_up_scale_2"])
+    block = _random_source_values(np.random.default_rng(7), (64, 160), "f8e4m3", name="w_gate_up_scale")
+    amax = 6 * decode_f8(block, "f8e4m3") * scale_2
+    assert np.allclose([amax.min(), amax.max()], [0.02, 0.08])
+
+
+def test_static_fp8_activation_scale_keeps_a_unit_activation_in_e4m3_range():
+    """A static FP8 checkpoint stores ``activation_scale`` beside a linear, its calibrated ``amax / 448``. Drawn below
+    that, a unit-std activation divided by it passes 448, and torch's cast to e4m3 gives NaN."""
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.compare import _random_source_values
+
+    scale = _random_source_values(np.random.default_rng(7), (1, 1), "f32", name="activation_scale")
+    x = np.random.default_rng(8).standard_normal((32, 16384))
+    assert float(np.abs(x / scale).max()) < 448
+
+
+def test_scatter_row_inputs_are_drawn_distinct():
+    """A page table's update writes rows named by its inputs. Drawn at unit std the rows repeat, two writes of different
+    values land in one row in either order, and eager and Emmy disagree there."""
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.compare import _distinct_rows, _scatter_index_inputs
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import ScatterOp
+    from emmy.compiler.tensor import Tensor
+
+    graph = Graph()
+    for name, shape in (("table", (33,)), ("slot", (65,)), ("value", (65,))):
+        graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, shape, "i64"))
+    graph.add_node(op=ScatterOp(), inputs=["table", "slot", "value"], output=Tensor("out", (33,), "i64"))
+    assert _scatter_index_inputs([graph]) == {"slot": [33]}
+
+    rows = _distinct_rows(np.random.default_rng(7), 65, 33)
+    assert sorted(rows[:33]) == list(range(33))
+    assert (rows[33:] == 32).all()
+    assert len(set(_distinct_rows(np.random.default_rng(7), 8, 33))) == 8
+
+
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0

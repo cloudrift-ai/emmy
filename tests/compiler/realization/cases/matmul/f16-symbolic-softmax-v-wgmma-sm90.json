@@ -1,0 +1,23 @@
+{"compute_cap": [9, 0],
+ "note": "Softmax@V with a symbolic sequence length on the Hopper warp-group cell: the probabilities arrive as a stored input, so the chunk tier gathers its score fragments and the warp-group expectation reads the value through a descriptor. The carrier has no query, so there is no query slab to fill ahead of the chunk loop; the lowering asked for one and failed. The query rows stay symbolic, so the 64-row tile overhangs them.",
+ "programs": [
+  {"inputs":["scores","v"],"outputs":["o"],"nodes":[
+   {"id":"scores","op":"input","outputs":[["scores","f16",[16,{"sym":"seq_len","hint":512},{"sym":"seq_len","hint":512}]]]},
+   {"id":"probs","op":"torch.softmax","inputs":["scores"],"outputs":[["probs","f16",[16,{"sym":"seq_len","hint":512},{"sym":"seq_len","hint":512}]]]},
+   {"id":"v","op":"input","outputs":[["v","f16",[16,{"sym":"seq_len","hint":512},128]]]},
+   {"id":"o","op":"torch.matmul","inputs":["probs","v"],"outputs":[["o","f16",[16,{"sym":"seq_len","hint":512},128]]]}
+  ]}
+ ],
+ "kernels": [
+  {"loop_ir":{"inputs":["scores","v"],"outputs":["o"],"nodes":[
+   {"id":"scores","op":"input","outputs":[["scores","f16",[16,{"sym":"seq_len","hint":512},{"sym":"seq_len","hint":512}]]]},
+   {"id":"v","op":"input","outputs":[["v","f16",[16,{"sym":"seq_len","hint":512},128]]]},
+   {"id":"o","op":"loop","attrs":{"body":"for a0 in 0..16:\n    for a1 in 0..seq_len:\n        for a2 in 0..seq_len:\n            in0 = load scores[a0, a1, a2]\n            acc0 <- maximum(acc0, in0) over a2\n        for a2 in 0..seq_len:\n            in1 = load scores[a0, a1, a2]\n            v0 = subtract(in1, acc0)\n            v1 = exp(v0)\n            acc1 <- add(acc1, v1) over a2\n        for a4 in 0..128:\n            for a5 in 0..seq_len:\n                in2 = load scores[a0, a1, a5]\n                v2 = subtract(in2, acc0)\n                v3 = exp(v2)\n                v4 = divide(v3, acc1)\n                in3 = load v[a0, a5, a4]\n                f32 v5 = multiply(in3, v4)\n                acc2 <- add(acc2, v5) over a5\n            o[a0, a1, a4] = acc2"},"inputs":["scores","v"],"outputs":[["o","f16",[16,{"sym":"seq_len","hint":512},128]]]}
+  ]},"formed":true,"traced":0,"origins":["o","probs"]}
+ ],
+ "rows": [
+  {"name":"k_matmul_softmax_reduce_60ce07",
+   "kernel":0,
+   "pins":{"FAST_MATH":false},
+   "knobs":{"WORK":"w4x1","RASTER":"","TILE":"wgmma_m64n64k16_f16_f32/f1x16/k4","REDUCE":"","STAGE":"d1/smem-tma"}}
+ ]}
