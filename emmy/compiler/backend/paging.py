@@ -440,6 +440,14 @@ def with_paging(plan, graph):
         geometry[name] = _declare(spliced, name, -(-shape[axis] // page), slots, prod(shape) // shape[axis] * page, specs[name].dtype)
     groups = _groups(geometry)
     covered = set()
+    alias = {b.name: b.alias for b in plan.buffers}
+
+    def stored(buffer: str) -> str:
+        """The buffer ``buffer`` is stored in: an output written in place over an input is that input."""
+        while alias.get(buffer) is not None:
+            buffer = alias[buffer]
+        return buffer
+
     for at, launch in enumerate(plan.launches):
         for names in groups:
             if (at, names) in covered or not any(f"{name}__pages" in launch.arg_names for name in names):
@@ -453,7 +461,7 @@ def with_paging(plan, graph):
                 touched = [name for name in names if f"{name}__pages" in later.arg_names]
                 node = graph.nodes[later.node_id]
                 inspectors = [(name, *_inspector_plan(graph, node, name, *managed[name][:2], geometry[name][0], marks)) for name in touched]
-                if any(set(inspector.inputs) & written for _, inspector, _ in inspectors):
+                if any({stored(buffer) for buffer in inspector.inputs} & written for _, inspector, _ in inspectors):
                     break
                 for name, inspector, most in inspectors:
                     key = (tuple(inspector.inputs), tuple((lc.kernel_name, lc.arg_names) for lc in inspector.launches))
@@ -468,7 +476,7 @@ def with_paging(plan, graph):
                     moved += most
                 if touched:
                     covered.add((later_at, names))
-                written.update(later.writes or (later.node_id,))
+                written.update(stored(buffer) for buffer in later.writes or (later.node_id,))
             spliced.launches.extend(_step(spliced, launch.node_id, names, marks, geometry, moved))
         spliced.launches.append(launch)
     return spliced

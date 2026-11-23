@@ -704,7 +704,7 @@ class _Step:
         A program ``priced`` for a :class:`WindowRange` runs only while the window lies in it: each range's program
         takes its own scope (``prefix`` and the range's name), and its traced twin the range's name."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
-        from emmy.compiler.backend.paging import TABLES
+        from emmy.compiler.backend.paging import TABLES, _groups
         from emmy.compiler.backend.plan_cache import binding_neutral_key
         from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
         from emmy.compiler.pipeline.search.policy.greedy import evidence_reads
@@ -752,6 +752,14 @@ class _Step:
         renames = dict(zip([n for n in plan.inputs if n not in pager], inputs, strict=True))
         renames.update(zip(plan.outputs, outputs, strict=True))
         renames.update({part: renames[n] + part[len(n) :] for n, parts in held.items() for part in parts})
+        # Buffers of one page list decide from their first one's slot state (``paging._groups``), so every program of
+        # the export pages them together, led by the same one: any other grouping decides from state never written.
+        shapes = {b.name: b.resolve_shape({}) for b in plan.buffers if b.name.endswith(("__table", "__slot_page")) and b.name in pager}
+        for names in _groups({n: (shapes[f"{n}__table"], shapes[f"{n}__slot_page"]) for n in held}):
+            group = tuple(renames[n] for n in names)
+            for name in group:
+                if (other := self.shared.setdefault(("page list", name), group)) != group:
+                    raise ValueError(f"{prefix} pages {name} in the page list {group}, another program in {other}")
         if weights is not None:
             renames.update({b.name: f"{weights}.{b.name}" for b in plan.buffers if b.role == "constant" and b.name not in renames})
         existing = {b.name: b for b in self.plan.buffers}

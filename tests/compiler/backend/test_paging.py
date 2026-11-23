@@ -405,3 +405,7 @@ def test_launches_of_one_page_list_take_one_run_while_their_selection_stands():
 
     assert runs(launch, launch) == [launch.node_id]
     assert runs(launch, replace(launch, writes=("sel",)), launch) == [launch.node_id] * 2
+    # A write stored over the selector in place is a write of the selector.
+    sel = next(b for b in plan.buffers if b.name == "sel")
+    plan = replace(plan, buffers=[*plan.buffers, replace(sel, name="sel_out", role="scratch", alias="sel")])
+    assert runs(launch, replace(launch, writes=("sel_out",)), launch) == [launch.node_id] * 2
