@@ -122,8 +122,8 @@ from tests.compiler.helpers import (
     direct_classic_leaf,
     from_pretrained_or_skip,
     requires_cuda,
+    requires_hopper,
     requires_sm,
-    requires_sm90,
     statements,
 )
 
@@ -525,7 +525,7 @@ def test_chunk_tier_stages_a_symbolic_key_extent(transport):
 
 
 @requires_cuda
-@requires_sm90
+@requires_hopper
 def test_wgmma_score_takes_a_symbolic_query_extent():
     """A warp-group score fills its query slab once per 64-row tile, and a symbolic row count
     leaves the last tile overhanging: the fill copies the last valid row into the tail and the

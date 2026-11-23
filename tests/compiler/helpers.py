@@ -201,6 +201,9 @@ requires_sm90 = pytest.mark.skipif(
     reason="mma.sync warp tier needs sm_90+ (pin-only / non-functional on sm_80-89: ldmatrix fault + sm_NNa TMA compile)",
 )
 
+# Skip the warp-group tests off Hopper: datacenter Blackwell has a different instruction and consumer Blackwell none.
+requires_hopper = pytest.mark.skipif(device_compute_capability() != (9, 0), reason="wgmma runs on sm_90 only")
+
 
 def direct_classic_leaf(fork_point):
     """Select the direct classic schedule without flattening the schedule tree."""

@@ -21,12 +21,10 @@ from emmy.compiler.ir.kernel.ir import Cond, CpAsyncCopy, CpAsyncWait, MbarrierA
 from emmy.compiler.ir.stmt import Body, Loop
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import compile_with_kernels, device_compute_capability, requires_cuda, statements
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_hopper, statements
 
 _N128 = "wgmma_m64n128k16_f16_f32/f1x16/k4"
 _HOPPER = Context.from_target((9, 0))
-
-requires_hopper = pytest.mark.skipif(device_compute_capability() != (9, 0), reason="wgmma runs on sm_90 only")
 
 
 def _code(n: int, k: int, epilogue: str = "") -> str:
