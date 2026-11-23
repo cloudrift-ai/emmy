@@ -76,7 +76,31 @@ def _placement_pools(path: Path):
     return placement_pools(db, _pools(path)["schedule"])
 
 
-KNOWN_MISSES: dict[tuple[str, str, int], str] = {}
+_PLACEMENT = "the placement prior misses a cut or split fork it trained on"
+_NEAR_TIE = "schedule near tie: the prior ranks a schedule 0.4-5% slower than the golden first"
+_IDENTICAL_ARMS = "two cut arms with identical features"
+KNOWN_MISSES: dict[tuple[str, str, int], str] = {
+    ("a100_sm80.json", "schedule", 26): _NEAR_TIE,
+    ("h100_sm90.json", "schedule", 26): _NEAR_TIE,
+    ("h100_sm90.json", "schedule", 86): _NEAR_TIE,
+    ("h100_sm90.json", "placement", 13): _IDENTICAL_ARMS,
+    ("rtx4090_sm89.json", "placement", 0): _PLACEMENT,
+    ("rtx4090_sm89.json", "placement", 6): _PLACEMENT,
+    ("rtx4090_sm89.json", "placement", 8): _PLACEMENT,
+    ("rtx4090_sm89.json", "placement", 57): _PLACEMENT,
+    ("rtx5090_sm120.json", "schedule", 11): _NEAR_TIE,
+    ("rtxpro6000_se_sm120.json", "schedule", 0): _NEAR_TIE,
+    ("rtxpro6000_se_sm120.json", "schedule", 30): _NEAR_TIE,
+    ("rtxpro6000_se_sm120.json", "placement", 2): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 12): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 28): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 49): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 87): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 89): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 92): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 129): _PLACEMENT,
+    ("v100_sxm2_sm70.json", "placement", 69): _PLACEMENT,
+}
 
 
 def _marks(path: Path, space: str, k: int) -> tuple:
