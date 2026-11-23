@@ -985,6 +985,24 @@ pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> PyResult<String>
     Ok(promoted.text().to_string())
 }
 
+/// Each integer [`prove_steps`] found moving: the place it is written at, its first value, its move per step.
+type Moves = Vec<(i64, i64, i64)>;
+
+/// The proof that `bodies` are one step taken again and again (`emmy_ir::numbering::prove`): how many integers the
+/// first body's coordinate expressions add, and for each that moves, the place it is written at, its value in the
+/// first body and how far it moves per step. A `ValueError` names the first difference that keeps them from it.
+#[pyfunction]
+pub fn prove_steps(bodies: Vec<Bound<'_, PyAny>>) -> PyResult<(usize, Moves)> {
+    let bodies: Vec<Body> = bodies
+        .iter()
+        .map(PyBody::from_iterable)
+        .collect::<PyResult<_>>()?;
+    match emmy_ir::numbering::prove(&bodies) {
+        Ok(proved) => Ok((proved.sites, proved.moves)),
+        Err(why) => Err(PyValueError::new_err(why)),
+    }
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBody>()?;
     m.add_class::<PyCone>()?;
@@ -992,6 +1010,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_body, m)?)?;
     m.add_function(wrap_pyfunction!(pretty_body, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_body, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_steps, m)?)?;
     m.add_function(wrap_pyfunction!(optimize_body, m)?)?;
     m.add_function(wrap_pyfunction!(check_types, m)?)?;
     m.add_function(wrap_pyfunction!(check_input, m)?)?;
