@@ -27,6 +27,8 @@ Preparation bundles `tokenizer.json` and the checkpoint's actual `chat_template.
 exists. Checkpoint tests compare rendered text and token IDs against Transformers for multilingual input, whitespace,
 special tokens, and multi-turn assistant history. Incremental decoding retains incomplete Unicode bytes. Final decode
 flushes incomplete output consistently with the checkpoint decoder, including genuine replacement characters.
+The text module owns each response's incremental decoder, token count, EOS and stop handling, and final flush. The
+worker validates the prepared prompt's context budget, starts generation, and drives GPU steps and bounded output.
 
 ## API contract
 
