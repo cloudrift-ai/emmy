@@ -1,7 +1,7 @@
 """Store what every launch of an ordered kernel stores over once, behind the last launch.
 
 A rolled scan whose states nothing reads but the next step keeps the state it ends with alone
-(``loop/fusion/_recurrence``): its store does not read the step, so each launch of the ordered kernel
+(``loop/fusion/005_roll_recurrence``): its store does not read the step, so each launch of the ordered kernel
 would write the same cells and only the last launch's would be read. The shared layout of ``035_shared_carry``
 stores it after its loop over the steps.
 """

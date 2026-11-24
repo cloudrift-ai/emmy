@@ -1,7 +1,8 @@
 """Roll an unrolled recurrence into ONE kernel that carries its state, where fusion would have inlined it.
 
-``010_merge_loop_ops`` asks this before it splices a region (:func:`roll`): the copies of one step, each reading
-the state the copy before it stored, are rolled first, and the regions of the graph that leaves are what it splices.
+The fusion pass's first rule asks this (``005_roll_recurrence``, :func:`roll`): the copies of one step, each
+reading the state the copy before it stored, are rolled before a loop reads through a copy or a region is spliced,
+and the regions of the graph that leaves are what the merge rule splices.
 
 A roll is a splice with more asked of its nodes, in three parts. :func:`found` lists the ways to read part of a
 region as a recurrence: which nodes are its states and which are each step's. :func:`_proved` holds one of them to

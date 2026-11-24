@@ -836,12 +836,10 @@ chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-d
 `O(j)`. No cut repairs that — a cut materializes within one target, and chunk `j+1`'s target recomputes what chunk
 `j`'s stored.
 
-The merge rule rolls it where it would have inlined it (`loop/fusion/_recurrence`, entered from
-`010_merge_loop_ops`): before it splices a region it rolls every recurrence a region holds, and the regions it
-splices are those of the graph the rolls leave, since a kernel that carries a state is in no region. A roll changes
-the regions after the rules ahead of the merge have read them, so once every recurrence has rolled the merge asks for
-the pass's rules to be scanned again from the first (`Match.rescan`): the loops around the new kernel read through
-the copies of their new regions before any of them is spliced. A roll is a splice with more asked of its nodes:
+`loop/fusion/005_roll_recurrence` rolls it BEFORE a loop reads through a copy and before fusion inlines it, while
+the structure is still plain: the fusion pass's first rule rolls every recurrence a region holds, and the regions
+the later rules read and splice are those of the graph the rolls leave, since a kernel that carries a state is in
+no region. A roll is a splice with more asked of its nodes:
 every step splices into one body, the bodies are one step up to the integers of their coordinates, and each step
 reads the state the step before it stored. The rule is three parts kept apart: the ways to read part of a region
 as a recurrence (the search), the test of one against those requirements, and the kernel written for the first

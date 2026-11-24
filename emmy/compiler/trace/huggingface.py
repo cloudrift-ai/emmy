@@ -328,7 +328,7 @@ def _chunk_rule(
     Each step of the scan reads its chunk's output, ``query @ state + intra @ new_values``, from the state it
     starts with and the new values it has just computed, and then advances the state. The recurrence rolls into
     one kernel that carries the state, and a step's own readers roll into it too
-    (``loop/fusion/_recurrence``): the output is computed where the state is held, and no state but the
+    (``loop/fusion/005_roll_recurrence``): the output is computed where the state is held, and no state but the
     last is stored. ``beta``, the decay and the query scale multiply the ``chunk x chunk`` matrices and the rows of
     a product's result, never the queries or values: those stay the operands they were loaded as, which is what a
     tensor-core tile reads. The keys take one decay, in the one product that shares its left operand with another.
