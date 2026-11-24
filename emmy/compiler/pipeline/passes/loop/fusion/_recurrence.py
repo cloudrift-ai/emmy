@@ -166,8 +166,25 @@ def _stateful(graph: Graph, region: set[str], state: str) -> set[str]:
     return found
 
 
+def _alike(readers: list[set[str]], of: dict[str, tuple], ancestors: dict[str, frozenset[str]]) -> list[set[str]]:
+    """The readers every step has. A reader of a kind the other steps' readers do not hold as often stays outside
+    the step, and so does what reads it: the first write of a buffer every step writes a part of reads the first
+    step alone, and the writes after it read two."""
+    while True:
+        counts = [Counter(of.get(node_id) for node_id in found) for found in readers]
+        gone = {node_id for found in readers for node_id in found if len({count[of.get(node_id)] for count in counts}) > 1}
+        if not gone:
+            return readers
+        readers = [{node_id for node_id in found if not ancestors[node_id] & gone} for found in readers]
+
+
 def _readers(
-    graph: Graph, regions: list[set[str]], states: list[str], chain: list[Node], ancestors: dict[str, frozenset[str]]
+    graph: Graph,
+    regions: list[set[str]],
+    states: list[str],
+    chain: list[Node],
+    ancestors: dict[str, frozenset[str]],
+    of: dict[str, tuple] | None = None,
 ) -> list[set[str]]:
     """What each step's own readers add to its region: every node outside the steps that reads the state the step
     starts from, or a value the step computes from it, and nothing of another step, with what such a node reads
@@ -192,6 +209,8 @@ def _readers(
             step[node_id] = next(iter(read)) if len(read) == 1 else None
             if step[node_id] is not None:
                 readers[step[node_id]].add(node_id)
+    if of is not None:
+        readers = _alike(readers, of, ancestors)
     # What the recurrence itself descends from is an input of the body or a step's own, and so is what the readers
     # of two steps both read: it is read at every step.
     recurrence = ancestors[chain[-1].id]
@@ -363,23 +382,24 @@ def found(graph: Graph, first: Node, kind: Kinds) -> Iterator[Recurrence]:
         except RuleSkipped:
             continue
         if count == len(states) + 1:
-            yield from _with_readers(graph, [*states, *last], steps, read, kind.ancestors)
+            yield from _with_readers(graph, [*states, *last], steps, read, kind)
             steps, read, count = steps[:-1], read[:-1], count - 1
-        yield from _with_readers(graph, states[:count], steps, read, kind.ancestors)
+        yield from _with_readers(graph, states[:count], steps, read, kind)
 
 
-def _with_readers(
-    graph: Graph, chain: list[Node], steps: list[set[str]], states: list[str], ancestors: dict[str, frozenset[str]]
-) -> Iterator[Recurrence]:
-    """Each step with its own readers, where those are one body at a stride as the steps are; then the steps alone,
-    where every reader takes its state from a store. Steps that are one body hold as many nodes each, which is asked
-    before any of them is spliced: two unrelated products of one matrix are a chain of two by their bodies, the
-    first one's readers are then everything that reads the matrix, and a splice of that many nodes over an unrolled
-    recurrence does not come back."""
-    readers = _readers(graph, steps, states, chain, ancestors)
-    joined = [step | read for step, read in zip(steps, readers, strict=True)]
-    if any(readers) and len({len(nodes) for nodes in joined}) == 1:
-        yield Recurrence(chain, joined, states)
+def _with_readers(graph: Graph, chain: list[Node], steps: list[set[str]], states: list[str], kind: Kinds) -> Iterator[Recurrence]:
+    """Each step with its own readers, where those are one body at a stride as the steps are; then with the readers
+    every step has (:func:`_alike`); then the steps alone, where every reader takes its state from a store. Steps
+    that are one body hold as many nodes each, which is asked before any of them is spliced: two unrelated products
+    of one matrix are a chain of two by their bodies, the first one's readers are then everything that reads the
+    matrix, and a splice of that many nodes over an unrolled recurrence does not come back."""
+    seen: list[list[set[str]]] = []
+    for of in (None, kind.of):
+        readers = _readers(graph, steps, states, chain, kind.ancestors, of)
+        joined = [step | read for step, read in zip(steps, readers, strict=True)]
+        if any(readers) and len({len(nodes) for nodes in joined}) == 1 and joined not in seen:
+            seen.append(joined)
+            yield Recurrence(chain, joined, states)
     yield Recurrence(chain, steps, states)
 
 

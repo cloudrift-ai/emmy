@@ -467,15 +467,19 @@ m(torch.randn(1, 16, 2, 8), torch.randn(1, 16, 2, 8), torch.randn(1, 16, 2, 8), 
 
 
 def test_the_chunked_gated_delta_rule_of_a_real_model_rolls_and_matches_eager() -> None:
-    """Qwen3.5's own chunk rule. Its step contracts over the previous state (``k_cumdecay @ S``),
-    its zero state enters the first step through a broadcast that belongs to the step, and it keeps
-    a second buffer per step (``v_new``) beside the state. Run as Loop IR, where a carrier executes
-    as it is spelled."""
+    """Qwen3.5's own chunk rule. Its step contracts over the previous state (``k_cumdecay @ S``), and its zero
+    state enters the first step through a broadcast that belongs to the step. It writes each chunk's output into
+    one buffer: the first of those writes reads the first step alone and the ones after it read two, so the roll
+    takes into the step the readers every step has, the chunk's output, and leaves the writes. The last chunk has
+    no step, its state is read by no one: the loop runs one trip past its steps for it. One kernel, which stores
+    the output and nothing else. Run as Loop IR, where a carrier executes as it is spelled."""
     graph, _, (module, _, _) = graph_from_code(_GATED_DELTA_RULE)
     graph = Pipeline.build(LOOP_PASSES).run(graph)
 
-    (rolled,) = _carriers(graph)
-    assert len(rolled.outputs) == 2 and any(isinstance(stmt, Loop) and stmt.carries for stmt in rolled.body)
+    (rolled,) = (node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp))
+    (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
+    assert steps.carries and steps.axis.extent.as_static() == 4, "three steps and the trip of the last chunk"
+    assert list(rolled.outputs) == list(graph.outputs)
 
     rng = np.random.default_rng(0)
     arrays: dict[str, np.ndarray] = {}

@@ -12,12 +12,14 @@ it can run there:
   (:func:`in_step`), and what it stores it then stores from inside the step;
 - a kernel each store of which reads one step by a literal is stored by that step (:func:`at_their_steps`). The state
   the loop ends with is what the last step stores, so its reader is one of these;
-- a kernel whose trip reads the state before its step reads the state itself, and where it has a trip after the last
-  step the loop runs that trip too, with the states held.
+- a kernel whose trip reads the state before its step reads the state itself, and where it has trips after the last
+  step the loop runs that step too, with the states held. A choice among the steps by a coordinate, one trip a
+  step or as many as the step is a digit of it, is one read at the step the coordinate names
+  (:func:`_chosen_step`); a chain of such choices, as the writes of one buffer part by part leave, is one choice.
 
 What cannot run in the step stays a kernel: a reader whose one store reads several steps, a reduction over the
-steps, a choice among the steps by a range of a coordinate. The merge is the fusion rule's own splice; which of these
-kernels are worth keeping apart is a cut's decision, taken on the merged kernel.
+steps. The merge is the fusion rule's own splice; which of these kernels are worth keeping apart is a cut's
+decision, taken on the merged kernel.
 """
 
 from __future__ import annotations
@@ -53,12 +55,14 @@ _Stepped = dict[str, tuple[int, int]]
 
 def _extents(body: Body) -> dict[str, int] | None:
     """The static extent of every loop of ``body`` by its axis, ``None`` where one is symbolic or a name is bound
-    twice."""
+    at two extents."""
     extents: dict[str, int] = {}
     for loop in body.iter_of_type(Loop):
-        if not loop.axis.extent.is_static or loop.axis.name in extents:
+        if (
+            not loop.axis.extent.is_static
+            or extents.setdefault(loop.axis.name, loop.axis.extent.as_static()) != loop.axis.extent.as_static()
+        ):
             return None
-        extents[loop.axis.name] = loop.axis.extent.as_static()
     return extents
 
 
@@ -109,6 +113,7 @@ def _one_read(graph: Graph, body: Body, stepped: _Stepped, before: dict[str, str
     (:func:`chosen_cell`, :func:`_chosen_step`). ``before`` names, for a buffer that holds a state — after each step,
     or after the last of the ``steps`` — the twin that holds it before each step."""
     before = before or {}
+    body = _flat_choices(body)
     reads = {load.names[0]: load for load in body.loads if plain_load(load)}
     chosen: dict[str, Statement | tuple[Statement, ...]] = {}
     tails: list[tuple[str, Load, Var, int, int]] = []
@@ -164,37 +169,75 @@ def _plain(entry: Expression) -> Expression:
     return total
 
 
-def _spans(select: Select, extents: dict[str, int]) -> tuple[Var, list[tuple[int, int]]] | None:
-    """The coordinate ``select`` chooses by, and the trips of it each branch takes as ``(first, past the last)``.
-    Every branch but the last is chosen where the coordinate equals a literal, or where it is below one, the bounds
-    rising; the last takes the trips left."""
-    *tests, otherwise = (branch.select for branch in select.branches)
-    if otherwise != _TRUE or not tests or not all(isinstance(test, BinaryExpression) for test in tests):
+def _flat_choices(body: Body) -> Body:
+    """``body`` with a choice whose last branch is another choice as ONE choice: the branches of the second follow
+    those of the first. A chain of writes into one buffer, each over a part of it, is such a chain of choices."""
+    while True:
+        selects = {select.name: select for select in body.iter_of_type(Select)}
+        nested = {
+            name: select for name, select in selects.items() if select.branches[-1].value in selects and select.branches[-1].select == _TRUE
+        }
+        if not nested:
+            return body
+
+        def flat(stmt: Statement, nested: dict[str, Select] = nested, selects: dict[str, Select] = selects) -> Statement:
+            if not isinstance(stmt, Select) or stmt.name not in nested:
+                return stmt
+            return stmt.replace(branches=(*stmt.branches[:-1], *selects[stmt.branches[-1].value].branches))
+
+        body = body.map(flat)
+        used = body.ssa_uses
+        body = body.map(lambda stmt, used=used: () if isinstance(stmt, Select) and stmt.name not in used else stmt)
+
+
+def _bounds(test: Expression) -> tuple[Expression, int | None, int | None] | None:
+    """``(the coordinate, the first trip, the trip past the last)`` a test holds on, a bound left open as ``None``:
+    the coordinate below a literal, at or above one, equal to one, or two of these at once."""
+    if not isinstance(test, BinaryExpression):
         return None
-    points: list[int] | None = None
-    if all(test.op == "==" for test in tests):
-        sides = [(test.left, test.right) if isinstance(test.left, Literal) else (test.right, test.left) for test in tests]
-        if not all(isinstance(literal, Literal) for literal, _ in sides):
+    if test.op == "&&":
+        left, right = _bounds(test.left), _bounds(test.right)
+        if left is None or right is None or left[0] != right[0]:
             return None
-        along, points = {other for _, other in sides}, [literal.value for literal, _ in sides]
-    elif all(test.op == "<" and isinstance(test.right, Literal) for test in tests):
-        along = {test.left for test in tests}
-    else:
+        low = max((bound for bound in (left[1], right[1]) if bound is not None), default=None)
+        high = min((bound for bound in (left[2], right[2]) if bound is not None), default=None)
+        return left[0], low, high
+    literal, other = (test.left, test.right) if isinstance(test.left, Literal) else (test.right, test.left)
+    if not isinstance(literal, Literal) or type(literal.value) is not int:
         return None
-    if len(along) != 1:
+    if test.op == "==":
+        return other, literal.value, literal.value + 1
+    if test.op == "<":
+        return (other, None, literal.value) if literal is test.right else (other, literal.value + 1, None)
+    if test.op == "<=":
+        return (other, None, literal.value + 1) if literal is test.right else (other, literal.value, None)
+    return None
+
+
+def _spans(select: Select, extents: dict[str, int]) -> tuple[Var, list[tuple[int, int]]] | None:
+    """The coordinate ``select`` chooses by, and the trips of it each branch takes as ``(first, past the last)``,
+    ``(0, 0)`` for a branch no trip reaches. Every branch but the last is chosen on a range of the coordinate
+    (:func:`_bounds`); a trip goes to the first branch whose range holds it, and the last takes the trips left."""
+    *tests, otherwise = (branch.select for branch in select.branches)
+    found = [_bounds(test) for test in tests]
+    if otherwise != _TRUE or not found or None in found or len({coordinate for coordinate, _, _ in found}) != 1:
         return None
-    (coordinate,) = along
+    coordinate = found[0][0]
     if not isinstance(coordinate, Var) or coordinate.name not in extents:
         return None
-    if points is not None:
-        left = set(range(extents[coordinate.name])) - set(points)
-        if len(left) != 1 or len(set(points)) != len(points):
-            return None
-        return coordinate, [(point, point + 1) for point in (*points, *left)]
-    edges = [0, *(test.right.value for test in tests), extents[coordinate.name]]
-    if any(low >= high for low, high in zip(edges, edges[1:], strict=False)):
-        return None
-    return coordinate, list(zip(edges, edges[1:], strict=False))
+    extent = extents[coordinate.name]
+    ranges = [(max(low or 0, 0), min(extent if high is None else high, extent)) for _, low, high in found] + [(0, extent)]
+    edges = sorted({0, extent, *(edge for low, high in ranges for edge in (low, high) if 0 <= edge <= extent)})
+    spans: list[tuple[int, int]] = [(0, 0)] * len(ranges)
+    for first, past in zip(edges, edges[1:], strict=False):
+        taker = next(at for at, (low, high) in enumerate(ranges) if low <= first and past <= high)
+        if spans[taker] == (0, 0):
+            spans[taker] = (first, past)
+        elif spans[taker][1] == first:
+            spans[taker] = (spans[taker][0], past)
+        else:
+            return None  # the branch takes two runs of trips
+    return coordinate, spans
 
 
 def _chosen_step(
@@ -248,11 +291,23 @@ def _chosen_step(
     one = f"{select.name}__step"
     read = Load(names=(one,), input=before[source] if offset else source, index=(*cell[:position], step, *cell[position:]))
     taken = {at for at, _ in picked}
-    branches = tuple(SelectBranch(one, branch.select) if at in taken else branch for at, branch in enumerate(select.branches))
     past = max(trips[at][1] for at in taken)
-    others = [trips[at][0] for at in range(len(trips)) if at not in taken]
-    tail = (coordinate, wide, past) if others and all(first >= past for first in others) else None
-    return (read, select.replace(branches=branches)), tail
+    # The other branches keep the trips they take, each named by its range; the one read takes the rest. The choice
+    # is then as long as its other branches, however many the steps are.
+    others = [at for at in range(len(trips)) if at not in taken and trips[at] != (0, 0)]
+    here = Literal(extents[coordinate.name], "int")
+    ranged = tuple(
+        SelectBranch(
+            select.branches[at].value,
+            _all(
+                BinaryExpression("<=", Literal(trips[at][0], "int"), coordinate) if trips[at][0] else None,
+                BinaryExpression("<", coordinate, Literal(trips[at][1], "int")) if trips[at][1] < here.value else None,
+            ),
+        )
+        for at in others
+    )
+    tail = (coordinate, wide, past) if others and all(trips[at][0] >= past for at in others) else None
+    return (read, select.replace(branches=(*ranged, SelectBranch(one, _TRUE)))), tail
 
 
 _TRUE = Literal(True, "bool")
@@ -577,7 +632,7 @@ def from_a_read(graph: Graph, op: LoopOp, seeds: set[str]) -> LoopOp:
     return replace(op, body=op.body.map(move), inputs={}) if starts else op
 
 
-def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[str], dict[str, tuple[Tensor, ...]]]:
+def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict[str, LoopOp], set[str], dict[str, tuple[Tensor, ...]]]:
     """``carrying`` and every kernel that joins its step, each as it is spliced: a kernel the step reads as it is, a
     reader of the step's stores as it runs inside the step (:func:`in_step`). And those of them that stay kernels
     of their own beside the step, for whoever else reads them. And the twins each member stores beside its own
@@ -597,9 +652,13 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
     states = _state_stores(carrying.op.body, stepped, set(standing)) if frame is not None else {}
     before = {name: f"{name}__before" for name in states}
     steps = extent = frame[0].axis.extent.as_static() if frame is not None else 0
-    for reader in sorted(set().union(*(graph.buffer_users(name) for name in states)) if states else ()):
+    reaching: set[str] = set()
+    for reader in sorted(set().union(*(graph.buffer_users(name) for name in states)) if states and longer else ()):
         if isinstance(graph.nodes[reader].op, LoopOp):
-            extent = max(extent, _reach(_one_read(graph, graph.nodes[reader].op.body, stepped, before, steps), set(before.values())))
+            reach = _reach(_one_read(graph, graph.nodes[reader].op.body, stepped, before, steps), set(before.values()))
+            if reach > steps:
+                reaching.add(reader)
+                extent = max(extent, reach)
     twins = (
         *standing.values(),
         *(
@@ -639,6 +698,7 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
         below = set().union(*(downstream[member] for member in members)) - set(members)
         return not any(graph.producer(name).id in below for name in node.inputs)
 
+    free: set[str] = set()
     grown = True
     while grown:
         grown = False
@@ -649,13 +709,16 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
             read = [name for name in node.inputs if graph.producer(name).id in members]
             if graph.users(nid) and graph.users(nid) <= set(members) and not set(node.buffer_names()) & set(graph.outputs):
                 members[nid] = node.op
+                free.update(node.buffer_names())
             elif not read and not nested and graph.users(nid) & set(members):
                 # PROTOTYPE. A plain kernel the step reads beside other readers is computed in the step too, where
                 # the step reads it, and stays a kernel for the others. Storing it once for all of them is memory
                 # taken for recomputation: a cut's choice, on the merged kernel.
                 members[nid] = node.op
                 kept.add(nid)
-            elif frame is not None and read and all(name in stepped or name in standing for name in read):
+                free.update(node.buffer_names())
+            elif frame is not None and set(read) - free and all(name in stepped or name in standing or name in free for name in read):
+                # What it reads of a member that is of no step it reads where it stands, like the step does.
                 if any(name in standing for name in read) and copied(graph, node.outputs[0].name) is not None:
                     continue  # a copy of what the last step stored: the step stores it there (``020``)
                 body = _one_read(graph, node.op.body, stepped, before, steps).map(
@@ -674,6 +737,9 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
             else:
                 continue
             grown = True
+    if not reaching <= set(members):
+        # The loop was made longer for a kernel that then stayed outside: the step is taken as long as it is.
+        return _neighbours(graph, carrying, longer=False)
     return members, kept, {carrying.id: twins if frame is not None else ()}
 
 
