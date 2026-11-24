@@ -8899,24 +8899,24 @@
     "  reshape__place_acf4b2d4ae_0[0, a0] = acc0"
    ]},"inputs":["reshape__place_2cffe24cd3_0","linear_wt"],"outputs":[["reshape__place_acf4b2d4ae_0","f16",[1,4096]]]}
   ]},"formed":true},
-  {"loop_ir":{"inputs":["reshape__place_68a19facfc_0","linear_1_wt","linear_2_wt"],"outputs":["reshape__place_011943295b_0__partial"],"nodes":[
+  {"loop_ir":{"inputs":["reshape__place_dbfe7581c3_0","linear_1_wt","linear_2_wt"],"outputs":["reshape__place_612e2415e1_0__partial"],"nodes":[
    {"id":"linear_1_wt","op":"input","outputs":[["linear_1_wt","f16",[3840,2048]]]},
    {"id":"linear_2_wt","op":"input","outputs":[["linear_2_wt","f16",[3840,2048]]]},
-   {"id":"reshape__place_68a19facfc_0","op":"input","outputs":[["reshape__place_68a19facfc_0","f16",[1,3840]]]},
-   {"id":"reshape__place_011943295b_0__partial","op":"loop","attrs":{"body":[
+   {"id":"reshape__place_dbfe7581c3_0","op":"input","outputs":[["reshape__place_dbfe7581c3_0","f16",[1,3840]]]},
+   {"id":"reshape__place_612e2415e1_0__partial","op":"loop","attrs":{"body":[
     "for a0 in 0..2:",
     "  for a1 in 0..2048:",
-    "    for a2 in 0..1920 window(parent=a2 in 0..3840, partition=true):",
-    "      in0 = load linear_1_wt[1920 * a0 + a2, a1]",
-    "      in1 = load linear_2_wt[1920 * a0 + a2, a1]",
-    "      in2 = load reshape__place_68a19facfc_0[0, 1920 * a0 + a2]",
-    "      f32 v0 = in1 * in2",
+    "    for a2 in 1920 * a0..1920 * a0 + 1920 of 3840 window(parent=a2 in 0..3840, partition=true):",
+    "      in0 = load reshape__place_dbfe7581c3_0[0, a2]",
+    "      in1 = load linear_1_wt[a2, a1]",
+    "      f32 v0 = in1 * in0",
     "      acc0 <- add(acc0, v0) over a2",
-    "      f32 v1 = in0 * in2",
+    "      in2 = load linear_2_wt[a2, a1]",
+    "      f32 v1 = in2 * in0",
     "      acc1 <- add(acc1, v1) over a2",
-    "    reshape__place_011943295b_0__partial[0, a0, 0, a1] = acc1",
-    "    reshape__place_011943295b_0__partial[1, a0, 0, a1] = acc0"
-   ]},"inputs":["reshape__place_68a19facfc_0","linear_1_wt","linear_2_wt"],"outputs":[["reshape__place_011943295b_0__partial","f32",[2,2,1,2048]]]}
+    "    reshape__place_612e2415e1_0__partial[0, a0, 0, a1] = acc0",
+    "    reshape__place_612e2415e1_0__partial[1, a0, 0, a1] = acc1"
+   ]},"inputs":["reshape__place_dbfe7581c3_0","linear_1_wt","linear_2_wt"],"outputs":[["reshape__place_612e2415e1_0__partial","f32",[2,2,1,2048]]]}
   ]},"formed":true},
   {"loop_ir":{"inputs":["reshape__place_0334628046_0__partial"],"outputs":["reshape__place_0334628046_0","reshape__place_0334628046_1"],"nodes":[
    {"id":"reshape__place_0334628046_0__partial","op":"input","outputs":[["reshape__place_0334628046_0__partial","f32",[2,2,1,2048]]]},
@@ -8931,33 +8931,33 @@
     "  reshape__place_0334628046_1[0, a0] = acc1"
    ]},"inputs":["reshape__place_0334628046_0__partial"],"outputs":[["reshape__place_0334628046_0","f16",[1,2048]],["reshape__place_0334628046_1","f16",[1,2048]]]}
   ]},"formed":true},
-  {"loop_ir":{"inputs":["reshape__place_acf4b2d4ae_0"],"outputs":["reshape__place_efe1538ec0_0"],"nodes":[
-   {"id":"reshape__place_acf4b2d4ae_0","op":"input","outputs":[["reshape__place_acf4b2d4ae_0","f16",[1,4096]]]},
-   {"id":"reshape__place_efe1538ec0_0","op":"loop","attrs":{"body":[
+  {"loop_ir":{"inputs":["reshape__place_335ef44c5d_0"],"outputs":["reshape__place_e3ad7ede20_0"],"nodes":[
+   {"id":"reshape__place_335ef44c5d_0","op":"input","outputs":[["reshape__place_335ef44c5d_0","f16",[1,4096]]]},
+   {"id":"reshape__place_e3ad7ede20_0","op":"loop","attrs":{"body":[
     "for a0 in 0..8:",
     "  for a1 in 0..16:",
-    "    for a2 in 0..32 window(parent=a2 in 0..256, partition=true):",
-    "      in0 = load reshape__place_acf4b2d4ae_0[0, 32 * a0 + 256 * a1 + a2]",
-    "      f16 v0 = copy(in0)",
-    "      f32 v1 = copy(v0)",
+    "    for a2 in 32 * a0..32 * a0 + 32 of 256 window(parent=a2 in 0..256, partition=true):",
+    "      in0 = load reshape__place_335ef44c5d_0[0, 256 * a1 + a2]",
+    "      f16 v0 = in0",
+    "      f32 v1 = v0",
     "      v2 = v1 * v1",
     "      acc0 <- add(acc0, v2) over a2",
-    "    reshape__place_efe1538ec0_0[0, a1] += acc0"
-   ]},"inputs":["reshape__place_acf4b2d4ae_0"],"outputs":[["reshape__place_efe1538ec0_0","f32",[1,16]]]}
+    "    reshape__place_e3ad7ede20_0[0, a1] += acc0"
+   ]},"inputs":["reshape__place_335ef44c5d_0"],"outputs":[["reshape__place_e3ad7ede20_0","f32",[1,16]]]}
   ]},"formed":true},
-  {"loop_ir":{"inputs":["reshape__place_68a19facfc_0","linear_wt"],"outputs":["reshape__place_636e08981b_0__partial"],"nodes":[
+  {"loop_ir":{"inputs":["reshape__place_dbfe7581c3_0","linear_wt"],"outputs":["reshape__place_335ef44c5d_0__partial"],"nodes":[
    {"id":"linear_wt","op":"input","outputs":[["linear_wt","f16",[3840,4096]]]},
-   {"id":"reshape__place_68a19facfc_0","op":"input","outputs":[["reshape__place_68a19facfc_0","f16",[1,3840]]]},
-   {"id":"reshape__place_636e08981b_0__partial","op":"loop","attrs":{"body":[
+   {"id":"reshape__place_dbfe7581c3_0","op":"input","outputs":[["reshape__place_dbfe7581c3_0","f16",[1,3840]]]},
+   {"id":"reshape__place_335ef44c5d_0__partial","op":"loop","attrs":{"body":[
     "for a0 in 0..2:",
     "  for a1 in 0..4096:",
-    "    for a2 in 0..1920 window(parent=a2 in 0..3840, partition=true):",
-    "      in0 = load linear_wt[1920 * a0 + a2, a1]",
-    "      in1 = load reshape__place_68a19facfc_0[0, 1920 * a0 + a2]",
-    "      f32 v0 = in0 * in1",
+    "    for a2 in 1920 * a0..1920 * a0 + 1920 of 3840 window(parent=a2 in 0..3840, partition=true):",
+    "      in0 = load reshape__place_dbfe7581c3_0[0, a2]",
+    "      in1 = load linear_wt[a2, a1]",
+    "      f32 v0 = in1 * in0",
     "      acc0 <- add(acc0, v0) over a2",
-    "    reshape__place_636e08981b_0__partial[a0, 0, a1] = acc0"
-   ]},"inputs":["reshape__place_68a19facfc_0","linear_wt"],"outputs":[["reshape__place_636e08981b_0__partial","f32",[2,1,4096]]]}
+    "    reshape__place_335ef44c5d_0__partial[a0, 0, a1] = acc0"
+   ]},"inputs":["reshape__place_dbfe7581c3_0","linear_wt"],"outputs":[["reshape__place_335ef44c5d_0__partial","f32",[2,1,4096]]]}
   ]},"formed":true},
   {"loop_ir":{"inputs":["reshape__place_acf4b2d4ae_0__partial"],"outputs":["reshape__place_acf4b2d4ae_0"],"nodes":[
    {"id":"reshape__place_acf4b2d4ae_0__partial","op":"input","outputs":[["reshape__place_acf4b2d4ae_0__partial","f32",[2,1,4096]]]},
@@ -14747,41 +14747,40 @@
     "      reshape_2[a1, 256 * a0 + a3] = v16"
    ]},"inputs":["reshape__place_2eb2b3787f_0","reshape__place_2eb2b3787f_1","p_k_norm_weight"],"outputs":[["reshape_1","f16",[192,2048]],["reshape_2","f16",[192,2048]]]}
   ]},"formed":false},
-  {"loop_ir":{"inputs":["hidden","p_input_layernorm_weight","linear_wt"],"outputs":["reshape__place_cd9bc2ebe2_0__partial"],"nodes":[
+  {"loop_ir":{"inputs":["hidden","p_input_layernorm_weight","linear_wt"],"outputs":["reshape__place_47dc234e9d_0__partial"],"nodes":[
    {"id":"hidden","op":"input","outputs":[["hidden","f16",[192,3840]]]},
    {"id":"linear_wt","op":"input","outputs":[["linear_wt","f16",[3840,4096]]]},
    {"id":"p_input_layernorm_weight","op":"input","outputs":[["p_input_layernorm_weight","f16",[3840]]]},
-   {"id":"reshape__place_cd9bc2ebe2_0__partial","op":"loop","attrs":{"body":[
-    "let f32 v0 = 3840.0",
-    "let f32 v1 = 9.999999974752427e-07",
-    "for a0 in 0..256:",
+   {"id":"reshape__place_47dc234e9d_0__partial","op":"loop","attrs":{"body":[
+    "for a0 in 0..16:",
     "  for a1 in 0..192:",
     "    for a2 in 0..3840:",
     "      in0 = load hidden[a1, a2]",
-    "      f32 v2 = copy(in0)",
-    "      v3 = v2 * v2",
-    "      acc0 <- add(acc0, v3) over a2",
-    "    v4 = acc0 / v0",
-    "    v5 = v1 + v4",
-    "    v6 = rsqrt(v5)",
-    "    for a3 in 0..16 window(parent=a3 in 0..256, partition=true):",
-    "      for a4 in 0..3840:",
-    "        in1 = load linear_wt[a4, 16 * a0 + a3]",
-    "        in2 = load hidden[a1, a4]",
-    "        f32 v7 = copy(in2)",
-    "        v8 = v7 * v6",
-    "        in3 = load p_input_layernorm_weight[a4]",
-    "        f32 v9 = copy(in3)",
-    "        v10 = v8 * v9",
-    "        f16 v11 = copy(v10)",
-    "        f32 v12 = in1 * v11",
-    "        acc2 <- add(acc2, v12) over a4",
-    "      f16 v13 = copy(acc2)",
-    "      f32 v14 = copy(v13)",
-    "      v15 = v14 * v14",
-    "      acc1 <- add(acc1, v15) over a3",
-    "    reshape__place_cd9bc2ebe2_0__partial[a0 % 16, a0 / 16, a1] = acc1"
-   ]},"inputs":["hidden","p_input_layernorm_weight","linear_wt"],"outputs":[["reshape__place_cd9bc2ebe2_0__partial","f32",[16,16,192]]]}
+    "      f32 v0 = in0",
+    "      v1 = v0 * v0",
+    "      acc0 <- add(acc0, v1) over a2",
+    "    v2 = acc0 / 3840.0",
+    "    v3 = v2 + 9.999999974752427e-07",
+    "    v4 = rsqrt(v3)",
+    "    for a3 in 0..16:",
+    "      for a4 in 16 * a3..16 * a3 + 16 of 256 window(parent=a4 in 0..256, partition=true):",
+    "        for a5 in 0..3840:",
+    "          in1 = load linear_wt[a5, 256 * a0 + a4]",
+    "          in2 = load hidden[a1, a5]",
+    "          f32 v5 = in2",
+    "          v6 = v5 * v4",
+    "          in3 = load p_input_layernorm_weight[a5]",
+    "          f32 v7 = in3",
+    "          v8 = v7 * v6",
+    "          f16 v9 = v8",
+    "          f32 v10 = in1 * v9",
+    "          acc2 <- add(acc2, v10) over a5",
+    "        f16 v11 = acc2",
+    "        f32 v12 = v11",
+    "        v13 = v12 * v12",
+    "        acc1 <- add(acc1, v13) over a4",
+    "      reshape__place_47dc234e9d_0__partial[a3, a0, a1] = acc1"
+   ]},"inputs":["hidden","p_input_layernorm_weight","linear_wt"],"outputs":[["reshape__place_47dc234e9d_0__partial","f32",[16,16,192]]]}
   ]},"formed":true},
   {"loop_ir":{"inputs":["reshape__place_96efaae974_0","reshape__place_96efaae974_1","hidden","p_input_layernorm_weight","p_k_norm_weight","linear_wt","p_q_norm_weight"],"outputs":["reshape","reshape_1","reshape_2"],"nodes":[
    {"id":"hidden","op":"input","outputs":[["hidden","f16",[192,3840]]]},
@@ -17687,8 +17686,7 @@
   {"name":"pre1.k_linear_mean_reduce_0ae83a.m1.fm.1ab0db4362ef.09f66ba2f7b2.b6649bda6a49",
    "kernel":98,
    "pins":{"FAST_MATH":true},
-   "knobs":{"WORK":"t128","TILE":"","REDUCE":"coop","STAGE":"","LOOPIFY":"0","RASTER":""},
-   "measurements":{"emmy_us":146.84343338012695,"reference_us":147.66629040241241,"reference_backend":"same-input-greedy","tried":1}},
+   "knobs":{"WORK":"t128","TILE":"","REDUCE":"coop","STAGE":"","LOOPIFY":"0","RASTER":""}},
   {"name":"pre1.k_linear_mean_reduce_0ae83a.m1.fm.1ab0db4362ef.09f66ba2f7b2.023f47d776ae",
    "kernel":99,
    "pins":{"FAST_MATH":true},
@@ -18025,8 +18023,7 @@
   {"name":"k_linear_mean_reduce_76c8a5.86ea74cbc58d",
    "kernel":277,
    "pins":{"FAST_MATH":false},
-   "knobs":{"REDUCE@reduce":"coop","REDUCE@reduce.1/inner":"","REDUCE@reduce.1/inner.1/map.3/map.1/reduce":"","WORK":"t128","TILE":"","STAGE":"","LOOPIFY":"0","RASTER":""},
-   "measurements":{"emmy_us":6499.840021133423,"reference_us":6495.823860168457,"reference_backend":"same-input-greedy","tried":1}},
+   "knobs":{"REDUCE@reduce":"coop","REDUCE@reduce.1/inner":"","REDUCE@reduce.1/inner.1/map.3/map.1/reduce":"","WORK":"t128","TILE":"","STAGE":"","LOOPIFY":"0","RASTER":""}},
   {"name":"k_linear_mean_reduce_76c8a5.1673ac0323cc",
    "kernel":281,
    "pins":{"FAST_MATH":false},
@@ -18050,8 +18047,7 @@
   {"name":"k_linear_mean_reduce_76c8a5.fm.86ea74cbc58d",
    "kernel":277,
    "pins":{"FAST_MATH":true},
-   "knobs":{"REDUCE@reduce":"coop","REDUCE@reduce.1/inner":"","REDUCE@reduce.1/inner.1/map.3/map.1/reduce":"","WORK":"t128","TILE":"","STAGE":"","LOOPIFY":"0","RASTER":""},
-   "measurements":{"emmy_us":6496.784210205078,"reference_us":6486.704111099243,"reference_backend":"same-input-greedy","tried":1}},
+   "knobs":{"REDUCE@reduce":"coop","REDUCE@reduce.1/inner":"","REDUCE@reduce.1/inner.1/map.3/map.1/reduce":"","WORK":"t128","TILE":"","STAGE":"","LOOPIFY":"0","RASTER":""}},
   {"name":"k_linear_mean_reduce_76c8a5.fm.1673ac0323cc",
    "kernel":281,
    "pins":{"FAST_MATH":true},
