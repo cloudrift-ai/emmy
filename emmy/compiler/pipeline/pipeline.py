@@ -769,8 +769,10 @@ class Run:
             strat.on_run_start(event)
         cand = Candidate(run=self, graph=graph, cursor=Cursor(run=self))
         trace: list[Decision] = []
-        # The launch binds every symbolic size of the graph's inputs, whichever caller resolves it.
-        with binding_extents(name for buffer in graph.inputs for dim in graph.buffer(buffer).shape for name in dim.expression.free_vars()):
+        # The launch binds every symbolic size of the graph's inputs and outputs, whichever caller resolves it. An
+        # output a pass has yet to write has no buffer yet.
+        io = [graph.buffer(buffer) for buffer in (*graph.inputs, *graph.outputs)]
+        with binding_extents(name for tensor in io if tensor is not None for dim in tensor.shape for name in dim.expression.free_vars()):
             while not cand.cursor.is_done:
                 self._step(cand, decide=decide, trace=trace)
         return cand.graph, trace
