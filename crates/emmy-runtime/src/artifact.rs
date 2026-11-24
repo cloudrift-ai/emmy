@@ -567,7 +567,10 @@ pub fn dimensions(axes: &[Vec<Expr>], env: &Env) -> Result<(u32, u32, u32)> {
 
 impl Program {
     pub fn parse(json: &str) -> Result<Self> {
-        let raw: RawPlan = serde_json::from_str(json)?;
+        Self::from_raw(serde_json::from_str(json)?)
+    }
+
+    fn from_raw(raw: RawPlan) -> Result<Self> {
         ensure!(
             SUPPORTED_PLAN_FORMATS.contains(&raw.format),
             "unsupported plan format {}",
@@ -588,7 +591,7 @@ impl Program {
             hints: BTreeMap::new(),
             caps: BTreeMap::new(),
         });
-        let mut program = Program {
+        let mut program = Self {
             format: raw.format,
             backend: raw.backend,
             inputs: raw.inputs,
