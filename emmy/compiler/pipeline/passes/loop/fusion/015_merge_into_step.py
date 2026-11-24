@@ -24,7 +24,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, TernaryExpression, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, splice_graph
-from emmy.compiler.ir.stmt import Accum, Body, Carry, Cond, Let, Load, Loop, Select, SelectBranch, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Let, Load, Loop, Select, SelectBranch, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import (
     build_merged_region,
@@ -76,10 +76,14 @@ def _width(entry, step: str, extents: dict[str, int]) -> int | None:
     return form[1][step] if low >= 0 and high < form[1][step] else None
 
 
+#: What may stand beside the loop that carries a state: values read or computed once, of no step.
+_ONCE = (Let, Load, Assign, Select)
+
+
 def stepped_stores(body: Body) -> tuple[Loop, _Stepped] | None:
-    """The loop that carries ``body``'s state, where nothing but literals stands beside it and its steps are
-    counted, and each buffer the step stores at a cell that holds the step."""
-    loops = [stmt for stmt in body if not isinstance(stmt, Let)]
+    """The loop that carries ``body``'s state, where nothing but values of no step stands beside it and its steps
+    are counted, and each buffer the step stores at a cell that holds the step."""
+    loops = [stmt for stmt in body if not isinstance(stmt, _ONCE)]
     if len(loops) != 1 or not isinstance(loops[0], Loop) or not loops[0].carries or not loops[0].axis.extent.is_static:
         return None
     loop, extents = loops[0], _extents(body)
@@ -276,7 +280,8 @@ def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int]
     carried = [stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries]
     if len(carried) > 1:
         return None
-    lets = tuple(stmt for stmt in body if isinstance(stmt, Let))
+    # What stands beside the loop of steps stays beside the one loop: it is of no step.
+    lets = tuple(stmt for stmt in body if stmt is not carried[0]) if carried else tuple(stmt for stmt in body if isinstance(stmt, Let))
     inner = carried[0].body if carried else Body(stmt for stmt in body if not isinstance(stmt, Let))
     own = carried[0].axis.name if carried else None
     trips = carried[0].axis.extent.as_static() if carried else 0
@@ -346,7 +351,7 @@ def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int]
 
 def _places(op: LoopOp) -> _Stepped | None:
     """Where each buffer ``op`` stores holds the step of its one outer loop, or ``None`` where one holds none."""
-    loops = [stmt for stmt in op.body if not isinstance(stmt, Let)]
+    loops = [stmt for stmt in op.body if not isinstance(stmt, _ONCE)]
     inner = _extents(op.body)
     if len(loops) != 1 or not isinstance(loops[0], Loop) or inner is None:
         return None
@@ -372,16 +377,21 @@ def in_step(graph: Graph, reader: LoopOp, stepped: _Stepped, steps: int) -> tupl
     return None if places is None else (op, places)
 
 
-def _neighbours(graph: Graph, carrying: Node) -> dict[str, LoopOp]:
-    """``carrying`` and every kernel that joins its step, each as it is spliced: a kernel only the step reads as it
-    is, a reader of the step's stores as it runs inside the step (:func:`in_step`)."""
+def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[str]]:
+    """``carrying`` and every kernel that joins its step, each as it is spliced: a kernel the step reads as it is, a
+    reader of the step's stores as it runs inside the step (:func:`in_step`). And those of them that stay kernels
+    of their own beside the step, for whoever else reads them."""
     members: dict[str, LoopOp] = {carrying.id: carrying.op}
+    kept: set[str] = set()
     frame = stepped_stores(carrying.op.body)
     stepped: _Stepped = dict(frame[1]) if frame is not None else {}
     order = graph.topological_order()
     downstream: dict[str, set[str]] = {}
     for nid in reversed(order):
         downstream[nid] = set().union(*({user} | downstream[user] for user in graph.users(nid)))
+    # A kernel that carries a state and comes after this one takes it into its own loop first (:func:`together`):
+    # what both of them read is then read by one kernel, and joins it whole.
+    nested = any(isinstance(later := graph.nodes[nid].op, LoopOp) and later.body.carries for nid in downstream[carrying.id])
 
     # The state starts from a buffer: the kernel that fills it stays one. And a kernel that reads a buffer this one
     # stores over reads it before that store, so it is a kernel before this one.
@@ -407,6 +417,12 @@ def _neighbours(graph: Graph, carrying: Node) -> dict[str, LoopOp]:
             read = [name for name in node.inputs if graph.producer(name).id in members]
             if graph.users(nid) and graph.users(nid) <= set(members) and not set(node.buffer_names()) & set(graph.outputs):
                 members[nid] = node.op
+            elif not read and not nested and graph.users(nid) & set(members):
+                # PROTOTYPE. A plain kernel the step reads beside other readers is computed in the step too, where
+                # the step reads it, and stays a kernel for the others. Storing it once for all of them is memory
+                # taken for recomputation: a cut's choice, on the merged kernel.
+                members[nid] = node.op
+                kept.add(nid)
             elif frame is not None and read and all(name in stepped for name in read):
                 moved = in_step(graph, node.op, {name: stepped[name] for name in read}, frame[0].axis.extent.as_static())
                 if moved is None:
@@ -416,7 +432,7 @@ def _neighbours(graph: Graph, carrying: Node) -> dict[str, LoopOp]:
             else:
                 continue
             grown = True
-    return members
+    return members, kept
 
 
 def together(graph: Graph, walk: Node, inner: Node) -> tuple[LoopOp, tuple[str, ...]] | None:
@@ -469,14 +485,14 @@ def rewrite(match: Match, carrying: Node) -> Graph:
                 match.consumed = {carrying.id, inner.id}
                 match.output = merged[1][0] if len(merged[1]) == 1 else output_map
                 return fragment
-    members = _neighbours(graph, carrying)
+    members, kept = _neighbours(graph, carrying)
     if len(members) == 1:
         raise RuleSkipped("no kernel beside this one runs in its step")
-    live = live_outputs_of(graph, set(members))
+    live = tuple(name for name in live_outputs_of(graph, set(members)) if graph.producer(name).id not in kept)
     merged = build_merged_region(graph, set(members), live, members)
     if merged is None:
         raise ValueError(f"fusion cannot splice the step of {carrying.id!r} with {sorted(set(members) - {carrying.id})}")
     fragment, output_map = wrap_multi_output_fragment(graph, merged, live)
-    match.consumed = set(members)
+    match.consumed = set(members) - kept
     match.output = live[0] if len(live) == 1 else output_map
     return fragment
