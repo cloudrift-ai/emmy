@@ -17,10 +17,10 @@ from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.expression import Literal
-from emmy.compiler.ir.stmt import Accum, Cond, Loop
+from emmy.compiler.ir.stmt import Cond, Loop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline, RuleSkipped
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
@@ -113,16 +113,17 @@ m(torch.randn(2, 16, 8), torch.randn(2, 16, 8), torch.randn(2, 16, 8))
 """
 
 
-def test_a_reader_of_several_steps_stays_outside_and_reads_the_stored_states() -> None:
-    """A product over the stack of every start state reads more than one step: no step computes it, so the kernel
-    stores the state of every step for it."""
+def test_a_reader_of_the_state_before_each_step_runs_in_the_step() -> None:
+    """A product over the stack of every start state has a trip per chunk, one more than the steps: each trip reads
+    the state before its step, the seed on the first and the state the loop ends with on the last. The loop runs
+    that last trip too, with the state held, and the product reads the state itself: one kernel, no stored states."""
     graph, _, _ = graph_from_code(_STACKED)
     graph = Pipeline.build(LOOP_PASSES).run(graph)
 
-    (rolled,) = _carriers(graph)
-    assert "q" not in rolled.inputs
-    (states,) = rolled.outputs.values()
-    assert states.shape[0].as_static() == 3, "the three states a later chunk starts from"
+    (rolled,) = (node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp))
+    (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
+    assert steps.axis.extent.as_static() == 4 and "q" in rolled.inputs, "three steps and the trip after the last"
+    assert list(rolled.outputs) == list(graph.outputs), "the states are stored for no one"
 
 
 _SETUP = """

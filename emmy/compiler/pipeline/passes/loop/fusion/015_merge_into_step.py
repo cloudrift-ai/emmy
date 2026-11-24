@@ -4,14 +4,20 @@
 them. Such a kernel is one step under the loop that carries the state, and a kernel beside it joins that step where
 it can run there:
 
-- a kernel only the step reads is computed where the step reads it, like any producer a splice inlines;
+- a kernel only the step reads is computed where the step reads it, like any producer a splice inlines. That holds
+  for the kernel that fills the buffer a state starts from: the state reads the buffer on its first step
+  (:func:`from_a_read`);
 - a kernel that reads what the step stores joins where each of its trips reads one step, the same one for every read:
   its loop over the coordinate the step is a digit of becomes the step and the trips of that step
-  (:func:`in_step`), and what it stores it then stores from inside the step.
+  (:func:`in_step`), and what it stores it then stores from inside the step;
+- a kernel each store of which reads one step by a literal is stored by that step (:func:`at_their_steps`). The state
+  the loop ends with is what the last step stores, so its reader is one of these;
+- a kernel whose trip reads the state before its step reads the state itself, and where it has a trip after the last
+  step the loop runs that trip too, with the states held.
 
-What cannot run in the step stays a kernel: a reader of the state the loop ends with, a reduction over the steps,
-another kernel that carries a state. The merge is the fusion rule's own splice; which of these kernels are worth
-keeping apart is a cut's decision, taken on the merged kernel.
+What cannot run in the step stays a kernel: a reader whose one store reads several steps, a reduction over the
+steps, a choice among the steps by a range of a coordinate. The merge is the fusion rule's own splice; which of these
+kernels are worth keeping apart is a cut's decision, taken on the merged kernel.
 """
 
 from __future__ import annotations
@@ -98,25 +104,81 @@ def stepped_stores(body: Body) -> tuple[Loop, _Stepped] | None:
     return loop, {name: next(iter(places)) for name, places in found.items() if len(places) == 1 and (-1, 0) not in places}
 
 
-def _one_read(graph: Graph, body: Body, stepped: _Stepped) -> Body:
+def _one_read(graph: Graph, body: Body, stepped: _Stepped, before: dict[str, str] | None = None) -> Body:
     """``body`` with each choice among reads of the steps of one buffer as the one read it is
-    (:func:`chosen_cell`)."""
+    (:func:`chosen_cell`, :func:`_chosen_step`). ``before`` names, for a buffer that holds a state after each step,
+    the twin that holds it before each step."""
     reads = {load.names[0]: load for load in body.loads if plain_load(load)}
-    chosen: dict[str, Load] = {}
+    chosen: dict[str, Statement | tuple[Statement, ...]] = {}
     for select in body.iter_of_type(Select):
         loads = [reads.get(branch.value) for branch in select.branches]
-        if any(load is None for load in loads) or len({load.input for load in loads}) != 1 or loads[0].input not in stepped:
-            continue
-        if graph.buffer(loads[0].input) is None:
-            continue
-        cell = chosen_cell(body, select, graph.buffer(loads[0].input).shape)
+        whole = not any(load is None for load in loads) and len({load.input for load in loads}) == 1 and loads[0].input in stepped
+        cell = chosen_cell(body, select, graph.buffer(loads[0].input).shape) if whole and graph.buffer(loads[0].input) is not None else None
         if cell is not None:
             chosen[select.name] = Load(names=(select.name,), input=loads[0].input, index=cell)
+        elif (found := _chosen_step(body, select, stepped, before or {})) is not None:
+            chosen[select.name] = found
     if not chosen:
         return body
     body = body.map(lambda stmt: chosen.get(stmt.name, stmt) if isinstance(stmt, Select) else stmt)
     used = body.ssa_uses
     return body.map(lambda stmt: () if isinstance(stmt, Load) and stmt.input in stepped and not set(stmt.names) & used else stmt)
+
+
+def _chosen_step(body: Body, select: Select, stepped: _Stepped, before: dict[str, str]) -> tuple[Statement, ...] | None:
+    """PROTOTYPE. ``select`` where some of its branches are reads of one buffer at the steps, each chosen where one
+    coordinate equals its step, or its step plus one: those branches as ONE read, at the coordinate. A read one step
+    back is a read of the state before the step, taken from the buffer's twin (``before``). The other branches stay
+    — the trip before the first step, the trip after the last."""
+    reads = {load.names[0]: load for load in body.loads if plain_load(load)}
+    picked = [(at, reads[branch.value]) for at, branch in enumerate(select.branches) if branch.value in reads]
+    picked = [(at, load) for at, load in picked if load.input in stepped]
+    extents = _extents(body)
+    if len(picked) < 2 or len({load.input for _, load in picked}) != 1 or extents is None:
+        return None
+    source = picked[0][1].input
+    position, width = stepped[source]
+    if width != 1 or not all(isinstance(load.index[position], Literal) for _, load in picked):
+        return None
+    # Every branch but the last is chosen where one coordinate equals a literal; the last takes the trip left over.
+    where: list[int] = []
+    along: set[Expression] = set()
+    for branch in select.branches[:-1]:
+        test = branch.select
+        if not isinstance(test, BinaryExpression) or test.op != "==":
+            return None
+        literal, other = (test.left, test.right) if isinstance(test.left, Literal) else (test.right, test.left)
+        if not isinstance(literal, Literal):
+            return None
+        where.append(literal.value)
+        along.add(other)
+    if select.branches[-1].select != _TRUE or len(along) != 1:
+        return None
+    (coordinate,) = along
+    if not isinstance(coordinate, Var) or coordinate.name not in extents:
+        return None
+    left = set(range(extents[coordinate.name])) - set(where)
+    if len(left) != 1:
+        return None
+    where.append(left.pop())
+    offsets = {where[at] - load.index[position].value for at, load in picked}
+    if len(offsets) != 1 or (offset := offsets.pop()) not in (0, 1) or (offset == 1 and source not in before):
+        return None
+    # The cell each branch reads where it is chosen is one cell, the step apart.
+    ctx = SimplifyCtx.empty()
+    cells = {
+        tuple(entry.substitute({coordinate.name: Literal(where[at], "int")}).simplify(ctx) for entry in load.index)[:position]
+        + tuple(entry.substitute({coordinate.name: Literal(where[at], "int")}).simplify(ctx) for entry in load.index)[position + 1 :]
+        for at, load in picked
+    }
+    if len(cells) != 1:
+        return None
+    (cell,) = cells
+    one = f"{select.name}__step"
+    read = Load(names=(one,), input=before[source] if offset else source, index=(*cell[:position], coordinate, *cell[position:]))
+    taken = {at for at, _ in picked}
+    branches = tuple(SelectBranch(one, branch.select) if at in taken else branch for at, branch in enumerate(select.branches))
+    return read, select.replace(branches=branches)
 
 
 _TRUE = Literal(True, "bool")
@@ -330,7 +392,8 @@ def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int]
         if isinstance(stmt, Write) and stmt.output in twins and stores:
             return stmt.replace(output=f"{stmt.output}__now", index=without(stmt.index, twins[stmt.output]))
         if isinstance(stmt, Write) and active is not None:
-            return Cond(cond=active, body=Body((stmt,)))
+            # Under the test the step is the kernel's own: the store names it as it is, with no clamp.
+            return Cond(cond=active, body=Body((stmt.substitute({own: step}) if clamp else stmt,)))
         return stmt
 
     def follow(stmt: Statement) -> Statement | tuple[Statement, ...]:
@@ -454,6 +517,20 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
     # stored. Its twin holds every step's, so a reader of the buffer is a reader of the last step.
     standing = _standing(carrying, stepped) if frame is not None else {}
     stepped.update({twin.name: (0, 1) for twin in standing.values()})
+    # PROTOTYPE. A buffer that holds a state after each step: its twin holds the state before each step, the seed
+    # before the first and the state the loop ends with after the last. A kernel whose trip reads the step before
+    # reads the twin at its own step, and where it has a trip after the last step the loop runs that trip too.
+    states = _state_stores(carrying.op.body, stepped) if frame is not None else {}
+    before = {name: f"{name}__before" for name in states}
+    extent = frame[0].axis.extent.as_static() if frame is not None else 0
+    for reader in sorted(set().union(*(graph.buffer_users(name) for name in states)) if states else ()):
+        if isinstance(graph.nodes[reader].op, LoopOp):
+            extent = max(extent, _reach(_one_read(graph, graph.nodes[reader].op.body, stepped, before), set(before.values())))
+    twins = (
+        *standing.values(),
+        *(Tensor(before[name], (Dim(extent), *graph.buffer(name).shape[1:]), graph.buffer(name).dtype) for name in states),
+    )
+    stepped.update({name: (0, 1) for name in before.values()})
     order = graph.topological_order()
     downstream: dict[str, set[str]] = {}
     for nid in reversed(order):
@@ -467,6 +544,11 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
     seeds = {carry.seed for carry in carrying.op.body.carries if isinstance(carry.seed, str)}
     filled = {name for name in seeds if isinstance(graph.producer(name).op, LoopOp) and joins_a_region(graph.producer(name).op)}
     members[carrying.id] = _with_twins(from_a_read(graph, carrying.op, filled), standing)
+    if frame is not None and extent > frame[0].axis.extent.as_static():
+        window = _fresh("time", carrying.op.body)
+        members[carrying.id] = placed(members[carrying.id], window, extent, Place(over=frame[0].axis.name), {}, {}, False)
+    if states:
+        members[carrying.id] = _with_states_before(members[carrying.id], {state: before[name] for name, state in states.items()})
     seeds -= filled
     over = {tensor.alias for tensor in carrying.outputs if tensor.alias is not None}
 
@@ -499,12 +581,15 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
                 if any(name in standing for name in read) and copied(graph, node.outputs[0].name) is not None:
                     continue  # a copy of what the last step stored: the step stores it there (``020``)
                 body = node.op.body.map(
-                    lambda stmt: stmt.replace(input=standing[stmt.input].name, index=(last, *stmt.index))
-                    if isinstance(stmt, Load) and stmt.input in standing
-                    else stmt
+                    lambda stmt: (
+                        stmt.replace(input=standing[stmt.input].name, index=(last, *stmt.index))
+                        if isinstance(stmt, Load) and stmt.input in standing
+                        else stmt
+                    )
                 )
-                reads = {standing[name].name if name in standing else name for name in read}
-                moved = in_step(graph, replace(node.op, body=body, inputs={}), {name: stepped[name] for name in reads}, int(last.value) + 1)
+                body = _one_read(graph, body, stepped, before)
+                reads = {load.input: stepped[load.input] for load in body.loads if load.input in stepped}
+                moved = in_step(graph, replace(node.op, body=body, inputs={}), reads, extent)
                 if moved is None:
                     continue
                 members[nid] = moved[0]
@@ -512,7 +597,39 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
             else:
                 continue
             grown = True
-    return members, kept, {carrying.id: tuple(standing.values())}
+    return members, kept, {carrying.id: twins if frame is not None else ()}
+
+
+def _state_stores(body: Body, stepped: _Stepped) -> dict[str, str]:
+    """Each buffer that holds a state after each step, to the state: the step stores the state's own value, at the
+    state's own cell."""
+    carried = {(carry.value, tuple(carry.index)): carry.name for carry in body.carries}
+    return {
+        write.output: carried[write.values[0], tuple(write.index)]
+        for write in body.writes
+        if stepped.get(write.output) == (0, 1) and len(write.values) == 1 and (write.values[0], tuple(write.index)) in carried
+    }
+
+
+def _reach(body: Body, twins: set[str]) -> int:
+    """How many trips the loop a kernel reads the states before each step along runs: one past the last step where
+    the kernel has a trip after it."""
+    extents = _extents(body) or {}
+    along = {load.index[0].name for load in body.loads if load.input in twins and isinstance(load.index[0], Var)}
+    return max((extents.get(name, 0) for name in along), default=0)
+
+
+def _with_states_before(op: LoopOp, twins: dict[str, str]) -> LoopOp:
+    """``op`` storing, on every trip of its loop, each state as it stands before the trip's step."""
+
+    def both(stmt: Statement) -> Statement | tuple[Statement, ...]:
+        if not isinstance(stmt, Carry) or stmt.name not in twins:
+            return stmt
+        stood = f"{stmt.value}__stood"
+        read = Load(names=(stood,), input=stmt.name, index=(stmt.index[0] - Literal(1, "int"), *stmt.index[1:]))
+        return (read, Write(output=twins[stmt.name], index=stmt.index, values=(stood,)), stmt)
+
+    return replace(op, body=op.body.map(both), inputs={})
 
 
 def _standing(carrying: Node, stepped: _Stepped) -> dict[str, Tensor]:
