@@ -1,11 +1,58 @@
 {"compute_cap": [12, 0],
  "note": "Qwen3-Embedding-0.6B decoder layer 0, kernels 6 and 7: causal GQA attention. hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 128. One of the twelve layer-0 kernels the perf suite curated before the corpus became its case source.\n\nThe schedule is SITE-SCOPED (TILE@map.1/twist.1/inner is the score, TILE@map.1/twist the weighted sum) because a flash tree decides per site. The carrier's scalar register tile is the schedule this case is about: the tier folds the term's own step, so the recipe's three states each get a cell copy and the fp32 target needs no mma atom for them.",
  "programs": [
-  {"inputs":["q","k","v"],"outputs":["o"],"nodes":[{"id":"k","op":"input","outputs":[["k","f32",[1,8,128,128]]]},{"id":"q","op":"input","outputs":[["q","f32",[1,16,128,128]]]},{"id":"v","op":"input","outputs":[["v","f32",[1,8,128,128]]]},{"id":"o","op":"torch.sdpa","attrs":{"is_causal":true},"inputs":["q","k","v"],"outputs":[["o","f32",[1,16,128,128]]]}]}
+  {"inputs":["q","k","v"],"outputs":["o"],"nodes":[
+   {"id":"k","op":"input","outputs":[["k","f32",[1,8,128,128]]]},
+   {"id":"q","op":"input","outputs":[["q","f32",[1,16,128,128]]]},
+   {"id":"v","op":"input","outputs":[["v","f32",[1,8,128,128]]]},
+   {"id":"o","op":"torch.sdpa","attrs":{"is_causal":true},"inputs":["q","k","v"],"outputs":[["o","f32",[1,16,128,128]]]}
+  ]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["k","q","v"],"outputs":["o"],"nodes":[{"id":"k","op":"input","outputs":[["k","f32",[1,8,128,128]]]},{"id":"q","op":"input","outputs":[["q","f32",[1,16,128,128]]]},{"id":"v","op":"input","outputs":[["v","f32",[1,8,128,128]]]},{"id":"o","op":"loop","attrs":{"body":"let f32 v0 = -1000000000.0\nlet f32 v1 = 0.0\nlet f32 v2 = 0.0883883461356163\nfor a0 in 0..16:\n    for a1 in 0..128:\n        for a2 in 0..128:\n            for a3 in 0..128:\n                in0 = load k[0, a0 / 2, a2, a3]\n                in1 = load q[0, a0, a1, a3]\n                v3 = multiply(in0, in1)\n                acc1 <- add(acc1, v3) over a3\n            v4 = multiply(acc1, v2)\n            v5 = select:\n                v1 when a2 <= a1\n                v0 when a1 < a2\n            v6 = add(v5, v4)\n            acc0 <- maximum(acc0, v6) over a2\n        for a2 in 0..128:\n            for a5 in 0..128:\n                in2 = load k[0, a0 / 2, a2, a5]\n                in3 = load q[0, a0, a1, a5]\n                v7 = multiply(in2, in3)\n                acc3 <- add(acc3, v7) over a5\n            v8 = multiply(acc3, v2)\n            v9 = select:\n                v1 when a2 <= a1\n                v0 when a1 < a2\n            v10 = add(v9, v8)\n            v11 = subtract(v10, acc0)\n            v12 = exp(v11)\n            acc2 <- add(acc2, v12) over a2\n        for a6 in 0..128:\n            for a7 in 0..128:\n                for a8 in 0..128:\n                    in4 = load k[0, a0 / 2, a7, a8]\n                    in5 = load q[0, a0, a1, a8]\n                    v13 = multiply(in4, in5)\n                    acc5 <- add(acc5, v13) over a8\n                v14 = multiply(acc5, v2)\n                in6 = load v[0, a0 / 2, a7, a6]\n                v15 = select:\n                    v1 when a7 <= a1\n                    v0 when a1 < a7\n                v16 = add(v15, v14)\n                v17 = subtract(v16, acc0)\n                v18 = exp(v17)\n                v19 = divide(v18, acc2)\n                v20 = multiply(in6, v19)\n                acc4 <- add(acc4, v20) over a7\n            o[0, a0, a1, a6] = acc4"},"inputs":["k","q","v"],"outputs":[["o","f32",[1,16,128,128]]]}]},"formed":true,"traced":0,"origins":["o"]}
+  {"loop_ir":{"inputs":["k","q","v"],"outputs":["o"],"nodes":[
+   {"id":"k","op":"input","outputs":[["k","f32",[1,8,128,128]]]},
+   {"id":"q","op":"input","outputs":[["q","f32",[1,16,128,128]]]},
+   {"id":"v","op":"input","outputs":[["v","f32",[1,8,128,128]]]},
+   {"id":"o","op":"loop","attrs":{"body":[
+    "for a0 in 0..16:",
+    "  for a1 in 0..128:",
+    "    for a2 in 0..a1 + 1 of 128:",
+    "      for a3 in 0..128:",
+    "        in0 = load k[0, a0 / 2, a2, a3]",
+    "        in1 = load q[0, a0, a1, a3]",
+    "        v0 = in0 * in1",
+    "        acc1 <- add(acc1, v0) over a3",
+    "      v1 = 0.0883883461356163 * acc1",
+    "      acc0 <- maximum(acc0, v1) over a2",
+    "    for a2 in 0..a1 + 1 of 128:",
+    "      for a5 in 0..128:",
+    "        in2 = load k[0, a0 / 2, a2, a5]",
+    "        in3 = load q[0, a0, a1, a5]",
+    "        v2 = in2 * in3",
+    "        acc3 <- add(acc3, v2) over a5",
+    "      v3 = 0.0883883461356163 * acc3 - acc0",
+    "      v4 = exp(v3)",
+    "      acc2 <- add(acc2, v4) over a2",
+    "    for a6 in 0..128:",
+    "      for a7 in 0..a1 + 1 of 128:",
+    "        for a8 in 0..128:",
+    "          in4 = load k[0, a0 / 2, a7, a8]",
+    "          in5 = load q[0, a0, a1, a8]",
+    "          v5 = in4 * in5",
+    "          acc5 <- add(acc5, v5) over a8",
+    "        v6 = 0.0883883461356163 * acc5 - acc0",
+    "        v7 = exp(v6)",
+    "        v8 = v7 / acc2",
+    "        in6 = load v[0, a0 / 2, a7, a6]",
+    "        v9 = in6 * v8",
+    "        acc4 <- add(acc4, v9) over a7",
+    "      o[0, a0, a1, a6] = acc4"
+   ]},"inputs":["k","q","v"],"outputs":[["o","f32",[1,16,128,128]]]}
+  ]},"formed":true,"traced":0,"origins":["o"]}
  ],
  "rows": [
-  {"name":"k_sdpa_d4bf3c","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"TILE@map.1/twist":"f1","TILE@map.1/twist.1/inner":"","WORK":"t32x16","REDUCE":"","STAGE":"","RASTER":""}}
+  {"name":"k_sdpa_d4bf3c",
+   "kernel":0,
+   "pins":{"FAST_MATH":false},
+   "knobs":{"TILE@map.1/twist":"f1","TILE@map.1/twist.1/inner":"","WORK":"t32x16","REDUCE":"","STAGE":"","RASTER":""}}
  ]}
