@@ -164,6 +164,20 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    fn from_raw(raw: RawBuffer) -> Result<Self> {
+        Ok(Self {
+            shape: raw
+                .shape
+                .iter()
+                .map(Expr::from_value)
+                .collect::<Result<_>>()?,
+            name: raw.name,
+            dtype: raw.dtype,
+            role: raw.role,
+            alias: raw.alias,
+        })
+    }
+
     pub fn is_symbolic(&self) -> bool {
         self.shape.iter().any(|d| !d.is_static())
     }
@@ -599,19 +613,7 @@ impl Program {
             buffers: raw
                 .buffers
                 .into_iter()
-                .map(|b| {
-                    Ok(Buffer {
-                        shape: b
-                            .shape
-                            .iter()
-                            .map(Expr::from_value)
-                            .collect::<Result<_>>()?,
-                        name: b.name,
-                        dtype: b.dtype,
-                        role: b.role,
-                        alias: b.alias,
-                    })
-                })
+                .map(Buffer::from_raw)
                 .collect::<Result<_>>()?,
             constants: raw
                 .constants
