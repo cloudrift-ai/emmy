@@ -22,9 +22,9 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, TernaryExpression, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, splice_graph
-from emmy.compiler.ir.stmt import Accum, Body, Carry, Let, Load, Loop, Select, SelectBranch, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Body, Carry, Cond, Let, Load, Loop, Select, SelectBranch, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import (
     build_merged_region,
@@ -336,6 +336,78 @@ def one_loop(graph: Graph, walk: Node, inner: Node) -> tuple[LoopOp, tuple[str, 
     return None if merged is None else (merged[0], live)
 
 
+def side_by_side(graph: Graph, walk: Node, inner: Node) -> tuple[LoopOp, tuple[str, ...]] | None:
+    """PROTOTYPE. ``walk`` and ``inner``, two kernels that each carry a state over one coordinate, as ONE kernel.
+
+    ``walk`` reads what ``inner`` stores at a step, always the step ``offset`` after its own: step ``i`` of the walk
+    and step ``i + offset`` of ``inner`` are one position. The one loop runs over the positions of ``inner``. The walk
+    does its step ``position - offset`` there and keeps its state as it stands on the positions before its first.
+    ``None`` where the two do not stand so."""
+    outer, nested = stepped_stores(walk.op.body), stepped_stores(inner.op.body)
+    if outer is None or nested is None:
+        return None
+    (walking, _), (prefix, stepped) = outer, nested
+    step = walking.axis.name
+    offsets: set[int] = set()
+    for load in walk.op.body.loads:
+        if load.input not in stepped:
+            continue
+        at, width = stepped[load.input]
+        form = affine_form(load.index[at], {step}) if width == 1 and at < len(load.index) else None
+        if form is None or form[1].get(step) != 1:
+            return None
+        try:
+            offsets.add(form[0].eval({}))
+        except (KeyError, TypeError, ValueError):
+            return None
+    if len(offsets) != 1:
+        return None
+    (offset,) = offsets
+    positions = prefix.axis.extent.as_static()
+    if offset < 0 or walking.axis.extent.as_static() + offset > positions:
+        return None
+    position = "position"
+    while position in walk.op.body.axis_names or position in walk.op.body.defined:
+        position += "_"
+    here, before = Var(position), Var(position) - Literal(1, "int")
+    # The walk has a step on the positions from its first to its last; on the others its states stand and it
+    # stores nothing.
+    last = offset + walking.axis.extent.as_static()
+    active = BinaryExpression("<", here, Literal(last, "int"))
+    if offset:
+        active = BinaryExpression("&&", BinaryExpression("<=", Literal(offset, "int"), here), active)
+    own = TernaryExpression(active, here - Literal(offset, "int"), Literal(0, "int"))
+    states = {carry.name for carry in walk.op.body.carries}
+
+    def aligned(stmt: Statement) -> Statement | tuple[Statement, ...]:
+        if isinstance(stmt, Load) and stmt.input in states:
+            return stmt.replace(index=(before, *stmt.index[1:]))
+        if isinstance(stmt, Load) and stmt.input in stepped:
+            at = stepped[stmt.input][0]
+            return stmt.replace(index=(*stmt.index[:at], here, *stmt.index[at + 1 :]))
+        if isinstance(stmt, Carry):
+            held, kept = f"{stmt.value}__held", f"{stmt.value}__kept"
+            return (
+                Load(names=(held,), input=stmt.name, index=(before, *stmt.index[1:])),
+                Select(name=kept, branches=(SelectBranch(stmt.value, active), SelectBranch(held, Literal(True, "bool")))),
+                stmt.replace(value=kept, index=(here, *stmt.index[1:])),
+            )
+        if isinstance(stmt, Write):
+            return Cond(cond=active, body=Body((stmt,)))
+        return stmt
+
+    body = Body(part.substitute({step: own}) for part in walking.body.map(aligned))
+    try:
+        lets = tuple(stmt for stmt in walk.op.body if isinstance(stmt, Let))
+        moved = LoopOp(body=Body((*lets, Loop(axis=Axis(position, positions), body=body))))
+    except ValueError:
+        return None
+    members = {walk.id: moved, inner.id: inner.op}
+    live = live_outputs_of(graph, set(members))
+    merged = build_merged_region(graph, set(members), live, members)
+    return None if merged is None else (merged, live)
+
+
 def rewrite(match: Match, carrying: Node) -> Graph:
     graph = match.graph
     if not carrying.op.body.carries:
@@ -343,7 +415,7 @@ def rewrite(match: Match, carrying: Node) -> Graph:
     for name in carrying.inputs:
         inner = graph.producer(name)
         if inner is not None and isinstance(inner.op, LoopOp) and inner.op.body.carries and inner.id != carrying.id:
-            together = one_loop(graph, carrying, inner)
+            together = one_loop(graph, carrying, inner) or side_by_side(graph, carrying, inner)
             if together is not None:
                 fragment, output_map = wrap_multi_output_fragment(graph, together[0], together[1])
                 match.consumed = {carrying.id, inner.id}
