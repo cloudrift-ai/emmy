@@ -15,6 +15,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Assign, parse_body
@@ -154,6 +155,21 @@ def test_the_split_parts_match_the_sequential_walk(parts: int) -> None:
 
 
 SCAN = "REDUCE@map.1/scan"  # the carrying site: a bare pin would reach the product pieces too
+
+
+def test_a_piece_of_a_split_walk_keeps_every_cell_a_grid_axis() -> None:
+    """A split rebuilds its pieces from the walk's body and lifts them. The delta rule's contraction reads the
+    state's row and not its column, and a body that opens the contraction's loop outside the column's lifts to a
+    piece with the column a loop inside the kernel, where a stored row of the piece then tiles another axis. The
+    walk's body opens its cells in grid order, so the piece that stores the output has every coordinate of the
+    store for a grid axis."""
+    from tests.compiler.passes import test_resident_state as delta  # noqa: PLC0415
+
+    graph = _cut(delta._graph(32), {SCAN: f"g{delta._STEPS}k"})
+    walk = next(node.op for node in graph.nodes.values() if node.id == "out")
+    (store,) = walk.output_specs
+    free = {axis.name for axis in walk.place.free}
+    assert not walk.carries and all(isinstance(entry, Var) and entry.name in free for entry in store.write.index)
 
 
 @pytest.mark.parametrize("pin", ["g2k1", "g4k1", "g4k2", "g8k1", "g8k3"])
