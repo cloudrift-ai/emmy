@@ -642,6 +642,8 @@ def stored_states(loop: Loop, outer: tuple[Axis, ...]) -> dict[str, tuple[Carry,
     step, so the lagged read is a read of it one step back (:func:`serial_form`)."""
     fixed = {loop.axis.name, *(axis.name for axis in outer)}
     stmts = tuple(loop.body.iter())
+    # A size-one axis the lift bound back holds its one coordinate, as a ``0`` does.
+    unit = {s.axis.name for s in stmts if isinstance(s, Loop) and s.axis.extent == 1}
     carries = {s.value: s for s in stmts if isinstance(s, Carry) and s.name in loop.carries}
     copies = {s.name: s.value.name for s in stmts if isinstance(s, Assign) and isinstance(s.value, Var) and s.dtype in (None, F32)}
     out: dict[str, tuple[Carry, Write]] = {}
@@ -655,7 +657,7 @@ def stored_states(loop: Loop, outer: tuple[Axis, ...]) -> dict[str, tuple[Carry,
             continue
         carry = carries[value]
         cells = set(carry.cells)
-        names = [expression.name for expression in stmt.index if isinstance(expression, Var)]
+        names = [expression.name for expression in stmt.index if isinstance(expression, Var) and expression.name not in unit]
         plain = all(isinstance(expression, Var) or expression == Literal(0, "int") for expression in stmt.index)
         if plain and len(set(names)) == len(names) and set(names) == fixed | cells:
             out.setdefault(carry.name, (carry, stmt))

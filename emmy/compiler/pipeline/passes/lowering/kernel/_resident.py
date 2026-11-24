@@ -123,7 +123,10 @@ class _Blocks:
         return self.memo[key]
 
     def gmem(self, buffer: str, index: tuple, row: str, col: str, rb: int | None, cb: int) -> str:
-        """The fragment of ``buffer`` at ``index``, the block's rows and columns standing for ``row`` and ``col``."""
+        """The fragment of ``buffer`` at ``index``, the block's rows and columns standing for ``row`` and ``col``. A
+        read that does not move with the columns is one block for every column."""
+        if not any(col in e.free_vars() for e in index):
+            cb = 0
         index = tuple(e.substitute({row: Var(FRAG_ROW), col: Var(FRAG_COL)}) for e in index)
         key = (buffer, tuple(str(e) for e in index), rb, cb)
         if key not in self.memo:
