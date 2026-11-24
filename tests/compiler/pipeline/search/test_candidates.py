@@ -129,7 +129,8 @@ def test_a_candidate_file_is_the_fresh_lowering(path: Path, traced: int) -> None
     golden's, lowered once in its own test."""
     document = document_of(path)
     fresh, report = restamp(document, traced=traced)
-    assert fresh == document and not report.changed, "\n".join(report.lines())
+    unchanged = fresh == document and not report.changed
+    assert unchanged, "\n".join(report.lines())
 
 
 def test_a_group_is_asked_for_no_more_candidates_than_its_schedule_space_holds(monkeypatch) -> None:
