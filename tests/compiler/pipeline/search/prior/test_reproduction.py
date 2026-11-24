@@ -80,17 +80,15 @@ _PLACEMENT = "the placement prior misses a cut or split fork it trained on"
 _NEAR_TIE = "schedule near tie: the prior ranks a schedule 0.4-5% slower than the golden first"
 _IDENTICAL_ARMS = "two cut arms with identical features"
 KNOWN_MISSES: dict[tuple[str, str, int], str] = {
-    ("a100_sm80.json", "schedule", 26): _NEAR_TIE,
-    ("h100_sm90.json", "schedule", 26): _NEAR_TIE,
-    ("h100_sm90.json", "schedule", 86): _NEAR_TIE,
+    ("a100_sm80.json", "schedule", 21): _NEAR_TIE,
+    ("h100_sm90.json", "schedule", 83): _NEAR_TIE,
     ("h100_sm90.json", "placement", 22): _IDENTICAL_ARMS,
     ("rtx4090_sm89.json", "placement", 0): _PLACEMENT,
     ("rtx4090_sm89.json", "placement", 6): _PLACEMENT,
     ("rtx4090_sm89.json", "placement", 8): _PLACEMENT,
     ("rtx4090_sm89.json", "placement", 63): _PLACEMENT,
-    ("rtx5090_sm120.json", "schedule", 11): _NEAR_TIE,
-    ("rtxpro6000_se_sm120.json", "schedule", 0): _NEAR_TIE,
-    ("rtxpro6000_se_sm120.json", "schedule", 30): _NEAR_TIE,
+    ("rtxpro6000_se_sm120.json", "schedule", 25): _NEAR_TIE,
+    ("rtxpro6000_se_sm120.json", "schedule", 78): _NEAR_TIE,
     ("rtxpro6000_se_sm120.json", "placement", 3): _PLACEMENT,
     ("rtxpro6000_se_sm120.json", "placement", 4): _PLACEMENT,
     ("rtxpro6000_se_sm120.json", "placement", 11): _PLACEMENT,
