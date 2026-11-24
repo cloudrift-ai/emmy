@@ -635,6 +635,25 @@ What the session changes for the milestones:
     schedule, so no row could change it); the per-expert scale pages folded into their codes' paging run; one
     paging run per layer over its buffers' joint list. Gate: paging overhead <= 2 ms a captured one-row step;
     tokens unchanged. Needs 1.
+    **2026-11-20, #1454, gate not yet measured.** The four buffers are read by one expert launch, so the second
+    and third levers are one change: buffers of a program with the same pages and slots share one page list, one
+    run per launch. The first lever does not work by schedule (no offered schedule parallelizes the pairwise
+    count); the miss rank became a running count instead. RTX 4080 surrogate: paging 33 us a layer against 122,
+    about 1.3 ms a step; 5090 estimate 1.3-2.0 ms. Left for the card: the captured one-row step under nsys, tokens
+    against main, and the paging programs' new traces and rows in the 5090 golden (the scan's parallel schedule
+    needs a row to be picked).
+    **2026-11-21, one card.** The 5090 golden holds the new paging programs, recorded (scan 1.24 us parallel against
+    4.7 serial). The gate is still open: strict export refuses on main and the branch alike (four twins' cut
+    decisions have no row), and a drafter-off pack's first `emmy generate` wedged the GPU before either tree's
+    tokens came back. **Second card, same day:** main's pack hangs too. The stall is the 4-row chunk's first Gated
+    DeltaNet tail, one launch of one block (the uncovered `gdn4-sparse-linear` twin's unsplit fallback), not paging.
+    Next card: the same chain with prompts of exactly 64 tokens, which never reach the 4-row chunk. The real fix is
+    rows for the four uncovered twins' cuts (a follow-up, also what strict export needs).
+    **Third card, same day:** with 64-token prompts both trees serve, tokens the same. Paging programs per one-row
+    step: 6.29 ms on main, 2.60 ms on the branch; the step 19.3 → 15.5 ms. The gate missed because each layer paged
+    twice (one run per expert launch, the second moving nothing). Now one run covers both launches.
+    **Fourth card, 2026-11-22: gate met.** Paging programs 1.36 ms per one-row step, tokens the same as main's.
+    The page copies (10.9 ms on this host's 25.6 GB/s link) are expert reads over the link, 12's question.
 
 12. **Qwen3.6: slots sized to the verify step's picks.** A verify step's three rows route past the 8 slots, so
     the drafter buys almost nothing (a 44-52 ms drafted step against a 19.6-19.8 ms one-row step). The pager's
