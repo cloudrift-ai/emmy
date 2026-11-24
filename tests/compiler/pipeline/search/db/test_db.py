@@ -115,7 +115,20 @@ def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
     assert _held(db, hot, "k", bindings={}, knobs=_ROW).us == 10.0
 
 
-@pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "FAST_EXP",
+        "F16_MMA_F32_ACC",
+        "FP8_MMA",
+        "TF32_MMA",
+        "F32_AS_BF16_MMA",
+        "FAST_DIV",
+        "FAST_SQRT",
+        "FLUSH_TO_ZERO",
+        "CONTRACT_FMA",
+    ],
+)
 @pytest.mark.parametrize("umbrella", [False, True])
 def test_independent_precision_regimes_never_replace_or_price_each_other(name, umbrella) -> None:
     from emmy.compiler.pipeline.knob import get
@@ -185,7 +198,7 @@ def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
 #: a contraction and a piece formed from no loop op. Re-pinning a changed corpus body does not change the DB version.
 _PINNED_IDENTITIES = {
     ("reduce/cross-cta-sum-kernel.json", 0): "aee18fd8b70ef8deb26b624698c57faa",
-    ("reduce/cross-cta-sum-kernel.json", 1): "5f232e36087fff038391e6ab2cf507b3",
+    ("reduce/cross-cta-sum-kernel.json", 1): "7aae6e57f787b76557f66951f75fdbad",
     ("reduce/online-softmax-4x128.json", 0): "3127e5e9abd4528aae4ae94f2b993890",
     ("attention/sdpa-hd128-softmax-v-mma.json", 0): "4a2b2de512f3683597e41d8318ac0f33",
     ("matmul/bf16-mma-sm120.json", 0): "f69100f62f2324896f9ea9e48bebda89",
@@ -212,10 +225,12 @@ def test_context_keys_match_the_db_version_and_ignore_later_ambient_pins(monkeyp
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     monkeypatch.setenv("EMMY_FAST_EXP", "1")
     expected = {
-        None: "88164354e165a548540cb600c6ec7370c68fdaf7128e7df553d126e7913c205f",
-        "FAST_EXP": "0751a3a7fb81652aa924315afba0deda93ba340d222710760553cceebaea7196",
-        "F16_MMA_F32_ACC": "1c1ac935521c473ae17d6ad43de685532ec646477d4714b264c053d786cf441c",
-        "FP8_MMA": "38f52eb5cbb1150ba9c5b1d4e14be48df46453bcfd2fe19373193765aa85684f",
+        None: "977bcdafcaa91afac062d92aa6e330d0838bdc6fe61283069ecf6cfde850700b",
+        "FAST_EXP": "90cd1164cf47eb7f85b8faf0becd4d57c48431e9fccb23be159e1b158da77c49",
+        "F16_MMA_F32_ACC": "22ff8c26b48dd401609fb9a0da7aacea341325dbeacab4fad5f8eb77c43eb8e8",
+        "FP8_MMA": "dd3f0181b16c2c227004b009cb42851e4357cb52657a8dd6a533fd3d26abd4b3",
+        "TF32_MMA": "b57f57801d644d280d33c02b652fd7803c1b727315a079ff094021f54d5fffb1",
+        "F32_AS_BF16_MMA": "4f16470ca5897518fa7ce604e92f37d88c06fe579d685613553c72b55d22e3fb",
     }
     for name, key in expected.items():
         ctx = Context.from_target((12, 0), precision={name: True} if name else {})

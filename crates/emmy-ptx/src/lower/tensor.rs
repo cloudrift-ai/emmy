@@ -52,6 +52,12 @@ const MMA_HALVES: Needs = Needs {
     arch_specific: false,
     version: (7, 0),
 };
+const MMA_TF32: Needs = Needs {
+    what: "`mma.sync` m16n8k8 of 32-bit floats rounded to TF32 (`cvt.rna.tf32.f32`)",
+    sm: 80..=SM_LAST,
+    arch_specific: false,
+    version: (7, 0),
+};
 const MMA_BYTES: Needs = Needs {
     what: "`mma.sync` m16n8k32 of 8-bit floats",
     sm: 89..=SM_LAST,
@@ -420,6 +426,9 @@ impl Lowerer {
             ((16, 8, 16), "f16", "f32") => Some((MmaShape::M16n8k16, Ty::F16, 4, 4, &MMA_HALVES)),
             ((16, 8, 16), "bf16", "f32") => Some((MmaShape::M16n8k16, Ty::Bf16, 4, 4, &MMA_HALVES)),
             ((16, 8, 16), "f16", "f16") => Some((MmaShape::M16n8k16, Ty::F16, 4, 2, &MMA_HALVES)),
+            ((16, 8, 8), "tf32" | "tf32x3", "f32") => {
+                Some((MmaShape::M16n8k8, Ty::Tf32, 4, 4, &MMA_TF32))
+            }
             ((16, 8, 32), "e4m3", "f32") => Some((MmaShape::M16n8k32, Ty::E4m3, 4, 4, &MMA_BYTES)),
             ((16, 8, 32), "e5m2", "f32") => Some((MmaShape::M16n8k32, Ty::E5m2, 4, 4, &MMA_BYTES)),
             ((16, 8, 64), "e2m1", "f32") => {
@@ -456,6 +465,15 @@ impl Lowerer {
         let a = self.tensor_fragment(node.a_frag, a_count, VTy::U32)?;
         let b = self.tensor_fragment(node.b_frag, 2, VTy::U32)?;
         let c = self.tensor_fragment(node.c_frag, c_count, c_ty)?;
+        if ab == "tf32x3" {
+            self.tf32_split(&a, &b, &c);
+            return Ok(());
+        }
+        let (a, b) = if ab_ty == Ty::Tf32 {
+            (self.tf32_rounded(&a), self.tf32_rounded(&b))
+        } else {
+            (a, b)
+        };
         let mut operands = vec![
             Operand::Tuple(a),
             Operand::Tuple(b),
@@ -495,6 +513,71 @@ impl Lowerer {
         let ty = if floats { Ty::F32 } else { Ty::B32 };
         self.b.emit(Inst::new(Opcode::Mma(mma), ty, c, operands));
         Ok(())
+    }
+
+    /// Each of `regs`, a 32-bit float, rounded to TF32. The instruction reads the top ten bits of an operand's
+    /// mantissa and drops the rest, which leaves every product a little small, and a dot product does not average
+    /// that away: an operand is first rounded to what the instruction reads.
+    fn tf32_rounded(&mut self, regs: &[Reg]) -> Vec<Reg> {
+        let mut rounded = Vec::with_capacity(regs.len());
+        for reg in regs {
+            let to = self.b.reg(Bank::B32);
+            let round = Inst::new(
+                Opcode::Cvt(Ty::F32),
+                Ty::Tf32,
+                vec![to],
+                vec![(*reg).into()],
+            );
+            self.b.emit(round.rounded(Round::Rna));
+            rounded.push(to);
+        }
+        rounded
+    }
+
+    /// The split product of two fragments of 32-bit floats into `c`: an operand is `hi + lo`, its rounding to
+    /// TF32 and what the rounding left, itself at TF32, and the product is `hi*lo + lo*hi + hi*hi`, the small
+    /// terms first. The instruction truncates as it accumulates, a bias that grows with every step of a long sum
+    /// (measured on an RTX 5090: 2e-5 of the result at K 4096), so one step is summed from zero and added to `c`
+    /// with a float add, which rounds to nearest.
+    fn tf32_split(&mut self, a: &[Reg], b: &[Reg], c: &[Reg]) {
+        let (a_hi, b_hi) = (self.tf32_rounded(a), self.tf32_rounded(b));
+        let (a_lo, b_lo) = (self.tf32_rest(a, &a_hi), self.tf32_rest(b, &b_hi));
+        let step: Vec<Reg> = c.iter().map(|_| self.b.reg(Bank::F32)).collect();
+        self.zero(&step, VTy::F32);
+        let mma = Mma {
+            shape: MmaShape::M16n8k8,
+            b_row: false,
+            ab: Ty::Tf32,
+            acc: Ty::F32,
+            block_scale: false,
+        };
+        for (a, b) in [(&a_hi, &b_lo), (&a_lo, &b_hi), (&a_hi, &b_hi)] {
+            let operands = vec![
+                Operand::Tuple(a.clone()),
+                Operand::Tuple(b.clone()),
+                Operand::Tuple(step.clone()),
+            ];
+            self.b
+                .emit(Inst::new(Opcode::Mma(mma), Ty::F32, step.clone(), operands));
+        }
+        for (total, part) in c.iter().zip(&step) {
+            let operands = vec![(*total).into(), (*part).into()];
+            self.b
+                .emit(Inst::new(Opcode::Add, Ty::F32, vec![*total], operands));
+        }
+    }
+
+    /// What rounding each of `regs` to `rounded` left of it, rounded to TF32 as well.
+    fn tf32_rest(&mut self, regs: &[Reg], rounded: &[Reg]) -> Vec<Reg> {
+        let mut rest = Vec::with_capacity(regs.len());
+        for (reg, hi) in regs.iter().zip(rounded) {
+            let left = self.b.reg(Bank::B32);
+            let operands = vec![(*reg).into(), (*hi).into()];
+            self.b
+                .emit(Inst::new(Opcode::Sub, Ty::F32, vec![left], operands));
+            rest.push(left);
+        }
+        self.tf32_rounded(&rest)
     }
 
     // --- between two products ----------------------------------------------------------------------------
@@ -665,7 +748,8 @@ impl Lowerer {
                     self.packed_pair(pair[0], pair[1], to, Some(into));
                 }
             }
-            ("m16n8k16", "b", [source]) if ab == "f16" => {
+            ("m16n8k16", "b", [source]) if matches!(ab, "f16" | "bf16") => {
+                let to = if ab == "f16" { Ty::F16x2 } else { Ty::Bf16x2 };
                 self.requires(&PACKED_CONVERSION)?;
                 let floats = self.tensor_fragment(*source, 4, VTy::F32)?;
                 let packed = self.repacked(node.frag, 2)?;
@@ -677,7 +761,7 @@ impl Lowerer {
                     self.lane_value(&sum(from, Expression::int(4)), ctx)?,
                 ];
                 for (pair, into) in floats.chunks(2).zip(packed) {
-                    let pair = self.packed_pair(pair[0], pair[1], Ty::F16x2, None);
+                    let pair = self.packed_pair(pair[0], pair[1], to, None);
                     let mut halves = Vec::with_capacity(2);
                     for lane in &lanes {
                         let theirs = self.taken_from(pair, lane);
@@ -701,6 +785,59 @@ impl Lowerer {
                         vec![halves[0].into(), high.into()],
                     );
                     self.b.emit(join);
+                }
+            }
+            ("m16n8k16", "a", [source]) if matches!(ab, "tf32" | "tf32x3") && node.part == 0 => {
+                // An operand of 32-bit floats spans eight K positions: the eight columns of ONE accumulator
+                // fragment. A lane's register `i` is the element at its group's row, eight further down for an
+                // odd `i`, and at column `t + 4 * (i / 2)`. Lane `t / 2 + 2 * (i / 2)` of the same group holds
+                // that column, in the register of that row and of the column's parity, which is the parity of
+                // `t`: so two exchanges with that lane, and the lane's own parity picks.
+                let floats = self.tensor_fragment(*source, 4, VTy::F32)?;
+                let into = self.repacked(node.frag, 4)?;
+                let (group, within) = (over(lane.clone(), 4), modulo(lane.clone(), 4));
+                let from = sum(times(group, 4), over(within, 2));
+                let lanes = [
+                    self.lane_value(&from, ctx)?,
+                    self.lane_value(&sum(from, Expression::int(2)), ctx)?,
+                ];
+                let odd =
+                    Expression::binary(Operation::NotEqual, masked(lane, 1), Expression::int(0));
+                let odd = self.pred(&odd, ctx)?;
+                for (register, into) in into.into_iter().enumerate() {
+                    let (rows, half) = (2 * (register & 1), register >> 1);
+                    let even = self.taken_from(floats[rows], &lanes[half]);
+                    let other = self.taken_from(floats[rows + 1], &lanes[half]);
+                    let operands = vec![other.into(), even.into(), odd.into()];
+                    self.b
+                        .emit(Inst::new(Opcode::Selp, Ty::B32, vec![into], operands));
+                }
+            }
+            ("m16n8k16", "b", [source])
+                if matches!(ab, "tf32" | "tf32x3") && (0..2).contains(&node.part) =>
+            {
+                // The accumulator's rows run along K here, and `part` names which eight of its sixteen. A lane's
+                // register `i` is the element at row `t + 4 * i` of them and at the column of its group. Lane
+                // `g / 2` of the group `t + 4 * i` holds that column, in the register of that half's rows and of
+                // the column's parity, which is the parity of `g`.
+                let floats = self.tensor_fragment(*source, 4, VTy::F32)?;
+                let into = self.repacked(node.frag, 2)?;
+                let (group, within) = (over(lane.clone(), 4), modulo(lane, 4));
+                let from = sum(times(within, 4), over(group.clone(), 2));
+                let lanes = [
+                    self.lane_value(&from, ctx)?,
+                    self.lane_value(&sum(from, Expression::int(16)), ctx)?,
+                ];
+                let odd =
+                    Expression::binary(Operation::NotEqual, masked(group, 1), Expression::int(0));
+                let odd = self.pred(&odd, ctx)?;
+                let rows = 2 * node.part as usize;
+                for (lane, into) in lanes.iter().zip(into) {
+                    let even = self.taken_from(floats[rows], lane);
+                    let other = self.taken_from(floats[rows + 1], lane);
+                    let operands = vec![other.into(), even.into(), odd.into()];
+                    self.b
+                        .emit(Inst::new(Opcode::Selp, Ty::B32, vec![into], operands));
                 }
             }
             ("m8n8k4", "a", [source]) if ab == "f16" && (0..4).contains(&node.part) => {

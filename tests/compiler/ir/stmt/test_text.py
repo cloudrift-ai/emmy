@@ -2,7 +2,6 @@
 a window) prints as its text and reads back; every stored kernel and lowered Kernel IR round-trips. The text of each
 statement type on its own is the crate's test."""
 
-import json
 from textwrap import dedent
 
 import pytest
@@ -122,7 +121,7 @@ def _stored_bodies(value) -> list:
 
 
 def test_every_corpus_kernel_reads_back_from_its_text():
-    stored = [Body.from_wire(wire) for path in helpers.case_files() for wire in _stored_bodies(json.loads(path.read_text()))]
+    stored = [Body.from_wire(wire) for path in helpers.case_files() for wire in _stored_bodies(helpers.load_case(path).document.to_wire())]
     assert len(stored) > 200
     for body in stored:
         back = parse_body(str(body))

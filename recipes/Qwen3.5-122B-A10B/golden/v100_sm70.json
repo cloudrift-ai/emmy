@@ -566,9 +566,9 @@
     "for a0 in 0..2:",
     "  for a1 in 0..seq_len:",
     "    for a2 in 0..64:",
-    "      for a3 in 0..1536 window(parent=a3 in 0..3072, partition=true):",
-    "        in0 = load x0[a1, 1536 * a0 + a3]",
-    "        in1 = load x1[a2, 1536 * a0 + a3]",
+    "      for a3 in 1536 * a0..1536 * a0 + 1536 of 3072 window(parent=a3 in 0..3072, partition=true):",
+    "        in0 = load x0[a1, a3]",
+    "        in1 = load x1[a2, a3]",
     "        f32 v0 = in0 * in1",
     "        acc0 <- add(acc0, v0) over a3",
     "      linear__partial[a0, a1, a2] = acc0"

@@ -1039,17 +1039,17 @@ class SyncTransport:
             # merge the run's V scalar 2 B loads into ONE vector ``Load`` binding every cell's
             # suffixed name (one 16 B ld like the cp.async fill, instead of V scalar loads — the
             # compute fill issued 3.6x cuBLAS's LSU instructions). Everything else replicates per
-            # cell.
+            # cell. The vector load takes the first cell's index, renamed with it: a leading coordinate may read a name
+            # the cell binds (a weight gathered by a statistic row's index).
             local = {nm for st in cell_stmts[0] for nm in exposed_defines(st)}
+            renames = [{nm: f"{nm}__c{j}" for nm in local} for j in range(v)]
             for p in range(len(cell_stmts[0])):
+                cells = [cell_stmts[j][p].rewrite(lambda nm, names=names: names.get(nm, nm)) for j, names in enumerate(renames)]
                 if plans[p] == "vector":
-                    ld = cell_stmts[0][p]
-                    body.append(Load(names=tuple(f"{ld.names[0]}__c{j}" for j in range(v)), input=ld.input, index=ld.index, dtype=ld.dtype))
-                    continue
-                for j in range(v):
-                    sfx = f"__c{j}"
-                    ren = lambda nm, sfx=sfx, local=local: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
-                    body.append(cell_stmts[j][p].rewrite(ren))
+                    ld = cells[0]
+                    body.append(Load(names=tuple(cell.names[0] for cell in cells), input=ld.input, index=ld.index, dtype=ld.dtype))
+                else:
+                    body += cells
             # ONE vector Write per run (the run is ``V`` contiguous 16-byte-aligned cells, so the
             # store is a single st.128 like the cp.async fill's chunk deposit) — V scalar 2 B
             # stores at 16 B thread stride were 8-way bank-conflicted, and the downstream

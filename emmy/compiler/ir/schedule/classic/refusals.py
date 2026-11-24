@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
-from emmy.compiler.dtype import BF16, F16
+from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
@@ -34,6 +34,8 @@ from .schedule import NodeSchedule, binds_root, node_id_spelling, packed_works
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.tile import TileOp
+
+    from .sites import ClassicProblem
 
 
 _WIDE = (BF16, F16)  # the 16-bit multiplicand families a computed weight repacks into
@@ -168,6 +170,9 @@ def _channel_dtype(tile: TileOp, node, target):
     dtypes = {edge_dtypes(edge, tile.inputs)[0] for edge in node.operands[1:]}
     if len(dtypes) == 1:
         return next(iter(dtypes))
+    # Streamed operands of several dtypes meet in a cell of 16 bits or fewer, which converts the others: the TF32
+    # cell is the one of operands that are all f32, answered above.
+    dtypes.discard(F32)
     eligible = {dtype for dtype in dtypes if dtype is not None and atoms_for(dtype, ctx=target)}
     if not eligible:
         # A dtype only another card multiplies still names the channel (an FP8 value beside an integer position on
@@ -175,6 +180,33 @@ def _channel_dtype(tile: TileOp, node, target):
         # its own check against this target.
         eligible = {dtype for dtype in dtypes if any(atom.operand_dtype("a") == dtype for atom in ATOM_REGISTRY.values())}
     return next(iter(eligible)) if len(eligible) == 1 else None
+
+
+def _family_dtype(tile: TileOp, node, target, dtype):
+    """The multiplicand dtype whose atoms ``node`` takes, ``dtype`` being its first operand's: that operand's own
+    where it has a cell of 16 bits or more, else the one its streamed operands share. An f32 first operand takes
+    the cell of what it multiplies, since a 16-bit cell converts it in its fill, so only a product of f32 operands
+    is the TF32 cell's."""
+    own = dtype is not None and dtype.nbytes >= 2 and dtype != F32 and atoms_for(dtype, ctx=target)
+    return dtype if own else _channel_dtype(tile, node, target)
+
+
+def _f32_product(tile: TileOp, target, node) -> bool:
+    """Whether ``node`` is a product whose operands are all f32, off the chunk tier and the packed pair: the one
+    product the TF32 atoms are the cells of."""
+    from emmy.compiler.ir.tile.ops import edge_dtypes  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
+
+    if node.chunked() or tile.packed_reading(node)[1] is not None:
+        return False
+    return _family_dtype(tile, node, target, edge_dtypes(node.operands[0], tile.inputs)[0]) == F32
+
+
+def _f32_as_bf16_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
+    """The bf16 atoms a product of f32 operands takes with every operand rounded to bf16 in its fill: the cell an
+    f32 operand beside a bf16 one already takes, on a product that has no bf16 operand. bf16 keeps f32's exponent
+    range, so the rounding cannot overflow; it keeps eight bits of mantissa, so offering it is a precision decision
+    (``ClassicProblem.allow_f32_as_bf16``). Empty for any other product."""
+    return atoms_for(BF16, ctx=target) if _f32_product(tile, target, node) else ()
 
 
 def _fragment_rows_refusal(tile: TileOp) -> str | None:
@@ -245,7 +277,7 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
             return f"no tensor-core atom takes a {dtype} multiplicand on this target"
         return None
 
-    atom_dtype = dtype if dtype is not None and dtype.nbytes >= 2 and atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
+    atom_dtype = _family_dtype(tile, node, target, dtype)
     if atom_dtype is None:
         return "no operand dtype selects a tensor-core atom family"
     if atom_dtype.nbytes == 1 and atom_dtype != dtype:
@@ -398,10 +430,10 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
         return atoms_for(tile.inputs[pair.b[0].bits.input].dtype, ctx=target)
     if dtype is not None and dtype.nbytes == 1 and _channel_dtype(tile, node, target) == dtype:
         return bindable(atoms_for(dtype, ctx=target))
-    atom_dtype = dtype if dtype is not None and dtype.nbytes >= 2 and atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
+    atom_dtype = _family_dtype(tile, node, target, dtype)
     base = bindable(atoms_for(atom_dtype, ctx=target))
     reduced_acc = bindable(atoms_for(atom_dtype, acc=atom_dtype, ctx=target))
-    return tuple(dict.fromkeys((*base, *reduced_acc)))
+    return tuple(dict.fromkeys((*base, *reduced_acc, *bindable(_f32_as_bf16_atoms(tile, target, node)))))
 
 
 def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
@@ -420,14 +452,17 @@ def _scalar_catalog() -> frozenset[Tile]:
     return frozenset(scalar_tile_moves())
 
 
-def _atom_policy_ok(atom: AtomKind, *, allow_f16_accumulate: bool, allow_fp8: bool) -> bool:
-    """The precision policy of UNPINNED enumeration: an f16-accumulate or FP8 atom is offered
-    only where the caller allowed it. A row that names such a tile bypasses this — an authored
-    value is a legal independent choice — so the policy filters the catalog, never a parse."""
+def _atom_policy_ok(atom: AtomKind, problem: ClassicProblem) -> bool:
+    """The precision policy of UNPINNED enumeration: an f16-accumulate, FP8 or TF32 atom is offered
+    only where ``problem`` allows it. A row that names such a tile bypasses this — an authored
+    value is a legal independent choice — so the policy filters the catalog, never a parse. The split TF32 atom
+    trades no precision, so the policy passes it; the catalog leaves it out all the same (``AtomKind.row_only``)."""
     a = atom.operand_dtype("a")
-    if a.logical_elems == 1 and a.nbytes == 1 and not allow_fp8:
+    if a.logical_elems == 1 and a.nbytes == 1 and not problem.allow_fp8:
         return False
-    return atom.operand_dtype("c").nbytes != 2 or allow_f16_accumulate
+    if a == F32 and not (atom.row_only or problem.allow_tf32):
+        return False
+    return atom.operand_dtype("c").nbytes != 2 or problem.allow_f16_accumulate
 
 
 def _warp_plan_ok(node, facts: ContractionFacts, plan: Tile) -> bool:

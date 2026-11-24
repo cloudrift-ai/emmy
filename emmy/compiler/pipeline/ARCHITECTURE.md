@@ -1647,12 +1647,15 @@ kernel's structural features (statement/op histogram + loop extents + operand dt
 (`features.stamps`); `H_*` the card and regime (`Context.features`). Neither is written onto an op: an op's knobs
 hold decisions only, every key a registered knob (Part 6).
 
-**`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP` / `FAST_DIV` / `FAST_SQRT` / `FLUSH_TO_ZERO` /
-`CONTRACT_FMA`** (BOOL, pin-only precision restrictions) — the **precision-trading family**. Precedence per knob: its
-own pin > the `FAST_MATH` umbrella > true (`space.precision_pin`); `CONTRACT_FMA` alone keeps its own default, on in
-both regimes, so only its own pin turns contraction off (`space.precision_default`). `F16_MMA_F32_ACC`
-admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32 register promote), while
-`FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable context excludes those
+**`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `TF32_MMA` / `F32_AS_BF16_MMA` / `FAST_EXP` / `FAST_DIV` /
+`FAST_SQRT` / `FLUSH_TO_ZERO` / `CONTRACT_FMA`** (BOOL, pin-only precision restrictions) — the **precision-trading
+family**. Precedence per knob: its own pin > the `FAST_MATH` umbrella > true (`space.precision_pin`); `CONTRACT_FMA`
+alone keeps its own default, on in both regimes, so only its own pin turns contraction off
+(`space.precision_default`). Four of them are atom gates (`space.ATOM_GATES`): `F16_MMA_F32_ACC` admits the fixed
+domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32 register promote), `FP8_MMA` its native fp8
+atoms, `TF32_MMA` the TF32 atom of a product of two f32 operands, and `F32_AS_BF16_MMA` the bf16 atoms on that same
+product, each operand rounded to bf16 where its slab is filled. A product with a bf16 or f16 operand takes that
+operand's cell whatever the last gate says. Without the effective gate, Algorithm 1's immutable context excludes those
 choices while composing its lazy frontier.
 The other five are one knob per instruction class, each picking the instruction its class compiles to.
 `FAST_EXP` swaps the exact exponential for the approximate one (`lowering/kernel/130_approximate_math`); `FAST_DIV`

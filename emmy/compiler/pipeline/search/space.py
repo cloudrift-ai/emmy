@@ -292,7 +292,7 @@ FAST_MATH = Knob(
     KnobType.BOOL,
     hints=(True,),
     help="Fast math is enabled by default: the precision-trading knobs that follow it (FAST_EXP, FAST_DIV, FAST_SQRT, "
-    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA). Pin 0 to disable; individual pins win.",
+    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA, TF32_MMA, F32_AS_BF16_MMA). Pin 0 to disable; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
 
@@ -322,9 +322,44 @@ FP8_MMA = Knob(
 )
 
 
+TF32_MMA = Knob(
+    "TF32_MMA",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the TF32 tensor-core atom forks (mma_m16n8k8_tf32_f32 — both multiplicands f32 values the "
+    "instruction reads at ten bits of mantissa, the accumulator f32) for a product of two f32 operands, which "
+    "otherwise runs on the scalar tier. Each product keeps about three decimal digits, so the fork family is "
+    "precision-trading: pin 1 to offer, 0 never; unset follows FAST_MATH. "
+    "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
+F32_AS_BF16_MMA = Knob(
+    "F32_AS_BF16_MMA",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the bf16 tensor-core atom forks (mma_m16n8k16_bf16_f32 and its wgmma form — the accumulator f32) "
+    "for a product of two f32 operands, each operand rounded to bf16 where its shared-memory slab is filled. bf16 "
+    "keeps f32's exponent range and eight bits of mantissa, so the fork family is precision-trading: pin 1 to "
+    "offer, 0 never; unset follows FAST_MATH. A product with a bf16 or f16 operand takes that cell whatever this "
+    "says. Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
 #: The precision-trading family: the umbrella and the knobs under it (:func:`precision_pin`) — what sorts a
 #: row into the fast-math lane.
-PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA, FAST_DIV, FAST_SQRT, FLUSH_TO_ZERO, CONTRACT_FMA)
+PRECISION_KNOBS = (
+    FAST_MATH,
+    FAST_EXP,
+    F16_MMA_F32_ACC,
+    FP8_MMA,
+    TF32_MMA,
+    F32_AS_BF16_MMA,
+    FAST_DIV,
+    FAST_SQRT,
+    FLUSH_TO_ZERO,
+    CONTRACT_FMA,
+)
 
 #: The precision-trading knobs whose default is their own first hint, not the umbrella's decision: the standard
 #: regime contracts multiply-adds as well, so the umbrella leaves contraction on in both.
@@ -351,6 +386,21 @@ def precision_pin(knob: Knob) -> bool:
         return knob.parse(raw)
     raw = FAST_MATH.raw()
     return precision_default(knob, FAST_MATH.parse(raw) if raw is not None else FAST_MATH.hints[0])
+
+
+#: The gates of the tensor-core atom families, each under the flag of ``ClassicProblem``'s precision policy it decides.
+ATOM_GATES = {
+    "allow_f16_accumulate": F16_MMA_F32_ACC,
+    "allow_fp8": FP8_MMA,
+    "allow_tf32": TF32_MMA,
+    "allow_f32_as_bf16": F32_AS_BF16_MMA,
+}
+
+
+def precision_policy() -> dict[str, bool]:
+    """The precision policy of an unpinned schedule enumeration, as ``ClassicProblem`` takes it: each atom gate as
+    its live pin resolves it."""
+    return {flag: precision_pin(gate) is True for flag, gate in ATOM_GATES.items()}
 
 
 def regime_pin(knob: Knob) -> bool:

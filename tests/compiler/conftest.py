@@ -15,7 +15,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-from tests.compiler.helpers import inject_constants, skip_if_no_cuda
+from tests.compiler.helpers import F32_PRODUCTS, inject_constants, skip_if_no_cuda
 
 
 @pytest.fixture(params=["f32", "f16"], ids=["f32", "f16"])
@@ -86,9 +86,11 @@ def run_graph(request) -> Callable:
             return be.run(compiled, input_data=augmented)[0].outputs
         # cuda
         from emmy.compiler.backend.cuda.backend import CudaBackend
+        from emmy.compiler.pipeline.search.pins import pinned_knobs
 
         be = CudaBackend()
-        compiled = be.compile(graph)
+        with pinned_knobs(F32_PRODUCTS):  # the callers hold their numbers to the other backends' f32
+            compiled = be.compile(graph)
         augmented = inject_constants(dict(input_data), compiled)
         return be.run(compiled, input_data=augmented)[0].outputs
 

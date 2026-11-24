@@ -39,6 +39,8 @@ from .refusals import (
     _contraction_plan_refusal,
     _contraction_plans,
     _contraction_reductions,
+    _f32_as_bf16_atoms,
+    _f32_product,
     _fill_budget_refusal,
     _fragment_agreements,
     _FragmentAgreement,
@@ -490,7 +492,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
 
             plans = self._select_plans(
                 self._named("TILE"),
-                (plan for plan in _contraction_plans(node, facts, self.problem.policy_atoms(self.id)) if not (swept and plan.is_tiled)),
+                (plan for plan in _contraction_plans(node, facts, self.problem.catalog_atoms(self.id)) if not (swept and plan.is_tiled)),
                 allowed=lambda plan: refusal(plan) is None,
                 work=self.problem.work,
                 why=refusal,
@@ -553,6 +555,11 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         facts = tile.contractions.get(self.id)
         if facts is None:
             return any(choice.tile.is_warp for choice in self.nodes)
+        # The reading the priors were fit on is of a product with an operand of 16 bits or fewer: a product of f32
+        # operands keeps the scalar ranking they learned, and its cells (TF32, and bf16 by rounding) join this
+        # reading with the featurizer version that refits them.
+        if _f32_product(tile, self.problem.target, node):
+            return False
         return any(self._placed_ok(ReductionSchedule(plan, Reduce())) for plan in _warp_plans(node, facts, self.problem.atoms_of(self.id)))
 
     @cached_property
@@ -729,8 +736,7 @@ class ClassicKernelSite(Site[ClassicSchedule]):
             for work in (Work.parse(f"w{warps}x1") for warps in (1, 2, 4, 8))
             if pinned is None or work.spell() == pinned
             for tile in problem.state_tiles
-            if tile.spell() == named
-            or (not named and _atom_policy_ok(tile.atom, allow_f16_accumulate=problem.allow_f16_accumulate, allow_fp8=False))
+            if tile.spell() == named or (not named and not tile.atom.row_only and _atom_policy_ok(tile.atom, problem))
         )
 
     def _states(self) -> tuple[Stage, ...]:
@@ -845,6 +851,10 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     row: Mapping[str, str] = field(default_factory=frozendict)
     allow_f16_accumulate: bool = True
     allow_fp8: bool = True
+    allow_tf32: bool = True
+    #: Whether a product of f32 operands is offered the bf16 atoms, each operand rounded to bf16 in its fill. Those
+    #: cells stage through the compute fill alone, so a problem built with no policy keeps the copy stages' catalog.
+    allow_f32_as_bf16: bool = False
     validate_pins: bool = True
     #: A split's finalize tolerates a bare WORK / RASTER / REDUCE pin its own domain cannot take:
     #: it may name the partial's row, so the finalize keeps its catalog instead of offering nothing.
@@ -948,12 +958,13 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
 
     @cached_method
     def policy_atoms(self, site: NodeId) -> tuple[str, ...]:
-        """The atoms the unpinned catalog offers: :meth:`atoms_of` under the precision policy."""
-        return tuple(
-            name
-            for name in self.atoms_of(site)
-            if _atom_policy_ok(ATOM_REGISTRY[name], allow_f16_accumulate=self.allow_f16_accumulate, allow_fp8=self.allow_fp8)
-        )
+        """The atoms a row a descent follows may deploy: :meth:`atoms_of` under the precision policy."""
+        rounded = () if self.allow_f32_as_bf16 else _f32_as_bf16_atoms(self.tile, self.target, self.tile.sites[site].node)
+        return tuple(name for name in self.atoms_of(site) if name not in rounded and _atom_policy_ok(ATOM_REGISTRY[name], self))
+
+    def catalog_atoms(self, site: NodeId) -> tuple[str, ...]:
+        """The atoms the unpinned catalog offers: :meth:`policy_atoms` less the cells only a row or a pin names."""
+        return tuple(name for name in self.policy_atoms(site) if not ATOM_REGISTRY[name].row_only)
 
     @cached_property
     def bare_pins(self) -> frozendict[str, str]:
