@@ -642,11 +642,11 @@ There is one fusion pass and one fixpoint, and the graph decides every region be
 (a scan, whose Write observes a running accumulator) and any op that is not a loop. Two loops share a region when the
 same such nodes — and the same packed producers — lie upstream of both and a chain of links joins them: a loop and a
 loop that reads it, whose value one kernel computes once, or two loops that read one buffer, which one kernel reads
-once for both; equal
-upstream boundaries are what keep a region convex, so the merged kernel never depends on a node that depends on it.
-Equal boundaries alone part two loops of which only one reads past a scan, though nothing lies between them, so two
-regions a loop edge joins then merge whenever the union stays convex — every node on a path between its members joins
-it too — and no member reads past a stop of its own (`_joined`). One rewrite splices one region: non-reconvergent consumers become output ports of one multi-output `LoopOp`, and all
+once for both. Equal upstream boundaries are what keep a region convex, so the merged kernel never depends on a node
+that depends on it. Equal boundaries alone part two loops of which only one reads past a scan, though nothing lies
+between them, so two regions a link joins then merge whenever the union stays convex — every node on a path between
+its members joins it too — and no member reads past a stop of its own (`_joined`). One rewrite splices one region:
+non-reconvergent consumers become output ports of one multi-output `LoopOp`, and all
 terminal Writes seed one splicer worklist, whose shared binding table emits an equal upstream demand once across every
 port. The partition is a function of the graph alone, so the kernel set is the same whatever order the producers are
 visited in — what a walk that grew a region from each producer and shrank it on a refusal could not promise. A
@@ -840,38 +840,42 @@ chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-d
 `j`'s stored.
 
 `loop/fusion/005_roll_recurrence` rolls it BEFORE a loop reads through a copy and before fusion inlines it, while
-the structure is still plain: the fusion pass's first rule rolls every recurrence a region holds, and the regions
-the later rules read and splice are those of the graph the rolls leave, since a kernel that carries a state is in
-no region. A roll is a splice with more asked of its nodes:
-every step splices into one body, the bodies are one step up to the integers of their coordinates, and each step
-reads the state the step before it stored. The rule is three parts kept apart: the ways to read part of a region
-as a recurrence (the search), the test of one against those requirements, and the kernel written for the first
-that passes. The copies of a step are nodes of one region, what
-fusion would splice into one kernel, so a region is where they are looked for. The states are a chain of its nodes
-of one shape — the same body once the integers of its coordinates are left out (load anchors, mask bounds, static
-loop extents: `Body.identity_apart`) — each depending on the last. A step is what lies between two of
-them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
-reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
-shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a
-Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Each step is spliced into one body by the
-fusion rule's own splicer under step-independent buffer names, and the steps must be one step taken again and again
-(`prove`). The proof is the crate's (`numbering::prove`, `ir/ARCHITECTURE.md`): the steps number alike with the
-integers of their coordinate expressions and static extents apart, statement by statement and scope by scope, and
-every such integer moves by one amount per step. It pairs statements by what they compute and where they nest, never
-by where they stand. A step the normal form spells otherwise, the one at the edge of its matrix whose mask lost the
-bound the extent already gives, is held to the step with its step number put in, in normal form. Steps that read
-other buffers are other computations, the layers of a model each with its weights, and are no chain at all. A
-chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one it
-writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
+the structure is as the tracer wrote it. It is the fusion pass's first rule, it rolls every recurrence a region holds,
+and the regions the later rules read and splice are those of the graph the rolls leave, since a kernel that carries a
+state is in no region. A roll is a splice with more asked of its nodes, in three parts kept apart
+(`loop/fusion/_recurrence`): the ways to read part of a region as a recurrence, the proof of one, and the kernel
+written for the first that is proved.
+
+**The readings.** The copies of a step are nodes of one region, what fusion would splice into one kernel, so a region
+is where they are looked for. The states are a chain of its nodes that store one tensor type and have one body once
+the integers of its coordinates are left out (load anchors, mask bounds, static loop extents: `Body.identity_apart`),
+each depending on the last. A step is what lies between two of them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first
+step is what the first state needs beyond what every step reads, and its state is the seed: the one buffer of the
+state's shape whose ancestry, taken out, leaves a first step shaped like every later one — the zeros the loop was
+seeded with, or the tensor it started from (a softmax before a Sinkhorn), which the carrier reads before its first
+step (`Carry.seed`). A reading may take every second state, where the states alternate two bodies (a row step, then
+a column step); the step at the edge of its matrix; and each step's own readers. The two paragraphs below say when.
+
+**The proof.** Each step is spliced into one body by the fusion rule's own splicer under step-independent buffer
+names, and the steps must be one step taken again and again (`prove`). The proof is the crate's (`numbering::prove`,
+`ir/ARCHITECTURE.md`): the steps number alike with the integers of their coordinate expressions and static extents
+apart, statement by statement and scope by scope, and every such integer moves by one amount per step. It pairs
+statements by what they compute and where they nest, never by where they stand. Steps that read other buffers are
+other computations, the layers of a model each with its weights, and are no chain at all. A chain that is not one
+step advanced is left alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel.
+
+A chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one
+it writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
 straight-line code that fusion inlines once, and rolling it would only store every state. This is a structural
-distinction, not a size or speed threshold. A reduction whose extent grows with the step runs at its
-widest in the rolled body and folds its identity past the step's own bound — the mask the tracer itself spells a
-partial reduction with. Only then does one kernel replace the chain. It carries the state (`Carry`,
-`ir/ARCHITECTURE.md`) and stores what each step kept — the state and any other buffer read outside that step — with
-the step as its leading axis. A state nothing reads but the next step (a triangular inverse's row substitutions, a
-Sinkhorn iteration) is stored for no one until the last: its store has the state's shape and no step axis, each step
-stores over the last one's, and the one reader reads the whole of it. Ordinary fusion then inlines one slice of those
-stores per replaced buffer into its reader.
+distinction, not a size or speed threshold.
+
+**The kernel.** One kernel replaces the chain. It carries the state (`Carry`, `ir/ARCHITECTURE.md`) and stores what
+each step kept — the state and any other buffer read outside that step — with the step as its leading axis. A
+reduction whose extent grows with the step runs at its widest in the rolled body and folds its identity past the
+step's own bound — the mask the tracer itself spells a partial reduction with. A state nothing reads but the next step
+(a triangular inverse's row substitutions, a Sinkhorn iteration) is stored for no one until the last: its store has
+the state's shape and no step axis, each step stores over the last one's, and the one reader reads the whole of it.
+Ordinary fusion then inlines one slice of those stores per replaced buffer into its reader.
 
 **A step's own readers roll with it.** A node outside the steps that reads the state a step starts from, or a value
 the step computes from it, and nothing of any other step, is computed in that step: it joins the step's region
@@ -886,16 +890,14 @@ offered no split across the sequence, since parts side by side cannot write that
 
 **A step at the edge of its matrix rolls with the rest.** A step that writes one row masks its store to that row, and
 at the last row the normal form drops the bound the matrix's extent already gives, so that step's body no longer
-spells like the others once those integers are left out. The chain offers the state after its last, where that one has
-the same statements and another body, and the roll's own test of every step (the first step advanced must normalize
-to it) decides; where it is not that step, the chain rolls without it. Only the last step is offered this way.
+spells like the others once those integers are left out. The chain offers the state after its last, where that one
+stores the same tensor in the same region with another body, and the proof decides: the general step with that
+step's number put in must normalize to it. Where it is not that step, the chain rolls without it. Only the last step
+is offered this way.
 
-A chain whose states alternate two
-bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
-alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion
-splices whole, up to the splicer's construction bound. A kernel that carries a state is in no region of plain
-loops (`carries_state`): the splice inlines a store into its readers, and a state is stored once per step. It takes
-the kernels around it into its step afterwards (`015_merge_into_step`, above).
+What the roll leaves unrolled, fusion splices whole, up to the splicer's construction bound. A kernel that carries a
+state is in no region of plain loops (`carries_state`): the splice inlines a store into its readers, and a state is
+stored once per step. It takes the kernels around it into its step afterwards (`015_merge_into_step`, above).
 
 ## Kernel boundaries after maximal fusion
 
