@@ -96,7 +96,7 @@ jobs:
 
       - uses: ./.github/actions/setup-emmy
 
-      - name: Export the repository goldens
+      - name: Export the hardware goldens
         run: |
           ./venv/bin/emmy db import --db _data/ci-prior.db --fresh --repository
           ./venv/bin/emmy db export --db _data/ci-prior.db _data/ci-prior --space "$SPACE"
@@ -182,6 +182,25 @@ jobs:
             --slurpfile goldens _data/goldens.json --slurpfile corpus _data/corpus.json --slurpfile xfail _data/xfail.json)
           echo "$summary"
           echo "summary=$summary" >> "$GITHUB_OUTPUT"
+
+  # Every repository golden but the RTX 5090's, which the PR suite holds: the fresh lowering of each traced program,
+  # the import, the fusion and normal-form checks, and the prior reproduction gate. Together they outlast the PR job.
+  goldens:
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-emmy
+
+      - name: Hold every other card's goldens
+        timeout-minutes: 230
+        run: EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -m goldens -q -p no:randomly -n auto --dist=loadgroup
 
   # Fill one hardware golden's missing measurements on its own card: the file with the most rows `emmy golden list
   # --missing` names among the cards CloudRift can rent now. Skipped when every row is measured or no card is free.
@@ -568,7 +587,7 @@ jobs:
 
   notify:
     name: Notify Discord
-    needs: [durations, prior, gaps, fill, discover]
+    needs: [durations, prior, gaps, goldens, fill, discover]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -583,6 +602,7 @@ jobs:
       SCHEDULE_PRIOR: ${{ needs.prior.outputs.schedule }}
       PLACEMENT_PRIOR: ${{ needs.prior.outputs.placement }}
       GAPS_RESULT: ${{ needs.gaps.result }}
+      GOLDENS_RESULT: ${{ needs.goldens.result }}
       FILL_RESULT: ${{ needs.fill.result }}
       GOLDEN_FILL: ${{ needs.fill.outputs.summary }}
       COMPILER_GAPS: ${{ needs.gaps.outputs.summary }}

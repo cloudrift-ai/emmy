@@ -17,6 +17,13 @@ import numpy as np
 import pytest
 
 
+def golden_lane(path: Path) -> tuple:
+    """The marks of a node that reads the repository golden at ``path``. The default suite holds the RTX 5090's
+    goldens alone; every other card's runs nightly under ``-m goldens``, because all of them together outlast the
+    PR job."""
+    return () if path.name == "rtx5090_sm120.json" else (pytest.mark.goldens,)
+
+
 def classic_cartesian_schedules(context):
     """Enumerate a classic context's literal kernel × node × edge test oracle."""
     from emmy.compiler.ir.schedule import Schedule, ScheduleRefused

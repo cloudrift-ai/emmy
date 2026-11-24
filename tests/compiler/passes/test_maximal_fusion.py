@@ -9,6 +9,7 @@ from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.loop import Assign, Loop, LoopOp
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from tests.compiler.helpers import golden_lane
 from tests.compiler.passes.test_roll_recurrence import _SINKHORN, _delta
 
 
@@ -390,7 +391,7 @@ def _repository_goldens() -> list:
     from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths
 
     with repository_golden_paths() as paths:
-        return [pytest.param(path, id=f"{path.parent.parent.name}/{path.name}") for path in paths]
+        return [pytest.param(path, id=f"{path.parent.parent.name}/{path.name}", marks=golden_lane(path)) for path in paths]
 
 
 @pytest.mark.parametrize("path", _repository_goldens())

@@ -76,7 +76,9 @@ def test_export_writes_a_dataset_the_readers_load(tmp_path):
     from emmy.compiler.pipeline.search.dataset import Dataset
 
     tuned_db(tmp_path / "dataset.db", (_CASE,), us=500.0).close()
-    args = Namespace(out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1)
+    args = Namespace(
+        out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1, candidates=[]
+    )
     handle_db_export(args)
     dataset = Dataset.load(tmp_path / "dataset")
     assert (len(dataset.golden), len(dataset.measured)) == (0, 1) and dataset.provenance["source"] == str(tmp_path / "dataset.db")
@@ -97,7 +99,9 @@ def test_import_and_export_time_their_phases_and_name_the_slowest_pools(tmp_path
     with caplog.at_level(logging.INFO, logger="emmy.progress"):
         handle_db_import(Namespace(sources=[str(golden)], db=str(tmp_path / "dataset.db"), fresh=True))
     assert "timing: emmy db import" in caplog.text and f"source={golden.name}" in caplog.text
-    args = Namespace(out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1)
+    args = Namespace(
+        out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1, candidates=[]
+    )
     handle_db_export(args)
     timing = json.loads((tmp_path / "dataset" / "timing.json").read_text())
     phases = {p["name"]: p for p in timing["phases"]}
@@ -116,7 +120,7 @@ def test_placement_export_reads_the_instance_alone(tmp_path):
     golden = _golden(tmp_path, "cut", 500.0, case="fused/linear-add-place-cut-sm70.json")
     database = tmp_path / "dataset.db"
     handle_db_import(Namespace(sources=[str(golden)], db=str(database), fresh=True))
-    args = Namespace(out=str(tmp_path / "placement"), db=str(database), pool_sample=0, seed=0, space="placement", jobs=1)
+    args = Namespace(out=str(tmp_path / "placement"), db=str(database), pool_sample=0, seed=0, space="placement", jobs=1, candidates=[])
     handle_db_export(args)
     assert Dataset.load(args.out).golden
 
@@ -203,22 +207,26 @@ def test_check_exits_nonzero_on_drift(tmp_path):
         handle_db_check(Namespace(db=str(tmp_path / "tune.db")))
 
 
-def test_repository_import_reads_the_repository_goldens(tmp_path, monkeypatch):
-    """``--repository`` names the repository goldens, and nothing where there is none."""
+def test_repository_import_reads_the_hardware_goldens_alone(tmp_path, monkeypatch):
+    """``--repository`` names the hardware goldens, the priors' training set, and nothing where there is none. A
+    recipe's golden that records the same kernel otherwise is no training data, so it reaches no row of the DB the
+    dataset is exported from."""
     from contextlib import nullcontext
 
     from emmy.compiler.pipeline.search.golden import repository
 
-    monkeypatch.setattr(repository, "repository_golden_paths", lambda: nullcontext([]))
+    monkeypatch.setattr(repository, "hardware_golden_paths", lambda: [])
     args = Namespace(sources=[], db=str(tmp_path / "dataset.db"), fresh=True, repository=True)
     with pytest.raises(SystemExit):
         handle_db_import(args)
 
-    golden = _golden(tmp_path, "card", 500.0)
-    monkeypatch.setattr(repository, "repository_golden_paths", lambda: nullcontext([golden]))
+    hardware, recipe = _golden(tmp_path, "card", 500.0), _golden(tmp_path, "recipe", 300.0)
+    monkeypatch.setattr(repository, "hardware_golden_paths", lambda: [hardware])
+    monkeypatch.setattr(repository, "repository_golden_paths", lambda: nullcontext([hardware, recipe]))
     handle_db_import(args)
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert db.perf_sources() == {file_source("golden", golden): 1}
+    assert db.perf_sources() == {file_source("golden", hardware): 1}
+    assert {row.us for row in db.iter_perf_rows()} == {500.0}
     db.close()
 
 

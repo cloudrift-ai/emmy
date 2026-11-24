@@ -24,6 +24,7 @@ from emmy.compiler.backend.correctness import (
     to_cuda_tensor,
 )
 from emmy.compiler.loader.binder import flatten_tensors
+from emmy.compiler.loader.synthesize import scale_input_leaves
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,9 @@ def _random_source_values(rng, shape, dtype, *, name: str | None = None):
     the per-tensor scale then reproduces a weight of the 0.02 std the unquantized sources have, and an activation
     quantized with the drawn ``input_scale`` gets block scales well under 448. A block-FP8 weight's scale
     (``*_scale_inv``) is its block's amax over 448, an amax of one to four std, so that the weight it scales has
-    the same std; larger scales overflow an FP16 trunk's projections. Any other scale gets a
+    the same std; larger scales overflow an FP16 trunk's projections. A static FP8 activation scale
+    (``activation_scale``) is ``amax / 448`` for an activation of unit std: drawn smaller, a unit-std activation
+    divided by it passes 448, and torch's cast to e4m3, which has no infinity, gives NaN. Any other scale gets a
     log-uniform draw from 1e-4 to 1e-1. A scale drawn from a normal distribution can be negative or near zero, and its
     reciprocal then overflows the 8-bit block scales computed from it."""
     import numpy as np  # noqa: PLC0415
@@ -117,6 +120,8 @@ def _random_source_values(rng, shape, dtype, *, name: str | None = None):
         return bits
     if std is not None:
         return np.full(shape, _SYNTH_AMAX_STDS * std / (e2m1_max * e4m3_max), dtype=np.float32)
+    if leaf.endswith("activation_scale"):
+        return np.full(shape, _SYNTH_AMAX_STDS / e4m3_max, dtype=np.float32)
     if leaf.endswith("_scale_inv"):
         return (rng.uniform(1, 4, shape) * _SYNTH_WEIGHT_STD / e4m3_max).astype(np.float32)
     if "scale" in leaf:
@@ -148,6 +153,33 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
         # reference holds infinities and no correctness check or isolated re-bench can run.
         return rng.standard_normal(shape, dtype=np.float32) * 0.02
     return rng.standard_normal(shape, dtype=np.float32)
+
+
+def _scatter_index_inputs(graphs) -> dict[str, list]:
+    """The inputs a scatter reads as its rows (``index_copy`` / ``x[idx] = v``: a 1-D index), each with the extents of
+    the destination axes it names. Rows are distinct in a real program, as a KV-cache slot mapping or a page table
+    is; drawn at unit std they repeat, and two writes of different values to one row land in either order."""
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ScatterOp  # noqa: PLC0415
+
+    extents: dict[str, list] = {}
+    for graph in graphs:
+        for node in graph.nodes.values():
+            index = graph.nodes.get(node.inputs[1]) if isinstance(node.op, ScatterOp) else None
+            if index is not None and isinstance(index.op, InputOp) and len(index.output.shape) == 1:
+                dest = graph.buffer(node.inputs[0])
+                extents.setdefault(index.id, []).append(dest.shape[int(node.op.axis) % len(dest.shape)])
+    return extents
+
+
+def _distinct_rows(rng, length: int, extent: int):
+    """``length`` distinct rows of an axis of ``extent`` rows, in random order. An index longer than the axis repeats
+    its last row past ``extent`` entries, as a page table or slot map sends every entry with no slot to its one
+    spare row, where they all write the same value."""
+    import numpy as np  # noqa: PLC0415
+
+    rows = rng.permutation(extent)[:length]
+    return np.concatenate([rows, np.full(length - rows.size, extent - 1)]).astype(np.int64)
 
 
 def _chunk_position(graph, static) -> int | None:
@@ -256,9 +288,17 @@ async def bench_lowered_vs_torch(
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
     position = _chunk_position(lowered, _static)
+    scale_leaves = scale_input_leaves({nid: node.output.dtype for nid, node in lowered.nodes.items() if isinstance(node.op, InputOp)})
+    scatter_rows = _scatter_index_inputs(([frontend] if frontend is not None else []) + [lowered])
     for nid, node in lowered.nodes.items():
         if isinstance(node.op, InputOp):
-            arr = _random_input_values(rng, _static(node.output.shape), node.output.dtype, name=nid)
+            # The checkpoint key's leaf is what names a weight's scale to the draw of a source.
+            draw, name = (_random_source_values, scale_leaves[nid]) if nid in scale_leaves else (_random_input_values, nid)
+            shape = _static(node.output.shape)
+            if nid in scatter_rows:
+                arr = _distinct_rows(rng, shape[0], min(_static(scatter_rows[nid])))
+            else:
+                arr = draw(rng, shape, node.output.dtype, name=name)
             if nid == "position" and position is not None:
                 arr = np.full(arr.shape, position)
             # Keep the ndarray shape (no flatten) — a symbolic graph's launch

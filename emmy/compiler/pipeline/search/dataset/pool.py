@@ -49,7 +49,8 @@ class GoldenPool(Wire):
     and its pool is skipped by name. A placement pool also holds the constant inputs its golden program binds
     (``placement_constants``, each constant's wire by input name), so the placement walk offers the forks a deploy
     sees — the layout fork of a transposed weight among them; the kernel's standalone definition reads every input
-    as an activation."""
+    as an activation. A schedule pool also holds the rows the card's candidate file measured on the same group
+    (``candidates``: other schedules than the golden's, the labeled negatives among them)."""
 
     gpu: str
     cap: tuple[int, int]
@@ -58,6 +59,7 @@ class GoldenPool(Wire):
     bindings: dict[str, int]
     rows: tuple[GoldenRow, ...]
     placement_constants: dict[str, dict] = field(default_factory=dict)
+    candidates: tuple[GoldenRow, ...] = ()
 
     @property
     def name(self) -> str:
