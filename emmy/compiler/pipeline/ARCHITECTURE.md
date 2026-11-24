@@ -177,7 +177,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/policy/greedy.py` | `greedy_decide` — the fork resolver `compile` / `run` / `serve` use: Part 3's hierarchy, one pick per fork. |
 | `search/strategy/` | The search shape above the loop: `base.SearchStrategy` and its one realization, `greedy.GreedyStrategy` — the greedy compile's retry orchestration (Part 4). |
 | `search/inventory.py` | `KernelInventory`, the splice watcher that reports each kernel-set decision a lowering takes, and the tune-DB routing-row writers. The golden restamp and `run --golden PATH` compose one into their pipeline (Parts 5–7). |
-| `search/autotune.py` | `run --tune`'s proposal side: `schedule_space` enumerates the one scheduled kernel under the greedy kernel set — every complete schedule row, a carried state's storage among its sites — `prior_scores` ranks its rows, and `Autotuner` proposes the prior's best rows, then Bayesian optimization batches over the knob values split into their parts. A nonempty pool of all-off rows has zero feature dimensions; its rows are still measured, not skipped. It never touches the GPU; `run` measures. |
+| `search/autotune.py` | `run --tune`'s proposal side: `kernel_set` walks a program as a greedy compile does and returns its kernels, each alone as a program, and the kernel-set forks it met with their arms by the placement prior — what a tune of a whole program measures; `schedule_space` enumerates one scheduled kernel under the greedy kernel set — every complete schedule row, a carried state's storage among its sites — `prior_scores` ranks its rows, and `Autotuner` proposes the prior's best rows, then Bayesian optimization batches over the knob values split into their parts. A nonempty pool of all-off rows has zero feature dimensions; its rows are still measured, not skipped. It never touches the GPU; `run` measures. |
 | `search/bench_record.py` | The perf-row writers: `persist_kernel_perf` (a `kernel` + `perf` row per benched kernel), `persist_bench_failure` (the `bench_fail` row of the kernel a failure names), `kernel_row` and `point_stats`. `run --bench` records through them (Part 5). |
 | `search/prior/` | The ONE ranking path: the `Prior` ABC (`base.py`) and its one implementation, `OfflinePrior` (`offline.py`), which `load_prior` builds from the weights artifact. `catboost_model.py` holds `CatBoostModel`, the offline prior's scoring function as a value object — the one definition the fitter trains and the deploy path ranks by. `fit/` is the offline fitter, split by responsibility — `catboost.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/dataset/group.Group`, one layer down: a pool is data, not a fitter detail. |
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — every rank and regret metric resolves here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
@@ -620,9 +620,9 @@ A split route prices the offered plan matching the `g<n>` half of its `REDUCE` v
 ballot decide nothing. The fastest measured arm wins; strict evidence refuses an unmeasured fork with multiple
 arms. A hand pin leaving one arm decides it, allowing a kernel set to be recorded before its routing row exists;
 the strict check then falls on the pieces. With no measured arm,
-the fork goes to the placement prior (`kernel_set_ranking`: its argmin over the arms' `P_*` rows, the arm that keeps the
-kernel whole included); without the shipped placement weights, the first arm wins — the kernel stays fused, unsplit
-and folded. Disabling the schedule prior does not disable placement ranking. No arm is scheduled to decide the fork (Part 4). A measurement can
+the fork goes to the placement prior (`kernel_set_ranking`: the first of the arms by their `P_*` rows, the arm that
+keeps the kernel whole included); without the shipped placement weights, the first arm wins — the kernel stays fused,
+unsplit and folded. Disabling the schedule prior does not disable placement ranking. No arm is scheduled to decide the fork (Part 4). A measurement can
 also disqualify: an arm that leaves a kernel whose every measured variant failed (`_Measured.failed`, the watchdog's
 `bench_fail` rows) is off the ballot while another arm remains. A failure also rules out keeping a kernel whole where
 the kernel failed or where a piece one of its cuts leaves failed: each piece computes part of its parent. Nothing is installed on the kernel: a piece a cut or
@@ -850,6 +850,20 @@ row names an optimization level.
 `run --bench --tune N` searches one kernel's schedule space on the card (`search/autotune.py`): the prior's best rows
 first, then the rows Bayesian optimization expects to improve most, each benched as an `--ab` row and written as rows
 of this same DB.
+
+**A program's tune measures kernel sets through their pieces.** A kernel-set arm has no time of its own, and a piece
+benched once, at the schedule the prior guessed, prices its arm at that guess: a merged piece whose tuned schedule
+runs in 9 us lost at 60 to 500 us, so the kernel set that merges it lost before anyone tuned it. A tune of a program of
+several kernels therefore tunes kernels, never sets (`autotune.kernel_set`, driven by `run`): each kernel of the
+kernel set the greedy compile takes, alone, then the kernels each untaken arm of each fork that compile met leaves —
+the arm taken on the fork's kernel alone, its pieces deciding their own forks as a deploy would — with every decision
+whose pieces hold rows stored as a routing row. Nothing new decides: the compile that follows reads those rows at
+the same forks through the same measured pick (Part 3), and an arm with an unmeasured piece stays off the measured
+ballot. The arms are ranked by the placement prior (`policy/greedy.kernel_set_ranking`, the ranking whose first is
+the greedy pick), which only orders what is measured first and bounds how many arms a fork has measured; it prices
+nothing. A kernel alone is the slice of the live graph at its fork (`slice.single_node_graph`), so its rows land
+under the identity the whole program's compile asks for. The search is local: arms one decision off the compiled
+kernel set, round after round while the set changes.
 
 ## Part 6: Persistence and keys
 

@@ -178,8 +178,8 @@ def register_run_command(subparsers):
         metavar="NAME",
         help=(
             "Run one kernel of --golden PATH as the whole program — its stored body, a cut piece included — by exact "
-            "name or an unambiguous name substring. With --tune, tunes that kernel alone: a schedule pin reaches only "
-            "it and each compile takes seconds where its layer takes minutes."
+            "name or an unambiguous name substring. With --tune, tunes that kernel alone, its own cut, layout and split "
+            "arms included: each compile takes seconds where its layer takes minutes."
         ),
     )
     parser.add_argument(
@@ -188,10 +188,12 @@ def register_run_command(subparsers):
         default=None,
         metavar="N",
         help=(
-            "Autotune the program's one scheduled kernel: measure N of its schedule rows, the prior's ten best first, "
-            "then the rows Bayesian optimization expects to improve most, each benched as an --ab row would be. "
-            "Clean rows land in the tune DB, so the next compile picks the fastest. Requires --bench and --code, "
-            "--realization or --kernel: an --ir file holds no program the schedule space can be enumerated from."
+            "Autotune the program: measure N schedule rows of each kernel alone, the prior's ten best first, then the "
+            "rows Bayesian optimization expects to improve most, each benched as an --ab row would be. A program of "
+            "several kernels has each kernel of its kernel set tuned, then the kernels of the kernel-set arms the "
+            "compile met and did not take, so the next compile picks its kernel set from measured rows. Clean rows land "
+            "in the tune DB. Requires --bench and --code, --realization or --kernel: an --ir file holds no program the "
+            "schedule space can be enumerated from."
         ),
     )
     parser.add_argument(
