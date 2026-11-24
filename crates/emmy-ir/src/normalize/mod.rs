@@ -443,17 +443,17 @@ for k in 0..3:
 
     #[test]
     fn a_carry_sorts_after_every_pure_leaf() {
-        // A `Pre` reads the step before and a `Carry` writes the step's state; neither orders the other by data flow,
-        // so where the carry's value is a load the order alone decides. Load, carry, pre, write is what the lift
-        // refuses (the state's store ahead of its load); the carry sorts after every pure leaf.
+        // A load of the state reads the step before and a `Carry` writes the step's state; neither orders the other
+        // by data flow, so where the carry's value is a load the order alone decides. The state's store ahead of its
+        // load is what the lift refuses; the carry sorts after every pure leaf.
         let normal = crate::text::body_text(
             &normalize_uncached(&testing::body(
                 "
         for a0 in 0..8:
           for a1 in 0..4:
             in0 = load U[a0, a1]
-            acc0[a1] <- in0 seed 0
-            v2 = pre acc0[a1]
+            acc0[a0, a1] <- in0 seed 0
+            v2 = load acc0[a0 - 1, a1]
             out[a0, a1] = v2
                 ",
             ))
@@ -461,7 +461,10 @@ for k in 0..3:
         )
         .unwrap();
         let lines: Vec<&str> = normal.lines().map(str::trim).collect();
-        assert!(lines.last().unwrap().starts_with("acc0[a1] <-"), "{normal}");
+        assert!(
+            lines.last().unwrap().starts_with("acc0[a0, a1] <-"),
+            "{normal}"
+        );
         assert!(
             lines.iter().position(|l| l.starts_with("out[")).unwrap() < lines.len() - 1,
             "{normal}"

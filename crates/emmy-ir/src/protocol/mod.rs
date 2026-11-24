@@ -946,7 +946,6 @@ mod tests {
         "y = exp(x)",
         "s <- add(s, x)",
         "c[i] <- x seed 0",
-        "p = pre c[i]",
         "init f32 s = 0",
         "let n = i + 1",
         "out[i] = x",
@@ -1107,7 +1106,7 @@ mod tests {
         // A literal seed is no buffer.
         let carry = statement("state[i] <- value seed 0.5");
         assert!(carry.external_reads().is_empty());
-        let renamed = Statement::rename_buffers(&carry, &mapping(&[("state", "other")]));
+        let renamed = Statement::rename_buffers(&carry, &mapping(&[("0.5", "other")]));
         assert!(Arc::ptr_eq(&renamed, &carry));
         let Statement::Carry(fields) = &*carry else {
             panic!("not a carry");
@@ -1127,7 +1126,7 @@ mod tests {
         let select = statement("picked = select:\n  x when i < 2\n  y when i >= 2");
         assert_eq!(strs(&select.deps()), ["x", "i", "y"]);
         let carry = statement("state[i] <- value seed 0");
-        assert_eq!(strs(&carry.deps()), ["value"]);
+        assert_eq!(strs(&carry.deps()), ["value", "i"]);
     }
 
     #[test]

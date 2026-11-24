@@ -659,7 +659,7 @@ store(out, S)
 ```
 
 **Row.** A static loop over one matrix state, with maps and additive products, takes register storage:
-`WORK=w<M>x1`, `STAGE=d1/reg` at the carrying fold, which keeps the state in registers across all steps of one
+`WORK=w<M>x1`, `STAGE=d1/reg` at the state's route, which keeps the state in registers across all steps of one
 launch, and at the same route a `TILE` of an f16 atom with `f1x<N>` covering the state's columns. Any other
 recurrence is one launch per step over a state buffer, or `STAGE=d1/smem` where one CTA owns the whole state.
 

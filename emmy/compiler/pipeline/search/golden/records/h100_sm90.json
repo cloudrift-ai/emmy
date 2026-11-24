@@ -53425,15 +53425,15 @@
     "      for a3 in 0..16:",
     "        for a4 in 0..16:",
     "          in1 = load w[a1, a0 + 1, a2, a4]",
-    "          v2 = pre acc0[a1, a4, a3]",
+    "          v2 = load acc0[a0 - 1, a1, a4, a3]",
     "          v3 = in1 * v2",
     "          acc1 <- add(acc1, v3) over a4",
     "        in2 = load u[a1, a0 + 1, a2, a3]",
-    "        v4 = pre acc0[a1, a2, a3]",
+    "        v4 = load acc0[a0 - 1, a1, a2, a3]",
     "        v5 = v1 * v4",
     "        v6 = in2 + v5 + 0.03125 * acc1",
     "        add_3__steps0[a0, a1, a2, a3] = v6",
-    "        acc0[a1, a2, a3] <- v6 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v6 seed add_1"
    ]},"inputs":["g","w","u","add_1"],"outputs":[["add_3__steps0","f32",[64,48,16,16]]]}
   ]},"formed":true,"traced":72,"origins":["add_10","add_100","add_102","add_104","add_106","add_108","add_110","add_112","add_114","add_116","add_118","add_12","add_120","add_122","add_124","add_126","add_128","add_14","add_16","add_18","add_2","add_20","add_22","add_24","add_26","add_28","add_30","add_32","add_34","add_36","add_38","add_4","add_40","add_42","add_44","add_46","add_48","add_50","add_52","add_54","add_56","add_58","add_6","add_60","add_62","add_64","add_66","add_68","add_70","add_72","add_74","add_76","add_78","add_8","add_80","add_82","add_84","add_86","add_88","add_90","add_92","add_94","add_96","add_98","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_16","matmul_17","matmul_18","matmul_19","matmul_2","matmul_20","matmul_21","matmul_22","matmul_23","matmul_24","matmul_25","matmul_26","matmul_27","matmul_28","matmul_29","matmul_3","matmul_30","matmul_31","matmul_32","matmul_33","matmul_34","matmul_35","matmul_36","matmul_37","matmul_38","matmul_39","matmul_4","matmul_40","matmul_41","matmul_42","matmul_43","matmul_44","matmul_45","matmul_46","matmul_47","matmul_48","matmul_49","matmul_5","matmul_50","matmul_51","matmul_52","matmul_53","matmul_54","matmul_55","matmul_56","matmul_57","matmul_58","matmul_59","matmul_6","matmul_60","matmul_61","matmul_62","matmul_63","matmul_64","matmul_7","matmul_8","matmul_9","mul_10","mul_100","mul_101","mul_102","mul_103","mul_104","mul_105","mul_106","mul_107","mul_108","mul_109","mul_11","mul_110","mul_111","mul_112","mul_113","mul_114","mul_115","mul_116","mul_117","mul_118","mul_119","mul_12","mul_120","mul_121","mul_122","mul_123","mul_124","mul_125","mul_126","mul_127","mul_128","mul_129","mul_13","mul_14","mul_15","mul_16","mul_17","mul_18","mul_19","mul_2","mul_20","mul_21","mul_22","mul_23","mul_24","mul_25","mul_26","mul_27","mul_28","mul_29","mul_3","mul_30","mul_31","mul_32","mul_33","mul_34","mul_35","mul_36","mul_37","mul_38","mul_39","mul_4","mul_40","mul_41","mul_42","mul_43","mul_44","mul_45","mul_46","mul_47","mul_48","mul_49","mul_5","mul_50","mul_51","mul_52","mul_53","mul_54","mul_55","mul_56","mul_57","mul_58","mul_59","mul_6","mul_60","mul_61","mul_62","mul_63","mul_64","mul_65","mul_66","mul_67","mul_68","mul_69","mul_7","mul_70","mul_71","mul_72","mul_73","mul_74","mul_75","mul_76","mul_77","mul_78","mul_79","mul_8","mul_80","mul_81","mul_82","mul_83","mul_84","mul_85","mul_86","mul_87","mul_88","mul_89","mul_9","mul_90","mul_91","mul_92","mul_93","mul_94","mul_95","mul_96","mul_97","mul_98","mul_99"]},
   {"loop_ir":{"inputs":["g","u"],"outputs":["add_3__steps0__offset0"],"nodes":[
@@ -53855,14 +53855,14 @@
     "      for a3 in 0..16:",
     "        for a4 in 0..16:",
     "          in0 = load add_3__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add_3__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add_3__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v2 seed add_1"
    ]},"inputs":["add_3__steps0__map0","add_3__steps0__offset0","add_1"],"outputs":[["add_3__steps0__start","f32",[64,48,16,16]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add_3__steps0"],"outputs":["add_65"],"nodes":[
@@ -53914,15 +53914,15 @@
     "      for a3 in 0..32:",
     "        for a4 in 0..32:",
     "          in1 = load w[a1, a0 + 1, a2, a4]",
-    "          v2 = pre acc0[a1, a4, a3]",
+    "          v2 = load acc0[a0 - 1, a1, a4, a3]",
     "          v3 = in1 * v2",
     "          acc1 <- add(acc1, v3) over a4",
     "        in2 = load u[a1, a0 + 1, a2, a3]",
-    "        v4 = pre acc0[a1, a2, a3]",
+    "        v4 = load acc0[a0 - 1, a1, a2, a3]",
     "        v5 = v1 * v4",
     "        v6 = in2 + v5 + 0.015625 * acc1",
     "        add_3__steps0[a1, a2, a3] = v6",
-    "        acc0[a1, a2, a3] <- v6 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v6 seed add_1"
    ]},"inputs":["g","w","u","add_1"],"outputs":[["add_3__steps0","f32",[48,32,32]]]}
   ]},"formed":true,"traced":73,"origins":["add_10","add_11","add_12","add_13","add_14","add_15","add_16","add_17","add_18","add_19","add_2","add_20","add_21","add_22","add_23","add_24","add_25","add_26","add_27","add_28","add_29","add_3","add_30","add_31","add_32","add_33","add_34","add_35","add_36","add_37","add_38","add_39","add_4","add_40","add_41","add_42","add_43","add_44","add_45","add_46","add_47","add_48","add_49","add_5","add_50","add_51","add_52","add_53","add_54","add_55","add_56","add_57","add_58","add_59","add_6","add_60","add_61","add_62","add_63","add_64","add_7","add_8","add_9","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_16","matmul_17","matmul_18","matmul_19","matmul_2","matmul_20","matmul_21","matmul_22","matmul_23","matmul_24","matmul_25","matmul_26","matmul_27","matmul_28","matmul_29","matmul_3","matmul_30","matmul_31","matmul_32","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_10","mul_11","mul_12","mul_13","mul_14","mul_15","mul_16","mul_17","mul_18","mul_19","mul_2","mul_20","mul_21","mul_22","mul_23","mul_24","mul_25","mul_26","mul_27","mul_28","mul_29","mul_3","mul_30","mul_31","mul_32","mul_33","mul_34","mul_35","mul_36","mul_37","mul_38","mul_39","mul_4","mul_40","mul_41","mul_42","mul_43","mul_44","mul_45","mul_46","mul_47","mul_48","mul_49","mul_5","mul_50","mul_51","mul_52","mul_53","mul_54","mul_55","mul_56","mul_57","mul_58","mul_59","mul_6","mul_60","mul_61","mul_62","mul_63","mul_64","mul_65","mul_7","mul_8","mul_9"]},
   {"loop_ir":{"inputs":["g","u"],"outputs":["add_3__steps0__offset0"],"nodes":[
@@ -54155,13 +54155,13 @@
     "      for a3 in 0..32:",
     "        for a4 in 0..32:",
     "          in0 = load add_3__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add_3__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
     "        add_3__steps0[a1, a2, a3] = v2",
-    "        acc0[a1, a2, a3] <- v2 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v2 seed add_1"
    ]},"inputs":["add_3__steps0__map0","add_3__steps0__offset0","add_1"],"outputs":[["add_3__steps0","f32",[48,32,32]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["g","s","w","u"],"outputs":["add_1"],"nodes":[
@@ -54249,15 +54249,15 @@
     "      for a3 in 0..128:",
     "        for a4 in 0..128:",
     "          in1 = load w[a1, a0 + 1, a2, a4]",
-    "          v2 = pre acc0[a1, a4, a3]",
+    "          v2 = load acc0[a0 - 1, a1, a4, a3]",
     "          v3 = in1 * v2",
     "          acc1 <- add(acc1, v3) over a4",
     "        in2 = load u[a1, a0 + 1, a2, a3]",
-    "        v4 = pre acc0[a1, a2, a3]",
+    "        v4 = load acc0[a0 - 1, a1, a2, a3]",
     "        v5 = v1 * v4",
     "        v6 = in2 + v5 + 0.00390625 * acc1",
     "        add_3__steps0[a0, a1, a2, a3] = v6",
-    "        acc0[a1, a2, a3] <- v6 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v6 seed add_1"
    ]},"inputs":["g","w","u","add_1"],"outputs":[["add_3__steps0","f32",[16,48,128,128]]]}
   ]},"formed":true,"traced":74,"origins":["add_10","add_12","add_14","add_16","add_18","add_2","add_20","add_22","add_24","add_26","add_28","add_30","add_32","add_4","add_6","add_8","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_16","matmul_2","matmul_3","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_10","mul_11","mul_12","mul_13","mul_14","mul_15","mul_16","mul_17","mul_18","mul_19","mul_2","mul_20","mul_21","mul_22","mul_23","mul_24","mul_25","mul_26","mul_27","mul_28","mul_29","mul_3","mul_30","mul_31","mul_32","mul_33","mul_4","mul_5","mul_6","mul_7","mul_8","mul_9"]},
   {"loop_ir":{"inputs":["g","u"],"outputs":["add_3__steps0__offset0"],"nodes":[
@@ -54672,14 +54672,14 @@
     "      for a3 in 0..128:",
     "        for a4 in 0..128:",
     "          in0 = load add_3__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add_3__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add_3__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v2 seed add_1"
    ]},"inputs":["add_3__steps0__map0","add_3__steps0__offset0","add_1"],"outputs":[["add_3__steps0__start","f32",[16,48,128,128]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -54719,17 +54719,17 @@
     "        for a4 in 0..128:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.0625 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[4,48,128,128]]]}
   ]},"formed":true,"traced":75,"origins":["matmul","matmul_1","matmul_2","matmul_3","mul_1","mul_10","mul_11","mul_2","mul_4","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_2","squeeze_3","sub","sub_1","sub_2","sub_3","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_4","unsqueeze_4_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -54821,14 +54821,14 @@
     "      for a3 in 0..128:",
     "        for a4 in 0..128:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[4,48,128,128]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -54892,17 +54892,17 @@
     "        for a4 in 0..128:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.0625 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[16,48,128,128]]]}
   ]},"formed":true,"traced":76,"origins":["matmul","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_2","matmul_3","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_1","mul_10","mul_11","mul_13","mul_14","mul_16","mul_17","mul_19","mul_2","mul_20","mul_22","mul_23","mul_25","mul_26","mul_28","mul_29","mul_31","mul_32","mul_34","mul_35","mul_37","mul_38","mul_4","mul_40","mul_41","mul_43","mul_44","mul_46","mul_47","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_10","squeeze_11","squeeze_12","squeeze_13","squeeze_14","squeeze_15","squeeze_2","squeeze_3","squeeze_4","squeeze_5","squeeze_6","squeeze_7","squeeze_8","squeeze_9","sub","sub_1","sub_10","sub_11","sub_12","sub_13","sub_14","sub_15","sub_2","sub_3","sub_4","sub_5","sub_6","sub_7","sub_8","sub_9","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_4","unsqueeze_44","unsqueeze_44_bc","unsqueeze_49","unsqueeze_49_bc","unsqueeze_4_bc","unsqueeze_54","unsqueeze_54_bc","unsqueeze_59","unsqueeze_59_bc","unsqueeze_64","unsqueeze_64_bc","unsqueeze_69","unsqueeze_69_bc","unsqueeze_74","unsqueeze_74_bc","unsqueeze_79","unsqueeze_79_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -55028,17 +55028,17 @@
     "        for a4 in 0..64:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.08838800340890884 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[8,48,64,64]]]}
   ]},"formed":true,"traced":77,"origins":["matmul","matmul_1","matmul_2","matmul_3","matmul_4","matmul_5","matmul_6","matmul_7","mul_1","mul_10","mul_11","mul_13","mul_14","mul_16","mul_17","mul_19","mul_2","mul_20","mul_22","mul_23","mul_4","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_2","squeeze_3","squeeze_4","squeeze_5","squeeze_6","squeeze_7","sub","sub_1","sub_2","sub_3","sub_4","sub_5","sub_6","sub_7","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_4","unsqueeze_4_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -55307,14 +55307,14 @@
     "      for a3 in 0..64:",
     "        for a4 in 0..64:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[8,48,64,64]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -55378,17 +55378,17 @@
     "        for a4 in 0..32:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.125 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v2 * v6",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[16,48,32,32]]]}
   ]},"formed":true,"traced":78,"origins":["matmul","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_2","matmul_3","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_1","mul_10","mul_11","mul_13","mul_14","mul_16","mul_17","mul_19","mul_2","mul_20","mul_22","mul_23","mul_25","mul_26","mul_28","mul_29","mul_31","mul_32","mul_34","mul_35","mul_37","mul_38","mul_4","mul_40","mul_41","mul_43","mul_44","mul_46","mul_47","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_10","squeeze_11","squeeze_12","squeeze_13","squeeze_14","squeeze_15","squeeze_2","squeeze_3","squeeze_4","squeeze_5","squeeze_6","squeeze_7","squeeze_8","squeeze_9","sub","sub_1","sub_10","sub_11","sub_12","sub_13","sub_14","sub_15","sub_2","sub_3","sub_4","sub_5","sub_6","sub_7","sub_8","sub_9","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_4","unsqueeze_44","unsqueeze_44_bc","unsqueeze_49","unsqueeze_49_bc","unsqueeze_4_bc","unsqueeze_54","unsqueeze_54_bc","unsqueeze_59","unsqueeze_59_bc","unsqueeze_64","unsqueeze_64_bc","unsqueeze_69","unsqueeze_69_bc","unsqueeze_74","unsqueeze_74_bc","unsqueeze_79","unsqueeze_79_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -55583,14 +55583,14 @@
     "      for a3 in 0..32:",
     "        for a4 in 0..32:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[16,48,32,32]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -55626,17 +55626,17 @@
     "        for a4 in 0..256:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.04419400170445442 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[2,48,256,256]]]}
   ]},"formed":true,"traced":79,"origins":["matmul","matmul_1","mul_1","mul_2","mul_4","mul_5","squeeze","squeeze_1","sub","sub_1","unsqueeze_4","unsqueeze_4_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -55793,14 +55793,14 @@
     "      for a3 in 0..256:",
     "        for a4 in 0..256:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[2,48,256,256]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -55896,17 +55896,17 @@
     "        for a4 in 0..64:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.08838800340890884 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[32,48,64,64]]]}
   ]},"formed":true,"traced":80,"origins":["matmul","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_16","matmul_17","matmul_18","matmul_19","matmul_2","matmul_20","matmul_21","matmul_22","matmul_23","matmul_24","matmul_25","matmul_26","matmul_27","matmul_28","matmul_29","matmul_3","matmul_30","matmul_31","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_1","mul_10","mul_11","mul_13","mul_14","mul_16","mul_17","mul_19","mul_2","mul_20","mul_22","mul_23","mul_25","mul_26","mul_28","mul_29","mul_31","mul_32","mul_34","mul_35","mul_37","mul_38","mul_4","mul_40","mul_41","mul_43","mul_44","mul_46","mul_47","mul_49","mul_5","mul_50","mul_52","mul_53","mul_55","mul_56","mul_58","mul_59","mul_61","mul_62","mul_64","mul_65","mul_67","mul_68","mul_7","mul_70","mul_71","mul_73","mul_74","mul_76","mul_77","mul_79","mul_8","mul_80","mul_82","mul_83","mul_85","mul_86","mul_88","mul_89","mul_91","mul_92","mul_94","mul_95","squeeze","squeeze_1","squeeze_10","squeeze_11","squeeze_12","squeeze_13","squeeze_14","squeeze_15","squeeze_16","squeeze_17","squeeze_18","squeeze_19","squeeze_2","squeeze_20","squeeze_21","squeeze_22","squeeze_23","squeeze_24","squeeze_25","squeeze_26","squeeze_27","squeeze_28","squeeze_29","squeeze_3","squeeze_30","squeeze_31","squeeze_4","squeeze_5","squeeze_6","squeeze_7","squeeze_8","squeeze_9","sub","sub_1","sub_10","sub_11","sub_12","sub_13","sub_14","sub_15","sub_16","sub_17","sub_18","sub_19","sub_2","sub_20","sub_21","sub_22","sub_23","sub_24","sub_25","sub_26","sub_27","sub_28","sub_29","sub_3","sub_30","sub_31","sub_4","sub_5","sub_6","sub_7","sub_8","sub_9","unsqueeze_104","unsqueeze_104_bc","unsqueeze_109","unsqueeze_109_bc","unsqueeze_114","unsqueeze_114_bc","unsqueeze_119","unsqueeze_119_bc","unsqueeze_124","unsqueeze_124_bc","unsqueeze_129","unsqueeze_129_bc","unsqueeze_134","unsqueeze_134_bc","unsqueeze_139","unsqueeze_139_bc","unsqueeze_14","unsqueeze_144","unsqueeze_144_bc","unsqueeze_149","unsqueeze_149_bc","unsqueeze_14_bc","unsqueeze_154","unsqueeze_154_bc","unsqueeze_159","unsqueeze_159_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_4","unsqueeze_44","unsqueeze_44_bc","unsqueeze_49","unsqueeze_49_bc","unsqueeze_4_bc","unsqueeze_54","unsqueeze_54_bc","unsqueeze_59","unsqueeze_59_bc","unsqueeze_64","unsqueeze_64_bc","unsqueeze_69","unsqueeze_69_bc","unsqueeze_74","unsqueeze_74_bc","unsqueeze_79","unsqueeze_79_bc","unsqueeze_84","unsqueeze_84_bc","unsqueeze_89","unsqueeze_89_bc","unsqueeze_9","unsqueeze_94","unsqueeze_94_bc","unsqueeze_99","unsqueeze_99_bc","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -56110,14 +56110,14 @@
     "      for a3 in 0..64:",
     "        for a4 in 0..64:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[32,48,64,64]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -56157,17 +56157,17 @@
     "        for a4 in 0..32:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.125 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v2 * v6",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[4,48,32,32]]]}
   ]},"formed":true,"traced":81,"origins":["matmul","matmul_1","matmul_2","matmul_3","mul_1","mul_10","mul_11","mul_2","mul_4","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_2","squeeze_3","sub","sub_1","sub_2","sub_3","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_4","unsqueeze_4_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -56259,14 +56259,14 @@
     "      for a3 in 0..32:",
     "        for a4 in 0..32:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[4,48,32,32]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["linear_wt","input"],"outputs":["linear"],"nodes":[
@@ -90774,7 +90774,7 @@
     "        for a5 in 0..128:",
     "          in4 = load repeat_interleave_1[0, a0, a1, a5]",
     "          v5 = in4 * v2",
-    "          v6 = pre acc0[0, a1, a5, a4]",
+    "          v6 = load acc0[a0 - 1, 0, a1, a5, a4]",
     "          v7 = v3 * v6",
     "          v8 = v7 * v5",
     "          acc2 <- add(acc2, v8) over a5",
@@ -90782,11 +90782,11 @@
     "        v9 = in5 - acc2",
     "        v10 = in2 * v9",
     "        v11 = v10 * v4",
-    "        v12 = pre acc0[0, a1, a3, a4]",
+    "        v12 = load acc0[a0 - 1, 0, a1, a3, a4]",
     "        v13 = v3 * v12",
     "        v14 = v11 + v13",
     "        add_5__steps0[a0, 0, a1, a3, a4] = v14",
-    "        acc0[0, a1, a3, a4] <- v14 seed state"
+    "        acc0[a0, 0, a1, a3, a4] <- v14 seed state"
    ]},"inputs":["repeat_interleave_1","mul_2","sigmoid","view_3","state"],"outputs":[["add_5__steps0","f32",[2,1,32,128,128]]]}
   ]},"formed":true,"traced":419,"origins":["mul_10","mul_16","mul_17","mul_18","mul_19","mul_7","mul_8","mul_9","sub","sub_1","sum_3","sum_3_keepdim","sum_7","sum_7_keepdim","unsqueeze_13","unsqueeze_13_bc","unsqueeze_6","unsqueeze_6_bc"]},
   {"loop_ir":{"inputs":["x","p_block_linear_attn_out_proj_weight_scale","view_6_static_fp8_scale","p_block_linear_attn_dt_bias","p_block_linear_attn_in_proj_qkv_weight_scale","type_as_static_fp8_scale","p_block_linear_attn_a_log","history","squeeze","p_block_input_layernorm_weight","p_block_linear_attn_in_proj_qkv_weight_bits","state","p_block_linear_attn_in_proj_z_weight_scale","linear_3_wt","linear_2_wt","p_block_linear_attn_in_proj_z_weight_bits","p_block_linear_attn_norm_weight","p_block_linear_attn_out_proj_weight_bits","type_as_1_static_fp4_scale_2","type_as_1_static_fp4_shift","type_as_1_static_fp4_scale_inv","p_block_post_attention_layernorm_weight"],"outputs":["copy","add_5","add_7","type_as_1_static_fp4_scale_bits","type_as_1_static_fp4_bits"],"nodes":[
@@ -95122,7 +95122,7 @@
     "        for a5 in 0..128:",
     "          in4 = load repeat_interleave_1[0, a0, a1, a5]",
     "          v5 = in4 * v2",
-    "          v6 = pre acc0[0, a1, a5, a4]",
+    "          v6 = load acc0[a0 - 1, 0, a1, a5, a4]",
     "          v7 = v3 * v6",
     "          v8 = v7 * v5",
     "          acc2 <- add(acc2, v8) over a5",
@@ -95130,11 +95130,11 @@
     "        v9 = in5 - acc2",
     "        v10 = in2 * v9",
     "        v11 = v10 * v4",
-    "        v12 = pre acc0[0, a1, a3, a4]",
+    "        v12 = load acc0[a0 - 1, 0, a1, a3, a4]",
     "        v13 = v3 * v12",
     "        v14 = v11 + v13",
     "        add_5__steps0[a0, 0, a1, a3, a4] = v14",
-    "        acc0[0, a1, a3, a4] <- v14 seed state"
+    "        acc0[a0, 0, a1, a3, a4] <- v14 seed state"
    ]},"inputs":["repeat_interleave_1","mul_2","sigmoid","view_3","state"],"outputs":[["add_5__steps0","f32",[3,1,32,128,128]]]}
   ]},"formed":true,"traced":423,"origins":["mul_10","mul_16","mul_17","mul_18","mul_19","mul_25","mul_26","mul_27","mul_28","mul_7","mul_8","mul_9","sub","sub_1","sub_2","sum_11","sum_11_keepdim","sum_3","sum_3_keepdim","sum_7","sum_7_keepdim","unsqueeze_13","unsqueeze_13_bc","unsqueeze_20","unsqueeze_20_bc","unsqueeze_6","unsqueeze_6_bc"]},
   {"loop_ir":{"inputs":["type_as_1_static_fp4_scale_2","type_as_1_static_fp4_shift","type_as_1_static_fp4_scale_inv","p_block_linear_attn_out_proj_weight_scale","transpose_1","add_5__steps0","p_block_linear_attn_in_proj_z_weight_scale","p_block_linear_attn_in_proj_z_weight_bits","type_as","p_block_linear_attn_norm_weight","p_block_linear_attn_out_proj_weight_bits","x","p_block_post_attention_layernorm_weight"],"outputs":["cat_2","add_10","type_as_1_static_fp4_scale_bits","type_as_1_static_fp4_bits"],"nodes":[
@@ -96109,7 +96109,7 @@
     "        for a5 in 0..128:",
     "          in4 = load repeat_interleave_1[0, a0, a1, a5]",
     "          v5 = in4 * v2",
-    "          v6 = pre acc0[0, a1, a5, a4]",
+    "          v6 = load acc0[a0 - 1, 0, a1, a5, a4]",
     "          v7 = v3 * v6",
     "          v8 = v7 * v5",
     "          acc2 <- add(acc2, v8) over a5",
@@ -96117,11 +96117,11 @@
     "        v9 = in5 - acc2",
     "        v10 = in2 * v9",
     "        v11 = v10 * v4",
-    "        v12 = pre acc0[0, a1, a3, a4]",
+    "        v12 = load acc0[a0 - 1, 0, a1, a3, a4]",
     "        v13 = v3 * v12",
     "        v14 = v11 + v13",
     "        add_5__steps0[a0, 0, a1, a3, a4] = v14",
-    "        acc0[0, a1, a3, a4] <- v14 seed state"
+    "        acc0[a0, 0, a1, a3, a4] <- v14 seed state"
    ]},"inputs":["repeat_interleave_1","mul_2","sigmoid","view_3","state"],"outputs":[["add_5__steps0","f32",[2,1,48,128,128]]]}
   ]},"formed":true,"traced":424,"origins":["mul_10","mul_16","mul_17","mul_18","mul_19","mul_7","mul_8","mul_9","sub","sub_1","sum_3","sum_3_keepdim","sum_7","sum_7_keepdim","unsqueeze_13","unsqueeze_13_bc","unsqueeze_6","unsqueeze_6_bc"]},
   {"loop_ir":{"inputs":["p_block_linear_attn_out_proj_weight_zeros_grouped_shift_view","p_block_linear_attn_out_proj_weight_zeros_grouped_mask","p_block_linear_attn_out_proj_weight_integers_mask","p_block_linear_attn_in_proj_qkv_weight_zeros_grouped_shift_view","p_block_linear_attn_in_proj_qkv_weight_zeros_grouped_mask","p_block_linear_attn_in_proj_qkv_weight_integers_mask","p_block_linear_attn_dt_bias","p_block_linear_attn_a_log","history","squeeze","p_block_linear_attn_in_proj_qkv_weight_zeros_grouped_view","p_block_linear_attn_in_proj_qkv_weight_integers_view","p_block_linear_attn_in_proj_qkv_weight_integers_shift_view","p_block_input_layernorm_weight","x","p_block_linear_attn_in_proj_qkv_weight_scales_view","state","p_block_linear_attn_in_proj_z_weight_zeros_grouped_shift_view","p_block_linear_attn_in_proj_z_weight_zeros_grouped_mask","p_block_linear_attn_in_proj_z_weight_integers_mask","p_block_linear_attn_out_proj_weight_zeros_grouped_view","p_block_linear_attn_out_proj_weight_integers_view","p_block_linear_attn_out_proj_weight_integers_shift_view","linear_3_wt","linear_2_wt","p_block_linear_attn_in_proj_z_weight_zeros_grouped_view","p_block_linear_attn_in_proj_z_weight_integers_view","p_block_linear_attn_in_proj_z_weight_integers_shift_view","p_block_linear_attn_in_proj_z_weight_scales_view","p_block_linear_attn_norm_weight","p_block_linear_attn_out_proj_weight_scales_view","p_block_mlp_down_proj_weight_zeros_grouped_shift_view","p_block_mlp_down_proj_weight_zeros_grouped_mask","p_block_mlp_down_proj_weight_integers_mask","p_block_mlp_gate_proj_weight_zeros_grouped_shift_view","p_block_mlp_gate_proj_weight_zeros_grouped_mask","p_block_mlp_gate_proj_weight_integers_mask","p_block_mlp_up_proj_weight_zeros_grouped_shift_view","p_block_mlp_up_proj_weight_zeros_grouped_mask","p_block_mlp_up_proj_weight_integers_mask","p_block_mlp_down_proj_weight_zeros_grouped_view","p_block_mlp_down_proj_weight_integers_view","p_block_mlp_down_proj_weight_integers_shift_view","p_block_mlp_gate_proj_weight_zeros_grouped_view","p_block_mlp_gate_proj_weight_integers_view","p_block_mlp_gate_proj_weight_integers_shift_view","p_block_mlp_up_proj_weight_zeros_grouped_view","p_block_mlp_up_proj_weight_integers_view","p_block_mlp_up_proj_weight_integers_shift_view","p_block_post_attention_layernorm_weight","p_block_mlp_gate_proj_weight_scales_view","p_block_mlp_up_proj_weight_scales_view","p_block_mlp_down_proj_weight_scales_view"],"outputs":["copy","add_5","add_10"],"nodes":[
@@ -99741,7 +99741,7 @@
     "        for a5 in 0..128:",
     "          in4 = load repeat_interleave_1[0, a0, a1, a5]",
     "          v5 = in4 * v2",
-    "          v6 = pre acc0[0, a1, a5, a4]",
+    "          v6 = load acc0[a0 - 1, 0, a1, a5, a4]",
     "          v7 = v3 * v6",
     "          v8 = v7 * v5",
     "          acc2 <- add(acc2, v8) over a5",
@@ -99749,11 +99749,11 @@
     "        v9 = in5 - acc2",
     "        v10 = in2 * v9",
     "        v11 = v10 * v4",
-    "        v12 = pre acc0[0, a1, a3, a4]",
+    "        v12 = load acc0[a0 - 1, 0, a1, a3, a4]",
     "        v13 = v3 * v12",
     "        v14 = v11 + v13",
     "        add_5__steps0[a0, 0, a1, a3, a4] = v14",
-    "        acc0[0, a1, a3, a4] <- v14 seed state"
+    "        acc0[a0, 0, a1, a3, a4] <- v14 seed state"
    ]},"inputs":["repeat_interleave_1","mul_2","sigmoid","view_3","state"],"outputs":[["add_5__steps0","f32",[3,1,48,128,128]]]}
   ]},"formed":true,"traced":427,"origins":["mul_10","mul_16","mul_17","mul_18","mul_19","mul_25","mul_26","mul_27","mul_28","mul_7","mul_8","mul_9","sub","sub_1","sub_2","sum_11","sum_11_keepdim","sum_3","sum_3_keepdim","sum_7","sum_7_keepdim","unsqueeze_13","unsqueeze_13_bc","unsqueeze_20","unsqueeze_20_bc","unsqueeze_6","unsqueeze_6_bc"]},
   {"loop_ir":{"inputs":["type_as_1_static_fp4_scale_2","type_as_1_static_fp4_shift","type_as_1_static_fp4_scale_inv","p_block_linear_attn_out_proj_weight_scale","view_6_static_fp8_scale","transpose_1","add_5__steps0","p_block_linear_attn_in_proj_z_weight_scale","type_as_static_fp8_scale","p_block_linear_attn_in_proj_z_weight_bits","type_as_static_fp8_bits","p_block_linear_attn_norm_weight","p_block_linear_attn_out_proj_weight_bits","x","p_block_post_attention_layernorm_weight"],"outputs":["cat_2","add_13","type_as_1_static_fp4_scale_bits","type_as_1_static_fp4_bits"],"nodes":[
@@ -101164,23 +101164,23 @@
     "    for a2 in 0..4:",
     "      for a3 in 0..4:",
     "        for a4 in 0..4:",
-    "          v0 = pre acc0[0, a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, 0, a1, a4, a3]",
     "          acc2 <- add(acc2, v0) over a4",
     "        v1 = acc2 + 9.999999974752427e-07",
-    "        v2 = pre acc0[0, a1, a2, a3]",
+    "        v2 = load acc0[a0 - 1, 0, a1, a2, a3]",
     "        v3 = v2 / v1",
     "        acc1 <- add(acc1, v3) over a3",
     "      v4 = acc1 + 9.999999974752427e-07",
     "      for a5 in 0..4:",
     "        for a6 in 0..4:",
-    "          v5 = pre acc0[0, a1, a6, a5]",
+    "          v5 = load acc0[a0 - 1, 0, a1, a6, a5]",
     "          acc3 <- add(acc3, v5) over a6",
     "        v6 = acc3 + 9.999999974752427e-07",
-    "        v7 = pre acc0[0, a1, a2, a5]",
+    "        v7 = load acc0[a0 - 1, 0, a1, a2, a5]",
     "        v8 = v7 / v6",
     "        v9 = v8 / v4",
     "        div_1__steps0[0, a1, a2, a5] = v9",
-    "        acc0[0, a1, a2, a5] <- v9 seed add_5"
+    "        acc0[a0, 0, a1, a2, a5] <- v9 seed add_5"
    ]},"inputs":["add_5"],"outputs":[["div_1__steps0","f32",[1,{"sym":"num_tokens","hint":512},4,4]]]}
   ]},"formed":true,"traced":429,"origins":["add_10","add_10_bc","add_11","add_11_bc","add_12","add_12_bc","add_13","add_13_bc","add_14","add_14_bc","add_15","add_15_bc","add_16","add_16_bc","add_17","add_17_bc","add_18","add_18_bc","add_19","add_19_bc","add_20","add_20_bc","add_21","add_21_bc","add_22","add_22_bc","add_23","add_23_bc","add_24","add_24_bc","add_25","add_25_bc","add_26","add_26_bc","add_27","add_27_bc","add_28","add_28_bc","add_29","add_29_bc","add_30","add_30_bc","add_31","add_31_bc","add_32","add_32_bc","add_33","add_33_bc","add_34","add_34_bc","add_35","add_35_bc","add_36","add_36_bc","add_37","add_37_bc","add_38","add_38_bc","add_39","add_39_bc","add_40","add_40_bc","add_41","add_41_bc","add_42","add_42_bc","add_43","add_43_bc","add_6","add_6_bc","add_7","add_7_bc","add_8","add_8_bc","add_9","add_9_bc","div","div_1","div_10","div_11","div_12","div_13","div_14","div_15","div_16","div_17","div_18","div_19","div_2","div_20","div_21","div_22","div_23","div_24","div_25","div_26","div_27","div_28","div_29","div_3","div_30","div_31","div_32","div_33","div_34","div_35","div_36","div_4","div_5","div_6","div_7","div_8","div_9","sum_1","sum_10","sum_11","sum_12","sum_13","sum_14","sum_15","sum_16","sum_17","sum_18","sum_19","sum_2","sum_20","sum_21","sum_22","sum_23","sum_24","sum_25","sum_26","sum_27","sum_28","sum_29","sum_3","sum_30","sum_31","sum_32","sum_33","sum_34","sum_35","sum_36","sum_37","sum_38","sum_4","sum_5","sum_6","sum_7","sum_8","sum_9"]},
   {"loop_ir":{"inputs":["p_attn_hc_scale","div_1__steps0","linear","p_attn_hc_base","view","attn_out","p_ffn_hc_scale","p_ffn_hc_fn","p_ffn_hc_base","p_post_attention_layernorm_weight"],"outputs":["add_45","mul_10","mul_14","add_51","view_7","view_8"],"nodes":[
@@ -101654,23 +101654,23 @@
     "  for a1 in 0..4:",
     "    for a2 in 0..4:",
     "      for a3 in 0..4:",
-    "        v0 = pre acc0[0, 0, a3, a2]",
+    "        v0 = load acc0[a0 - 1, 0, 0, a3, a2]",
     "        acc2 <- add(acc2, v0) over a3",
     "      v1 = acc2 + 9.999999974752427e-07",
-    "      v2 = pre acc0[0, 0, a1, a2]",
+    "      v2 = load acc0[a0 - 1, 0, 0, a1, a2]",
     "      v3 = v2 / v1",
     "      acc1 <- add(acc1, v3) over a2",
     "    v4 = acc1 + 9.999999974752427e-07",
     "    for a4 in 0..4:",
     "      for a5 in 0..4:",
-    "        v5 = pre acc0[0, 0, a5, a4]",
+    "        v5 = load acc0[a0 - 1, 0, 0, a5, a4]",
     "        acc3 <- add(acc3, v5) over a5",
     "      v6 = acc3 + 9.999999974752427e-07",
-    "      v7 = pre acc0[0, 0, a1, a4]",
+    "      v7 = load acc0[a0 - 1, 0, 0, a1, a4]",
     "      v8 = v7 / v6",
     "      v9 = v8 / v4",
     "      div_1__steps0[0, 0, a1, a4] = v9",
-    "      acc0[0, 0, a1, a4] <- v9 seed add_5"
+    "      acc0[a0, 0, 0, a1, a4] <- v9 seed add_5"
    ]},"inputs":["add_5"],"outputs":[["div_1__steps0","f32",[1,1,4,4]]]}
   ]},"formed":true,"traced":430,"origins":["add_10","add_10_bc","add_11","add_11_bc","add_12","add_12_bc","add_13","add_13_bc","add_14","add_14_bc","add_15","add_15_bc","add_16","add_16_bc","add_17","add_17_bc","add_18","add_18_bc","add_19","add_19_bc","add_20","add_20_bc","add_21","add_21_bc","add_22","add_22_bc","add_23","add_23_bc","add_24","add_24_bc","add_25","add_25_bc","add_26","add_26_bc","add_27","add_27_bc","add_28","add_28_bc","add_29","add_29_bc","add_30","add_30_bc","add_31","add_31_bc","add_32","add_32_bc","add_33","add_33_bc","add_34","add_34_bc","add_35","add_35_bc","add_36","add_36_bc","add_37","add_37_bc","add_38","add_38_bc","add_39","add_39_bc","add_40","add_40_bc","add_41","add_41_bc","add_42","add_42_bc","add_43","add_43_bc","add_6","add_6_bc","add_7","add_7_bc","add_8","add_8_bc","add_9","add_9_bc","div","div_1","div_10","div_11","div_12","div_13","div_14","div_15","div_16","div_17","div_18","div_19","div_2","div_20","div_21","div_22","div_23","div_24","div_25","div_26","div_27","div_28","div_29","div_3","div_30","div_31","div_32","div_33","div_34","div_35","div_36","div_4","div_5","div_6","div_7","div_8","div_9","sum_1","sum_10","sum_11","sum_12","sum_13","sum_14","sum_15","sum_16","sum_17","sum_18","sum_19","sum_2","sum_20","sum_21","sum_22","sum_23","sum_24","sum_25","sum_26","sum_27","sum_28","sum_29","sum_3","sum_30","sum_31","sum_32","sum_33","sum_34","sum_35","sum_36","sum_37","sum_38","sum_4","sum_5","sum_6","sum_7","sum_8","sum_9"]},
   {"loop_ir":{"inputs":["p_attn_hc_scale","p_ffn_hc_scale","div_1__steps0","linear","p_attn_hc_base","view","attn_out","p_ffn_hc_fn","p_ffn_hc_base","p_post_attention_layernorm_weight"],"outputs":["add_45","mul_10","mul_14","add_51","view_7","view_8"],"nodes":[
@@ -102148,23 +102148,23 @@
     "    for a2 in 0..4:",
     "      for a3 in 0..4:",
     "        for a4 in 0..4:",
-    "          v0 = pre acc0[0, a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, 0, a1, a4, a3]",
     "          acc2 <- add(acc2, v0) over a4",
     "        v1 = acc2 + 9.999999974752427e-07",
-    "        v2 = pre acc0[0, a1, a2, a3]",
+    "        v2 = load acc0[a0 - 1, 0, a1, a2, a3]",
     "        v3 = v2 / v1",
     "        acc1 <- add(acc1, v3) over a3",
     "      v4 = acc1 + 9.999999974752427e-07",
     "      for a5 in 0..4:",
     "        for a6 in 0..4:",
-    "          v5 = pre acc0[0, a1, a6, a5]",
+    "          v5 = load acc0[a0 - 1, 0, a1, a6, a5]",
     "          acc3 <- add(acc3, v5) over a6",
     "        v6 = acc3 + 9.999999974752427e-07",
-    "        v7 = pre acc0[0, a1, a2, a5]",
+    "        v7 = load acc0[a0 - 1, 0, a1, a2, a5]",
     "        v8 = v7 / v6",
     "        v9 = v8 / v4",
     "        div_1__steps0[0, a1, a2, a5] = v9",
-    "        acc0[0, a1, a2, a5] <- v9 seed add_5"
+    "        acc0[a0, 0, a1, a2, a5] <- v9 seed add_5"
    ]},"inputs":["add_5"],"outputs":[["div_1__steps0","f32",[1,16,4,4]]]}
   ]},"formed":true,"traced":431,"origins":["add_10","add_10_bc","add_11","add_11_bc","add_12","add_12_bc","add_13","add_13_bc","add_14","add_14_bc","add_15","add_15_bc","add_16","add_16_bc","add_17","add_17_bc","add_18","add_18_bc","add_19","add_19_bc","add_20","add_20_bc","add_21","add_21_bc","add_22","add_22_bc","add_23","add_23_bc","add_24","add_24_bc","add_25","add_25_bc","add_26","add_26_bc","add_27","add_27_bc","add_28","add_28_bc","add_29","add_29_bc","add_30","add_30_bc","add_31","add_31_bc","add_32","add_32_bc","add_33","add_33_bc","add_34","add_34_bc","add_35","add_35_bc","add_36","add_36_bc","add_37","add_37_bc","add_38","add_38_bc","add_39","add_39_bc","add_40","add_40_bc","add_41","add_41_bc","add_42","add_42_bc","add_43","add_43_bc","add_6","add_6_bc","add_7","add_7_bc","add_8","add_8_bc","add_9","add_9_bc","div","div_1","div_10","div_11","div_12","div_13","div_14","div_15","div_16","div_17","div_18","div_19","div_2","div_20","div_21","div_22","div_23","div_24","div_25","div_26","div_27","div_28","div_29","div_3","div_30","div_31","div_32","div_33","div_34","div_35","div_36","div_4","div_5","div_6","div_7","div_8","div_9","sum_1","sum_10","sum_11","sum_12","sum_13","sum_14","sum_15","sum_16","sum_17","sum_18","sum_19","sum_2","sum_20","sum_21","sum_22","sum_23","sum_24","sum_25","sum_26","sum_27","sum_28","sum_29","sum_3","sum_30","sum_31","sum_32","sum_33","sum_34","sum_35","sum_36","sum_37","sum_38","sum_4","sum_5","sum_6","sum_7","sum_8","sum_9"]},
   {"loop_ir":{"inputs":["p_attn_hc_scale","p_ffn_hc_scale","div_1__steps0","linear","p_attn_hc_base","view","attn_out","p_ffn_hc_fn","p_ffn_hc_base","p_post_attention_layernorm_weight"],"outputs":["add_45","mul_10","mul_14","add_51","view_7","view_8"],"nodes":[
@@ -102642,23 +102642,23 @@
     "    for a2 in 0..4:",
     "      for a3 in 0..4:",
     "        for a4 in 0..4:",
-    "          v0 = pre acc0[0, a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, 0, a1, a4, a3]",
     "          acc2 <- add(acc2, v0) over a4",
     "        v1 = acc2 + 9.999999974752427e-07",
-    "        v2 = pre acc0[0, a1, a2, a3]",
+    "        v2 = load acc0[a0 - 1, 0, a1, a2, a3]",
     "        v3 = v2 / v1",
     "        acc1 <- add(acc1, v3) over a3",
     "      v4 = acc1 + 9.999999974752427e-07",
     "      for a5 in 0..4:",
     "        for a6 in 0..4:",
-    "          v5 = pre acc0[0, a1, a6, a5]",
+    "          v5 = load acc0[a0 - 1, 0, a1, a6, a5]",
     "          acc3 <- add(acc3, v5) over a6",
     "        v6 = acc3 + 9.999999974752427e-07",
-    "        v7 = pre acc0[0, a1, a2, a5]",
+    "        v7 = load acc0[a0 - 1, 0, a1, a2, a5]",
     "        v8 = v7 / v6",
     "        v9 = v8 / v4",
     "        div_1__steps0[0, a1, a2, a5] = v9",
-    "        acc0[0, a1, a2, a5] <- v9 seed add_5"
+    "        acc0[a0, 0, a1, a2, a5] <- v9 seed add_5"
    ]},"inputs":["add_5"],"outputs":[["div_1__steps0","f32",[1,4096,4,4]]]}
   ]},"formed":true,"traced":432,"origins":["add_10","add_10_bc","add_11","add_11_bc","add_12","add_12_bc","add_13","add_13_bc","add_14","add_14_bc","add_15","add_15_bc","add_16","add_16_bc","add_17","add_17_bc","add_18","add_18_bc","add_19","add_19_bc","add_20","add_20_bc","add_21","add_21_bc","add_22","add_22_bc","add_23","add_23_bc","add_24","add_24_bc","add_25","add_25_bc","add_26","add_26_bc","add_27","add_27_bc","add_28","add_28_bc","add_29","add_29_bc","add_30","add_30_bc","add_31","add_31_bc","add_32","add_32_bc","add_33","add_33_bc","add_34","add_34_bc","add_35","add_35_bc","add_36","add_36_bc","add_37","add_37_bc","add_38","add_38_bc","add_39","add_39_bc","add_40","add_40_bc","add_41","add_41_bc","add_42","add_42_bc","add_43","add_43_bc","add_6","add_6_bc","add_7","add_7_bc","add_8","add_8_bc","add_9","add_9_bc","div","div_1","div_10","div_11","div_12","div_13","div_14","div_15","div_16","div_17","div_18","div_19","div_2","div_20","div_21","div_22","div_23","div_24","div_25","div_26","div_27","div_28","div_29","div_3","div_30","div_31","div_32","div_33","div_34","div_35","div_36","div_4","div_5","div_6","div_7","div_8","div_9","sum_1","sum_10","sum_11","sum_12","sum_13","sum_14","sum_15","sum_16","sum_17","sum_18","sum_19","sum_2","sum_20","sum_21","sum_22","sum_23","sum_24","sum_25","sum_26","sum_27","sum_28","sum_29","sum_3","sum_30","sum_31","sum_32","sum_33","sum_34","sum_35","sum_36","sum_37","sum_38","sum_4","sum_5","sum_6","sum_7","sum_8","sum_9"]},
   {"loop_ir":{"inputs":["view_8"],"outputs":["cumsum"],"nodes":[
@@ -104000,14 +104000,14 @@
     "    for a2 in 0..64:",
     "      for a3 in 0..64:",
     "        for a4 in 0..a0 + 2 of 62:",
-    "          v0 = pre acc0[0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a0 + 2, a4]",
-    "          v1 = pre acc0[0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a4, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0 : 0]",
+    "          v0 = load acc0[a0 - 1, 0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a0 + 2, a4]",
+    "          v1 = load acc0[a0 - 1, 0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a4, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0 : 0]",
     "          v2 = v0 * v1",
     "          acc1 <- add(acc1, v2) over a4",
-    "        v3 = pre acc0[0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a0 + 2, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0 : 0]",
+    "        v3 = load acc0[a0 - 1, 0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a0 + 2, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0 : 0]",
     "        v4 = acc1 + v3",
-    "        v5 = pre acc0[0, a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0, 0, a0 + 2, a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0]",
-    "        v6 = pre acc0[0, a1, 0, a2, a3]",
+    "        v5 = load acc0[a0 - 1, 0, a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0, 0, a0 + 2, a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0]",
+    "        v6 = load acc0[a0 - 1, 0, a1, 0, a2, a3]",
     "        v7 = select:",
     "          v4 when (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2",
     "          v5 when true",
@@ -104015,7 +104015,7 @@
     "          v7 when a2 < a0 + 3 && a0 + 2 <= a2",
     "          v6 when true",
     "        select_scatter_1__steps0[0, a1, 0, a2, a3] = v8",
-    "        acc0[0, a1, 0, a2, a3] <- v8 seed select_scatter"
+    "        acc0[a0, 0, a1, 0, a2, a3] <- v8 seed select_scatter"
    ]},"inputs":["select_scatter"],"outputs":[["select_scatter_1__steps0","f32",[1,32,1,64,64]]]}
   ]},"formed":true,"traced":433,"origins":["add_10","add_11","add_12","add_13","add_14","add_15","add_16","add_17","add_18","add_19","add_20","add_21","add_22","add_23","add_24","add_25","add_26","add_27","add_28","add_29","add_30","add_31","add_32","add_33","add_34","add_35","add_36","add_37","add_38","add_39","add_40","add_41","add_42","add_43","add_44","add_45","add_46","add_47","add_48","add_49","add_50","add_51","add_52","add_53","add_54","add_55","add_56","add_57","add_58","add_59","add_6","add_60","add_61","add_62","add_63","add_64","add_65","add_66","add_7","add_8","add_9","copy_1","copy_10","copy_11","copy_12","copy_13","copy_14","copy_15","copy_16","copy_17","copy_18","copy_19","copy_2","copy_20","copy_21","copy_22","copy_23","copy_24","copy_25","copy_26","copy_27","copy_28","copy_29","copy_3","copy_30","copy_31","copy_32","copy_33","copy_34","copy_35","copy_36","copy_37","copy_38","copy_39","copy_4","copy_40","copy_41","copy_42","copy_43","copy_44","copy_45","copy_46","copy_47","copy_48","copy_49","copy_5","copy_50","copy_51","copy_52","copy_53","copy_54","copy_55","copy_56","copy_57","copy_58","copy_59","copy_6","copy_60","copy_61","copy_7","copy_8","copy_9","mul_14","mul_15","mul_16","mul_17","mul_18","mul_19","mul_20","mul_21","mul_22","mul_23","mul_24","mul_25","mul_26","mul_27","mul_28","mul_29","mul_30","mul_31","mul_32","mul_33","mul_34","mul_35","mul_36","mul_37","mul_38","mul_39","mul_40","mul_41","mul_42","mul_43","mul_44","mul_45","mul_46","mul_47","mul_48","mul_49","mul_50","mul_51","mul_52","mul_53","mul_54","mul_55","mul_56","mul_57","mul_58","mul_59","mul_60","mul_61","mul_62","mul_63","mul_64","mul_65","mul_66","mul_67","mul_68","mul_69","mul_70","mul_71","mul_72","mul_73","mul_74","select_10","select_102","select_106","select_110","select_114","select_118","select_122","select_126","select_130","select_134","select_138","select_14","select_142","select_146","select_150","select_154","select_158","select_162","select_166","select_170","select_174","select_178","select_18","select_182","select_186","select_190","select_194","select_198","select_202","select_206","select_210","select_214","select_218","select_22","select_222","select_226","select_230","select_234","select_238","select_242","select_246","select_250","select_254","select_258","select_26","select_262","select_266","select_270","select_274","select_278","select_282","select_286","select_290","select_294","select_298","select_30","select_302","select_306","select_310","select_314","select_318","select_322","select_326","select_330","select_334","select_338","select_34","select_342","select_346","select_350","select_354","select_358","select_362","select_366","select_370","select_374","select_378","select_38","select_382","select_386","select_390","select_394","select_398","select_402","select_406","select_410","select_414","select_418","select_42","select_422","select_426","select_430","select_434","select_438","select_442","select_446","select_450","select_454","select_458","select_46","select_462","select_466","select_470","select_474","select_478","select_482","select_486","select_490","select_50","select_54","select_58","select_6","select_62","select_66","select_70","select_74","select_78","select_82","select_86","select_90","select_94","select_98","select_scatter_1","select_scatter_10","select_scatter_11","select_scatter_12","select_scatter_13","select_scatter_14","select_scatter_15","select_scatter_16","select_scatter_17","select_scatter_18","select_scatter_19","select_scatter_2","select_scatter_20","select_scatter_21","select_scatter_22","select_scatter_23","select_scatter_24","select_scatter_25","select_scatter_26","select_scatter_27","select_scatter_28","select_scatter_29","select_scatter_3","select_scatter_30","select_scatter_31","select_scatter_32","select_scatter_33","select_scatter_34","select_scatter_35","select_scatter_36","select_scatter_37","select_scatter_38","select_scatter_39","select_scatter_4","select_scatter_40","select_scatter_41","select_scatter_42","select_scatter_43","select_scatter_44","select_scatter_45","select_scatter_46","select_scatter_47","select_scatter_48","select_scatter_49","select_scatter_5","select_scatter_50","select_scatter_51","select_scatter_52","select_scatter_53","select_scatter_54","select_scatter_55","select_scatter_56","select_scatter_57","select_scatter_58","select_scatter_59","select_scatter_6","select_scatter_60","select_scatter_7","select_scatter_8","select_scatter_9","slice_10","slice_100","slice_104","slice_105","slice_110","slice_114","slice_115","slice_120","slice_124","slice_125","slice_130","slice_134","slice_135","slice_14","slice_140","slice_144","slice_145","slice_15","slice_150","slice_154","slice_155","slice_160","slice_164","slice_165","slice_170","slice_174","slice_175","slice_180","slice_184","slice_185","slice_190","slice_194","slice_195","slice_20","slice_200","slice_204","slice_205","slice_210","slice_214","slice_215","slice_220","slice_224","slice_225","slice_230","slice_234","slice_235","slice_24","slice_240","slice_244","slice_245","slice_25","slice_250","slice_254","slice_255","slice_260","slice_264","slice_265","slice_270","slice_274","slice_275","slice_280","slice_284","slice_285","slice_290","slice_294","slice_295","slice_30","slice_300","slice_304","slice_305","slice_310","slice_314","slice_315","slice_320","slice_324","slice_325","slice_330","slice_334","slice_335","slice_34","slice_340","slice_344","slice_345","slice_35","slice_350","slice_354","slice_355","slice_360","slice_364","slice_365","slice_370","slice_374","slice_375","slice_380","slice_384","slice_385","slice_390","slice_394","slice_395","slice_40","slice_400","slice_404","slice_405","slice_410","slice_414","slice_415","slice_420","slice_424","slice_425","slice_430","slice_434","slice_435","slice_44","slice_440","slice_444","slice_445","slice_45","slice_450","slice_454","slice_455","slice_460","slice_464","slice_465","slice_470","slice_474","slice_475","slice_480","slice_484","slice_485","slice_490","slice_494","slice_495","slice_50","slice_500","slice_504","slice_505","slice_510","slice_514","slice_515","slice_520","slice_524","slice_525","slice_530","slice_534","slice_535","slice_54","slice_540","slice_544","slice_545","slice_55","slice_550","slice_554","slice_555","slice_560","slice_564","slice_565","slice_570","slice_574","slice_575","slice_580","slice_584","slice_585","slice_590","slice_594","slice_595","slice_60","slice_600","slice_604","slice_605","slice_610","slice_614","slice_615","slice_64","slice_65","slice_70","slice_74","slice_75","slice_80","slice_84","slice_85","slice_90","slice_94","slice_95","slice_scatter_1","slice_scatter_10","slice_scatter_11","slice_scatter_12","slice_scatter_13","slice_scatter_14","slice_scatter_15","slice_scatter_16","slice_scatter_17","slice_scatter_18","slice_scatter_19","slice_scatter_2","slice_scatter_20","slice_scatter_21","slice_scatter_22","slice_scatter_23","slice_scatter_24","slice_scatter_25","slice_scatter_26","slice_scatter_27","slice_scatter_28","slice_scatter_29","slice_scatter_3","slice_scatter_30","slice_scatter_31","slice_scatter_32","slice_scatter_33","slice_scatter_34","slice_scatter_35","slice_scatter_36","slice_scatter_37","slice_scatter_38","slice_scatter_39","slice_scatter_4","slice_scatter_40","slice_scatter_41","slice_scatter_42","slice_scatter_43","slice_scatter_44","slice_scatter_45","slice_scatter_46","slice_scatter_47","slice_scatter_48","slice_scatter_49","slice_scatter_5","slice_scatter_50","slice_scatter_51","slice_scatter_52","slice_scatter_53","slice_scatter_54","slice_scatter_55","slice_scatter_56","slice_scatter_57","slice_scatter_58","slice_scatter_59","slice_scatter_6","slice_scatter_60","slice_scatter_61","slice_scatter_7","slice_scatter_8","slice_scatter_9","sum_10","sum_10_keepdim","sum_11","sum_11_keepdim","sum_12","sum_12_keepdim","sum_13","sum_13_keepdim","sum_14","sum_14_keepdim","sum_15","sum_15_keepdim","sum_16","sum_16_keepdim","sum_17","sum_17_keepdim","sum_18","sum_18_keepdim","sum_19","sum_19_keepdim","sum_20","sum_20_keepdim","sum_21","sum_21_keepdim","sum_22","sum_22_keepdim","sum_23","sum_23_keepdim","sum_24","sum_24_keepdim","sum_25","sum_25_keepdim","sum_26","sum_26_keepdim","sum_27","sum_27_keepdim","sum_28","sum_28_keepdim","sum_29","sum_29_keepdim","sum_30","sum_30_keepdim","sum_31","sum_31_keepdim","sum_32","sum_32_keepdim","sum_33","sum_33_keepdim","sum_34","sum_34_keepdim","sum_35","sum_35_keepdim","sum_36","sum_36_keepdim","sum_37","sum_37_keepdim","sum_38","sum_38_keepdim","sum_39","sum_39_keepdim","sum_4","sum_40","sum_40_keepdim","sum_41","sum_41_keepdim","sum_42","sum_42_keepdim","sum_43","sum_43_keepdim","sum_44","sum_44_keepdim","sum_45","sum_45_keepdim","sum_46","sum_46_keepdim","sum_47","sum_47_keepdim","sum_48","sum_48_keepdim","sum_49","sum_49_keepdim","sum_4_keepdim","sum_5","sum_50","sum_50_keepdim","sum_51","sum_51_keepdim","sum_52","sum_52_keepdim","sum_53","sum_53_keepdim","sum_54","sum_54_keepdim","sum_55","sum_55_keepdim","sum_56","sum_56_keepdim","sum_57","sum_57_keepdim","sum_58","sum_58_keepdim","sum_59","sum_59_keepdim","sum_5_keepdim","sum_6","sum_60","sum_60_keepdim","sum_61","sum_61_keepdim","sum_62","sum_62_keepdim","sum_63","sum_63_keepdim","sum_64","sum_64_keepdim","sum_6_keepdim","sum_7","sum_7_keepdim","sum_8","sum_8_keepdim","sum_9","sum_9_keepdim","unsqueeze_10","unsqueeze_10_bc","unsqueeze_11","unsqueeze_11_bc","unsqueeze_12","unsqueeze_12_bc","unsqueeze_13","unsqueeze_13_bc","unsqueeze_14","unsqueeze_14_bc","unsqueeze_15","unsqueeze_15_bc","unsqueeze_16","unsqueeze_16_bc","unsqueeze_17","unsqueeze_17_bc","unsqueeze_18","unsqueeze_18_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_20","unsqueeze_20_bc","unsqueeze_21","unsqueeze_21_bc","unsqueeze_22","unsqueeze_22_bc","unsqueeze_23","unsqueeze_23_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_25","unsqueeze_25_bc","unsqueeze_26","unsqueeze_26_bc","unsqueeze_27","unsqueeze_27_bc","unsqueeze_28","unsqueeze_28_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_30","unsqueeze_30_bc","unsqueeze_31","unsqueeze_31_bc","unsqueeze_32","unsqueeze_32_bc","unsqueeze_33","unsqueeze_33_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_35","unsqueeze_35_bc","unsqueeze_36","unsqueeze_36_bc","unsqueeze_37","unsqueeze_37_bc","unsqueeze_38","unsqueeze_38_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_40","unsqueeze_40_bc","unsqueeze_41","unsqueeze_41_bc","unsqueeze_42","unsqueeze_42_bc","unsqueeze_43","unsqueeze_43_bc","unsqueeze_44","unsqueeze_44_bc","unsqueeze_45","unsqueeze_45_bc","unsqueeze_46","unsqueeze_46_bc","unsqueeze_47","unsqueeze_47_bc","unsqueeze_48","unsqueeze_48_bc","unsqueeze_49","unsqueeze_49_bc","unsqueeze_50","unsqueeze_50_bc","unsqueeze_51","unsqueeze_51_bc","unsqueeze_52","unsqueeze_52_bc","unsqueeze_53","unsqueeze_53_bc","unsqueeze_54","unsqueeze_54_bc","unsqueeze_55","unsqueeze_55_bc","unsqueeze_56","unsqueeze_56_bc","unsqueeze_57","unsqueeze_57_bc","unsqueeze_58","unsqueeze_58_bc","unsqueeze_59","unsqueeze_59_bc","unsqueeze_60","unsqueeze_60_bc","unsqueeze_61","unsqueeze_61_bc","unsqueeze_62","unsqueeze_62_bc","unsqueeze_63","unsqueeze_63_bc","unsqueeze_64","unsqueeze_64_bc","unsqueeze_65","unsqueeze_65_bc","unsqueeze_66","unsqueeze_66_bc","unsqueeze_67","unsqueeze_67_bc","unsqueeze_7","unsqueeze_7_bc","unsqueeze_8","unsqueeze_8_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["conv1d_win1_zero","conv1d_win0_zero","conv1d_win2_zero","conv1d_win3_zero","x","p_block_input_layernorm_weight","history","p_block_linear_attn_in_proj_qkv_weight_bits","p_block_linear_attn_in_proj_qkv_weight_scale","squeeze","p_block_linear_attn_dt_bias","linear_3_wt","linear_2_wt","p_block_linear_attn_a_log"],"outputs":["type_as","slice_1","transpose_1","pad_3","view_5","view_6","view_8"],"nodes":[
@@ -107136,14 +107136,14 @@
     "    for a2 in 0..64:",
     "      for a3 in 0..64:",
     "        for a4 in 0..a0 + 2 of 62:",
-    "          v0 = pre acc0[0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a0 + 2, a4]",
-    "          v1 = pre acc0[0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a4, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0 : 0]",
+    "          v0 = load acc0[a0 - 1, 0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a0 + 2, a4]",
+    "          v1 = load acc0[a0 - 1, 0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a4, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0 : 0]",
     "          v2 = v0 * v1",
     "          acc1 <- add(acc1, v2) over a4",
-    "        v3 = pre acc0[0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a0 + 2, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0 : 0]",
+    "        v3 = load acc0[a0 - 1, 0, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0 : 0, 0, a0 + 2, (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2 ? a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0 : 0]",
     "        v4 = acc1 + v3",
-    "        v5 = pre acc0[0, a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0, 0, a0 + 2, a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0]",
-    "        v6 = pre acc0[0, a1, 0, a2, a3]",
+    "        v5 = load acc0[a0 - 1, 0, a2 < a0 + 3 && a0 + 2 <= a2 ? a1 : 0, 0, a0 + 2, a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0]",
+    "        v6 = load acc0[a0 - 1, 0, a1, 0, a2, a3]",
     "        v7 = select:",
     "          v4 when (a2 < a0 + 3 && a0 + 2 <= a2 ? a3 : 0) < a0 + 2",
     "          v5 when true",
@@ -107151,7 +107151,7 @@
     "          v7 when a2 < a0 + 3 && a0 + 2 <= a2",
     "          v6 when true",
     "        select_scatter_1__steps0[0, a1, 0, a2, a3] = v8",
-    "        acc0[0, a1, 0, a2, a3] <- v8 seed select_scatter"
+    "        acc0[a0, 0, a1, 0, a2, a3] <- v8 seed select_scatter"
    ]},"inputs":["select_scatter"],"outputs":[["select_scatter_1__steps0","f32",[1,48,1,64,64]]]}
   ]},"formed":true,"traced":435,"origins":["add_10","add_11","add_12","add_13","add_14","add_15","add_16","add_17","add_18","add_19","add_20","add_21","add_22","add_23","add_24","add_25","add_26","add_27","add_28","add_29","add_30","add_31","add_32","add_33","add_34","add_35","add_36","add_37","add_38","add_39","add_40","add_41","add_42","add_43","add_44","add_45","add_46","add_47","add_48","add_49","add_50","add_51","add_52","add_53","add_54","add_55","add_56","add_57","add_58","add_59","add_6","add_60","add_61","add_62","add_63","add_64","add_65","add_66","add_7","add_8","add_9","copy_1","copy_10","copy_11","copy_12","copy_13","copy_14","copy_15","copy_16","copy_17","copy_18","copy_19","copy_2","copy_20","copy_21","copy_22","copy_23","copy_24","copy_25","copy_26","copy_27","copy_28","copy_29","copy_3","copy_30","copy_31","copy_32","copy_33","copy_34","copy_35","copy_36","copy_37","copy_38","copy_39","copy_4","copy_40","copy_41","copy_42","copy_43","copy_44","copy_45","copy_46","copy_47","copy_48","copy_49","copy_5","copy_50","copy_51","copy_52","copy_53","copy_54","copy_55","copy_56","copy_57","copy_58","copy_59","copy_6","copy_60","copy_61","copy_7","copy_8","copy_9","mul_14","mul_15","mul_16","mul_17","mul_18","mul_19","mul_20","mul_21","mul_22","mul_23","mul_24","mul_25","mul_26","mul_27","mul_28","mul_29","mul_30","mul_31","mul_32","mul_33","mul_34","mul_35","mul_36","mul_37","mul_38","mul_39","mul_40","mul_41","mul_42","mul_43","mul_44","mul_45","mul_46","mul_47","mul_48","mul_49","mul_50","mul_51","mul_52","mul_53","mul_54","mul_55","mul_56","mul_57","mul_58","mul_59","mul_60","mul_61","mul_62","mul_63","mul_64","mul_65","mul_66","mul_67","mul_68","mul_69","mul_70","mul_71","mul_72","mul_73","mul_74","select_10","select_102","select_106","select_110","select_114","select_118","select_122","select_126","select_130","select_134","select_138","select_14","select_142","select_146","select_150","select_154","select_158","select_162","select_166","select_170","select_174","select_178","select_18","select_182","select_186","select_190","select_194","select_198","select_202","select_206","select_210","select_214","select_218","select_22","select_222","select_226","select_230","select_234","select_238","select_242","select_246","select_250","select_254","select_258","select_26","select_262","select_266","select_270","select_274","select_278","select_282","select_286","select_290","select_294","select_298","select_30","select_302","select_306","select_310","select_314","select_318","select_322","select_326","select_330","select_334","select_338","select_34","select_342","select_346","select_350","select_354","select_358","select_362","select_366","select_370","select_374","select_378","select_38","select_382","select_386","select_390","select_394","select_398","select_402","select_406","select_410","select_414","select_418","select_42","select_422","select_426","select_430","select_434","select_438","select_442","select_446","select_450","select_454","select_458","select_46","select_462","select_466","select_470","select_474","select_478","select_482","select_486","select_490","select_50","select_54","select_58","select_6","select_62","select_66","select_70","select_74","select_78","select_82","select_86","select_90","select_94","select_98","select_scatter_1","select_scatter_10","select_scatter_11","select_scatter_12","select_scatter_13","select_scatter_14","select_scatter_15","select_scatter_16","select_scatter_17","select_scatter_18","select_scatter_19","select_scatter_2","select_scatter_20","select_scatter_21","select_scatter_22","select_scatter_23","select_scatter_24","select_scatter_25","select_scatter_26","select_scatter_27","select_scatter_28","select_scatter_29","select_scatter_3","select_scatter_30","select_scatter_31","select_scatter_32","select_scatter_33","select_scatter_34","select_scatter_35","select_scatter_36","select_scatter_37","select_scatter_38","select_scatter_39","select_scatter_4","select_scatter_40","select_scatter_41","select_scatter_42","select_scatter_43","select_scatter_44","select_scatter_45","select_scatter_46","select_scatter_47","select_scatter_48","select_scatter_49","select_scatter_5","select_scatter_50","select_scatter_51","select_scatter_52","select_scatter_53","select_scatter_54","select_scatter_55","select_scatter_56","select_scatter_57","select_scatter_58","select_scatter_59","select_scatter_6","select_scatter_60","select_scatter_7","select_scatter_8","select_scatter_9","slice_10","slice_100","slice_104","slice_105","slice_110","slice_114","slice_115","slice_120","slice_124","slice_125","slice_130","slice_134","slice_135","slice_14","slice_140","slice_144","slice_145","slice_15","slice_150","slice_154","slice_155","slice_160","slice_164","slice_165","slice_170","slice_174","slice_175","slice_180","slice_184","slice_185","slice_190","slice_194","slice_195","slice_20","slice_200","slice_204","slice_205","slice_210","slice_214","slice_215","slice_220","slice_224","slice_225","slice_230","slice_234","slice_235","slice_24","slice_240","slice_244","slice_245","slice_25","slice_250","slice_254","slice_255","slice_260","slice_264","slice_265","slice_270","slice_274","slice_275","slice_280","slice_284","slice_285","slice_290","slice_294","slice_295","slice_30","slice_300","slice_304","slice_305","slice_310","slice_314","slice_315","slice_320","slice_324","slice_325","slice_330","slice_334","slice_335","slice_34","slice_340","slice_344","slice_345","slice_35","slice_350","slice_354","slice_355","slice_360","slice_364","slice_365","slice_370","slice_374","slice_375","slice_380","slice_384","slice_385","slice_390","slice_394","slice_395","slice_40","slice_400","slice_404","slice_405","slice_410","slice_414","slice_415","slice_420","slice_424","slice_425","slice_430","slice_434","slice_435","slice_44","slice_440","slice_444","slice_445","slice_45","slice_450","slice_454","slice_455","slice_460","slice_464","slice_465","slice_470","slice_474","slice_475","slice_480","slice_484","slice_485","slice_490","slice_494","slice_495","slice_50","slice_500","slice_504","slice_505","slice_510","slice_514","slice_515","slice_520","slice_524","slice_525","slice_530","slice_534","slice_535","slice_54","slice_540","slice_544","slice_545","slice_55","slice_550","slice_554","slice_555","slice_560","slice_564","slice_565","slice_570","slice_574","slice_575","slice_580","slice_584","slice_585","slice_590","slice_594","slice_595","slice_60","slice_600","slice_604","slice_605","slice_610","slice_614","slice_615","slice_64","slice_65","slice_70","slice_74","slice_75","slice_80","slice_84","slice_85","slice_90","slice_94","slice_95","slice_scatter_1","slice_scatter_10","slice_scatter_11","slice_scatter_12","slice_scatter_13","slice_scatter_14","slice_scatter_15","slice_scatter_16","slice_scatter_17","slice_scatter_18","slice_scatter_19","slice_scatter_2","slice_scatter_20","slice_scatter_21","slice_scatter_22","slice_scatter_23","slice_scatter_24","slice_scatter_25","slice_scatter_26","slice_scatter_27","slice_scatter_28","slice_scatter_29","slice_scatter_3","slice_scatter_30","slice_scatter_31","slice_scatter_32","slice_scatter_33","slice_scatter_34","slice_scatter_35","slice_scatter_36","slice_scatter_37","slice_scatter_38","slice_scatter_39","slice_scatter_4","slice_scatter_40","slice_scatter_41","slice_scatter_42","slice_scatter_43","slice_scatter_44","slice_scatter_45","slice_scatter_46","slice_scatter_47","slice_scatter_48","slice_scatter_49","slice_scatter_5","slice_scatter_50","slice_scatter_51","slice_scatter_52","slice_scatter_53","slice_scatter_54","slice_scatter_55","slice_scatter_56","slice_scatter_57","slice_scatter_58","slice_scatter_59","slice_scatter_6","slice_scatter_60","slice_scatter_61","slice_scatter_7","slice_scatter_8","slice_scatter_9","sum_10","sum_10_keepdim","sum_11","sum_11_keepdim","sum_12","sum_12_keepdim","sum_13","sum_13_keepdim","sum_14","sum_14_keepdim","sum_15","sum_15_keepdim","sum_16","sum_16_keepdim","sum_17","sum_17_keepdim","sum_18","sum_18_keepdim","sum_19","sum_19_keepdim","sum_20","sum_20_keepdim","sum_21","sum_21_keepdim","sum_22","sum_22_keepdim","sum_23","sum_23_keepdim","sum_24","sum_24_keepdim","sum_25","sum_25_keepdim","sum_26","sum_26_keepdim","sum_27","sum_27_keepdim","sum_28","sum_28_keepdim","sum_29","sum_29_keepdim","sum_30","sum_30_keepdim","sum_31","sum_31_keepdim","sum_32","sum_32_keepdim","sum_33","sum_33_keepdim","sum_34","sum_34_keepdim","sum_35","sum_35_keepdim","sum_36","sum_36_keepdim","sum_37","sum_37_keepdim","sum_38","sum_38_keepdim","sum_39","sum_39_keepdim","sum_4","sum_40","sum_40_keepdim","sum_41","sum_41_keepdim","sum_42","sum_42_keepdim","sum_43","sum_43_keepdim","sum_44","sum_44_keepdim","sum_45","sum_45_keepdim","sum_46","sum_46_keepdim","sum_47","sum_47_keepdim","sum_48","sum_48_keepdim","sum_49","sum_49_keepdim","sum_4_keepdim","sum_5","sum_50","sum_50_keepdim","sum_51","sum_51_keepdim","sum_52","sum_52_keepdim","sum_53","sum_53_keepdim","sum_54","sum_54_keepdim","sum_55","sum_55_keepdim","sum_56","sum_56_keepdim","sum_57","sum_57_keepdim","sum_58","sum_58_keepdim","sum_59","sum_59_keepdim","sum_5_keepdim","sum_6","sum_60","sum_60_keepdim","sum_61","sum_61_keepdim","sum_62","sum_62_keepdim","sum_63","sum_63_keepdim","sum_64","sum_64_keepdim","sum_6_keepdim","sum_7","sum_7_keepdim","sum_8","sum_8_keepdim","sum_9","sum_9_keepdim","unsqueeze_10","unsqueeze_10_bc","unsqueeze_11","unsqueeze_11_bc","unsqueeze_12","unsqueeze_12_bc","unsqueeze_13","unsqueeze_13_bc","unsqueeze_14","unsqueeze_14_bc","unsqueeze_15","unsqueeze_15_bc","unsqueeze_16","unsqueeze_16_bc","unsqueeze_17","unsqueeze_17_bc","unsqueeze_18","unsqueeze_18_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_20","unsqueeze_20_bc","unsqueeze_21","unsqueeze_21_bc","unsqueeze_22","unsqueeze_22_bc","unsqueeze_23","unsqueeze_23_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_25","unsqueeze_25_bc","unsqueeze_26","unsqueeze_26_bc","unsqueeze_27","unsqueeze_27_bc","unsqueeze_28","unsqueeze_28_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_30","unsqueeze_30_bc","unsqueeze_31","unsqueeze_31_bc","unsqueeze_32","unsqueeze_32_bc","unsqueeze_33","unsqueeze_33_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_35","unsqueeze_35_bc","unsqueeze_36","unsqueeze_36_bc","unsqueeze_37","unsqueeze_37_bc","unsqueeze_38","unsqueeze_38_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_40","unsqueeze_40_bc","unsqueeze_41","unsqueeze_41_bc","unsqueeze_42","unsqueeze_42_bc","unsqueeze_43","unsqueeze_43_bc","unsqueeze_44","unsqueeze_44_bc","unsqueeze_45","unsqueeze_45_bc","unsqueeze_46","unsqueeze_46_bc","unsqueeze_47","unsqueeze_47_bc","unsqueeze_48","unsqueeze_48_bc","unsqueeze_49","unsqueeze_49_bc","unsqueeze_50","unsqueeze_50_bc","unsqueeze_51","unsqueeze_51_bc","unsqueeze_52","unsqueeze_52_bc","unsqueeze_53","unsqueeze_53_bc","unsqueeze_54","unsqueeze_54_bc","unsqueeze_55","unsqueeze_55_bc","unsqueeze_56","unsqueeze_56_bc","unsqueeze_57","unsqueeze_57_bc","unsqueeze_58","unsqueeze_58_bc","unsqueeze_59","unsqueeze_59_bc","unsqueeze_60","unsqueeze_60_bc","unsqueeze_61","unsqueeze_61_bc","unsqueeze_62","unsqueeze_62_bc","unsqueeze_63","unsqueeze_63_bc","unsqueeze_64","unsqueeze_64_bc","unsqueeze_65","unsqueeze_65_bc","unsqueeze_66","unsqueeze_66_bc","unsqueeze_67","unsqueeze_67_bc","unsqueeze_7","unsqueeze_7_bc","unsqueeze_8","unsqueeze_8_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["conv1d_win1_zero","conv1d_win0_zero","conv1d_win2_zero","conv1d_win3_zero","x","p_block_input_layernorm_weight","p_block_linear_attn_in_proj_qkv_weight_scale","history","p_block_linear_attn_in_proj_qkv_weight_bits","squeeze","p_block_linear_attn_dt_bias","linear_3_wt","linear_2_wt","p_block_linear_attn_a_log"],"outputs":["type_as","slice_1","transpose_1","pad_3","view_5","view_6","view_8"],"nodes":[
@@ -111110,18 +111110,18 @@
     "      for a3 in 0..64:",
     "        for a4 in 0..64:",
     "          for a5 in 0..a0 + 2 of 62:",
-    "            v0 = pre acc0[0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a1 : 0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a2 : 0, a0 + 2, a5]",
-    "            v1 = pre acc0[0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a1 : 0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a2 : 0, a5, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a4 : 0]",
+    "            v0 = load acc0[a0 - 1, 0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a1 : 0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a2 : 0, a0 + 2, a5]",
+    "            v1 = load acc0[a0 - 1, 0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a1 : 0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a2 : 0, a5, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a4 : 0]",
     "            v2 = v0 * v1",
     "            acc1 <- add(acc1, v2) over a5",
-    "          v3 = pre acc0[0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a1 : 0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a2 : 0, a0 + 2, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a4 : 0]",
+    "          v3 = load acc0[a0 - 1, 0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a1 : 0, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a2 : 0, a0 + 2, a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3) ? a4 : 0]",
     "          v4 = acc1 + v3",
-    "          v5 = pre acc0[0, a1, a2, a3, a4]",
+    "          v5 = load acc0[a0 - 1, 0, a1, a2, a3, a4]",
     "          v6 = select:",
     "            v4 when a4 < a0 + 2 && (a3 < a0 + 3 && a0 + 2 <= a3)",
     "            v5 when true",
     "          copy__1_base__steps0[0, a1, a2, a3, a4] = v6",
-    "          acc0[0, a1, a2, a3, a4] <- v6 seed copy__base"
+    "          acc0[a0, 0, a1, a2, a3, a4] <- v6 seed copy__base"
    ]},"inputs":["copy__base"],"outputs":[["copy__1_base__steps0","f32",[1,48,8,64,64]]]}
   ]},"formed":true,"traced":437,"origins":["add_10","add_11","add_12","add_13","add_14","add_15","add_16","add_17","add_18","add_19","add_20","add_21","add_22","add_23","add_24","add_25","add_26","add_27","add_28","add_29","add_30","add_31","add_32","add_33","add_34","add_35","add_36","add_37","add_38","add_39","add_40","add_41","add_42","add_43","add_44","add_45","add_46","add_47","add_48","add_49","add_50","add_51","add_52","add_53","add_54","add_55","add_56","add_57","add_58","add_59","add_6","add_60","add_61","add_62","add_63","add_64","add_65","add_66","add_7","add_8","add_9","copy__1","copy__10","copy__10_base","copy__11","copy__11_base","copy__12","copy__12_base","copy__13","copy__13_base","copy__14","copy__14_base","copy__15","copy__15_base","copy__16","copy__16_base","copy__17","copy__17_base","copy__18","copy__18_base","copy__19","copy__19_base","copy__1_base","copy__2","copy__20","copy__20_base","copy__21","copy__21_base","copy__22","copy__22_base","copy__23","copy__23_base","copy__24","copy__24_base","copy__25","copy__25_base","copy__26","copy__26_base","copy__27","copy__27_base","copy__28","copy__28_base","copy__29","copy__29_base","copy__2_base","copy__3","copy__30","copy__30_base","copy__31","copy__31_base","copy__32","copy__32_base","copy__33","copy__33_base","copy__34","copy__34_base","copy__35","copy__35_base","copy__36","copy__36_base","copy__37","copy__37_base","copy__38","copy__38_base","copy__39","copy__39_base","copy__3_base","copy__4","copy__40","copy__40_base","copy__41","copy__41_base","copy__42","copy__42_base","copy__43","copy__43_base","copy__44","copy__44_base","copy__45","copy__45_base","copy__46","copy__46_base","copy__47","copy__47_base","copy__48","copy__48_base","copy__49","copy__49_base","copy__4_base","copy__5","copy__50","copy__50_base","copy__51","copy__51_base","copy__52","copy__52_base","copy__53","copy__53_base","copy__54","copy__54_base","copy__55","copy__55_base","copy__56","copy__56_base","copy__57","copy__57_base","copy__58","copy__58_base","copy__59","copy__59_base","copy__5_base","copy__6","copy__60","copy__60_base","copy__6_base","copy__7","copy__7_base","copy__8","copy__8_base","copy__9","copy__9_base","mul_12","mul_13","mul_14","mul_15","mul_16","mul_17","mul_18","mul_19","mul_20","mul_21","mul_22","mul_23","mul_24","mul_25","mul_26","mul_27","mul_28","mul_29","mul_30","mul_31","mul_32","mul_33","mul_34","mul_35","mul_36","mul_37","mul_38","mul_39","mul_40","mul_41","mul_42","mul_43","mul_44","mul_45","mul_46","mul_47","mul_48","mul_49","mul_50","mul_51","mul_52","mul_53","mul_54","mul_55","mul_56","mul_57","mul_58","mul_59","mul_60","mul_61","mul_62","mul_63","mul_64","mul_65","mul_66","mul_67","mul_68","mul_69","mul_70","mul_71","mul_72","select_10","select_100","select_102","select_104","select_106","select_108","select_110","select_112","select_114","select_116","select_118","select_12","select_120","select_122","select_14","select_16","select_18","select_2","select_20","select_22","select_24","select_26","select_28","select_30","select_32","select_34","select_36","select_38","select_4","select_40","select_42","select_44","select_46","select_48","select_50","select_52","select_54","select_56","select_58","select_6","select_60","select_62","select_64","select_66","select_68","select_70","select_72","select_74","select_76","select_78","select_8","select_80","select_82","select_84","select_86","select_88","select_90","select_92","select_94","select_96","select_98","slice_10","slice_100","slice_102","slice_103","slice_104","slice_106","slice_107","slice_108","slice_11","slice_110","slice_111","slice_112","slice_114","slice_115","slice_116","slice_118","slice_119","slice_12","slice_120","slice_122","slice_123","slice_124","slice_126","slice_127","slice_128","slice_130","slice_131","slice_132","slice_134","slice_135","slice_136","slice_138","slice_139","slice_14","slice_140","slice_142","slice_143","slice_144","slice_146","slice_147","slice_148","slice_15","slice_150","slice_151","slice_152","slice_154","slice_155","slice_156","slice_158","slice_159","slice_16","slice_160","slice_162","slice_163","slice_164","slice_166","slice_167","slice_168","slice_170","slice_171","slice_172","slice_174","slice_175","slice_176","slice_178","slice_179","slice_18","slice_180","slice_182","slice_183","slice_184","slice_186","slice_187","slice_188","slice_19","slice_190","slice_191","slice_192","slice_194","slice_195","slice_196","slice_198","slice_199","slice_20","slice_200","slice_202","slice_203","slice_204","slice_206","slice_207","slice_208","slice_210","slice_211","slice_212","slice_214","slice_215","slice_216","slice_218","slice_219","slice_22","slice_220","slice_222","slice_223","slice_224","slice_226","slice_227","slice_228","slice_23","slice_230","slice_231","slice_232","slice_234","slice_235","slice_236","slice_238","slice_239","slice_24","slice_240","slice_242","slice_243","slice_244","slice_246","slice_247","slice_248","slice_26","slice_27","slice_28","slice_30","slice_31","slice_32","slice_34","slice_35","slice_36","slice_38","slice_39","slice_40","slice_42","slice_43","slice_44","slice_46","slice_47","slice_48","slice_50","slice_51","slice_52","slice_54","slice_55","slice_56","slice_58","slice_59","slice_6","slice_60","slice_62","slice_63","slice_64","slice_66","slice_67","slice_68","slice_7","slice_70","slice_71","slice_72","slice_74","slice_75","slice_76","slice_78","slice_79","slice_8","slice_80","slice_82","slice_83","slice_84","slice_86","slice_87","slice_88","slice_90","slice_91","slice_92","slice_94","slice_95","slice_96","slice_98","slice_99","sum_10","sum_10_keepdim","sum_11","sum_11_keepdim","sum_12","sum_12_keepdim","sum_13","sum_13_keepdim","sum_14","sum_14_keepdim","sum_15","sum_15_keepdim","sum_16","sum_16_keepdim","sum_17","sum_17_keepdim","sum_18","sum_18_keepdim","sum_19","sum_19_keepdim","sum_20","sum_20_keepdim","sum_21","sum_21_keepdim","sum_22","sum_22_keepdim","sum_23","sum_23_keepdim","sum_24","sum_24_keepdim","sum_25","sum_25_keepdim","sum_26","sum_26_keepdim","sum_27","sum_27_keepdim","sum_28","sum_28_keepdim","sum_29","sum_29_keepdim","sum_30","sum_30_keepdim","sum_31","sum_31_keepdim","sum_32","sum_32_keepdim","sum_33","sum_33_keepdim","sum_34","sum_34_keepdim","sum_35","sum_35_keepdim","sum_36","sum_36_keepdim","sum_37","sum_37_keepdim","sum_38","sum_38_keepdim","sum_39","sum_39_keepdim","sum_4","sum_40","sum_40_keepdim","sum_41","sum_41_keepdim","sum_42","sum_42_keepdim","sum_43","sum_43_keepdim","sum_44","sum_44_keepdim","sum_45","sum_45_keepdim","sum_46","sum_46_keepdim","sum_47","sum_47_keepdim","sum_48","sum_48_keepdim","sum_49","sum_49_keepdim","sum_4_keepdim","sum_5","sum_50","sum_50_keepdim","sum_51","sum_51_keepdim","sum_52","sum_52_keepdim","sum_53","sum_53_keepdim","sum_54","sum_54_keepdim","sum_55","sum_55_keepdim","sum_56","sum_56_keepdim","sum_57","sum_57_keepdim","sum_58","sum_58_keepdim","sum_59","sum_59_keepdim","sum_5_keepdim","sum_6","sum_60","sum_60_keepdim","sum_61","sum_61_keepdim","sum_62","sum_62_keepdim","sum_63","sum_63_keepdim","sum_64","sum_64_keepdim","sum_6_keepdim","sum_7","sum_7_keepdim","sum_8","sum_8_keepdim","sum_9","sum_9_keepdim","unsqueeze_10","unsqueeze_10_bc","unsqueeze_11","unsqueeze_11_bc","unsqueeze_12","unsqueeze_12_bc","unsqueeze_13","unsqueeze_13_bc","unsqueeze_14","unsqueeze_14_bc","unsqueeze_15","unsqueeze_15_bc","unsqueeze_16","unsqueeze_16_bc","unsqueeze_17","unsqueeze_17_bc","unsqueeze_18","unsqueeze_18_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_20","unsqueeze_20_bc","unsqueeze_21","unsqueeze_21_bc","unsqueeze_22","unsqueeze_22_bc","unsqueeze_23","unsqueeze_23_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_25","unsqueeze_25_bc","unsqueeze_26","unsqueeze_26_bc","unsqueeze_27","unsqueeze_27_bc","unsqueeze_28","unsqueeze_28_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_30","unsqueeze_30_bc","unsqueeze_31","unsqueeze_31_bc","unsqueeze_32","unsqueeze_32_bc","unsqueeze_33","unsqueeze_33_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_35","unsqueeze_35_bc","unsqueeze_36","unsqueeze_36_bc","unsqueeze_37","unsqueeze_37_bc","unsqueeze_38","unsqueeze_38_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_40","unsqueeze_40_bc","unsqueeze_41","unsqueeze_41_bc","unsqueeze_42","unsqueeze_42_bc","unsqueeze_43","unsqueeze_43_bc","unsqueeze_44","unsqueeze_44_bc","unsqueeze_45","unsqueeze_45_bc","unsqueeze_46","unsqueeze_46_bc","unsqueeze_47","unsqueeze_47_bc","unsqueeze_48","unsqueeze_48_bc","unsqueeze_49","unsqueeze_49_bc","unsqueeze_5","unsqueeze_50","unsqueeze_50_bc","unsqueeze_51","unsqueeze_51_bc","unsqueeze_52","unsqueeze_52_bc","unsqueeze_53","unsqueeze_53_bc","unsqueeze_54","unsqueeze_54_bc","unsqueeze_55","unsqueeze_55_bc","unsqueeze_56","unsqueeze_56_bc","unsqueeze_57","unsqueeze_57_bc","unsqueeze_58","unsqueeze_58_bc","unsqueeze_59","unsqueeze_59_bc","unsqueeze_5_bc","unsqueeze_6","unsqueeze_60","unsqueeze_60_bc","unsqueeze_61","unsqueeze_61_bc","unsqueeze_62","unsqueeze_62_bc","unsqueeze_63","unsqueeze_63_bc","unsqueeze_64","unsqueeze_64_bc","unsqueeze_65","unsqueeze_65_bc","unsqueeze_6_bc","unsqueeze_7","unsqueeze_7_bc","unsqueeze_8","unsqueeze_8_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["cumsum","matmul_2","matmul_1","reshape_5"],"outputs":["add_70__steps0","add_70__steps1"],"nodes":[
@@ -111139,7 +111139,7 @@
     "        for a4 in 0..64:",
     "          for a5 in 0..128:",
     "            in1 = load matmul_2[0, a1, a0, a4, a5]",
-    "            v1 = pre acc0[0, a1, a5, a3]",
+    "            v1 = load acc0[a0 - 1, 0, a1, a5, a3]",
     "            v2 = in1 * v1",
     "            acc2 <- add(acc2, v2) over a5",
     "          in2 = load cumsum[0, a1, a0, a4]",
@@ -111151,16 +111151,16 @@
     "          v6 = in4 * v4",
     "          v7 = v6 * v5",
     "          acc1 <- add(acc1, v7) over a4",
-    "        v8 = pre acc0[0, a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, 0, a1, a2, a3]",
     "        v9 = v0 * v8",
     "        v10 = acc1 + v9",
     "        add_70__steps0[a0, 0, a1, a2, a3] = v10",
-    "        acc0[0, a1, a2, a3] <- v10 seed 0",
+    "        acc0[a0, 0, a1, a2, a3] <- v10 seed 0",
     "    for a6 in 0..64:",
     "      for a7 in 0..128:",
     "        for a8 in 0..128:",
     "          in5 = load matmul_2[0, a1, a0, a6, a8]",
-    "          v11 = pre acc0[0, a1, a8, a7]",
+    "          v11 = load acc0[a0 - 1, 0, a1, a8, a7]",
     "          v12 = in5 * v11",
     "          acc3 <- add(acc3, v12) over a8",
     "        in6 = load matmul_1[0, a1, a0, a6, a7]",

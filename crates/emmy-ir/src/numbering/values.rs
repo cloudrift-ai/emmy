@@ -126,6 +126,8 @@ struct Context<'a> {
     loops: Vec<Name>,
     path: Vec<usize>,
     carried: HashSet<Name>,
+    /// The carried states of the whole body: a load of one reads the state, whatever name it goes under.
+    states: HashSet<Name>,
     binding: Vec<Name>,
     defined_by: HashMap<Name, usize>,
     depths_of: HashMap<Param, Vec<usize>>,
@@ -702,7 +704,9 @@ impl Context<'_> {
                         .iter()
                         .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
                         .collect();
-                    let buffer = if self.env.contains_key(&s.input) {
+                    let buffer = if self.states.contains(&s.input) {
+                        self.resource(&s.input, Tag::State, &mut touched)
+                    } else if self.env.contains_key(&s.input) {
                         self.operand(&s.input, &mut ops, &mut touched)
                     } else {
                         self.resource(&s.input, Tag::Buffer, &mut touched)
@@ -823,23 +827,6 @@ impl Context<'_> {
                         Key::option(s.dtype.as_ref().map(|d| d.text())),
                     ]);
                     let value = self.compose(Tag::Carry, payload, ops, &params, &[], false);
-                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
-                }
-                Statement::Pre(s) => {
-                    let index: Vec<Key> = s
-                        .index
-                        .iter()
-                        .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
-                        .collect();
-                    let state = self.resource(&s.carrier, Tag::State, &mut touched);
-                    let value = self.compose(
-                        Tag::Pre,
-                        Key::tuple([state, Key::Tuple(index)]),
-                        ops,
-                        &params,
-                        &[],
-                        false,
-                    );
                     self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 _ if !stmt.nested().is_empty() => {
@@ -1074,6 +1061,14 @@ pub fn value_numbers(
         loops: Vec::new(),
         path: Vec::new(),
         carried: HashSet::new(),
+        states: body
+            .carries()
+            .iter()
+            .filter_map(|here| match &**here.stmt() {
+                Statement::Carry(c) => Some(c.name),
+                _ => None,
+            })
+            .collect(),
         binding: Vec::new(),
         defined_by: HashMap::new(),
         depths_of: HashMap::new(),

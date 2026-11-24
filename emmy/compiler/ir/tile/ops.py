@@ -749,7 +749,10 @@ def carries_partition(tile) -> bool:
 
     The receipt sits on the sliced axis, and that axis is not always a NODE: a computed-A cone can
     keep its sliced contraction inside the lift as a plain ``Loop``, so a ``sites``-only scan
-    misses it. Scan the loop bodies too; the receipt is in the IR either way."""
+    misses it. Scan the loop bodies too; the receipt is in the IR either way. A walk split across the sequence keeps
+    it on its serial axis, which no node binds."""
+    if any(axis.window is not None and axis.window.partition for axis in tile.place.serial):
+        return True
 
     def loops(stmts):
         for s in stmts:

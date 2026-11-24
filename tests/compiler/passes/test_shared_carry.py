@@ -10,6 +10,7 @@ from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16, F32, F64
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.kernel import KernelOp, Sync
@@ -39,14 +40,14 @@ def _body(n=40, *, masked=True, extra_reader=False, last=False):
                 for r in 0..{n}:
                     for c in 0..{n}:
                         for k in 0..{n}:
-                            left = pre state[{owner}, {row if masked else "r"}, k]
-                            right = pre state[{owner}, k, c]
+                            left = load state[t - 1, {owner}, {row if masked else "r"}, k]
+                            right = load state[t - 1, {owner}, k, c]
                             product = multiply(left, right)
                             sum <- add(sum, product)
-                        old = pre state[b, r, c]
+                        old = load state[t - 1, b, r, c]
                         updated = add(old, sum)
                         {value}
-                        state[b, r, c] <- next seed `seed`
+                        state[t, b, r, c] <- next seed `seed`
                         out[{"" if last else "t, "}b, r, c] = next{extra}
         """
     )
@@ -82,6 +83,16 @@ def test_shared_storage_keeps_the_ordered_loop_inside_one_launch():
     assert "_carry_copy" in text(kernel)
     assert "__acc" not in text(kernel)
     assert len(compiled.nodes["out"].outputs) == 1
+
+
+def test_the_batch_stands_first_on_the_grid_beside_a_size_one_axis():
+    """A kernel whose step is a contraction with no row of its own gets a size-one row bound ahead of its grid.
+    It holds no cell, so the state's batch still stands first and shared storage still takes the kernel."""
+    row, batch, rows, columns = Axis("_row", 1), Axis("b", 2), Axis("r", 40), Axis("c", 40)
+    assert shared._lead((batch, rows, columns), 3, ("b",)) == 1
+    assert shared._lead((row, batch, rows, columns), 4, ("b",)) == 2
+    assert shared._lead((rows, batch, columns), 3, ("b",)) is None
+    assert shared._lead((rows, columns), 2, ()) == 0
 
 
 def test_shared_storage_requires_room_for_both_states_and_the_combine():

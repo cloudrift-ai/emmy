@@ -27,7 +27,6 @@ mod tests {
         "f8e4m3 in0, in1 = load x[a0]",
         "in0 = load x[a0] carried=unpack",
         "in0 = load `model.layers.0.weight`[a0]",
-        "p = pre state[a0, 0]",
         "v1 = in0 * in1",
         "f16 v1 = exp(in0)",
         "`load` = copy(`for`)",

@@ -28,7 +28,6 @@ Init = _ir.Init
 Let = _ir.Let
 Load = _ir.Load
 Loop = _ir.Loop
-Pre = _ir.Pre
 Select = _ir.Select
 SelectBranch = _ir.SelectBranch
 Subroutine = _ir.Subroutine
@@ -71,7 +70,6 @@ __all__ = [
     "Load",
     "Loop",
     "OutputSpec",
-    "Pre",
     "Select",
     "SelectBranch",
     "Statement",

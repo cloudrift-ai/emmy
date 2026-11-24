@@ -65,12 +65,6 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
                 carried
             )
         }
-        Statement::Pre(s) => format!(
-            "{} = pre {}{}",
-            spell_stmt_name(&s.name)?,
-            spell_stmt_name(&s.carrier)?,
-            index(&s.index)?
-        ),
         Statement::Assign(s) => format!(
             "{}{} = {}",
             typed(&s.dtype),

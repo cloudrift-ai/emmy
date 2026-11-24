@@ -8,10 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use emmy_ir::body::Body;
 use emmy_ir::elementwise::ElementwiseOp;
-use emmy_ir::expr::{Expr, ExprClass, Expression, Num};
-use emmy_ir::field::NumOr;
+use emmy_ir::expr::{Expr, ExprClass, Expression};
 use emmy_ir::normalize::{AffineTerms, affine_sum, affine_terms, ties};
-use emmy_ir::statement::{Accum, Assign, Carry, PURE, Statement};
+use emmy_ir::statement::{Accum, Assign, PURE, Statement};
 use emmy_ir::{Error, Name, Result};
 
 use crate::fold::{Fold, Parts, Seed};
@@ -28,7 +27,6 @@ pub struct Memos {
     chunked: OnceLock<bool>,
     per_state: OnceLock<Option<Fold>>,
     reduction: OnceLock<Option<Reduction>>,
-    affine: OnceLock<Option<Affine>>,
     merge: Mutex<HashMap<Vec<Name>, Body>>,
     step: OnceLock<Body>,
 }
@@ -68,8 +66,8 @@ pub struct Reduction {
     pub ops: Option<Vec<ElementwiseOp>>,
 }
 
-/// A carried state's step read as affine in the state and column-wise: the position the carrier reads mix, and the
-/// own position a probe packs basis vectors along (both `None` for a diagonal map).
+/// A carried state's step read as affine in the state and column-wise: the position the loads of the state mix, and
+/// the own position a probe packs basis vectors along (both `None` for a diagonal map).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Affine {
     pub state: Name,
@@ -160,13 +158,9 @@ impl Fold {
     }
 
     /// This term restricted to the results `names` (exposed names), same operands and params, body cut to what those
-    /// results need. Twisted, observed and carried states stay whole: their components depend on each other.
+    /// results need. Twisted and observed states stay whole: their components depend on each other.
     pub fn exposing(&self, names: &[Name]) -> Result<Fold> {
-        if self.exposes() == names
-            || self.twist().is_some()
-            || self.observe().is_some()
-            || self.carries()
-        {
+        if self.exposes() == names || self.twist().is_some() || self.observe().is_some() {
             return Ok(self.clone());
         }
         if let Some(found) = self
@@ -609,7 +603,7 @@ impl Fold {
         let Some(base) = self.base() else {
             return Ok(None);
         };
-        if self.twist().is_some() || self.observe().is_some() || self.carries() {
+        if self.twist().is_some() || self.observe().is_some() {
             return Ok(None);
         }
         let Some(pluses) = base.components() else {
@@ -725,53 +719,22 @@ impl Fold {
         })
     }
 
-    /// A read of a carried state as a term: a lift of one `Pre` binding the state, the carrying axis, and the cell
-    /// coordinates its index reads.
-    pub fn carrier_read(read: Arc<Statement>, axis: Name) -> Result<Fold> {
-        let Statement::Pre(pre) = &*read else {
-            return Err(Error::Type("a carrier read is one Pre".into()));
-        };
-        let (carrier, own) = (pre.carrier, pre.name);
-        Fold::new(Parts {
-            lift: Some(Lambda::closing(
-                vec![carrier, axis],
-                &Body::new(vec![read.clone()]),
-                vec![own],
-            )?),
-            ..Parts::default()
-        })
-    }
-
-    /// The affine reading of this carried state, or `None`.
-    pub fn affine(&self) -> Result<Option<Affine>> {
-        if let Some(found) = self.memos().affine.get() {
-            return Ok(found.clone());
-        }
-        let found = self.find_affine()?;
-        Ok(self.memos().affine.get_or_init(|| found).clone())
-    }
-
-    fn find_affine(&self) -> Result<Option<Affine>> {
-        let Some(base) = self.base() else {
-            return Ok(None);
-        };
-        if !self.carries() || base.results().len() != 1 {
-            return Ok(None);
-        }
-        let state = base.results()[0];
+    /// The affine reading of this step in the carried `state` its loads read one step back, or `None`: `value` is
+    /// the state's next value among what the term exposes, `cells` the axes of the state's cell.
+    pub fn affine(&self, state: Name, cells: &[Name], value: Name) -> Result<Option<Affine>> {
         let mut reads: Vec<Arc<Statement>> = Vec::new();
         let classes = affine_classes(self, state, &mut reads, &mut HashMap::new(), None)?;
-        let kind = classes.get(&state).map_or(Kind::Free, |c| c.0);
+        let kind = classes.get(&value).map_or(Kind::Free, |c| c.0);
         if !matches!(kind, Kind::Affine | Kind::Free) || reads.is_empty() {
             return Ok(None);
         }
-        let own: Vec<Expression> = self.cells().iter().map(|c| Expression::var(c)).collect();
+        let own: Vec<Expression> = cells.iter().map(|c| Expression::var(c)).collect();
         let mut mixed: HashSet<usize> = HashSet::new();
         for read in &reads {
-            let Statement::Pre(pre) = &**read else {
+            let Statement::Load(load) = &**read else {
                 continue;
             };
-            for (position, expression) in pre.index.iter().enumerate() {
+            for (position, expression) in load.index.iter().skip(1).enumerate() {
                 if own.get(position) != Some(expression) {
                     mixed.insert(position);
                 }
@@ -784,11 +747,11 @@ impl Fold {
                 kept: None,
             }));
         }
-        if mixed.len() != 1 || self.cells().len() < 2 {
+        if mixed.len() != 1 || cells.len() < 2 {
             return Ok(None);
         }
         let position = *mixed.iter().next().expect("one mixed position");
-        let kept = (0..self.cells().len())
+        let kept = (0..cells.len())
             .filter(|&p| p != position)
             .max()
             .expect("two cells");
@@ -797,9 +760,9 @@ impl Fold {
             state,
             &mut Vec::new(),
             &mut HashMap::new(),
-            Some((self.cells()[kept], kept)),
+            Some((cells[kept], kept)),
         )?;
-        if varies.get(&state).is_some_and(|c| c.1) {
+        if varies.get(&value).is_some_and(|c| c.1) {
             return Ok(None);
         }
         Ok(Some(Affine {
@@ -979,8 +942,7 @@ impl Fold {
     }
 
     /// The per-step statements this fold derives: the injected lift's body, then the combine applied at the singleton
-    /// (each `Accum` over the reduce axis) or a carried state's `Carry`s, then an observer's tap. A map's step is its
-    /// lift body.
+    /// (each `Accum` over the reduce axis), then an observer's tap. A map's step is its lift body.
     pub fn step(&self) -> Result<Body> {
         if let Some(found) = self.memos().step.get() {
             return Ok(found.clone());
@@ -988,29 +950,6 @@ impl Fold {
         let lift = self.injected()?.clone();
         let body = match self.combine()? {
             None => lift.body().clone(),
-            Some(_) if self.carries() => {
-                let index: Vec<Expression> =
-                    self.cells().iter().map(|c| Expression::var(c)).collect();
-                let base = self.base().expect("a carried state has a base");
-                let mut stmts = lift.body().stmts().to_vec();
-                for ((state, value), seed) in
-                    base.results().iter().zip(lift.results()).zip(self.init())
-                {
-                    let seed = match seed {
-                        Seed::Int(v) => NumOr::Num(Num::Int(*v)),
-                        Seed::Float(v) => NumOr::Num(Num::Float(*v)),
-                        Seed::Buffer(n) => NumOr::Value(*n),
-                    };
-                    stmts.push(Arc::new(Statement::Carry(Carry {
-                        name: *state,
-                        value: *value,
-                        index: index.clone().into(),
-                        seed,
-                        dtype: None,
-                    })));
-                }
-                Body::new(stmts)
-            }
             Some(_) => {
                 let axis = self.axis().expect("a combine binds an axis");
                 let mut stmts = lift.body().stmts().to_vec();
@@ -1065,7 +1004,7 @@ enum Kind {
 type Classes = HashMap<Name, (Kind, bool)>;
 
 /// How every value `term` exposes depends on the carried `state` — free, affine or neither — beside whether it varies
-/// with the kept cell coordinate `kept` (its name and position). The carrier reads of the state met are collected.
+/// with the kept cell coordinate `kept` (its name and position). The loads of the state met are collected.
 fn affine_classes(
     term: &Fold,
     state: Name,
@@ -1080,31 +1019,6 @@ fn affine_classes(
         Some((n, p)) => (Some(n), Some(p)),
         None => (None, None),
     };
-    if let Some(read) = term.as_carrier_read() {
-        let Statement::Pre(pre) = &**read else {
-            unreachable!("a carrier read is a Pre")
-        };
-        if pre.carrier == state {
-            reads.push(read.clone());
-        }
-        let varies = kept.is_some()
-            && pre.index.iter().enumerate().any(|(i, e)| {
-                Some(i) != position && kept_name.is_some_and(|n| e.free_vars().contains(&n))
-            });
-        let out: Classes = HashMap::from([(
-            pre.name,
-            (
-                if pre.carrier == state {
-                    Kind::Affine
-                } else {
-                    Kind::Free
-                },
-                varies,
-            ),
-        )]);
-        memo.insert(term.address(), out.clone());
-        return Ok(out);
-    }
     let mut env: Classes = HashMap::new();
     for b in term.bindings() {
         let edge = &term.operands()[b.operand];
@@ -1164,6 +1078,15 @@ fn affine_classes(
                 let class = classify(&env, &a.value, &of);
                 env.insert(a.name, class);
             }
+            // A load of the state reads it one step back, at the cell past the step.
+            Statement::Load(load) if load.input == state => {
+                reads.push(stmt.clone());
+                let varies = kept.is_some()
+                    && load.index.iter().skip(1).enumerate().any(|(i, e)| {
+                        Some(i) != position && kept_name.is_some_and(|n| e.free_vars().contains(&n))
+                    });
+                env.insert(load.names[0], (Kind::Affine, varies));
+            }
             Statement::Load(load) => {
                 let coordinates: Vec<(Kind, bool)> = load
                     .index
@@ -1222,8 +1145,7 @@ fn affine_classes(
                 let (kind, varies) = of(&env, own);
                 let folded = kind == Kind::Free
                     || (kind == Kind::Affine
-                        && (term.carries()
-                            || ops.as_ref().is_some_and(|ops| ops[index].name() == "add")));
+                        && ops.as_ref().is_some_and(|ops| ops[index].name() == "add"));
                 out.insert(
                     *exposed,
                     if folded {

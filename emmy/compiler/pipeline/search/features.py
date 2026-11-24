@@ -20,7 +20,7 @@ from sys import float_info
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Loop, Pre
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Loop
 from emmy.compiler.pipeline.knob import _SITE_FAMILIES, KnobType, axis_of, family_of, family_value, get
 from emmy.compiler.wire import kernel_tile
 
@@ -1082,29 +1082,28 @@ def _trips(body: Body) -> float:
 
 def _varying_trips(body: Body) -> float:
     """The statement executions ``body`` performs where each statement runs only as often as its value changes: a
-    leaf once per trip of the static loops around it whose axis it depends on (``Body.axis_dependencies``; a read of
-    a carried state depends on the loop that carries it). :func:`_trips` charges a statement every loop around it,
+    leaf once per trip of the static loops around it whose axis it depends on (``Body.axis_dependencies``; a load of
+    a carried state reads the step, the axis of the loop that carries it). :func:`_trips` charges a statement every loop around it,
     so a contraction that sits inside an output loop it does not read is a matrix of work per step there and a row
     here. That is what tells a recurrence whose step is a rank-one update from one whose step is a dense product:
     their loop nests agree, and composing the first costs a matrix product where its walk paid a row. Symbolic
     extents count as in :func:`_trips`."""
     depends = body.axis_dependencies
 
-    def walk(stmts: Body, around: tuple[tuple[str, float, bool], ...]) -> float:
+    def walk(stmts: Body, around: tuple[tuple[str, float], ...]) -> float:
         total = 0.0
         for s in stmts:
             if isinstance(s, Loop):
                 ext = s.axis.extent
-                total += walk(s.body, (*around, (s.axis.name, float(ext.as_static()) if ext.is_static else 1.0, bool(s.carries))))
+                total += walk(s.body, (*around, (s.axis.name, float(ext.as_static()) if ext.is_static else 1.0)))
             elif nested := s.nested():
                 total += sum(walk(inner, around) for inner in nested)
             else:
-                before = isinstance(s, Pre)  # reads the cells its index names, at each step of the carrying loop
-                reads = set(s.deps()).union(*(e.free_vars() for e in s.expressions())) - ({s.carrier} if before else set())
+                reads = set(s.deps()).union(*(e.free_vars() for e in s.expressions()))
                 axes = reads.union(*(depends.get(name, ()) for name in reads))
                 runs = 1.0
-                for name, extent, carries in around:
-                    if name in axes or (carries and before):
+                for name, extent in around:
+                    if name in axes:
                         runs = _bounded_mul(runs, extent)
                 total += runs
         return min(total, float_info.max)

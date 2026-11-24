@@ -40170,15 +40170,15 @@
     "      for a3 in 0..16:",
     "        for a4 in 0..16:",
     "          in1 = load w[a1, a0 + 1, a2, a4]",
-    "          v2 = pre acc0[a1, a4, a3]",
+    "          v2 = load acc0[a0 - 1, a1, a4, a3]",
     "          v3 = in1 * v2",
     "          acc1 <- add(acc1, v3) over a4",
     "        in2 = load u[a1, a0 + 1, a2, a3]",
-    "        v4 = pre acc0[a1, a2, a3]",
+    "        v4 = load acc0[a0 - 1, a1, a2, a3]",
     "        v5 = v1 * v4",
     "        v6 = in2 + v5 + 0.03125 * acc1",
     "        add_3__steps0[a0, a1, a2, a3] = v6",
-    "        acc0[a1, a2, a3] <- v6 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v6 seed add_1"
    ]},"inputs":["g","w","u","add_1"],"outputs":[["add_3__steps0","f32",[64,48,16,16]]]}
   ]},"formed":true,"traced":58,"origins":["add_10","add_100","add_102","add_104","add_106","add_108","add_110","add_112","add_114","add_116","add_118","add_12","add_120","add_122","add_124","add_126","add_128","add_14","add_16","add_18","add_2","add_20","add_22","add_24","add_26","add_28","add_30","add_32","add_34","add_36","add_38","add_4","add_40","add_42","add_44","add_46","add_48","add_50","add_52","add_54","add_56","add_58","add_6","add_60","add_62","add_64","add_66","add_68","add_70","add_72","add_74","add_76","add_78","add_8","add_80","add_82","add_84","add_86","add_88","add_90","add_92","add_94","add_96","add_98","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_16","matmul_17","matmul_18","matmul_19","matmul_2","matmul_20","matmul_21","matmul_22","matmul_23","matmul_24","matmul_25","matmul_26","matmul_27","matmul_28","matmul_29","matmul_3","matmul_30","matmul_31","matmul_32","matmul_33","matmul_34","matmul_35","matmul_36","matmul_37","matmul_38","matmul_39","matmul_4","matmul_40","matmul_41","matmul_42","matmul_43","matmul_44","matmul_45","matmul_46","matmul_47","matmul_48","matmul_49","matmul_5","matmul_50","matmul_51","matmul_52","matmul_53","matmul_54","matmul_55","matmul_56","matmul_57","matmul_58","matmul_59","matmul_6","matmul_60","matmul_61","matmul_62","matmul_63","matmul_64","matmul_7","matmul_8","matmul_9","mul_10","mul_100","mul_101","mul_102","mul_103","mul_104","mul_105","mul_106","mul_107","mul_108","mul_109","mul_11","mul_110","mul_111","mul_112","mul_113","mul_114","mul_115","mul_116","mul_117","mul_118","mul_119","mul_12","mul_120","mul_121","mul_122","mul_123","mul_124","mul_125","mul_126","mul_127","mul_128","mul_129","mul_13","mul_14","mul_15","mul_16","mul_17","mul_18","mul_19","mul_2","mul_20","mul_21","mul_22","mul_23","mul_24","mul_25","mul_26","mul_27","mul_28","mul_29","mul_3","mul_30","mul_31","mul_32","mul_33","mul_34","mul_35","mul_36","mul_37","mul_38","mul_39","mul_4","mul_40","mul_41","mul_42","mul_43","mul_44","mul_45","mul_46","mul_47","mul_48","mul_49","mul_5","mul_50","mul_51","mul_52","mul_53","mul_54","mul_55","mul_56","mul_57","mul_58","mul_59","mul_6","mul_60","mul_61","mul_62","mul_63","mul_64","mul_65","mul_66","mul_67","mul_68","mul_69","mul_7","mul_70","mul_71","mul_72","mul_73","mul_74","mul_75","mul_76","mul_77","mul_78","mul_79","mul_8","mul_80","mul_81","mul_82","mul_83","mul_84","mul_85","mul_86","mul_87","mul_88","mul_89","mul_9","mul_90","mul_91","mul_92","mul_93","mul_94","mul_95","mul_96","mul_97","mul_98","mul_99"]},
   {"loop_ir":{"inputs":["g","u"],"outputs":["add_3__steps0__offset0"],"nodes":[
@@ -40600,14 +40600,14 @@
     "      for a3 in 0..16:",
     "        for a4 in 0..16:",
     "          in0 = load add_3__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add_3__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add_3__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v2 seed add_1"
    ]},"inputs":["add_3__steps0__map0","add_3__steps0__offset0","add_1"],"outputs":[["add_3__steps0__start","f32",[64,48,16,16]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add_3__steps0"],"outputs":["add_65"],"nodes":[
@@ -40659,15 +40659,15 @@
     "      for a3 in 0..32:",
     "        for a4 in 0..32:",
     "          in1 = load w[a1, a0 + 1, a2, a4]",
-    "          v2 = pre acc0[a1, a4, a3]",
+    "          v2 = load acc0[a0 - 1, a1, a4, a3]",
     "          v3 = in1 * v2",
     "          acc1 <- add(acc1, v3) over a4",
     "        in2 = load u[a1, a0 + 1, a2, a3]",
-    "        v4 = pre acc0[a1, a2, a3]",
+    "        v4 = load acc0[a0 - 1, a1, a2, a3]",
     "        v5 = v1 * v4",
     "        v6 = in2 + v5 + 0.015625 * acc1",
     "        add_3__steps0[a1, a2, a3] = v6",
-    "        acc0[a1, a2, a3] <- v6 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v6 seed add_1"
    ]},"inputs":["g","w","u","add_1"],"outputs":[["add_3__steps0","f32",[48,32,32]]]}
   ]},"formed":true,"traced":59,"origins":["add_10","add_11","add_12","add_13","add_14","add_15","add_16","add_17","add_18","add_19","add_2","add_20","add_21","add_22","add_23","add_24","add_25","add_26","add_27","add_28","add_29","add_3","add_30","add_31","add_32","add_33","add_34","add_35","add_36","add_37","add_38","add_39","add_4","add_40","add_41","add_42","add_43","add_44","add_45","add_46","add_47","add_48","add_49","add_5","add_50","add_51","add_52","add_53","add_54","add_55","add_56","add_57","add_58","add_59","add_6","add_60","add_61","add_62","add_63","add_64","add_7","add_8","add_9","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_16","matmul_17","matmul_18","matmul_19","matmul_2","matmul_20","matmul_21","matmul_22","matmul_23","matmul_24","matmul_25","matmul_26","matmul_27","matmul_28","matmul_29","matmul_3","matmul_30","matmul_31","matmul_32","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_10","mul_11","mul_12","mul_13","mul_14","mul_15","mul_16","mul_17","mul_18","mul_19","mul_2","mul_20","mul_21","mul_22","mul_23","mul_24","mul_25","mul_26","mul_27","mul_28","mul_29","mul_3","mul_30","mul_31","mul_32","mul_33","mul_34","mul_35","mul_36","mul_37","mul_38","mul_39","mul_4","mul_40","mul_41","mul_42","mul_43","mul_44","mul_45","mul_46","mul_47","mul_48","mul_49","mul_5","mul_50","mul_51","mul_52","mul_53","mul_54","mul_55","mul_56","mul_57","mul_58","mul_59","mul_6","mul_60","mul_61","mul_62","mul_63","mul_64","mul_65","mul_7","mul_8","mul_9"]},
   {"loop_ir":{"inputs":["g","u"],"outputs":["add_3__steps0__offset0"],"nodes":[
@@ -40900,13 +40900,13 @@
     "      for a3 in 0..32:",
     "        for a4 in 0..32:",
     "          in0 = load add_3__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add_3__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
     "        add_3__steps0[a1, a2, a3] = v2",
-    "        acc0[a1, a2, a3] <- v2 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v2 seed add_1"
    ]},"inputs":["add_3__steps0__map0","add_3__steps0__offset0","add_1"],"outputs":[["add_3__steps0","f32",[48,32,32]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["g","s","w","u"],"outputs":["add_1"],"nodes":[
@@ -40994,15 +40994,15 @@
     "      for a3 in 0..128:",
     "        for a4 in 0..128:",
     "          in1 = load w[a1, a0 + 1, a2, a4]",
-    "          v2 = pre acc0[a1, a4, a3]",
+    "          v2 = load acc0[a0 - 1, a1, a4, a3]",
     "          v3 = in1 * v2",
     "          acc1 <- add(acc1, v3) over a4",
     "        in2 = load u[a1, a0 + 1, a2, a3]",
-    "        v4 = pre acc0[a1, a2, a3]",
+    "        v4 = load acc0[a0 - 1, a1, a2, a3]",
     "        v5 = v1 * v4",
     "        v6 = in2 + v5 + 0.00390625 * acc1",
     "        add_3__steps0[a0, a1, a2, a3] = v6",
-    "        acc0[a1, a2, a3] <- v6 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v6 seed add_1"
    ]},"inputs":["g","w","u","add_1"],"outputs":[["add_3__steps0","f32",[16,48,128,128]]]}
   ]},"formed":true,"traced":60,"origins":["add_10","add_12","add_14","add_16","add_18","add_2","add_20","add_22","add_24","add_26","add_28","add_30","add_32","add_4","add_6","add_8","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_16","matmul_2","matmul_3","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_10","mul_11","mul_12","mul_13","mul_14","mul_15","mul_16","mul_17","mul_18","mul_19","mul_2","mul_20","mul_21","mul_22","mul_23","mul_24","mul_25","mul_26","mul_27","mul_28","mul_29","mul_3","mul_30","mul_31","mul_32","mul_33","mul_4","mul_5","mul_6","mul_7","mul_8","mul_9"]},
   {"loop_ir":{"inputs":["g","u"],"outputs":["add_3__steps0__offset0"],"nodes":[
@@ -41417,14 +41417,14 @@
     "      for a3 in 0..128:",
     "        for a4 in 0..128:",
     "          in0 = load add_3__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add_3__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add_3__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed add_1"
+    "        acc0[a0, a1, a2, a3] <- v2 seed add_1"
    ]},"inputs":["add_3__steps0__map0","add_3__steps0__offset0","add_1"],"outputs":[["add_3__steps0__start","f32",[16,48,128,128]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -41464,17 +41464,17 @@
     "        for a4 in 0..128:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.0625 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[4,48,128,128]]]}
   ]},"formed":true,"traced":61,"origins":["matmul","matmul_1","matmul_2","matmul_3","mul_1","mul_10","mul_11","mul_2","mul_4","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_2","squeeze_3","sub","sub_1","sub_2","sub_3","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_4","unsqueeze_4_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -41566,14 +41566,14 @@
     "      for a3 in 0..128:",
     "        for a4 in 0..128:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[4,48,128,128]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -41637,17 +41637,17 @@
     "        for a4 in 0..128:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.0625 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[16,48,128,128]]]}
   ]},"formed":true,"traced":62,"origins":["matmul","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_2","matmul_3","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_1","mul_10","mul_11","mul_13","mul_14","mul_16","mul_17","mul_19","mul_2","mul_20","mul_22","mul_23","mul_25","mul_26","mul_28","mul_29","mul_31","mul_32","mul_34","mul_35","mul_37","mul_38","mul_4","mul_40","mul_41","mul_43","mul_44","mul_46","mul_47","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_10","squeeze_11","squeeze_12","squeeze_13","squeeze_14","squeeze_15","squeeze_2","squeeze_3","squeeze_4","squeeze_5","squeeze_6","squeeze_7","squeeze_8","squeeze_9","sub","sub_1","sub_10","sub_11","sub_12","sub_13","sub_14","sub_15","sub_2","sub_3","sub_4","sub_5","sub_6","sub_7","sub_8","sub_9","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_4","unsqueeze_44","unsqueeze_44_bc","unsqueeze_49","unsqueeze_49_bc","unsqueeze_4_bc","unsqueeze_54","unsqueeze_54_bc","unsqueeze_59","unsqueeze_59_bc","unsqueeze_64","unsqueeze_64_bc","unsqueeze_69","unsqueeze_69_bc","unsqueeze_74","unsqueeze_74_bc","unsqueeze_79","unsqueeze_79_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -41773,17 +41773,17 @@
     "        for a4 in 0..64:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.08838800340890884 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[8,48,64,64]]]}
   ]},"formed":true,"traced":63,"origins":["matmul","matmul_1","matmul_2","matmul_3","matmul_4","matmul_5","matmul_6","matmul_7","mul_1","mul_10","mul_11","mul_13","mul_14","mul_16","mul_17","mul_19","mul_2","mul_20","mul_22","mul_23","mul_4","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_2","squeeze_3","squeeze_4","squeeze_5","squeeze_6","squeeze_7","sub","sub_1","sub_2","sub_3","sub_4","sub_5","sub_6","sub_7","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_4","unsqueeze_4_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -42052,14 +42052,14 @@
     "      for a3 in 0..64:",
     "        for a4 in 0..64:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[8,48,64,64]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -42123,17 +42123,17 @@
     "        for a4 in 0..32:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.125 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v2 * v6",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[16,48,32,32]]]}
   ]},"formed":true,"traced":64,"origins":["matmul","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_2","matmul_3","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_1","mul_10","mul_11","mul_13","mul_14","mul_16","mul_17","mul_19","mul_2","mul_20","mul_22","mul_23","mul_25","mul_26","mul_28","mul_29","mul_31","mul_32","mul_34","mul_35","mul_37","mul_38","mul_4","mul_40","mul_41","mul_43","mul_44","mul_46","mul_47","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_10","squeeze_11","squeeze_12","squeeze_13","squeeze_14","squeeze_15","squeeze_2","squeeze_3","squeeze_4","squeeze_5","squeeze_6","squeeze_7","squeeze_8","squeeze_9","sub","sub_1","sub_10","sub_11","sub_12","sub_13","sub_14","sub_15","sub_2","sub_3","sub_4","sub_5","sub_6","sub_7","sub_8","sub_9","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_4","unsqueeze_44","unsqueeze_44_bc","unsqueeze_49","unsqueeze_49_bc","unsqueeze_4_bc","unsqueeze_54","unsqueeze_54_bc","unsqueeze_59","unsqueeze_59_bc","unsqueeze_64","unsqueeze_64_bc","unsqueeze_69","unsqueeze_69_bc","unsqueeze_74","unsqueeze_74_bc","unsqueeze_79","unsqueeze_79_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -42328,14 +42328,14 @@
     "      for a3 in 0..32:",
     "        for a4 in 0..32:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[16,48,32,32]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -42371,17 +42371,17 @@
     "        for a4 in 0..256:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.04419400170445442 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[2,48,256,256]]]}
   ]},"formed":true,"traced":65,"origins":["matmul","matmul_1","mul_1","mul_2","mul_4","mul_5","squeeze","squeeze_1","sub","sub_1","unsqueeze_4","unsqueeze_4_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -42538,14 +42538,14 @@
     "      for a3 in 0..256:",
     "        for a4 in 0..256:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[2,48,256,256]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -42641,17 +42641,17 @@
     "        for a4 in 0..64:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.08838800340890884 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v6 * v2",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[32,48,64,64]]]}
   ]},"formed":true,"traced":66,"origins":["matmul","matmul_1","matmul_10","matmul_11","matmul_12","matmul_13","matmul_14","matmul_15","matmul_16","matmul_17","matmul_18","matmul_19","matmul_2","matmul_20","matmul_21","matmul_22","matmul_23","matmul_24","matmul_25","matmul_26","matmul_27","matmul_28","matmul_29","matmul_3","matmul_30","matmul_31","matmul_4","matmul_5","matmul_6","matmul_7","matmul_8","matmul_9","mul_1","mul_10","mul_11","mul_13","mul_14","mul_16","mul_17","mul_19","mul_2","mul_20","mul_22","mul_23","mul_25","mul_26","mul_28","mul_29","mul_31","mul_32","mul_34","mul_35","mul_37","mul_38","mul_4","mul_40","mul_41","mul_43","mul_44","mul_46","mul_47","mul_49","mul_5","mul_50","mul_52","mul_53","mul_55","mul_56","mul_58","mul_59","mul_61","mul_62","mul_64","mul_65","mul_67","mul_68","mul_7","mul_70","mul_71","mul_73","mul_74","mul_76","mul_77","mul_79","mul_8","mul_80","mul_82","mul_83","mul_85","mul_86","mul_88","mul_89","mul_91","mul_92","mul_94","mul_95","squeeze","squeeze_1","squeeze_10","squeeze_11","squeeze_12","squeeze_13","squeeze_14","squeeze_15","squeeze_16","squeeze_17","squeeze_18","squeeze_19","squeeze_2","squeeze_20","squeeze_21","squeeze_22","squeeze_23","squeeze_24","squeeze_25","squeeze_26","squeeze_27","squeeze_28","squeeze_29","squeeze_3","squeeze_30","squeeze_31","squeeze_4","squeeze_5","squeeze_6","squeeze_7","squeeze_8","squeeze_9","sub","sub_1","sub_10","sub_11","sub_12","sub_13","sub_14","sub_15","sub_16","sub_17","sub_18","sub_19","sub_2","sub_20","sub_21","sub_22","sub_23","sub_24","sub_25","sub_26","sub_27","sub_28","sub_29","sub_3","sub_30","sub_31","sub_4","sub_5","sub_6","sub_7","sub_8","sub_9","unsqueeze_104","unsqueeze_104_bc","unsqueeze_109","unsqueeze_109_bc","unsqueeze_114","unsqueeze_114_bc","unsqueeze_119","unsqueeze_119_bc","unsqueeze_124","unsqueeze_124_bc","unsqueeze_129","unsqueeze_129_bc","unsqueeze_134","unsqueeze_134_bc","unsqueeze_139","unsqueeze_139_bc","unsqueeze_14","unsqueeze_144","unsqueeze_144_bc","unsqueeze_149","unsqueeze_149_bc","unsqueeze_14_bc","unsqueeze_154","unsqueeze_154_bc","unsqueeze_159","unsqueeze_159_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_24","unsqueeze_24_bc","unsqueeze_29","unsqueeze_29_bc","unsqueeze_34","unsqueeze_34_bc","unsqueeze_39","unsqueeze_39_bc","unsqueeze_4","unsqueeze_44","unsqueeze_44_bc","unsqueeze_49","unsqueeze_49_bc","unsqueeze_4_bc","unsqueeze_54","unsqueeze_54_bc","unsqueeze_59","unsqueeze_59_bc","unsqueeze_64","unsqueeze_64_bc","unsqueeze_69","unsqueeze_69_bc","unsqueeze_74","unsqueeze_74_bc","unsqueeze_79","unsqueeze_79_bc","unsqueeze_84","unsqueeze_84_bc","unsqueeze_89","unsqueeze_89_bc","unsqueeze_9","unsqueeze_94","unsqueeze_94_bc","unsqueeze_99","unsqueeze_99_bc","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -42890,14 +42890,14 @@
     "      for a3 in 0..64:",
     "        for a4 in 0..64:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[32,48,64,64]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["add__steps0"],"outputs":["stack"],"nodes":[
@@ -42937,17 +42937,17 @@
     "        for a4 in 0..32:",
     "          in2 = load k[a1, a0, a4]",
     "          v3 = 0.125 * in2",
-    "          v4 = pre acc0[a1, a4, a3]",
+    "          v4 = load acc0[a0 - 1, a1, a4, a3]",
     "          v5 = v3 * v4",
     "          acc1 <- add(acc1, v5) over a4",
     "        in3 = load v[a1, a0, a3]",
     "        v6 = in3 - acc1",
     "        v7 = v2 * v6",
-    "        v8 = pre acc0[a1, a2, a3]",
+    "        v8 = load acc0[a0 - 1, a1, a2, a3]",
     "        v9 = v1 * v8",
     "        v10 = v7 + v9",
     "        add__steps0[a0, a1, a2, a3] = v10",
-    "        acc0[a1, a2, a3] <- v10 seed s"
+    "        acc0[a0, a1, a2, a3] <- v10 seed s"
    ]},"inputs":["g","k","v","s"],"outputs":[["add__steps0","f32",[4,48,32,32]]]}
   ]},"formed":true,"traced":67,"origins":["matmul","matmul_1","matmul_2","matmul_3","mul_1","mul_10","mul_11","mul_2","mul_4","mul_5","mul_7","mul_8","squeeze","squeeze_1","squeeze_2","squeeze_3","sub","sub_1","sub_2","sub_3","unsqueeze_14","unsqueeze_14_bc","unsqueeze_19","unsqueeze_19_bc","unsqueeze_4","unsqueeze_4_bc","unsqueeze_9","unsqueeze_9_bc"]},
   {"loop_ir":{"inputs":["g","k","v"],"outputs":["add__steps0__offset0"],"nodes":[
@@ -43039,14 +43039,14 @@
     "      for a3 in 0..32:",
     "        for a4 in 0..32:",
     "          in0 = load add__steps0__map0[a0, a1, a2, a4]",
-    "          v0 = pre acc0[a1, a4, a3]",
+    "          v0 = load acc0[a0 - 1, a1, a4, a3]",
     "          v1 = in0 * v0",
     "          acc1 <- add(acc1, v1) over a4",
     "        in1 = load add__steps0__offset0[a0, a1, a2, a3]",
     "        v2 = acc1 + in1",
-    "        v3 = pre acc0[a1, a2, a3]",
+    "        v3 = load acc0[a0 - 1, a1, a2, a3]",
     "        add__steps0__start[a0, a1, a2, a3] = v3",
-    "        acc0[a1, a2, a3] <- v2 seed s"
+    "        acc0[a0, a1, a2, a3] <- v2 seed s"
    ]},"inputs":["add__steps0__map0","add__steps0__offset0","s"],"outputs":[["add__steps0__start","f32",[4,48,32,32]]]}
   ]},"formed":false},
   {"loop_ir":{"inputs":["linear_wt","input"],"outputs":["linear"],"nodes":[
@@ -52995,7 +52995,7 @@
     "        for a5 in 0..128:",
     "          in4 = load repeat_interleave_1[0, a0, a1, a5]",
     "          v5 = in4 * v2",
-    "          v6 = pre acc0[0, a1, a5, a4]",
+    "          v6 = load acc0[a0 - 1, 0, a1, a5, a4]",
     "          v7 = v3 * v6",
     "          v8 = v7 * v5",
     "          acc2 <- add(acc2, v8) over a5",
@@ -53003,11 +53003,11 @@
     "        v9 = in5 - acc2",
     "        v10 = in2 * v9",
     "        v11 = v10 * v4",
-    "        v12 = pre acc0[0, a1, a3, a4]",
+    "        v12 = load acc0[a0 - 1, 0, a1, a3, a4]",
     "        v13 = v3 * v12",
     "        v14 = v11 + v13",
     "        add_5__steps0[a0, 0, a1, a3, a4] = v14",
-    "        acc0[0, a1, a3, a4] <- v14 seed state"
+    "        acc0[a0, 0, a1, a3, a4] <- v14 seed state"
    ]},"inputs":["repeat_interleave_1","mul_2","sigmoid","view_3","state"],"outputs":[["add_5__steps0","f32",[2,1,48,128,128]]]}
   ]},"formed":true,"traced":123,"origins":["mul_10","mul_16","mul_17","mul_18","mul_19","mul_7","mul_8","mul_9","sub","sub_1","sum_3","sum_3_keepdim","sum_7","sum_7_keepdim","unsqueeze_13","unsqueeze_13_bc","unsqueeze_6","unsqueeze_6_bc"]},
   {"loop_ir":{"inputs":["add_5__steps0"],"outputs":["cat_2"],"nodes":[
@@ -73940,7 +73940,7 @@
     "        for a5 in 0..128:",
     "          in4 = load repeat_interleave_1[0, a0, a1, a5]",
     "          v5 = in4 * v2",
-    "          v6 = pre acc0[0, a1, a5, a4]",
+    "          v6 = load acc0[a0 - 1, 0, a1, a5, a4]",
     "          v7 = v3 * v6",
     "          v8 = v7 * v5",
     "          acc2 <- add(acc2, v8) over a5",
@@ -73948,11 +73948,11 @@
     "        v9 = in5 - acc2",
     "        v10 = in2 * v9",
     "        v11 = v10 * v4",
-    "        v12 = pre acc0[0, a1, a3, a4]",
+    "        v12 = load acc0[a0 - 1, 0, a1, a3, a4]",
     "        v13 = v3 * v12",
     "        v14 = v11 + v13",
     "        add_5__steps0[a0, 0, a1, a3, a4] = v14",
-    "        acc0[0, a1, a3, a4] <- v14 seed state"
+    "        acc0[a0, 0, a1, a3, a4] <- v14 seed state"
    ]},"inputs":["repeat_interleave_1","mul_2","sigmoid","view_3","state"],"outputs":[["add_5__steps0","f32",[2,1,32,128,128]]]}
   ]},"formed":true,"traced":175,"origins":["mul_10","mul_16","mul_17","mul_18","mul_19","mul_7","mul_8","mul_9","sub","sub_1","sum_3","sum_3_keepdim","sum_7","sum_7_keepdim","unsqueeze_13","unsqueeze_13_bc","unsqueeze_6","unsqueeze_6_bc"]},
   {"loop_ir":{"inputs":["add_5__steps0"],"outputs":["cat_2"],"nodes":[
@@ -77703,7 +77703,7 @@
     "        for a5 in 0..128:",
     "          in4 = load repeat_interleave_1[0, a0, a1, a5]",
     "          v5 = in4 * v2",
-    "          v6 = pre acc0[0, a1, a5, a4]",
+    "          v6 = load acc0[a0 - 1, 0, a1, a5, a4]",
     "          v7 = v3 * v6",
     "          v8 = v7 * v5",
     "          acc2 <- add(acc2, v8) over a5",
@@ -77711,11 +77711,11 @@
     "        v9 = in5 - acc2",
     "        v10 = in2 * v9",
     "        v11 = v10 * v4",
-    "        v12 = pre acc0[0, a1, a3, a4]",
+    "        v12 = load acc0[a0 - 1, 0, a1, a3, a4]",
     "        v13 = v3 * v12",
     "        v14 = v11 + v13",
     "        add_5__steps0[a0, 0, a1, a3, a4] = v14",
-    "        acc0[0, a1, a3, a4] <- v14 seed state"
+    "        acc0[a0, 0, a1, a3, a4] <- v14 seed state"
    ]},"inputs":["repeat_interleave_1","mul_2","sigmoid","view_3","state"],"outputs":[["add_5__steps0","f32",[3,1,32,128,128]]]}
   ]},"formed":true,"traced":176,"origins":["mul_10","mul_16","mul_17","mul_18","mul_19","mul_25","mul_26","mul_27","mul_28","mul_7","mul_8","mul_9","sub","sub_1","sub_2","sum_11","sum_11_keepdim","sum_3","sum_3_keepdim","sum_7","sum_7_keepdim","unsqueeze_13","unsqueeze_13_bc","unsqueeze_20","unsqueeze_20_bc","unsqueeze_6","unsqueeze_6_bc"]},
   {"loop_ir":{"inputs":["add_5__steps0"],"outputs":["cat_2"],"nodes":[
@@ -118374,7 +118374,7 @@
     "        for a5 in 0..128:",
     "          in4 = load repeat_interleave_1[0, a0, a1, a5]",
     "          v5 = in4 * v2",
-    "          v6 = pre acc0[0, a1, a5, a4]",
+    "          v6 = load acc0[a0 - 1, 0, a1, a5, a4]",
     "          v7 = v3 * v6",
     "          v8 = v7 * v5",
     "          acc2 <- add(acc2, v8) over a5",
@@ -118382,11 +118382,11 @@
     "        v9 = in5 - acc2",
     "        v10 = in2 * v9",
     "        v11 = v10 * v4",
-    "        v12 = pre acc0[0, a1, a3, a4]",
+    "        v12 = load acc0[a0 - 1, 0, a1, a3, a4]",
     "        v13 = v3 * v12",
     "        v14 = v11 + v13",
     "        add_5__steps0[a0, 0, a1, a3, a4] = v14",
-    "        acc0[0, a1, a3, a4] <- v14 seed state"
+    "        acc0[a0, 0, a1, a3, a4] <- v14 seed state"
    ]},"inputs":["repeat_interleave_1","mul_2","sigmoid","view_3","state"],"outputs":[["add_5__steps0","f32",[3,1,48,128,128]]]}
   ]},"formed":true,"traced":337,"origins":["mul_10","mul_16","mul_17","mul_18","mul_19","mul_25","mul_26","mul_27","mul_28","mul_7","mul_8","mul_9","sub","sub_1","sub_2","sum_11","sum_11_keepdim","sum_3","sum_3_keepdim","sum_7","sum_7_keepdim","unsqueeze_13","unsqueeze_13_bc","unsqueeze_20","unsqueeze_20_bc","unsqueeze_6","unsqueeze_6_bc"]},
   {"loop_ir":{"inputs":["type_as_1_static_fp4_scale_2","type_as_1_static_fp4_shift","type_as_1_static_fp4_scale_inv","p_block_linear_attn_out_proj_weight_scale","view_6_static_fp8_scale","transpose_1","add_5__steps0","p_block_linear_attn_in_proj_z_weight_scale","type_as_static_fp8_scale","p_block_linear_attn_in_proj_z_weight_bits","type_as_static_fp8_bits","p_block_linear_attn_norm_weight","p_block_linear_attn_out_proj_weight_bits","x","p_block_post_attention_layernorm_weight"],"outputs":["add_13","type_as_1_static_fp4_scale_bits","type_as_1_static_fp4_bits"],"nodes":[
@@ -161795,7 +161795,7 @@
   {"name":"k_077e426585c1.k_077e426585c1",
    "kernel":784,
    "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
-   "knobs":{"TILE@map.1/scan":"","TILE@map.2/inner":"f3","REDUCE@map.1/map.1/map.1/reduce":"","REDUCE@map.2/inner":"","STAGE@map.1/scan":"","STAGE@map.2/inner":"","WORK":"t128","RASTER":"gm8"},
+   "knobs":{"TILE@map.1/scan":"","TILE@map.2/inner":"","REDUCE@map.1/map.1/map.1/reduce":"","REDUCE@map.2/inner":"","STAGE@map.1/scan":"","STAGE@map.2/inner":"","WORK":"t128","RASTER":"gm8"},
    "measurements":{"emmy_us":84.1728001832962,"reference_us":83.86559784412384,"reference_backend":"same-input-greedy","tried":201}},
   {"name":"k_077e426585c1.k_077e426585c1",
    "kernel":784,
