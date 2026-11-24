@@ -11,7 +11,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.kernel.ir import FragmentApply, FragmentRepack, MmaSyncPtx, RegStore
+from emmy.compiler.ir.kernel.ir import GMEM, FragmentApply, FragmentRepack, MmaSyncPtx, RegStore
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.classic.schedule import classic_state_tile_keys
@@ -124,6 +124,10 @@ def test_a_value_that_does_not_read_the_column_is_computed_once():
     n, atom = 32, ATOM_REGISTRY["mma_m16n8k16_f16_f32"]
     body = resident_walk(_lifted(n), atom, 2, 4).body
     assert len(list(body.iter_of_type(MmaSyncPtx))) == n // atom.atom_k
+    # The same holds for a read of memory: ``g`` and ``v`` read no column, so each is one block, and ``k`` at the
+    # state's column is a block for each.
+    reads = [arg.buffer for stmt in body.iter_of_type(FragmentApply) for arg in stmt.args if arg.kind == GMEM]
+    assert (reads.count("g"), reads.count("v")) == (1, 1) and reads.count("k") > n // atom.atom_n
 
 
 def test_a_state_the_fragments_do_not_tile_is_not_offered():

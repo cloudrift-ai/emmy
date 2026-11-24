@@ -211,6 +211,32 @@ def test_a_state_the_term_stores_every_step_needs_no_port() -> None:
     np.testing.assert_allclose(np.asarray(got), _reference(arrays, stored="next"), rtol=1e-5, atol=1e-6)
 
 
+def test_a_store_under_a_size_one_axis_is_still_the_states_own() -> None:
+    """A size-one dim of the output is a ``0`` in the store, or an extent-one axis where the lift bound it back.
+    Either way it holds one position and is no coordinate of the state, so the store still holds every step of the
+    state and the kernel keeps no second buffer for it."""
+    from emmy.compiler.pipeline.passes.tile._fromloop import stored_states
+
+    def stored(unit: str, head: str = "") -> set[str]:
+        (loop,) = parse_body(
+            f"""
+            for c in 0..{STEPS}:
+                {head}
+                for i in 0..{N}:
+                    for j in 0..{N}:
+                        own = load S[c - 1, i, j]
+                        next = multiply(own, 2.0)
+                        S[c, i, j] <- next seed 0
+                        out[c, {unit}, i, j] = next
+            """
+        )
+        return set(stored_states(loop, ()))
+
+    assert stored("0") == {"S"}
+    assert stored("_row", "for _row in 0..1:") == {"S"}
+    assert stored("b", "for b in 0..2:") == set(), "a coordinate of two positions the state does not have"
+
+
 def test_the_lift_carries_the_state_in_the_term() -> None:
     """The kernel's term is one step and the loop that carries the state its serial axis: the state is a store of
     the kernel into a buffer of its own, over the two free coordinates the block is indexed by, with the loop's
