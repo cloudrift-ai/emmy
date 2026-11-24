@@ -1,19 +1,22 @@
-"""Read through a copy that another kernel would have to store for this one.
+"""Read through every copy: a loop that only moves values joins no two loops.
 
 A loop that computes nothing — one read and one store of it, in another layout or at another dtype: the chunks of a
-sequence, a transpose, a broadcast, a cast to a wider float — is a buffer only where something has to read it as one.
-Inside its own region it never is: the splice inlines the read (``_region.regions``). Across the region's boundary it
-was. A kernel that carries a state is in no region, so every operand it reads through a copy was a buffer some kernel
-filled for it alone; and a copy two regions read was filled by one of them for the other. Such a reader now takes the
-read itself: the buffer behind the copy, at the cell the copy reads there.
+sequence, a transpose, a broadcast, a cast to a wider float — holds no work a kernel could share. Every loop that
+reads one takes the read itself: the buffer behind the copy, at the cell the copy reads there. The copy is then read
+by no loop, and the kernel whose only work it was is gone.
 
-The regions stay what they were. A reader in the copy's own region is left to the splice, so the copy still joins
-the loops it joined into one kernel; what goes is the store of the copy, and the kernel whose only work it was.
+So a copy joins nothing. Loops share a region through a value that is computed (``_region.regions``): one kernel
+computes it once for all of them. Two loops that read one copy share what two loops that read one input share, and
+are two kernels as those are, whether or not the program wrote a transpose between the input and them. A kernel that
+carries a state, which no region holds, reads its operands where they are stored by the same rule.
+
+A copy the program itself holds, a graph output, is a buffer whoever reads it: it is stored once and its readers
+read it there, like any stored value. A copy that rounds is arithmetic and is not read through, nor is a copy of a
+buffer another kernel stores over, nor one of a packed buffer.
 
 It runs after ``005_roll_recurrence``, which compares the steps of a recurrence as the tracer left them: a step's
 slice of a copy is a literal coordinate that advances with the step, where the read behind it is an offset that the
-first step does not have. The copy stays for whoever still reads it as a buffer: a graph output, a packed buffer's
-reader, a reader of a buffer another kernel stores over.
+first step does not have.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._region import joins_a_region, plain_load, regions, wrap_multi_output_fragment
+from emmy.compiler.pipeline.passes.loop.fusion._region import plain_load, wrap_multi_output_fragment
 
 PATTERN = [Pattern("reader", LoopOp)]
 
@@ -57,14 +60,13 @@ def copied(graph: Graph, name: str) -> tuple[tuple, Load] | None:
     return (tuple(write.index), load) if exact and plain else None
 
 
-def read_in_place(graph: Graph, body: Body, region: frozenset[str]) -> Body:
-    """``body`` with each read of a copy that ``region`` does not hold taken through it, and through the copy behind
-    that one."""
+def read_in_place(graph: Graph, body: Body) -> Body:
+    """``body`` with each read of a copy taken through it, and through the copy behind that one."""
 
     def through(stmt: Statement) -> Statement:
         while isinstance(stmt, Load) and plain_load(stmt) and (copy := copied(graph, stmt.input)) is not None:
-            if graph.producer(stmt.input).id in region:
-                break
+            if stmt.input in graph.outputs:
+                break  # the program holds this copy: it is stored whoever reads it, and a reader finds its values there
             cells, read = copy
             if len(cells) != len(stmt.index) or any(isinstance(c, Literal) and c != at for c, at in zip(cells, stmt.index, strict=True)):
                 break
@@ -77,15 +79,8 @@ def read_in_place(graph: Graph, body: Body, region: frozenset[str]) -> Body:
 
 def rewrite(match: Match, reader: Node) -> Graph:
     graph = match.graph
-    region: frozenset[str] = frozenset()
-    if joins_a_region(reader.op):
-        # A copy this loop alone reads is its own region's: a loop whose every reader sits in one region joins it.
-        # The regions are an answer about the whole graph, asked only for a loop that reads a copy with another reader.
-        region = frozenset(graph.producer(name).id for name in reader.inputs if graph.buffer_users(name) == {reader.id})
-        if read_in_place(graph, reader.op.body, region) != reader.op.body:
-            region = regions(graph).get(reader.id, frozenset())
-    body = read_in_place(graph, reader.op.body, region)
+    body = read_in_place(graph, reader.op.body)
     if body == reader.op.body:
-        raise RuleSkipped("the loop reads no copy of another region")
+        raise RuleSkipped("the loop reads no copy")
     fragment, match.output = wrap_multi_output_fragment(graph, replace(reader.op, body=body, inputs={}), tuple(reader.buffer_names()))
     return fragment

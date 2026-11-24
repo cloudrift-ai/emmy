@@ -1,11 +1,12 @@
-"""A copy is read through by every loop outside its region (``loop/fusion/008_read_through_copies``), and a kernel
+"""A copy is read through by every loop that reads it (``loop/fusion/008_read_through_copies``), and a kernel
 no region holds stores its buffer where the one loop that reads it would only have moved it
 (``loop/fusion/020_store_through_copies``).
 
 A loop that only re-lays out or widens a buffer was stored wherever a kernel outside its region read it: for a kernel
-that carries a state, which is in no region, and for a second region. The reader now reads the buffer behind the
-copy, and the copy is stored for no one. On the other side of such a kernel, the loop that puts its outputs where the
-program wants them, rounded to the dtype it wants them at, was a kernel of its own.
+that carries a state, which is in no region, and for a second region. Every reader now reads the buffer behind the
+copy, the copy is stored for no one, and it joins no two loops into one kernel. On the other side of such a kernel,
+the loop that puts its outputs where the program wants them, rounded to the dtype it wants them at, was a kernel of
+its own.
 """
 
 from __future__ import annotations
@@ -94,10 +95,34 @@ def test_a_copy_two_regions_read_is_stored_by_neither() -> None:
     graph = Pipeline.build(LOOP_PASSES).run(graph)
 
     readers = [node for node in _loops(graph) if "x" in node.inputs]
-    # The transpose is in the region of the exponential. The product is behind the running sum, which no region
-    # holds, so it is another region; it reads ``x`` itself, and the first kernel stores its exponential alone.
+    # The exponential and the product each read ``x`` itself. The product is behind the running sum, which no region
+    # holds, so it is another region, and the first kernel stores its exponential alone.
     assert len(readers) == 2 and all(len(node.outputs) == 1 for node in readers)
     assert len(_loops(graph)) == 3, "the exponential, the running sum and the product"
+
+
+_TWO_READERS = """
+import torch, torch.nn as nn
+class TwoReaders(nn.Module):
+    def forward(self, x):
+        t = {shared}
+        return torch.relu(t), torch.exp(t)
+m = TwoReaders()
+m(torch.randn(4, 8))
+"""
+
+
+@pytest.mark.parametrize(
+    ("shared", "kernels"),
+    [("x", [1, 1]), ("x.transpose(0, 1)", [1, 1]), ("torch.sin(x)", [2])],
+    ids=["the-input", "a-transpose-of-it", "a-computed-value"],
+)
+def test_loops_are_joined_by_a_value_that_is_computed_never_by_one_that_is_moved(shared: str, kernels: list[int]) -> None:
+    """Two loops that read one input are two kernels, and a transpose between the input and them changes nothing:
+    it is read through by both and joins neither to the other. A value that is computed joins its readers: one
+    kernel computes it once and stores both of their results."""
+    graph = Pipeline.build(LOOP_PASSES).run(graph_from_code(_TWO_READERS.format(shared=shared))[0])
+    assert [len(node.outputs) for node in _loops(graph)] == kernels
 
 
 def _copy_graph(dtype, stored_over: bool = False) -> Graph:
