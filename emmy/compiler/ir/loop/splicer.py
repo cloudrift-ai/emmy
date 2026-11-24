@@ -66,6 +66,7 @@ import math
 from dataclasses import dataclass
 
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.loop.analysis import BodyAnalysis
 from emmy.compiler.ir.loop.assembly import NotSupported, Program, Splicer, UnfusableStmt
 from emmy.compiler.ir.loop.ir import Load, Loop, LoopOp, Write
 
@@ -127,8 +128,15 @@ def splice_loops(
         roots = tuple((root_tag, write.output) for write in loops[root_tag].writes)
     if not roots:
         return None
+    # PROTOTYPE. Two loops that each carry a state both call it by the name the normal form gives a body's first
+    # state: in the merged body each loop's states take a name of their own.
+    carrying = [tag for tag, op in loops.items() if op.body.carries]
+    bodies = {tag: op.body for tag, op in loops.items()}
+    if len(carrying) > 1:
+        for at, tag in enumerate(carrying):
+            bodies[tag] = bodies[tag].rename_buffers({carry.name: f"{carry.name}__{at}" for carry in bodies[tag].carries})
     try:
-        body = Splicer(Program({tag: op.analyze() for tag, op in loops.items()}, splice_edges), roots=roots).run()
+        body = Splicer(Program({tag: BodyAnalysis.from_body(body) for tag, body in bodies.items()}, splice_edges), roots=roots).run()
         return LoopOp(body=body)
     except (NotSupported, ValueError) as exc:
         # NotSupported = splicer hit an unsupported pattern (σ-solve, scope).

@@ -19,11 +19,12 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.graph import Graph, Node
+from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var, affine_form
-from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Body, Let, Load, Loop, Select, Statement
+from emmy.compiler.ir.loop import LoopOp, splice_graph
+from emmy.compiler.ir.stmt import Accum, Body, Carry, Let, Load, Loop, Select, SelectBranch, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import (
     build_merged_region,
@@ -219,10 +220,135 @@ def _neighbours(graph: Graph, carrying: Node) -> dict[str, LoopOp]:
     return members
 
 
+def _without(index: tuple, at: int) -> tuple:
+    return (*index[:at], *index[at + 1 :])
+
+
+def one_loop(graph: Graph, walk: Node, inner: Node) -> tuple[LoopOp, tuple[str, ...]] | None:
+    """PROTOTYPE. ``walk`` and ``inner``, two kernels that each carry a state, as ONE kernel under one loop.
+
+    ``inner`` runs its whole recurrence once per trip of a plain loop of its own, and ``walk`` reads what it stores
+    at the trip that is the walk's step. The one loop runs over both step numbers, ``time = steps of inner * step of
+    walk + step of inner``: the inner state starts from its seed where its own step is the first, and the walk's
+    state moves where it is the last. ``None`` where the two do not stand so."""
+    outer, nested = stepped_stores(walk.op.body), stepped_stores(inner.op.body)
+    if outer is None or nested is None or not outer[0].axis.extent.is_static:
+        return None
+    (walking, _), (rows, _) = outer, nested
+    stores = {tensor.name for tensor in inner.outputs}
+    if any(graph.buffer_users(name) != {walk.id} or name in graph.outputs for name in stores):
+        return None
+    steps, trips = walking.axis.extent.as_static(), rows.axis.extent.as_static()
+    states = {carry.name: carry for carry in inner.op.body.carries}
+    if any(isinstance(carry.seed, str) for carry in states.values()):
+        return None
+    # The loop of ``inner`` that the walk's step is: the one coordinate at which the walk reads its stores.
+    writes = {write.output: write for write in inner.op.body.writes}
+    trip: set[tuple[str, str, int]] = set()
+    for load in walk.op.body.loads:
+        if load.input not in stores:
+            continue
+        write = writes[load.input]
+        where = [at for at, entry in enumerate(load.index) if entry == Var(walking.axis.name)]
+        if len(where) != 1 or not isinstance(write.index[where[0]], Var):
+            return None
+        trip.add((write.index[where[0]].name, load.input, where[0]))
+    axes = {axis for axis, _, _ in trip}
+    if len(axes) != 1:
+        return None
+    (chunk,) = axes
+    at_store = {name: at for _, name, at in trip}
+    if set(at_store) != stores:
+        return None
+    extents = _extents(inner.op.body)
+    if extents is None or extents.get(chunk) != steps:
+        return None
+    time = "time"
+    while time in walk.op.body.axis_names | inner.op.body.axis_names or time in walk.op.body.defined | inner.op.body.defined:
+        time += "_"
+    now, before = Var(time), Var(time) - Literal(1, "int")
+    digit = BinaryExpression("%", now, Literal(trips, "int"))
+    first = BinaryExpression("==", digit, Literal(0, "int"))
+    last = BinaryExpression("==", digit, Literal(trips - 1, "int"))
+    at_state = {}
+    for name, carry in states.items():
+        where = [at for at, entry in enumerate(carry.index) if entry == Var(chunk)]
+        if len(where) > 1:
+            return None
+        at_state[name] = where[0] if where else None
+
+    def cell(name: str, index: tuple) -> tuple:
+        return index[1:] if at_state[name] is None else _without(index, at_state[name])[1:]
+
+    def nested_step(stmt: Statement) -> Statement | tuple[Statement, ...]:
+        if isinstance(stmt, Loop) and stmt.axis.name == chunk:
+            return tuple(stmt.body)
+        if isinstance(stmt, Load) and stmt.input in states:
+            held, seed = f"{stmt.names[0]}__held", f"{stmt.names[0]}__seed"
+            return (
+                stmt.replace(names=(held,), index=(before, *cell(stmt.input, stmt.index))),
+                Let(name=seed, value=Literal(float(states[stmt.input].seed))),
+                Select(name=stmt.names[0], branches=(SelectBranch(seed, first), SelectBranch(held, Literal(True, "bool")))),
+            )
+        if isinstance(stmt, Carry):
+            return stmt.replace(index=(now, *cell(stmt.name, stmt.index)))
+        if isinstance(stmt, Write):
+            return stmt.replace(output=f"{stmt.output}__now", index=(now, *_without(stmt.index, at_store[stmt.output])))
+        return stmt
+
+    moved = {rows.axis.name: digit, chunk: BinaryExpression("/", now, Literal(trips, "int"))}
+    inner_body = Body(part.substitute(moved) for part in rows.body.map(nested_step))
+    walk_states = {carry.name for carry in walk.op.body.carries}
+
+    def walk_step(stmt: Statement) -> Statement | tuple[Statement, ...]:
+        if isinstance(stmt, Load) and stmt.input in walk_states:
+            return stmt.replace(index=(before, *stmt.index[1:]))
+        if isinstance(stmt, Load) and stmt.input in stores:
+            return stmt.replace(input=f"{stmt.input}__now", index=(now, *_without(stmt.index, at_store[stmt.input])))
+        if isinstance(stmt, Carry):
+            held, kept = f"{stmt.value}__held", f"{stmt.value}__kept"
+            return (
+                Load(names=(held,), input=stmt.name, index=(before, *stmt.index[1:])),
+                Select(name=kept, branches=(SelectBranch(stmt.value, last), SelectBranch(held, Literal(True, "bool")))),
+                stmt.replace(value=kept, index=(now, *stmt.index[1:])),
+            )
+        return stmt
+
+    walk_body = Body(part.substitute({walking.axis.name: moved[chunk]}) for part in walking.body.map(walk_step))
+    lets = lambda body: tuple(stmt for stmt in body if isinstance(stmt, Let))  # noqa: E731
+    try:
+        nested_op = LoopOp(body=Body((*lets(inner.op.body), Loop(axis=Axis(time, steps * trips), body=inner_body))))
+        walk_op = LoopOp(body=Body((*lets(walk.op.body), Loop(axis=Axis(time, steps * trips), body=walk_body))))
+    except ValueError:
+        return None
+    live = live_outputs_of(graph, {walk.id, inner.id})
+    sub = Graph()
+    for name in dict.fromkeys(name for node in (inner, walk) for name in node.inputs if name not in stores):
+        sub.add_node(InputOp(), [], graph.buffer(name), node_id=name)
+    now_tensors = []
+    for tensor in inner.outputs:
+        shape = (steps * trips, *_without(tuple(tensor.shape), at_store[tensor.name]))
+        now_tensors.append(Tensor(f"{tensor.name}__now", shape, tensor.dtype))
+    sub.add_node(nested_op, list(nested_op.inputs), outputs=now_tensors, node_id=now_tensors[0].name)
+    sub.add_node(walk_op, list(walk_op.inputs), outputs=walk.outputs, node_id=walk.id)
+    sub.outputs = list(live)
+    merged = splice_graph(sub)
+    return None if merged is None else (merged[0], live)
+
+
 def rewrite(match: Match, carrying: Node) -> Graph:
     graph = match.graph
     if not carrying.op.body.carries:
         raise RuleSkipped("the kernel carries no state")
+    for name in carrying.inputs:
+        inner = graph.producer(name)
+        if inner is not None and isinstance(inner.op, LoopOp) and inner.op.body.carries and inner.id != carrying.id:
+            together = one_loop(graph, carrying, inner)
+            if together is not None:
+                fragment, output_map = wrap_multi_output_fragment(graph, together[0], together[1])
+                match.consumed = {carrying.id, inner.id}
+                match.output = together[1][0] if len(together[1]) == 1 else output_map
+                return fragment
     members = _neighbours(graph, carrying)
     if len(members) == 1:
         raise RuleSkipped("no kernel beside this one runs in its step")
