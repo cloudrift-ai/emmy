@@ -1732,6 +1732,13 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     set. A load-vectorizer change that widens a packed weight's byte loads in a serial loop sped the fused
     down-and-sum from 16.4 to 14.3 us at one row and from 63.5 to 51.2 at eight; no kernel set recorded here uses that
     kernel and the change moves code of other models' goldens, so it was left out.
+- **A tune that measures a kernel set's pieces before the set is compared (2026-11-24).** The item the 2026-11-21
+  round left for the search, main `10494ea1c`. In progress: the design and the gate are in the round's pull request.
+  - Reproduced on the card, cold, from a tune DB with no row of the program: the compiler's own kernel set for post8
+    is 15 kernels at 542.7 us (139.3 us pinned by hand, also 15 kernels), and for the one-row slot program with its
+    sum inside 2 kernels at 61.4 us (33.8 us pinned by hand, 3 kernels). `--tune` refuses both programs, because it
+    tunes a program of one kernel. The one-kernel tune itself is not the gap: on three of post8's hand-pinned pieces
+    it reached the pinned time within its first 8 tries, at 0.7 s a try.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
