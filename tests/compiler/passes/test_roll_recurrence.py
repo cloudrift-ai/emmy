@@ -19,7 +19,8 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Accum, Loop
+from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.stmt import Accum, Cond, Loop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline, RuleSkipped
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
@@ -78,25 +79,19 @@ def test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state() -
     graph, _, _ = graph_from_code(_delta())
     graph = Pipeline.build(LOOP_PASSES).run(graph)
 
-    (rolled,) = _carriers(graph)
+    (rolled,) = (node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp))
     (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
     # Four chunks: the last chunk's state is never read, so three steps are carried.
     assert steps.axis.extent.as_static() == 3 and list(steps.carries) == [carry.name for carry in rolled.body.carries]
-    # Every input is read at a step-relative offset.
-    states = {carry.name for carry in rolled.body.carries}
-    assert all(steps.axis.name in load.index[1].free_vars() for load in rolled.body.loads if load.input not in states)
-    # A chunk's output reads the state its step starts with and nothing of another step, so the step computes it:
-    # the kernel stores that output every step, and of the states the one the loop ends with.
-    last, outs = rolled.outputs.values()
-    assert len(outs.shape) == len(last.shape) + 1 and outs.shape[0].as_static() == 3
-    read_back = [load for load in rolled.body.loads if load.input in states]
-    assert "q" in rolled.inputs and len(read_back) == 2, "the state's own step, and the output's product"
-    # Each of those outputs is one stored step read back, and the last chunk's reads the stored state.
-    readers = {node.id: node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp) and outs.name in node.inputs}
-    reads = sorted(load.index[0].value for op in readers.values() for load in op.body.loads if load.input == outs.name)
-    assert reads == [0, 1, 2] and not any(op.body.accums for op in readers.values())
-    (final,) = (node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp) and last.name in node.inputs)
-    assert len(final.body.accums) == 1 and "q" in final.inputs
+    # A chunk's output reads the state its step starts with and nothing of another step, so the step computes it and
+    # stores it at its own time. The last chunk's output reads the state the loop ends with: the last step stores it.
+    stored = {}
+    for cond in rolled.body.iter_of_type(Cond):
+        (write,) = cond.body.writes
+        (at,) = (side.value for side in (cond.cond.left, cond.cond.right) if isinstance(side, Literal))
+        stored[write.output] = at
+    assert sorted(stored.values()) == [0, 1, 2, 2] and set(stored) == set(graph.outputs)
+    assert len(rolled.body.writes) == 4, "the kernel stores the four outputs and nothing else"
 
 
 _STACKED = """
@@ -603,15 +598,15 @@ m(torch.randn(2, 3, {n}, {n}) * 0.2)
 def test_a_step_at_the_edge_of_its_matrix_rolls_with_the_rest() -> None:
     """A step that writes row ``i`` masks its store by ``i <= row < i + 1``. At the last row the normal form drops
     the bound the extent already gives, so that step's body no longer spells like the others. It is still the first
-    step advanced, and the roll takes it: every row's step is in the kernel that carries the state, and what is left
-    beside it, the reader of the last state, computes no product."""
+    step advanced, and the roll takes it: every row's step is in the kernel that carries the state. The reader of
+    the last state is stored by the last step, so the program is one kernel."""
     n = 16
     rolled = Pipeline.build(LOOP_PASSES).run(graph_from_code(_ROWS.format(n=n))[0])
-    loops = [node.op for node in rolled.nodes.values() if isinstance(node.op, LoopOp)]
-    (scan,) = (op for op in loops if op.body.carries)
+    (scan,) = (node.op for node in rolled.nodes.values() if isinstance(node.op, LoopOp))
     (steps,) = (stmt for stmt in scan.body if isinstance(stmt, Loop))
-    assert steps.axis.extent.as_static() == n - 1
-    assert len(loops) == 2 and not [op for op in loops if op is not scan and op.body.iter_of_type(Accum)]
+    assert steps.axis.extent.as_static() == n - 1 and scan.body.carries
+    (at_last,) = scan.body.iter_of_type(Cond)
+    assert n - 2 in {side.value for side in (at_last.cond.left, at_last.cond.right) if isinstance(side, Literal)}
 
     got, reference = _lifted_output(_ROWS.format(n=8), "a")
     np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)

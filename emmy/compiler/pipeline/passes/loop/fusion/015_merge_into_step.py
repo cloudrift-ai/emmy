@@ -29,6 +29,7 @@ from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import (
     build_merged_region,
     chosen_cell,
+    copied,
     joins_a_region,
     live_outputs_of,
     plain_load,
@@ -105,6 +106,8 @@ def _one_read(graph: Graph, body: Body, stepped: _Stepped) -> Body:
     for select in body.iter_of_type(Select):
         loads = [reads.get(branch.value) for branch in select.branches]
         if any(load is None for load in loads) or len({load.input for load in loads}) != 1 or loads[0].input not in stepped:
+            continue
+        if graph.buffer(loads[0].input) is None:
             continue
         cell = chosen_cell(body, select, graph.buffer(loads[0].input).shape)
         if cell is not None:
@@ -364,15 +367,51 @@ def _places(op: LoopOp) -> _Stepped | None:
     return places
 
 
+def at_their_steps(body: Body, stepped: _Stepped, steps: int, time: str) -> LoopOp | None:
+    """PROTOTYPE. A plain kernel each store of which reads the steps at one literal, on the loop over the steps: a
+    store is made at the time it reads, from what the step holds then. ``None`` where a store reads two steps, or
+    none, or a step that is a digit of a wider coordinate."""
+    here = Var(time)
+
+    def read_at(load: Load) -> int | None:
+        at, width = stepped[load.input]
+        entry = load.index[at] if plain_load(load) and at < len(load.index) else None
+        return entry.value if width == 1 and isinstance(entry, Literal) else None
+
+    when: dict[Write, int] = {}
+    for write in body.writes:
+        alone = body.map(lambda stmt, write=write: () if isinstance(stmt, Write) and stmt != write else stmt).pruned(write.values)
+        times = {read_at(load) for load in alone.loads if load.input in stepped}
+        if len(times) != 1 or None in times:
+            return None
+        when[write] = times.pop()
+
+    def move(stmt: Statement) -> Statement:
+        if isinstance(stmt, Load) and stmt.input in stepped:
+            at = stepped[stmt.input][0]
+            return stmt.replace(index=(*stmt.index[:at], here, *stmt.index[at + 1 :]))
+        if isinstance(stmt, Write):
+            return Cond(cond=BinaryExpression("==", here, Literal(when[stmt], "int")), body=Body((stmt,)))
+        return stmt
+
+    lets = tuple(stmt for stmt in body if isinstance(stmt, Let))
+    rest = Body(stmt for stmt in body if not isinstance(stmt, Let)).map(move)
+    try:
+        return LoopOp(body=Body((*lets, Loop(axis=Axis(time, steps), body=rest))))
+    except ValueError:
+        return None
+
+
 def in_step(graph: Graph, reader: LoopOp, stepped: _Stepped, steps: int) -> tuple[LoopOp, _Stepped] | None:
     """A plain ``reader`` as it runs inside the step, and where each buffer it stores holds the step
-    (:func:`relate`, :func:`placed`). ``None`` where some trip reads two steps, or a step that no coordinate of its
-    own names."""
+    (:func:`relate`, :func:`placed`): its trips follow the steps where each reads one, and where its stores each
+    read one step by a literal they are made at that step (:func:`at_their_steps`). ``None`` where neither holds."""
     body = _one_read(graph, reader.body, stepped)
     time = _fresh("step", body)
     alignment = relate(None, body, stepped, steps, time)
     if alignment is None:
-        return None
+        once = at_their_steps(body, stepped, steps, time)
+        return None if once is None else (once, {})
     op = placed(replace(reader, body=body, inputs={}), time, alignment.extent, alignment.reader, alignment.now, {}, False)
     places = None if op is None else _places(op)
     return None if places is None else (op, places)
@@ -401,14 +440,20 @@ def from_a_read(graph: Graph, op: LoopOp, seeds: set[str]) -> LoopOp:
     return replace(op, body=op.body.map(move), inputs={}) if starts else op
 
 
-def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[str]]:
+def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[str], dict[str, tuple[Tensor, ...]]]:
     """``carrying`` and every kernel that joins its step, each as it is spliced: a kernel the step reads as it is, a
     reader of the step's stores as it runs inside the step (:func:`in_step`). And those of them that stay kernels
-    of their own beside the step, for whoever else reads them."""
+    of their own beside the step, for whoever else reads them. And the twins each member stores beside its own
+    buffers."""
     members: dict[str, LoopOp] = {carrying.id: carrying.op}
     kept: set[str] = set()
     frame = stepped_stores(carrying.op.body)
     stepped: _Stepped = dict(frame[1]) if frame is not None else {}
+    last = Literal(frame[0].axis.extent.as_static() - 1, "int") if frame is not None else None
+    # PROTOTYPE. A buffer the step stores at a cell that holds no step holds, after the loop, what the last step
+    # stored. Its twin holds every step's, so a reader of the buffer is a reader of the last step.
+    standing = _standing(carrying, stepped) if frame is not None else {}
+    stepped.update({twin.name: (0, 1) for twin in standing.values()})
     order = graph.topological_order()
     downstream: dict[str, set[str]] = {}
     for nid in reversed(order):
@@ -421,7 +466,7 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
     # kernel that reads a buffer this one stores over reads it before that store, so it is a kernel before this one.
     seeds = {carry.seed for carry in carrying.op.body.carries if isinstance(carry.seed, str)}
     filled = {name for name in seeds if isinstance(graph.producer(name).op, LoopOp) and joins_a_region(graph.producer(name).op)}
-    members[carrying.id] = from_a_read(graph, carrying.op, filled)
+    members[carrying.id] = _with_twins(from_a_read(graph, carrying.op, filled), standing)
     seeds -= filled
     over = {tensor.alias for tensor in carrying.outputs if tensor.alias is not None}
 
@@ -450,8 +495,16 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
                 # taken for recomputation: a cut's choice, on the merged kernel.
                 members[nid] = node.op
                 kept.add(nid)
-            elif frame is not None and read and all(name in stepped for name in read):
-                moved = in_step(graph, node.op, {name: stepped[name] for name in read}, frame[0].axis.extent.as_static())
+            elif frame is not None and read and all(name in stepped or name in standing for name in read):
+                if any(name in standing for name in read) and copied(graph, node.outputs[0].name) is not None:
+                    continue  # a copy of what the last step stored: the step stores it there (``020``)
+                body = node.op.body.map(
+                    lambda stmt: stmt.replace(input=standing[stmt.input].name, index=(last, *stmt.index))
+                    if isinstance(stmt, Load) and stmt.input in standing
+                    else stmt
+                )
+                reads = {standing[name].name if name in standing else name for name in read}
+                moved = in_step(graph, replace(node.op, body=body, inputs={}), {name: stepped[name] for name in reads}, int(last.value) + 1)
                 if moved is None:
                     continue
                 members[nid] = moved[0]
@@ -459,7 +512,32 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
             else:
                 continue
             grown = True
-    return members, kept
+    return members, kept, {carrying.id: tuple(standing.values())}
+
+
+def _standing(carrying: Node, stepped: _Stepped) -> dict[str, Tensor]:
+    """The twin of each buffer ``carrying`` stores on every step at a cell that holds no step: the buffer with the
+    step before its cell."""
+    body = carrying.op.body
+    steps = next(stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries).axis.extent
+    sometimes = {write.output for cond in body.iter_of_type(Cond) for write in cond.body.writes}
+    return {
+        tensor.name: Tensor(f"{tensor.name}__now", (steps, *tensor.shape), tensor.dtype)
+        for tensor in carrying.outputs
+        if tensor.name not in stepped and tensor.name not in sometimes and tensor.alias is None
+    }
+
+
+def _with_twins(op: LoopOp, standing: dict[str, Tensor]) -> LoopOp:
+    """``op`` storing the twin of each standing buffer beside the buffer."""
+    (step,) = (stmt.axis.name for stmt in op.body if isinstance(stmt, Loop) and stmt.carries)
+
+    def both(stmt: Statement) -> Statement | tuple[Statement, ...]:
+        if not isinstance(stmt, Write) or stmt.output not in standing:
+            return stmt
+        return (stmt, stmt.replace(output=standing[stmt.output].name, index=(Var(step), *stmt.index)))
+
+    return replace(op, body=op.body.map(both), inputs={}) if standing else op
 
 
 def together(graph: Graph, walk: Node, inner: Node) -> tuple[LoopOp, tuple[str, ...]] | None:
@@ -512,11 +590,11 @@ def rewrite(match: Match, carrying: Node) -> Graph:
                 match.consumed = {carrying.id, inner.id}
                 match.output = merged[1][0] if len(merged[1]) == 1 else output_map
                 return fragment
-    members, kept = _neighbours(graph, carrying)
+    members, kept, twins = _neighbours(graph, carrying)
     if len(members) == 1:
         raise RuleSkipped("no kernel beside this one runs in its step")
     live = tuple(name for name in live_outputs_of(graph, set(members)) if graph.producer(name).id not in kept)
-    merged = build_merged_region(graph, set(members), live, members)
+    merged = build_merged_region(graph, set(members), live, members, twins)
     if merged is None:
         raise ValueError(f"fusion cannot splice the step of {carrying.id!r} with {sorted(set(members) - {carrying.id})}")
     fragment, output_map = wrap_multi_output_fragment(graph, merged, live)

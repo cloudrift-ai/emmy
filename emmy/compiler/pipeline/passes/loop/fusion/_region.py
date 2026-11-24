@@ -312,10 +312,15 @@ def live_outputs_of(graph: Graph, region: set[str]) -> tuple[str, ...]:
 
 
 def build_merged_region(
-    graph: Graph, region: set[str], live_outputs: tuple[str, ...], ops: dict[str, LoopOp] | None = None
+    graph: Graph,
+    region: set[str],
+    live_outputs: tuple[str, ...],
+    ops: dict[str, LoopOp] | None = None,
+    twins: dict[str, tuple[Tensor, ...]] | None = None,
 ) -> LoopOp | None:
     """Splice one maximal region, sharing equal upstream demands across roots. ``ops`` gives a member the loop it is
-    spliced as where that is not the node's own."""
+    spliced as where that is not the node's own, and ``twins`` the buffers it then stores beside the node's own, for
+    the members that read them."""
     order = [nid for nid in graph.topological_order() if nid in region]
     sub = Graph()
     external: list[str] = []
@@ -331,7 +336,7 @@ def build_merged_region(
         sub.add_node(InputOp(), [], ext_t, node_id=ext_id)
     for nid in order:
         node = graph.nodes[nid]
-        sub.add_node((ops or {}).get(nid, node.op), list(node.inputs), outputs=node.outputs, node_id=nid)
+        sub.add_node((ops or {}).get(nid, node.op), list(node.inputs), outputs=(*node.outputs, *(twins or {}).get(nid, ())), node_id=nid)
     sub.outputs = list(live_outputs)
 
     result = splice_graph(sub)
