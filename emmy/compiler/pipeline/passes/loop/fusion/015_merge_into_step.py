@@ -16,13 +16,13 @@ keeping apart is a cut's decision, taken on the merged kernel.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, TernaryExpression, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, TernaryExpression, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, splice_graph
 from emmy.compiler.ir.stmt import Accum, Body, Carry, Cond, Let, Load, Loop, Select, SelectBranch, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -111,56 +111,212 @@ def _one_read(graph: Graph, body: Body, stepped: _Stepped) -> Body:
     return body.map(lambda stmt: () if isinstance(stmt, Load) and stmt.input in stepped and not set(stmt.names) & used else stmt)
 
 
-def in_step(graph: Graph, reader: LoopOp, stepped: _Stepped, steps: int) -> tuple[LoopOp, _Stepped] | None:
-    """``reader`` as it runs inside the step, and where each buffer it stores holds the step: its outermost loop is
-    the loop over the ``steps``, and a trip of it does the trips of ``reader`` that read that step. ``None`` where
-    some trip reads two steps, or a step that no coordinate of its own names."""
-    body = _one_read(graph, reader.body, stepped)
-    extents = _extents(body)
+_TRUE = Literal(True, "bool")
+
+
+@dataclass(frozen=True)
+class Place:
+    """PROTOTYPE. Where a kernel stands on the ONE loop it shares with another, as functions of that loop's ``time``.
+
+    Two kernels share a loop where the coordinates of one are an affine function of the other's. Each then has a
+    place on the loop: the step it does at a time (``step``, for a kernel with a loop of steps), where it does one
+    at all (``active``; at every time when ``None``), where its states start again from their seeds (``restart``),
+    and the plain loops of its own that follow the time (``pins``: the loop's axis, its value at this time, and the
+    trips the loop keeps below that value)."""
+
+    step: Expression | None = None
+    active: Expression | None = None
+    restart: Expression | None = None
+    pins: tuple[tuple[str, Expression, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class Alignment:
+    """How a reader and the kernel it reads share one loop of ``extent`` trips: each one's :class:`Place` (``None``
+    for a producer whose own steps are the loop), the stepped stores the reader takes at this time (``now``: the
+    position that held the step), and the stores it takes as they stand at this time through a twin that holds
+    every time (``twins``: the position that held the producer's pinned loop)."""
+
+    extent: int
+    producer: Place | None
+    reader: Place
+    now: dict[str, int]
+    twins: dict[str, int]
+
+
+def _fresh(name: str, *bodies: Body) -> str:
+    while any(name in body.axis_names or name in body.defined for body in bodies):
+        name += "_"
+    return name
+
+
+def relate(producer: Body | None, reader: Body, stepped: _Stepped, steps: int, time: str) -> Alignment | None:
+    """The alignment of ``reader`` with what it reads, or ``None`` where their coordinates are not one an affine
+    function of the other.
+
+    ``stepped`` names the stores that hold a step of the loop of ``steps`` the reader may join, and where. A read of
+    one says which step: ``step = v + k`` for the reader's own step ``v`` puts the two side by side, ``k`` apart;
+    ``step = v / c`` for a plain loop ``v`` of the reader makes that loop follow the time, ``c`` trips below it. A
+    read of a store of ``producer`` that holds no step, at the reader's own step in the place of a plain loop of the
+    producer, puts the producer's whole recurrence inside each step of the reader:
+    ``time = producer's steps * reader's step + producer's step``."""
+    extents = _extents(reader)
     if extents is None:
         return None
+    carried = [stmt for stmt in reader if isinstance(stmt, Loop) and stmt.carries]
+    own = carried[0].axis.name if len(carried) == 1 else None
+    here = Var(time)
     ctx = SimplifyCtx.empty()
     for name, extent in extents.items():
         ctx = ctx.extend(name, Interval(0, extent - 1), Literal(extent, "int"))
-    digits: set[tuple[str, int]] = set()
-    for load in body.loads:
+    follows: set[tuple[str, int, int]] = set()
+    now: dict[str, int] = {}
+    for load in reader.loads:
         if load.input not in stepped:
             continue
         at, width = stepped[load.input]
         if not plain_load(load) or at >= len(load.index):
             return None
-        entry = load.index[at] if width == 1 else BinaryExpression("/", load.index[at], Literal(width, "int"))
-        entry = entry.simplify(ctx)
-        if isinstance(entry, Var):
-            digits.add((entry.name, 1))
-        elif isinstance(entry, BinaryExpression) and entry.op == "/" and isinstance(entry.left, Var) and isinstance(entry.right, Literal):
-            digits.add((entry.left.name, entry.right.value))
+        entry = (load.index[at] if width == 1 else BinaryExpression("/", load.index[at], Literal(width, "int"))).simplify(ctx)
+        form = affine_form(entry, entry.free_vars())
+        if isinstance(entry, BinaryExpression) and entry.op == "/" and isinstance(entry.left, Var) and isinstance(entry.right, Literal):
+            follows.add((entry.left.name, entry.right.value, 0))
+        elif form is not None and len(form[1]) == 1 and next(iter(form[1].values())) == 1:
+            try:
+                follows.add((next(iter(form[1])), 1, form[0].eval({})))
+            except (KeyError, TypeError, ValueError):
+                return None
         else:
             return None
-    if len(digits) != 1:
+        if width == 1:
+            now[load.input] = at
+    if follows:
+        if len(follows) != 1:
+            return None
+        ((axis, trips, offset),) = follows
+        if axis == own:
+            # Side by side: the reader's step ``v`` is the step ``v + offset`` of what it reads.
+            last = offset + extents[axis]
+            if trips != 1 or offset < 0 or last > steps:
+                return None
+            active = BinaryExpression("<", here, Literal(last, "int"))
+            if offset:
+                active = BinaryExpression("&&", BinaryExpression("<=", Literal(offset, "int"), here), active)
+            whole = last == steps and not offset
+            return Alignment(steps, None, Place(step=here - Literal(offset, "int"), active=None if whole else active), now, {})
+        # A plain loop of the reader follows the time: a trip of it reads one step, and no reduction folds it.
+        folded = any(axis in accum.axes for accum in reader.iter_of_type(Accum))
+        if own is not None or offset or extents.get(axis) != trips * steps or folded:
+            return None
+        if sum(len(loop.body.writes) for loop in reader.iter_of_type(Loop) if loop.axis.name == axis) != len(reader.writes):
+            return None  # every store sits under the loop that follows the time: another would be stored once a step
+        return Alignment(steps, None, Place(pins=((axis, here, trips),)), {} if trips > 1 else now, {})
+    if producer is None or own is None:
         return None
-    ((axis, width),) = digits
-    # The coordinate is a loop of the reader's own, over every step, and no reduction folds it: a trip reads one step.
-    if extents.get(axis) != width * steps or any(axis in accum.axes for accum in body.iter_of_type(Accum)):
+    # Inside: the reader reads a result of the producer that holds no step, at its own step.
+    rows = [stmt for stmt in producer if isinstance(stmt, Loop) and stmt.carries]
+    inner = _extents(producer)
+    if len(rows) != 1 or inner is None or not rows[0].axis.extent.is_static:
         return None
-    step = "step"
-    while step in body.axis_names or step in body.defined:
-        step += "_"
-    moved = BinaryExpression("+", BinaryExpression("*", Var(step), Literal(width, "int")), Var(axis)) if width > 1 else Var(step)
+    writes = {write.output: write for write in producer.writes}
+    twins: dict[str, int] = {}
+    chunks: set[str] = set()
+    for load in reader.loads:
+        if load.input not in writes:
+            continue
+        where = [at for at, entry in enumerate(load.index) if entry == Var(own)]
+        if len(where) != 1 or not isinstance(writes[load.input].index[where[0]], Var):
+            return None
+        chunks.add(writes[load.input].index[where[0]].name)
+        twins[load.input] = where[0]
+    trips = rows[0].axis.extent.as_static()
+    if len(chunks) != 1 or set(twins) != set(writes) or inner.get(next(iter(chunks))) != extents[own]:
+        return None
+    if any(isinstance(carry.seed, str) for carry in producer.carries):
+        return None
+    digit = BinaryExpression("%", here, Literal(trips, "int"))
+    chunk = BinaryExpression("/", here, Literal(trips, "int"))
+    inside = Place(step=digit, restart=BinaryExpression("==", digit, Literal(0, "int")), pins=((next(iter(chunks)), chunk, 1),))
+    outside = Place(step=chunk, active=BinaryExpression("==", digit, Literal(trips - 1, "int")))
+    return Alignment(trips * extents[own], inside, outside, {}, twins)
 
-    def cut(stmt: Statement) -> Statement | tuple[Statement, ...]:
-        if not isinstance(stmt, Loop) or stmt.axis.name != axis:
+
+def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int], twins: dict[str, int], stores: bool) -> LoopOp | None:
+    """``op`` on the one loop over ``time``, at its :class:`Place`: its states read one time back and held where it
+    has no step, its stores kept to its own steps, its pinned loops following the time. ``stores`` says the
+    ``twins`` are its own stores (it writes the twin) and not stores it reads (it reads the twin)."""
+    body = op.body
+    carried = [stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries]
+    if len(carried) > 1:
+        return None
+    lets = tuple(stmt for stmt in body if isinstance(stmt, Let))
+    inner = carried[0].body if carried else Body(stmt for stmt in body if not isinstance(stmt, Let))
+    here, before = Var(time), Var(time) - Literal(1, "int")
+    states = {carry.name: carry for carry in body.carries}
+    pins = {axis: (value, trips) for axis, value, trips in place.pins}
+    gone = {axis for axis, (_, trips) in pins.items() if trips == 1}
+
+    def cell(name: str, index: tuple) -> tuple:
+        held = states[name].index
+        return tuple(entry for at, entry in enumerate(index) if at and not (isinstance(held[at], Var) and held[at].name in gone))
+
+    def without(index: tuple, at: int) -> tuple:
+        return (here, *index[:at], *index[at + 1 :])
+
+    def move(stmt: Statement) -> Statement | tuple[Statement, ...]:
+        if isinstance(stmt, Load) and stmt.input in states:
+            read = stmt.replace(index=(before, *cell(stmt.input, stmt.index)))
+            if place.restart is None:
+                return read
+            held, seed = f"{stmt.names[0]}__held", f"{stmt.names[0]}__seed"
+            return (
+                read.replace(names=(held,)),
+                Let(name=seed, value=Literal(float(states[stmt.input].seed))),
+                Select(name=stmt.names[0], branches=(SelectBranch(seed, place.restart), SelectBranch(held, _TRUE))),
+            )
+        if isinstance(stmt, Load) and stmt.input in now:
+            at = now[stmt.input]
+            return stmt.replace(index=(*stmt.index[:at], here, *stmt.index[at + 1 :]))
+        if isinstance(stmt, Load) and stmt.input in twins and not stores:
+            return stmt.replace(input=f"{stmt.input}__now", index=without(stmt.index, twins[stmt.input]))
+        if isinstance(stmt, Carry):
+            index = (here, *cell(stmt.name, stmt.index))
+            if place.active is None:
+                return stmt.replace(index=index)
+            held, kept = f"{stmt.value}__held", f"{stmt.value}__kept"
+            return (
+                Load(names=(held,), input=stmt.name, index=(before, *index[1:])),
+                Select(name=kept, branches=(SelectBranch(stmt.value, place.active), SelectBranch(held, _TRUE))),
+                stmt.replace(value=kept, index=index),
+            )
+        if isinstance(stmt, Write) and stmt.output in twins and stores:
+            return stmt.replace(output=f"{stmt.output}__now", index=without(stmt.index, twins[stmt.output]))
+        if isinstance(stmt, Write) and place.active is not None and place.step is not None and carried and not stores:
+            return Cond(cond=place.active, body=Body((stmt,)))
+        return stmt
+
+    def follow(stmt: Statement) -> Statement | tuple[Statement, ...]:
+        if not isinstance(stmt, Loop) or stmt.axis.name not in pins:
             return stmt
-        inner = Body(tuple(part.substitute({axis: moved}) for part in stmt.body))
-        return tuple(inner) if width == 1 else stmt.replace(axis=replace(stmt.axis, extent=Dim(width)), body=inner)
+        value, trips = pins[stmt.axis.name]
+        if trips == 1:
+            return tuple(part.substitute({stmt.axis.name: value}) for part in stmt.body)
+        moved = BinaryExpression("+", BinaryExpression("*", value, Literal(trips, "int")), Var(stmt.axis.name))
+        inside = Body(tuple(part.substitute({stmt.axis.name: moved}) for part in stmt.body))
+        return stmt.replace(axis=replace(stmt.axis, extent=Dim(trips)), body=inside)
 
-    # Every store sits under the loop that became the step: another would be stored once a step.
-    if sum(len(loop.body.writes) for loop in body.iter_of_type(Loop) if loop.axis.name == axis) != len(body.writes):
-        return None
+    stepped_body = inner.map(move).map(follow)
+    if carried and place.step is not None:
+        step = place.step if place.active is None else TernaryExpression(place.active, place.step, Literal(0, "int"))
+        stepped_body = Body(part.substitute({carried[0].axis.name: step}) for part in stepped_body)
     try:
-        op = LoopOp(body=Body((Loop(axis=Axis(step, steps), body=body.map(cut)),)))
+        return LoopOp(body=Body((*lets, Loop(axis=Axis(time, extent), body=stepped_body))))
     except ValueError:
         return None
+
+
+def _places(op: LoopOp) -> _Stepped | None:
+    """Where each buffer ``op`` stores holds the step of its one outer loop, or ``None`` where one holds none."""
     loops = [stmt for stmt in op.body if not isinstance(stmt, Let)]
     inner = _extents(op.body)
     if len(loops) != 1 or not isinstance(loops[0], Loop) or inner is None:
@@ -170,7 +326,21 @@ def in_step(graph: Graph, reader: LoopOp, stepped: _Stepped, steps: int) -> tupl
         widths = [(at, found) for at, entry in enumerate(write.index) if (found := _width(entry, loops[0].axis.name, inner))]
         if len(widths) != 1 or places.setdefault(write.output, widths[0]) != widths[0]:
             return None
-    return op, places
+    return places
+
+
+def in_step(graph: Graph, reader: LoopOp, stepped: _Stepped, steps: int) -> tuple[LoopOp, _Stepped] | None:
+    """A plain ``reader`` as it runs inside the step, and where each buffer it stores holds the step
+    (:func:`relate`, :func:`placed`). ``None`` where some trip reads two steps, or a step that no coordinate of its
+    own names."""
+    body = _one_read(graph, reader.body, stepped)
+    time = _fresh("step", body)
+    alignment = relate(None, body, stepped, steps, time)
+    if alignment is None or alignment.reader.step is not None:
+        return None
+    op = placed(replace(reader, body=body, inputs={}), time, alignment.extent, alignment.reader, alignment.now, {}, False)
+    places = None if op is None else _places(op)
+    return None if places is None else (op, places)
 
 
 def _neighbours(graph: Graph, carrying: Node) -> dict[str, LoopOp]:
@@ -220,192 +390,41 @@ def _neighbours(graph: Graph, carrying: Node) -> dict[str, LoopOp]:
     return members
 
 
-def _without(index: tuple, at: int) -> tuple:
-    return (*index[:at], *index[at + 1 :])
-
-
-def one_loop(graph: Graph, walk: Node, inner: Node) -> tuple[LoopOp, tuple[str, ...]] | None:
-    """PROTOTYPE. ``walk`` and ``inner``, two kernels that each carry a state, as ONE kernel under one loop.
-
-    ``inner`` runs its whole recurrence once per trip of a plain loop of its own, and ``walk`` reads what it stores
-    at the trip that is the walk's step. The one loop runs over both step numbers, ``time = steps of inner * step of
-    walk + step of inner``: the inner state starts from its seed where its own step is the first, and the walk's
-    state moves where it is the last. ``None`` where the two do not stand so."""
-    outer, nested = stepped_stores(walk.op.body), stepped_stores(inner.op.body)
-    if outer is None or nested is None or not outer[0].axis.extent.is_static:
+def together(graph: Graph, walk: Node, inner: Node) -> tuple[LoopOp, tuple[str, ...]] | None:
+    """PROTOTYPE. ``walk`` and ``inner``, a kernel that carries a state and one it reads that carries one too, as ONE
+    kernel under one loop (:func:`relate`): side by side where the walk reads the other's steps an offset apart, the
+    other's whole recurrence inside each step of the walk where it reads its result at its own step."""
+    frame = stepped_stores(inner.op.body)
+    if frame is None or stepped_stores(walk.op.body) is None:
         return None
-    (walking, _), (rows, _) = outer, nested
     stores = {tensor.name for tensor in inner.outputs}
-    if any(graph.buffer_users(name) != {walk.id} or name in graph.outputs for name in stores):
+    time = _fresh("time", walk.op.body, inner.op.body)
+    stepped = {name: place for name, place in frame[1].items() if name in stores}
+    alignment = relate(inner.op.body, walk.op.body, stepped, frame[0].axis.extent.as_static(), time)
+    if alignment is None:
         return None
-    steps, trips = walking.axis.extent.as_static(), rows.axis.extent.as_static()
-    states = {carry.name: carry for carry in inner.op.body.carries}
-    if any(isinstance(carry.seed, str) for carry in states.values()):
+    if alignment.twins and any(graph.buffer_users(name) != {walk.id} or name in graph.outputs for name in stores):
         return None
-    # The loop of ``inner`` that the walk's step is: the one coordinate at which the walk reads its stores.
-    writes = {write.output: write for write in inner.op.body.writes}
-    trip: set[tuple[str, str, int]] = set()
-    for load in walk.op.body.loads:
-        if load.input not in stores:
-            continue
-        write = writes[load.input]
-        where = [at for at, entry in enumerate(load.index) if entry == Var(walking.axis.name)]
-        if len(where) != 1 or not isinstance(write.index[where[0]], Var):
-            return None
-        trip.add((write.index[where[0]].name, load.input, where[0]))
-    axes = {axis for axis, _, _ in trip}
-    if len(axes) != 1:
-        return None
-    (chunk,) = axes
-    at_store = {name: at for _, name, at in trip}
-    if set(at_store) != stores:
-        return None
-    extents = _extents(inner.op.body)
-    if extents is None or extents.get(chunk) != steps:
-        return None
-    time = "time"
-    while time in walk.op.body.axis_names | inner.op.body.axis_names or time in walk.op.body.defined | inner.op.body.defined:
-        time += "_"
-    now, before = Var(time), Var(time) - Literal(1, "int")
-    digit = BinaryExpression("%", now, Literal(trips, "int"))
-    first = BinaryExpression("==", digit, Literal(0, "int"))
-    last = BinaryExpression("==", digit, Literal(trips - 1, "int"))
-    at_state = {}
-    for name, carry in states.items():
-        where = [at for at, entry in enumerate(carry.index) if entry == Var(chunk)]
-        if len(where) > 1:
-            return None
-        at_state[name] = where[0] if where else None
-
-    def cell(name: str, index: tuple) -> tuple:
-        return index[1:] if at_state[name] is None else _without(index, at_state[name])[1:]
-
-    def nested_step(stmt: Statement) -> Statement | tuple[Statement, ...]:
-        if isinstance(stmt, Loop) and stmt.axis.name == chunk:
-            return tuple(stmt.body)
-        if isinstance(stmt, Load) and stmt.input in states:
-            held, seed = f"{stmt.names[0]}__held", f"{stmt.names[0]}__seed"
-            return (
-                stmt.replace(names=(held,), index=(before, *cell(stmt.input, stmt.index))),
-                Let(name=seed, value=Literal(float(states[stmt.input].seed))),
-                Select(name=stmt.names[0], branches=(SelectBranch(seed, first), SelectBranch(held, Literal(True, "bool")))),
-            )
-        if isinstance(stmt, Carry):
-            return stmt.replace(index=(now, *cell(stmt.name, stmt.index)))
-        if isinstance(stmt, Write):
-            return stmt.replace(output=f"{stmt.output}__now", index=(now, *_without(stmt.index, at_store[stmt.output])))
-        return stmt
-
-    moved = {rows.axis.name: digit, chunk: BinaryExpression("/", now, Literal(trips, "int"))}
-    inner_body = Body(part.substitute(moved) for part in rows.body.map(nested_step))
-    walk_states = {carry.name for carry in walk.op.body.carries}
-
-    def walk_step(stmt: Statement) -> Statement | tuple[Statement, ...]:
-        if isinstance(stmt, Load) and stmt.input in walk_states:
-            return stmt.replace(index=(before, *stmt.index[1:]))
-        if isinstance(stmt, Load) and stmt.input in stores:
-            return stmt.replace(input=f"{stmt.input}__now", index=(now, *_without(stmt.index, at_store[stmt.input])))
-        if isinstance(stmt, Carry):
-            held, kept = f"{stmt.value}__held", f"{stmt.value}__kept"
-            return (
-                Load(names=(held,), input=stmt.name, index=(before, *stmt.index[1:])),
-                Select(name=kept, branches=(SelectBranch(stmt.value, last), SelectBranch(held, Literal(True, "bool")))),
-                stmt.replace(value=kept, index=(now, *stmt.index[1:])),
-            )
-        return stmt
-
-    walk_body = Body(part.substitute({walking.axis.name: moved[chunk]}) for part in walking.body.map(walk_step))
-    lets = lambda body: tuple(stmt for stmt in body if isinstance(stmt, Let))  # noqa: E731
-    try:
-        nested_op = LoopOp(body=Body((*lets(inner.op.body), Loop(axis=Axis(time, steps * trips), body=inner_body))))
-        walk_op = LoopOp(body=Body((*lets(walk.op.body), Loop(axis=Axis(time, steps * trips), body=walk_body))))
-    except ValueError:
+    reader = placed(walk.op, time, alignment.extent, alignment.reader, alignment.now, alignment.twins, False)
+    producer = inner.op
+    if alignment.producer is not None:
+        producer = placed(inner.op, time, alignment.extent, alignment.producer, {}, alignment.twins, True)
+    if reader is None or producer is None:
         return None
     live = live_outputs_of(graph, {walk.id, inner.id})
     sub = Graph()
     for name in dict.fromkeys(name for node in (inner, walk) for name in node.inputs if name not in stores):
         sub.add_node(InputOp(), [], graph.buffer(name), node_id=name)
-    now_tensors = []
+    outputs = []
     for tensor in inner.outputs:
-        shape = (steps * trips, *_without(tuple(tensor.shape), at_store[tensor.name]))
-        now_tensors.append(Tensor(f"{tensor.name}__now", shape, tensor.dtype))
-    sub.add_node(nested_op, list(nested_op.inputs), outputs=now_tensors, node_id=now_tensors[0].name)
-    sub.add_node(walk_op, list(walk_op.inputs), outputs=walk.outputs, node_id=walk.id)
+        at = alignment.twins.get(tensor.name)
+        shape = tensor.shape if at is None else (alignment.extent, *tensor.shape[:at], *tensor.shape[at + 1 :])
+        outputs.append(tensor if at is None else Tensor(f"{tensor.name}__now", tuple(shape), tensor.dtype))
+    sub.add_node(producer, list(producer.inputs), outputs=outputs, node_id=outputs[0].name if alignment.twins else inner.id)
+    sub.add_node(reader, list(reader.inputs), outputs=walk.outputs, node_id=walk.id)
     sub.outputs = list(live)
     merged = splice_graph(sub)
     return None if merged is None else (merged[0], live)
-
-
-def side_by_side(graph: Graph, walk: Node, inner: Node) -> tuple[LoopOp, tuple[str, ...]] | None:
-    """PROTOTYPE. ``walk`` and ``inner``, two kernels that each carry a state over one coordinate, as ONE kernel.
-
-    ``walk`` reads what ``inner`` stores at a step, always the step ``offset`` after its own: step ``i`` of the walk
-    and step ``i + offset`` of ``inner`` are one position. The one loop runs over the positions of ``inner``. The walk
-    does its step ``position - offset`` there and keeps its state as it stands on the positions before its first.
-    ``None`` where the two do not stand so."""
-    outer, nested = stepped_stores(walk.op.body), stepped_stores(inner.op.body)
-    if outer is None or nested is None:
-        return None
-    (walking, _), (prefix, stepped) = outer, nested
-    step = walking.axis.name
-    offsets: set[int] = set()
-    for load in walk.op.body.loads:
-        if load.input not in stepped:
-            continue
-        at, width = stepped[load.input]
-        form = affine_form(load.index[at], {step}) if width == 1 and at < len(load.index) else None
-        if form is None or form[1].get(step) != 1:
-            return None
-        try:
-            offsets.add(form[0].eval({}))
-        except (KeyError, TypeError, ValueError):
-            return None
-    if len(offsets) != 1:
-        return None
-    (offset,) = offsets
-    positions = prefix.axis.extent.as_static()
-    if offset < 0 or walking.axis.extent.as_static() + offset > positions:
-        return None
-    position = "position"
-    while position in walk.op.body.axis_names or position in walk.op.body.defined:
-        position += "_"
-    here, before = Var(position), Var(position) - Literal(1, "int")
-    # The walk has a step on the positions from its first to its last; on the others its states stand and it
-    # stores nothing.
-    last = offset + walking.axis.extent.as_static()
-    active = BinaryExpression("<", here, Literal(last, "int"))
-    if offset:
-        active = BinaryExpression("&&", BinaryExpression("<=", Literal(offset, "int"), here), active)
-    own = TernaryExpression(active, here - Literal(offset, "int"), Literal(0, "int"))
-    states = {carry.name for carry in walk.op.body.carries}
-
-    def aligned(stmt: Statement) -> Statement | tuple[Statement, ...]:
-        if isinstance(stmt, Load) and stmt.input in states:
-            return stmt.replace(index=(before, *stmt.index[1:]))
-        if isinstance(stmt, Load) and stmt.input in stepped:
-            at = stepped[stmt.input][0]
-            return stmt.replace(index=(*stmt.index[:at], here, *stmt.index[at + 1 :]))
-        if isinstance(stmt, Carry):
-            held, kept = f"{stmt.value}__held", f"{stmt.value}__kept"
-            return (
-                Load(names=(held,), input=stmt.name, index=(before, *stmt.index[1:])),
-                Select(name=kept, branches=(SelectBranch(stmt.value, active), SelectBranch(held, Literal(True, "bool")))),
-                stmt.replace(value=kept, index=(here, *stmt.index[1:])),
-            )
-        if isinstance(stmt, Write):
-            return Cond(cond=active, body=Body((stmt,)))
-        return stmt
-
-    body = Body(part.substitute({step: own}) for part in walking.body.map(aligned))
-    try:
-        lets = tuple(stmt for stmt in walk.op.body if isinstance(stmt, Let))
-        moved = LoopOp(body=Body((*lets, Loop(axis=Axis(position, positions), body=body))))
-    except ValueError:
-        return None
-    members = {walk.id: moved, inner.id: inner.op}
-    live = live_outputs_of(graph, set(members))
-    merged = build_merged_region(graph, set(members), live, members)
-    return None if merged is None else (merged, live)
 
 
 def rewrite(match: Match, carrying: Node) -> Graph:
@@ -415,11 +434,11 @@ def rewrite(match: Match, carrying: Node) -> Graph:
     for name in carrying.inputs:
         inner = graph.producer(name)
         if inner is not None and isinstance(inner.op, LoopOp) and inner.op.body.carries and inner.id != carrying.id:
-            together = one_loop(graph, carrying, inner) or side_by_side(graph, carrying, inner)
-            if together is not None:
-                fragment, output_map = wrap_multi_output_fragment(graph, together[0], together[1])
+            merged = together(graph, carrying, inner)
+            if merged is not None:
+                fragment, output_map = wrap_multi_output_fragment(graph, merged[0], merged[1])
                 match.consumed = {carrying.id, inner.id}
-                match.output = together[1][0] if len(together[1]) == 1 else output_map
+                match.output = merged[1][0] if len(merged[1]) == 1 else output_map
                 return fragment
     members = _neighbours(graph, carrying)
     if len(members) == 1:
