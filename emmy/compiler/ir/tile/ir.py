@@ -838,9 +838,11 @@ class TileOp(Op):
             return None
         # A grid axis only the stores read — a pointwise cell indexed by its coordinate, nothing
         # evaluated over it — is the kernel's to bind: the term opens every coordinate it declares
-        # and those loops wrap outside, in grid order.
-        glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
+        # and those loops wrap outside, in grid order. Under a serial axis every grid axis is bound here: the
+        # steps enclose the state's cells, each a loop of its own, so a kernel a split of the sequence lifts from
+        # this body has every cell for a grid axis as this one does.
         serial = tuple(self.place.serial)
+        glue = tuple(axis for axis in self.place.free if serial or axis.name not in self.op.free_axes)
         with binding_extents(self.extents):
             body = self.op.lower(frozenset(axis.name for axis in (*glue, *serial)), self.output_specs, self.axes)
         # A serial axis is time: it encloses every cell, so a lagged read of this kernel's own
