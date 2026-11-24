@@ -372,15 +372,16 @@ def _lifted_output(code: str, *inputs: str) -> tuple[np.ndarray, np.ndarray]:
 
 
 def test_a_recurrence_from_a_traced_state_with_alternating_steps_rolls_and_matches_eager() -> None:
-    """Sinkhorn: the state is the softmax rather than zeros, so the seed is a buffer the rolled
-    kernel reads before its first step, and a row step and a column step alternate, so the step
-    the chain repeats is two states long. Unrolled and fused, every step would re-derive every
-    earlier one through two reductions: the binding blowup the splicer's cap was written for."""
+    """Sinkhorn: the state is the softmax rather than zeros, and a row step and a column step alternate, so the
+    step the chain repeats is two states long. Unrolled and fused, every step would re-derive every earlier one
+    through two reductions: the binding blowup the splicer's cap was written for. The state reads the softmax on its
+    first step, so the softmax is computed in the step and the program is one kernel."""
     graph, _, _ = graph_from_code(_SINKHORN.format(iters=4, n=2, r=3, c=3))
-    (rolled,) = _carriers(Pipeline.build(LOOP_PASSES).run(graph))
+    fused = Pipeline.build(LOOP_PASSES).run(graph)
+    (rolled,) = (node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
     (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
     (carry,) = rolled.body.carries
-    assert steps.axis.extent.as_static() == 4 and isinstance(carry.seed, str), "four two-state steps from the softmax"
+    assert steps.axis.extent.as_static() == 4 and not isinstance(carry.seed, str), "four two-state steps from the softmax"
 
     got, reference = _lifted_output(_SINKHORN.format(iters=4, n=2, r=3, c=3), "scores")
     np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)

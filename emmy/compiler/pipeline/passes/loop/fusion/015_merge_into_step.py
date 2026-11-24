@@ -35,6 +35,7 @@ from emmy.compiler.pipeline.passes.loop.fusion._region import (
     stops_a_region,
     wrap_multi_output_fragment,
 )
+from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
 
 PATTERN = [Pattern("carrying", LoopOp)]
 
@@ -377,6 +378,29 @@ def in_step(graph: Graph, reader: LoopOp, stepped: _Stepped, steps: int) -> tupl
     return None if places is None else (op, places)
 
 
+def from_a_read(graph: Graph, op: LoopOp, seeds: set[str]) -> LoopOp:
+    """PROTOTYPE. ``op`` with each state that starts from one of ``seeds`` reading that buffer on its first step, and
+    starting from zero. The kernel that fills the buffer is then a kernel the step reads, like any other."""
+    starts = {carry.name: carry for carry in op.body.carries if carry.seed in seeds}
+
+    def move(stmt: Statement) -> Statement | tuple[Statement, ...]:
+        if isinstance(stmt, Carry) and stmt.name in starts:
+            return stmt.replace(seed=0.0)
+        if not isinstance(stmt, Load) or stmt.input not in starts:
+            return stmt
+        carry = starts[stmt.input]
+        held, first = f"{stmt.names[0]}__held", f"{stmt.names[0]}__first"
+        at = seed_index(stmt.index[1:], graph.buffer(carry.seed).shape)
+        on_first = BinaryExpression("==", carry.index[0], Literal(0, "int"))
+        return (
+            stmt.replace(names=(held,)),
+            Load(names=(first,), input=carry.seed, index=at),
+            Select(name=stmt.names[0], branches=(SelectBranch(first, on_first), SelectBranch(held, _TRUE))),
+        )
+
+    return replace(op, body=op.body.map(move), inputs={}) if starts else op
+
+
 def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[str]]:
     """``carrying`` and every kernel that joins its step, each as it is spliced: a kernel the step reads as it is, a
     reader of the step's stores as it runs inside the step (:func:`in_step`). And those of them that stay kernels
@@ -393,9 +417,12 @@ def _neighbours(graph: Graph, carrying: Node) -> tuple[dict[str, LoopOp], set[st
     # what both of them read is then read by one kernel, and joins it whole.
     nested = any(isinstance(later := graph.nodes[nid].op, LoopOp) and later.body.carries for nid in downstream[carrying.id])
 
-    # The state starts from a buffer: the kernel that fills it stays one. And a kernel that reads a buffer this one
-    # stores over reads it before that store, so it is a kernel before this one.
+    # A state that starts from a buffer a plain kernel fills reads it on its first step (:func:`from_a_read`). And a
+    # kernel that reads a buffer this one stores over reads it before that store, so it is a kernel before this one.
     seeds = {carry.seed for carry in carrying.op.body.carries if isinstance(carry.seed, str)}
+    filled = {name for name in seeds if isinstance(graph.producer(name).op, LoopOp) and joins_a_region(graph.producer(name).op)}
+    members[carrying.id] = from_a_read(graph, carrying.op, filled)
+    seeds -= filled
     over = {tensor.alias for tensor in carrying.outputs if tensor.alias is not None}
 
     def joins(node: Node) -> bool:

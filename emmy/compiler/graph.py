@@ -979,7 +979,8 @@ class Graph(Wire):
             if nid in output_set or nid in input_set:
                 return True
             node = self.nodes.get(nid)
-            return node is not None and isinstance(node.op, InputOp)
+            # A graph output may be any buffer of a node, not only the one that names it.
+            return node is not None and (isinstance(node.op, InputOp) or not output_set.isdisjoint(node.buffer_names()))
 
         def _dep_ids(node: Node) -> set[str]:
             """Producing node ids of ``node``'s input buffers (an edge naming
