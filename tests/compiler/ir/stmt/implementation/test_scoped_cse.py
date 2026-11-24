@@ -1,10 +1,9 @@
 """Every corpus kernel reuses pure values already available in its lexical scope."""
 
-import json
-
 import pytest
 
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, free_names, normalize_body, normalize_lambda_body, parse_body
+from emmy.compiler.pipeline.search.golden import GoldenFile
 from tests.compiler.realization.helpers import CASES_DIR, case_files
 
 
@@ -50,8 +49,7 @@ def _assert_scoped_cse(body, available=()):
 
 @pytest.mark.parametrize("path", case_files(), ids=lambda path: path.relative_to(CASES_DIR).as_posix())
 def test_corpus_kernels_have_no_available_duplicates(path):
-    document = json.loads(path.read_text())
-    kernels = [node for kernel in document["kernels"] for node in kernel["loop_ir"]["nodes"] if node["op"] == "loop"]
+    kernels = [node for kernel in GoldenFile.load(path).kernels for node in kernel.loop_ir["nodes"] if node["op"] == "loop"]
     assert kernels, "the corpus case must exercise at least one kernel"
     for kernel in kernels:
         normalized = normalize_body(Body.from_wire(kernel["attrs"]["body"]))
