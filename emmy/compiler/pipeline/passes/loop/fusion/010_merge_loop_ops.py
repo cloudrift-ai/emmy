@@ -7,8 +7,8 @@ boundaries. Neither tile lifting, nor scheduling, nor speed narrows it, and a re
 cannot build is a compiler bug it raises, never a smaller region.
 
 An unrolled recurrence is not spliced as it stands: the copies of the step would be inlined into one another, every
-state re-derived wherever the next step reads it. Before the rule splices a region it rolls every recurrence the
-graph holds (``_recurrence.roll``), each into one kernel that carries its state, and the regions around those
+state re-derived wherever the next step reads it. Before the rule splices a region it rolls every recurrence a
+region holds (``_recurrence.roll``), each into one kernel that carries its state, and the regions around those
 kernels are what a later match of this rule splices.
 """
 
@@ -48,7 +48,7 @@ def rewrite(match: Match, producer: Node) -> Graph:
     if region is None or len(region) < 2:
         raise RuleSkipped("the producer is a region of its own")
     # A kernel that carries a state is in no region, so the regions to splice are those of the graph the rolls leave.
-    if (rolled := roll(match)) is not None:
+    if (rolled := roll(match, partition)) is not None:
         return rolled
     # The rolls of this batch changed the regions after the rules before this one had read them: those rules read
     # the graph again before a region is spliced with a copy in it that a loop outside could read through.

@@ -245,6 +245,7 @@ def test_steps_of_different_sizes_are_not_spliced_with_their_readers(monkeypatch
     from emmy.compiler.pipeline.pipeline import Rule
 
     roll = import_module("emmy.compiler.pipeline.passes.loop.fusion._recurrence")
+    regions = import_module("emmy.compiler.pipeline.passes.loop.fusion._region").regions
     graph, _, _ = graph_from_code(_RULE_FROM_A_STATE)
     graph = Pipeline.build([stage for stage in LOOP_PASSES if stage != "loop/fusion"]).run(graph)
     spliced: list[int] = []
@@ -252,12 +253,13 @@ def test_steps_of_different_sizes_are_not_spliced_with_their_readers(monkeypatch
     monkeypatch.setattr(roll, "build_merged_region", lambda graph, region, live: spliced.append(len(region)) or splice(graph, region, live))
     rolled: list[int] = []
     taken: set[str] = set()
+    kind = roll.kinds(graph, regions(graph))
     for node_id in graph.topological_order():
         node = graph.nodes[node_id]
         if isinstance(node.op, LoopOp) and node_id not in taken:
             match = Match(graph=graph, root_node_id=node_id, rule=Rule(name="test", pattern=[]))
             try:
-                roll.roll_from(match, node)
+                roll.roll_from(match, node, kind)
             except RuleSkipped:
                 continue
             taken |= set(match.consumed)

@@ -837,13 +837,14 @@ chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-d
 `j`'s stored.
 
 The merge rule rolls it where it would have inlined it (`loop/fusion/_recurrence`, entered from
-`010_merge_loop_ops`): before it splices a region it rolls every recurrence the graph holds, and the regions it
+`010_merge_loop_ops`): before it splices a region it rolls every recurrence a region holds, and the regions it
 splices are those of the graph the rolls leave, since a kernel that carries a state is in no region. A roll changes
 the regions after the rules ahead of the merge have read them, so once every recurrence has rolled the merge asks for
 the pass's rules to be scanned again from the first (`Match.rescan`): the loops around the new kernel read through
-the copies of their new regions before any of them is spliced. The states
-are a chain of nodes of one shape — the same body once the integers of its coordinates are left out (load
-anchors, mask bounds, static loop extents: `Body.identity_apart`) — each depending on the last. A step is what lies between two of
+the copies of their new regions before any of them is spliced. The copies of a step are nodes of one region, what
+fusion would splice into one kernel, so a region is where they are looked for. The states are a chain of its nodes
+of one shape — the same body once the integers of its coordinates are left out (load anchors, mask bounds, static
+loop extents: `Body.identity_apart`) — each depending on the last. A step is what lies between two of
 them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
 reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
 shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a

@@ -7,7 +7,9 @@ Two programs are one step where :func:`prove` says so.
 A Python loop over chunks leaves the tracer unrolled: step ``j``'s kernels read the state step
 ``j − 1`` stored, so fusing them whole makes every later state re-derive every earlier one, and a
 chain of twenty reductions demands two to the twentieth bindings of its first step. Here the
-structure is still plain. The states are a chain of same-shaped nodes of one body, each depending
+structure is still plain. The copies are nodes of one region, the set fusion would splice into one kernel, so
+the region is where they are looked for. The states are a chain of its nodes of one kind (:func:`kinds`: one
+tensor type and one body once the integers of its coordinates are left out), each depending
 on the last; what lies between two of them is one step; and the steps differ only in the integer
 literals they read and mask at — an offset, a slice bound — each advancing affinely with the step.
 
@@ -27,8 +29,8 @@ gives, is taken with the chain where it is the first step advanced (:func:`_chai
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import replace
-from functools import lru_cache
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
@@ -59,43 +61,34 @@ def _ancestors(graph: Graph, node_id: str) -> set[str]:
     return seen
 
 
-@lru_cache(maxsize=256)
-def _census(body: Body) -> tuple[tuple[str, int], ...]:
-    """How many statements of each kind ``body`` holds, nested ones included — a linear-time
-    necessary condition for two bodies to be one computation, to ask before an exact key."""
-    counts: dict[str, int] = {}
-    for stmt in body.iter():
-        kind = type(stmt).__name__
-        counts[kind] = counts.get(kind, 0) + 1
-    return tuple(sorted(counts.items()))
+def kinds(graph: Graph, partition: dict[str, frozenset[str]]) -> dict[str, tuple]:
+    """Per loop of a region, what a state of a recurrence shares with the states after it: the region, the shape and
+    the type of what it stores, and its body once the integers of its coordinates and static extents are left out
+    (``Body.identity_apart``). The copies of a step are nodes of one region: what fusion would splice into one kernel."""
+    found = {}
+    for node_id, region in partition.items():
+        node = graph.nodes[node_id]
+        found[node_id] = (region, node.outputs[0].shape, node.outputs[0].dtype, node.op.body.identity_apart())
+    return found
 
 
-def _chain(graph: Graph, first: Node) -> tuple[list[Node], Node | None]:
-    """``first`` and every later state: what descends from it with the same shape and the same body
-    once the integers of its coordinates and static extents are left out (``Body.identity_apart``). And the state
-    after the last of them, if there is one with the same statements and another body: a step at the edge of its
-    matrix. A step that writes
-    row ``i`` masks its store by ``i <= row < i + 1``, and at the last row the normal form drops the
-    bound the extent already gives, so the body is the first step's advanced and no longer spells
-    like it. Whether it is that step is the roll's own test of every step. A first step at the
-    matrix's other edge is not offered."""
-    body, tensor = first.op.body, first.outputs[0]
-    key = body.identity_apart()
+def _chain(graph: Graph, first: Node, kind: dict[str, tuple]) -> tuple[list[Node], Node | None]:
+    """``first`` and every later state: what descends from it and is of its kind (:func:`kinds`). And the state
+    after the last of them, if there is one of its region and tensor with another body: a step at the edge of its
+    matrix. A step that writes row ``i`` masks its store by ``i <= row < i + 1``, and at the last row the normal form
+    drops the bound the extent already gives, so the body is the first step's advanced and no longer spells like it.
+    Whether it is that step is the roll's own test of every step. A first step at the matrix's other edge is not
+    offered."""
     chain, reached, edge = [first], {first.id}, None
     for node_id in graph.topological_order():
         node = graph.nodes[node_id]
         if not any(producer.id in reached for name in node.inputs if (producer := graph.producer(name)) is not None):
             continue
         reached.add(node_id)
-        alike = isinstance(node.op, LoopOp) and node.outputs[0].shape == tensor.shape and node.outputs[0].dtype == tensor.dtype
-        # The key ranks the body's buffers, which a fused kernel of thousands of statements pays for in seconds: ask
-        # only of a body with the same statements to begin with.
-        if not alike or _census(node.op.body) != _census(body):
-            continue
-        if node.op.body.identity_apart() == key:
+        if kind.get(node_id) == kind[first.id]:
             chain.append(node)
             edge = None
-        elif edge is None:
+        elif edge is None and kind.get(node_id, ())[:3] == kind[first.id][:3]:
             edge = node
     return chain, edge
 
@@ -298,32 +291,31 @@ def _slice(tensor: Tensor, source: str, step: int | None) -> LoopOp:
     return LoopOp(body=body)
 
 
-def roll(match: Match) -> Graph | None:
-    """The fragment that rolls a recurrence the graph holds, or ``None`` where it holds none: the first of its
-    loops, in topological order, that starts a chain :func:`prove` proves."""
+def roll(match: Match, partition: dict[str, frozenset[str]]) -> Graph | None:
+    """The fragment that rolls a recurrence one of the graph's regions holds, or ``None`` where none holds one: the
+    first of the regions' loops, in topological order, that starts a chain :func:`prove` proves."""
     graph = match.graph
-    loops = [node for node_id in graph.topological_order() if isinstance((node := graph.nodes[node_id]).op, LoopOp)]
-    # A chain is two states of one shape that hold the same statements: most loops have no such second.
-    kinds = [(node.outputs[0].shape, node.outputs[0].dtype, _census(node.op.body)) for node in loops]
-    alike = {kind: kinds.count(kind) for kind in set(kinds)}
-    for node, kind in zip(loops, kinds, strict=True):
-        if alike[kind] < 2:
+    kind = kinds(graph, partition)
+    alike = Counter(kind.values())
+    for node_id in graph.topological_order():
+        # A chain is two states of one kind: most loops have no such second.
+        if alike[kind.get(node_id)] < 2:
             continue
         try:
-            return roll_from(match, node)
+            return roll_from(match, graph.nodes[node_id], kind)
         except RuleSkipped as why:
-            logger.debug("no recurrence rolls from %s: %s", node.id, why)
+            logger.debug("no recurrence rolls from %s: %s", node_id, why)
     return None
 
 
-def roll_from(match: Match, first: Node) -> Graph:
+def roll_from(match: Match, first: Node, kind: dict[str, tuple]) -> Graph:
     """The fragment that rolls the recurrence whose first state ``first`` stores."""
     graph = match.graph
-    if first.outputs[0].dtype != F32:
-        raise RuleSkipped("a carried state is f32")
-    chain, edge = _chain(graph, first)
+    if first.outputs[0].dtype != F32 or first.id not in kind:
+        raise RuleSkipped("a carried state is an f32 tensor a loop of a region stores")
+    chain, edge = _chain(graph, first, kind)
     if len(chain) < 2:
-        raise RuleSkipped("no later state of this shape depends on this one")
+        raise RuleSkipped("no later state of this kind depends on this one")
     declined: RuleSkipped | None = None
     for period in _PERIODS:
         if len(chain[::period]) < 2:
