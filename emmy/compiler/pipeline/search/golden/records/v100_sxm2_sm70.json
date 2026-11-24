@@ -161795,7 +161795,7 @@
   {"name":"k_077e426585c1.k_077e426585c1",
    "kernel":784,
    "pins":{"FAST_MATH":true,"FAST_EXP":true,"F16_MMA_F32_ACC":true,"FP8_MMA":true,"FAST_DIV":true,"FAST_SQRT":true,"FLUSH_TO_ZERO":true,"CONTRACT_FMA":true},
-   "knobs":{"TILE@map.1/scan":"","TILE@map.2/inner":"f3","REDUCE@map.1/map.1/map.1/reduce":"","REDUCE@map.2/inner":"","STAGE@map.1/scan":"","STAGE@map.2/inner":"","WORK":"t128","RASTER":"gm8"},
+   "knobs":{"TILE@map.1/scan":"","TILE@map.2/inner":"","REDUCE@map.1/map.1/map.1/reduce":"","REDUCE@map.2/inner":"","STAGE@map.1/scan":"","STAGE@map.2/inner":"","WORK":"t128","RASTER":"gm8"},
    "measurements":{"emmy_us":84.1728001832962,"reference_us":83.86559784412384,"reference_backend":"same-input-greedy","tried":201}},
   {"name":"k_077e426585c1.k_077e426585c1",
    "kernel":784,
