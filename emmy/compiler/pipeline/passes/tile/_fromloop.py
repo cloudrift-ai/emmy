@@ -639,7 +639,7 @@ def stored_states(loop: Loop, outer: tuple[Axis, ...]) -> dict[str, tuple[Carry,
     ``Carry``'s value (or an exact copy of it a normalization step named) at the step, the free coordinates
     outside the loop and the cell, with ``0`` where a size-one dim pins the coordinate — the per-step store the
     roll gives a rolled recurrence's state. Such a state needs no buffer of its own: that output holds every
-    step, so the lagged read is a read of it one step back (:func:`states_as_buffers`)."""
+    step, so the lagged read is a read of it one step back (:func:`serial_form`)."""
     fixed = {loop.axis.name, *(axis.name for axis in outer)}
     stmts = tuple(loop.body.iter())
     carries = {s.value: s for s in stmts if isinstance(s, Carry) and s.name in loop.carries}
@@ -792,7 +792,7 @@ def _lift_loop_op(op: LoopOp, body) -> TileOp:
 def seed_index(cell: tuple[Expression, ...], shape: tuple) -> tuple[Expression, ...]:
     """A seed read at ``cell``, one coordinate per dim of the seed tensor (``shape``). The state's cells
     are its axes alone: a size-one dim, which normalization pins to ``0`` in every index over the state,
-    holds no cell (``_carried_from_loop``). The seed keeps that dim, so it reads ``0`` there."""
+    holds no cell (:func:`_axes_alone`). The seed keeps that dim, so it reads ``0`` there."""
     if len(shape) == len(cell):
         return cell
     units = [dim for dim, extent in enumerate(shape) if extent == 1]

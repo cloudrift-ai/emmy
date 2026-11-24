@@ -481,11 +481,7 @@ def state_ports(tile: TileOp, prefix: str) -> tuple[Tensor, ...]:
     stored = {state for loop, above in carrying_loops(tile.loop_body) for state in stored_states(loop, above)}
     (time,) = tile.place.serial
     return tuple(
-        Tensor(
-            name=f"{prefix}__{carry.name}",
-            shape=(time.extent, *(tile.axis_of(entry.name).extent if isinstance(entry, Var) else Dim(1) for entry in carry.cell)),
-            dtype=F32,
-        )
+        Tensor(name=f"{prefix}__{carry.name}", shape=(time.extent, *(tile.axis_of(name).extent for name in carry.cells)), dtype=F32)
         for carry in (spec.write for spec in tile.states)
         if carry.name not in stored
     )

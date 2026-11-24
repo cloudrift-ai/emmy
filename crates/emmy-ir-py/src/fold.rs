@@ -627,7 +627,7 @@ impl PyReductionView {
     }
 }
 
-/// A carried state's step read as AFFINE in the state, acting column-wise: every carrier read keeps the cell's own
+/// A carried state's step read as AFFINE in the state, acting column-wise: every read of the state keeps the cell's own
 /// coordinate at every position but `mixed`, so the step is `S ← A·S + b` with `A` a matrix over the mixed axis
 /// alone, and two steps compose as affine maps. `kept` is the own position a probe packs basis vectors along. A step
 /// that reads its own cell alone has no mixed position (`None`): `A` is diagonal.

@@ -136,7 +136,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Serial axis / lagged read** — The classic schedule's realization of a carried state: a `Placement.serial` axis
   is launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel reads its
   own output strictly behind the step it writes (`S[c − 1]` while writing `S[c]`). The state lives in the buffer,
-  so the step is any `Fold`; the schedule's fork lifts the carrying kernel's Loop IR into this form (`lift_serial`).
+  so the step is any `Fold`; the schedule's fork rewrites the carrying kernel's term into this form (`serial_form`).
 - **Range** — Where a loop's axis walks when that is not all of it: a start and an exclusive end over the coordinates
   around the loop and the symbolic dims (`for a4 in 0..a0 + 2 of 62:`). The values lie inside `0..extent`, so the
   extent stays the bound every index is analysed under. Loop IR's normal form moves a mask to a fold's neutral

@@ -50,7 +50,10 @@ a load of the state one step back, at any cell, so a contraction over the previo
 (`Σ_k W[i,k] · S[c - 1,k,j]`) is an ordinary nested fold whose B is that slab. Nothing in the term says "state":
 the kernel's stores do. A per-step output is a store like any other, and the closed program opens the serial loop
 around the step, which is the Loop IR the roll wrote. A parallel loop the source spelled around the carrying one
-runs one recurrence per trip, so its coordinate joins the state's cell and the steps still stand outermost.
+runs one recurrence per trip, so its coordinate joins the state's cell and the steps still stand outermost. A
+size-one dim, which the normal form pins to `0` in every index over the state, holds no cell: the lift drops that
+coordinate from the state's update and from every read of it, so a state's cell is its axes alone, and the step's
+affine reading and the split across the sequence count a read's coordinates against them.
 
 A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@map.1/scan=g<n>k[<p>]`, bare
 where the step has no reduction of its own; offered by `030_cut` through `_split.realize_carry_split`). It needs
