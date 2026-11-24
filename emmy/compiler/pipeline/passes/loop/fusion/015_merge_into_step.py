@@ -116,18 +116,20 @@ _TRUE = Literal(True, "bool")
 
 @dataclass(frozen=True)
 class Place:
-    """PROTOTYPE. Where a kernel stands on the ONE loop it shares with another, as functions of that loop's ``time``.
+    """PROTOTYPE. Where a kernel stands on the ONE loop it shares with another: an affine map from its own
+    coordinates to that loop's ``time``,
 
-    Two kernels share a loop where the coordinates of one are an affine function of the other's. Each then has a
-    place on the loop: the step it does at a time (``step``, for a kernel with a loop of steps), where it does one
-    at all (``active``; at every time when ``None``), where its states start again from their seeds (``restart``),
-    and the plain loops of its own that follow the time (``pins``: the loop's axis, its value at this time, and the
-    trips the loop keeps below that value)."""
+        ``time = stride * over + under + shift``,
 
-    step: Expression | None = None
-    active: Expression | None = None
-    restart: Expression | None = None
-    pins: tuple[tuple[str, Expression, int], ...] = ()
+    with ``over`` and ``under`` loops of the kernel (either may be absent). ``fine`` trips of ``over`` pass in one
+    time where the map runs the other way, ``over = fine * time + rest``. Everything a kernel does differently on
+    the shared loop follows from the map (:func:`_schedule`)."""
+
+    over: str | None = None
+    stride: int = 1
+    under: str | None = None
+    shift: int = 0
+    fine: int = 1
 
 
 @dataclass(frozen=True)
@@ -150,95 +152,120 @@ def _fresh(name: str, *bodies: Body) -> str:
     return name
 
 
-def relate(producer: Body | None, reader: Body, stepped: _Stepped, steps: int, time: str) -> Alignment | None:
-    """The alignment of ``reader`` with what it reads, or ``None`` where their coordinates are not one an affine
-    function of the other.
+def _all(*tests: Expression | None) -> Expression | None:
+    held = [test for test in tests if test is not None]
+    return None if not held else held[0] if len(held) == 1 else BinaryExpression("&&", held[0], _all(*held[1:]))
 
-    ``stepped`` names the stores that hold a step of the loop of ``steps`` the reader may join, and where. A read of
-    one says which step: ``step = v + k`` for the reader's own step ``v`` puts the two side by side, ``k`` apart;
-    ``step = v / c`` for a plain loop ``v`` of the reader makes that loop follow the time, ``c`` trips below it. A
-    read of a store of ``producer`` that holds no step, at the reader's own step in the place of a plain loop of the
-    producer, puts the producer's whole recurrence inside each step of the reader:
-    ``time = producer's steps * reader's step + producer's step``."""
+
+def _schedule(place: Place, own: str | None, trips: int, time: str, extent: int):
+    """What the map of ``place`` means for a kernel whose loop of steps is ``own`` (``trips`` long), on a loop over
+    ``time`` of ``extent``: ``(step, clamp, active, restart, pins)``. ``step`` is the kernel's step at a time and
+    ``clamp`` says it is one only where ``active`` holds; ``active`` is where the kernel has a step at all (``None``:
+    everywhere); ``restart`` is where its states start again from their seeds; ``pins`` are the plain loops that
+    follow the time, each with its value and the trips it keeps."""
+    here = Var(time)
+    if place.fine > 1:
+        return None, False, None, None, {place.over: (here, place.fine)}
+    lead = here - Literal(place.shift, "int") if place.shift else here
+    stride = Literal(place.stride, "int")
+    # Where the shift is less than a stride, the high part is the time's own, and it is a step at every time.
+    high = BinaryExpression("/", here if 0 <= place.shift < place.stride else lead, stride) if place.stride > 1 else lead
+    value = {place.over: high, place.under: BinaryExpression("%", lead, stride)}
+    pins = {axis: (value[axis], 1) for axis in (place.over, place.under) if axis is not None and axis != own}
+    if own is None:
+        return None, False, None, None, pins
+    if own == place.under:
+        # The step is the low part of the time: it runs through, and starts again each time the high part moves.
+        restart = BinaryExpression("==", value[own], Literal(0, "int")) if place.over is not None else None
+        return value[own], False, None, restart, pins
+    # The step is the high part: the kernel has a step once every ``stride`` times, from ``shift`` on.
+    last = place.shift + place.stride * (trips - 1)
+    active = _all(
+        BinaryExpression("==", BinaryExpression("%", here, stride), Literal(place.shift % place.stride, "int"))
+        if place.stride > 1
+        else None,
+        BinaryExpression("<=", Literal(place.shift, "int"), here) if place.shift >= place.stride else None,
+        BinaryExpression("<", here, Literal(last + 1, "int")) if last + 1 < extent else None,
+    )
+    return value[own], not 0 <= place.shift < place.stride or last + 1 < extent, active, None, pins
+
+
+def relate(producer: Body | None, reader: Body, stepped: _Stepped, steps: int, time: str) -> Alignment | None:
+    """The alignment of ``reader`` with what it reads: the index equations of its reads, solved for a map of each
+    kernel's coordinates to one time (:class:`Place`). ``None`` where they do not solve so.
+
+    A read says where the reader's coordinates stand to the producer's: the index of the read equals the index of
+    the store. ``stepped`` names the stores that hold the step of the producer's loop of ``steps``, and where.
+
+    - A store that holds the producer's step, read at ``v + k`` for the reader's own step ``v``: the two steps are
+      one position, ``k`` apart. ``time = producer's step = reader's step + k``.
+    - Such a store read at ``v / c`` for a plain loop ``v`` of the reader: ``c`` trips of that loop are one step.
+      ``time = producer's step = v / c``.
+    - A store that holds no step, read at the reader's own step in the place of a plain loop of the producer: the
+      producer's whole loop runs before each step of the reader.
+      ``time = producer's steps * that loop + producer's step = producer's steps * reader's step + the last``."""
     extents = _extents(reader)
     if extents is None:
         return None
     carried = [stmt for stmt in reader if isinstance(stmt, Loop) and stmt.carries]
     own = carried[0].axis.name if len(carried) == 1 else None
-    here = Var(time)
     ctx = SimplifyCtx.empty()
     for name, extent in extents.items():
         ctx = ctx.extend(name, Interval(0, extent - 1), Literal(extent, "int"))
-    follows: set[tuple[str, int, int]] = set()
+    writes = {} if producer is None else {write.output: write for write in producer.writes}
+    # The equations. ``steps_at``: the producer's step equals ``v / c + k``. ``loops_at``: a plain loop of the
+    # producer equals the reader's own step.
+    steps_at: set[tuple[str, int, int]] = set()
+    loops_at: set[str] = set()
     now: dict[str, int] = {}
+    twins: dict[str, int] = {}
     for load in reader.loads:
-        if load.input not in stepped:
-            continue
-        at, width = stepped[load.input]
-        if not plain_load(load) or at >= len(load.index):
-            return None
-        entry = (load.index[at] if width == 1 else BinaryExpression("/", load.index[at], Literal(width, "int"))).simplify(ctx)
-        form = affine_form(entry, entry.free_vars())
-        if isinstance(entry, BinaryExpression) and entry.op == "/" and isinstance(entry.left, Var) and isinstance(entry.right, Literal):
-            follows.add((entry.left.name, entry.right.value, 0))
-        elif form is not None and len(form[1]) == 1 and next(iter(form[1].values())) == 1:
-            try:
-                follows.add((next(iter(form[1])), 1, form[0].eval({})))
-            except (KeyError, TypeError, ValueError):
+        if load.input in stepped:
+            at, width = stepped[load.input]
+            if not plain_load(load) or at >= len(load.index):
                 return None
-        else:
-            return None
-        if width == 1:
-            now[load.input] = at
-    if follows:
-        if len(follows) != 1:
-            return None
-        ((axis, trips, offset),) = follows
-        if axis == own:
-            # Side by side: the reader's step ``v`` is the step ``v + offset`` of what it reads.
-            last = offset + extents[axis]
-            if trips != 1 or offset < 0 or last > steps:
+            entry = (load.index[at] if width == 1 else BinaryExpression("/", load.index[at], Literal(width, "int"))).simplify(ctx)
+            form = affine_form(entry, entry.free_vars())
+            if isinstance(entry, BinaryExpression) and entry.op == "/" and isinstance(entry.left, Var) and isinstance(entry.right, Literal):
+                steps_at.add((entry.left.name, entry.right.value, 0))
+            elif form is not None and len(form[1]) == 1 and next(iter(form[1].values())) == 1:
+                try:
+                    steps_at.add((next(iter(form[1])), 1, form[0].eval({})))
+                except (KeyError, TypeError, ValueError):
+                    return None
+            else:
                 return None
-            active = BinaryExpression("<", here, Literal(last, "int"))
-            if offset:
-                active = BinaryExpression("&&", BinaryExpression("<=", Literal(offset, "int"), here), active)
-            whole = last == steps and not offset
-            return Alignment(steps, None, Place(step=here - Literal(offset, "int"), active=None if whole else active), now, {})
-        # A plain loop of the reader follows the time: a trip of it reads one step, and no reduction folds it.
+            if width == 1:
+                now[load.input] = at
+        elif load.input in writes and own is not None:
+            where = [at for at, entry in enumerate(load.index) if entry == Var(own)]
+            if len(where) != 1 or not isinstance(writes[load.input].index[where[0]], Var):
+                return None
+            loops_at.add(writes[load.input].index[where[0]].name)
+            twins[load.input] = where[0]
+    if len(steps_at) == 1 and not loops_at:
+        ((axis, fine, offset),) = steps_at
+        if axis == own and fine == 1 and 0 <= offset and offset + extents[axis] <= steps:
+            return Alignment(steps, None, Place(over=own, shift=offset), now, {})
         folded = any(axis in accum.axes for accum in reader.iter_of_type(Accum))
-        if own is not None or offset or extents.get(axis) != trips * steps or folded:
-            return None
-        if sum(len(loop.body.writes) for loop in reader.iter_of_type(Loop) if loop.axis.name == axis) != len(reader.writes):
-            return None  # every store sits under the loop that follows the time: another would be stored once a step
-        return Alignment(steps, None, Place(pins=((axis, here, trips),)), {} if trips > 1 else now, {})
-    if producer is None or own is None:
+        under = sum(len(loop.body.writes) for loop in reader.iter_of_type(Loop) if loop.axis.name == axis)
+        # A plain loop follows the time where a trip of it reads one step, no reduction folds it, and every store
+        # sits under it: another would be stored once a step.
+        if own is None and not offset and extents.get(axis) == fine * steps and not folded and under == len(reader.writes):
+            return Alignment(steps, None, Place(over=axis, fine=fine), {} if fine > 1 else now, {})
         return None
-    # Inside: the reader reads a result of the producer that holds no step, at its own step.
+    if steps_at or len(loops_at) != 1 or producer is None:
+        return None
     rows = [stmt for stmt in producer if isinstance(stmt, Loop) and stmt.carries]
     inner = _extents(producer)
-    if len(rows) != 1 or inner is None or not rows[0].axis.extent.is_static:
-        return None
-    writes = {write.output: write for write in producer.writes}
-    twins: dict[str, int] = {}
-    chunks: set[str] = set()
-    for load in reader.loads:
-        if load.input not in writes:
-            continue
-        where = [at for at, entry in enumerate(load.index) if entry == Var(own)]
-        if len(where) != 1 or not isinstance(writes[load.input].index[where[0]], Var):
-            return None
-        chunks.add(writes[load.input].index[where[0]].name)
-        twins[load.input] = where[0]
-    trips = rows[0].axis.extent.as_static()
-    if len(chunks) != 1 or set(twins) != set(writes) or inner.get(next(iter(chunks))) != extents[own]:
+    (chunk,) = loops_at
+    if len(rows) != 1 or inner is None or set(twins) != set(writes) or inner.get(chunk) != extents[own]:
         return None
     if any(isinstance(carry.seed, str) for carry in producer.carries):
         return None
-    digit = BinaryExpression("%", here, Literal(trips, "int"))
-    chunk = BinaryExpression("/", here, Literal(trips, "int"))
-    inside = Place(step=digit, restart=BinaryExpression("==", digit, Literal(0, "int")), pins=((next(iter(chunks)), chunk, 1),))
-    outside = Place(step=chunk, active=BinaryExpression("==", digit, Literal(trips - 1, "int")))
-    return Alignment(trips * extents[own], inside, outside, {}, twins)
+    trips = rows[0].axis.extent.as_static()
+    inside = Place(over=chunk, stride=trips, under=rows[0].axis.name)
+    return Alignment(trips * extents[own], inside, Place(over=own, stride=trips, shift=trips - 1), {}, twins)
 
 
 def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int], twins: dict[str, int], stores: bool) -> LoopOp | None:
@@ -251,10 +278,12 @@ def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int]
         return None
     lets = tuple(stmt for stmt in body if isinstance(stmt, Let))
     inner = carried[0].body if carried else Body(stmt for stmt in body if not isinstance(stmt, Let))
+    own = carried[0].axis.name if carried else None
+    trips = carried[0].axis.extent.as_static() if carried else 0
+    step, clamp, active, restart, pins = _schedule(place, own, trips, time, extent)
     here, before = Var(time), Var(time) - Literal(1, "int")
     states = {carry.name: carry for carry in body.carries}
-    pins = {axis: (value, trips) for axis, value, trips in place.pins}
-    gone = {axis for axis, (_, trips) in pins.items() if trips == 1}
+    gone = {axis for axis, (_, kept) in pins.items() if kept == 1}
 
     def cell(name: str, index: tuple) -> tuple:
         held = states[name].index
@@ -266,13 +295,13 @@ def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int]
     def move(stmt: Statement) -> Statement | tuple[Statement, ...]:
         if isinstance(stmt, Load) and stmt.input in states:
             read = stmt.replace(index=(before, *cell(stmt.input, stmt.index)))
-            if place.restart is None:
+            if restart is None:
                 return read
             held, seed = f"{stmt.names[0]}__held", f"{stmt.names[0]}__seed"
             return (
                 read.replace(names=(held,)),
                 Let(name=seed, value=Literal(float(states[stmt.input].seed))),
-                Select(name=stmt.names[0], branches=(SelectBranch(seed, place.restart), SelectBranch(held, _TRUE))),
+                Select(name=stmt.names[0], branches=(SelectBranch(seed, restart), SelectBranch(held, _TRUE))),
             )
         if isinstance(stmt, Load) and stmt.input in now:
             at = now[stmt.input]
@@ -281,34 +310,34 @@ def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int]
             return stmt.replace(input=f"{stmt.input}__now", index=without(stmt.index, twins[stmt.input]))
         if isinstance(stmt, Carry):
             index = (here, *cell(stmt.name, stmt.index))
-            if place.active is None:
+            if active is None:
                 return stmt.replace(index=index)
             held, kept = f"{stmt.value}__held", f"{stmt.value}__kept"
             return (
                 Load(names=(held,), input=stmt.name, index=(before, *index[1:])),
-                Select(name=kept, branches=(SelectBranch(stmt.value, place.active), SelectBranch(held, _TRUE))),
+                Select(name=kept, branches=(SelectBranch(stmt.value, active), SelectBranch(held, _TRUE))),
                 stmt.replace(value=kept, index=index),
             )
         if isinstance(stmt, Write) and stmt.output in twins and stores:
             return stmt.replace(output=f"{stmt.output}__now", index=without(stmt.index, twins[stmt.output]))
-        if isinstance(stmt, Write) and place.active is not None and place.step is not None and carried and not stores:
-            return Cond(cond=place.active, body=Body((stmt,)))
+        if isinstance(stmt, Write) and active is not None:
+            return Cond(cond=active, body=Body((stmt,)))
         return stmt
 
     def follow(stmt: Statement) -> Statement | tuple[Statement, ...]:
         if not isinstance(stmt, Loop) or stmt.axis.name not in pins:
             return stmt
-        value, trips = pins[stmt.axis.name]
-        if trips == 1:
+        value, kept = pins[stmt.axis.name]
+        if kept == 1:
             return tuple(part.substitute({stmt.axis.name: value}) for part in stmt.body)
-        moved = BinaryExpression("+", BinaryExpression("*", value, Literal(trips, "int")), Var(stmt.axis.name))
+        moved = BinaryExpression("+", BinaryExpression("*", value, Literal(kept, "int")), Var(stmt.axis.name))
         inside = Body(tuple(part.substitute({stmt.axis.name: moved}) for part in stmt.body))
-        return stmt.replace(axis=replace(stmt.axis, extent=Dim(trips)), body=inside)
+        return stmt.replace(axis=replace(stmt.axis, extent=Dim(kept)), body=inside)
 
     stepped_body = inner.map(move).map(follow)
-    if carried and place.step is not None:
-        step = place.step if place.active is None else TernaryExpression(place.active, place.step, Literal(0, "int"))
-        stepped_body = Body(part.substitute({carried[0].axis.name: step}) for part in stepped_body)
+    if step is not None:
+        at_step = TernaryExpression(active, step, Literal(0, "int")) if clamp and active is not None else step
+        stepped_body = Body(part.substitute({own: at_step}) for part in stepped_body)
     try:
         return LoopOp(body=Body((*lets, Loop(axis=Axis(time, extent), body=stepped_body))))
     except ValueError:
@@ -336,7 +365,7 @@ def in_step(graph: Graph, reader: LoopOp, stepped: _Stepped, steps: int) -> tupl
     body = _one_read(graph, reader.body, stepped)
     time = _fresh("step", body)
     alignment = relate(None, body, stepped, steps, time)
-    if alignment is None or alignment.reader.step is not None:
+    if alignment is None:
         return None
     op = placed(replace(reader, body=body, inputs={}), time, alignment.extent, alignment.reader, alignment.now, {}, False)
     places = None if op is None else _places(op)
