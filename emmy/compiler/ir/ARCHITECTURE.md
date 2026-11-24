@@ -1063,7 +1063,7 @@ recurrence left unrolled — each stage re-demanded under compositions of σs, D
 being the live case — multiplies bindings per stage instead of deduplicating, and such a merge cannot be constructed
 at any budget. The first binding past `_BINDING_RATIO` times the region's statement count raises `UnfusableStmt`,
 which names the loop. Fusion never catches it: its regions are decided before any is spliced, so a region that
-multiplies is a recurrence for `loop/fusion/005_roll_recurrence` to roll, not a region to shrink — shrinking made the
+multiplies is a recurrence for the merge rule to roll (`loop/fusion/_recurrence`), not a region to shrink — shrinking made the
 kernel set depend on the order the producers were visited in. This is a termination bound, not a fusion-quality gate:
 placement still owns every cut on a merge that CAN be built.
 

@@ -660,7 +660,7 @@ reads, a kernel that carries a state among them; the copy is then read by no loo
 was is gone. What two readers of a copy share is then the buffer behind it, and loops that read one buffer share a
 region: whether the program wrote a transpose between a buffer and its readers decides no kernel boundary. A copy
 the program itself holds, a graph output, is a buffer whoever reads it, and its readers read it there. It runs
-after the roll, which compares a recurrence's steps as the tracer left them. A copy that rounds is arithmetic and is
+before the merge rule rolls and splices, and again after a roll. A copy that rounds is arithmetic and is
 not read through, nor is a copy of a buffer another kernel stores over, nor one of a packed buffer.
 
 A buffer is stored where its one reader would only have moved it (`020_store_through_copies`). After the regions are
@@ -839,12 +839,17 @@ chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-d
 `O(j)`. No cut repairs that — a cut materializes within one target, and chunk `j+1`'s target recomputes what chunk
 `j`'s stored.
 
-`loop/fusion/005_roll_recurrence` rolls it BEFORE a loop reads through a copy and before fusion inlines it, while
-the structure is as the tracer wrote it. It is the fusion pass's first rule, it rolls every recurrence a region holds,
-and the regions the later rules read and splice are those of the graph the rolls leave, since a kernel that carries a
-state is in no region. A roll is a splice with more asked of its nodes, in three parts kept apart
-(`loop/fusion/_recurrence`): the ways to read part of a region as a recurrence, the proof of one, and the kernel
-written for the first that is proved.
+The merge rule rolls it where it would have inlined it (`loop/fusion/_recurrence`, entered from
+`010_merge_loop_ops`): before it splices any region it rolls the recurrences the regions hold, the largest first,
+and the regions it splices are those of the graph the rolls leave, since a kernel that carries a state is in no
+region. Every loop has read through its copies by then, so the steps read their buffers themselves. A roll leaves
+slices of what its kernel stores, so once the recurrences have rolled the merge asks for the pass's rules to be
+scanned again from the first (`Match.rescan`): the loops around the new kernel read through those slices before any
+region is spliced. A roll is a splice with more asked of its nodes, in three parts kept apart: the ways to read
+part of a region as a recurrence, the proof of one, and the kernel written. The readings are held to the proof
+largest first, by the nodes their steps hold, and the first that is proved is written: a short recurrence that
+shares a state with a long one, a softmax's own division ahead of a Sinkhorn's row step, would otherwise be taken
+first and leave the long one a step short.
 
 **The readings.** The copies of a step are nodes of one region, what fusion would splice into one kernel, so a region
 is where they are looked for. The states are a chain of its nodes that store one tensor type and have one body once

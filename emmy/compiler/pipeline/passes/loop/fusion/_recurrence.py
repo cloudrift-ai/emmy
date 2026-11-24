@@ -2,9 +2,9 @@
 
 A Python loop over chunks leaves the tracer unrolled: step ``j``'s loops read the state step ``j − 1`` stored, so
 splicing them whole makes every later state re-derive every earlier one, and a chain of twenty reductions demands
-two to the twentieth bindings of its first step. The fusion pass's first rule (``005_roll_recurrence``,
-:func:`roll`) rolls such a chain before a loop reads through a copy or a region is spliced, while the structure is
-as the tracer wrote it.
+two to the twentieth bindings of its first step. The merge rule (``010_merge_loop_ops``) asks :func:`roll` before
+it splices a region, and rolls such a chain where it would have inlined it. Every loop has read through its copies
+by then, so the steps read their buffers themselves.
 
 A roll is a splice with more asked of its nodes, in three parts kept apart:
 
@@ -24,7 +24,8 @@ A roll is a splice with more asked of its nodes, in three parts kept apart:
   stores what each step defined (the last state alone, where nothing but the next step reads a state), and one
   slice of those stores per replaced buffer.
 
-The first reading that is proved is taken.
+The readings are held to the proof largest first, by the nodes their steps hold, and the first that is proved is
+written.
 """
 
 from __future__ import annotations
@@ -51,47 +52,51 @@ _STATE, _STEP, _CONST = "carried_state", "carried_step", "carried_const"
 _PERIODS = (1, 2)
 
 
-def _ancestors(graph: Graph, node_id: str) -> set[str]:
-    seen: set[str] = set()
-    pending = [node_id]
-    while pending:
-        current = pending.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        pending.extend(producer.id for name in graph.nodes[current].inputs if (producer := graph.producer(name)) is not None)
-    return seen
+@dataclass(frozen=True)
+class Kinds:
+    """What the roll reads of a graph that stands still, worked out once for every reading it is asked for.
+
+    ``of`` is, per loop of a region, what a state of a recurrence shares with the states after it: the region, the
+    shape and the type of what it stores, and its body once the integers of its coordinates and static extents are
+    left out (``Body.identity_apart``). The copies of a step are nodes of one region: what fusion would splice into
+    one kernel. ``ancestors`` is, per node, itself and every node it descends from; ``order`` the loops of ``of`` in
+    topological order."""
+
+    of: dict[str, tuple]
+    ancestors: dict[str, frozenset[str]]
+    order: list[str]
 
 
-def kinds(graph: Graph, partition: dict[str, frozenset[str]]) -> dict[str, tuple]:
-    """Per loop of a region, what a state of a recurrence shares with the states after it: the region, the shape and
-    the type of what it stores, and its body once the integers of its coordinates and static extents are left out
-    (``Body.identity_apart``). The copies of a step are nodes of one region: what fusion would splice into one kernel."""
-    found = {}
+def kinds(graph: Graph, partition: dict[str, frozenset[str]]) -> Kinds:
+    of = {}
     for node_id, region in partition.items():
         node = graph.nodes[node_id]
-        found[node_id] = (region, node.outputs[0].shape, node.outputs[0].dtype, node.op.body.identity_apart())
-    return found
+        of[node_id] = (region, node.outputs[0].shape, node.outputs[0].dtype, node.op.body.identity_apart())
+    ancestors: dict[str, frozenset[str]] = {}
+    order = graph.topological_order()
+    for node_id in order:
+        producers = (graph.producer(name) for name in graph.nodes[node_id].inputs)
+        ancestors[node_id] = frozenset({node_id}).union(*(ancestors[producer.id] for producer in producers if producer is not None))
+    return Kinds(of, ancestors, [node_id for node_id in order if node_id in of])
 
 
-def _chain(graph: Graph, first: Node, kind: dict[str, tuple]) -> tuple[list[Node], Node | None]:
-    """``first`` and every later state: what descends from it and is of its kind (:func:`kinds`). And the state
+def _chain(graph: Graph, first: Node, kind: Kinds) -> tuple[list[Node], Node | None]:
+    """``first`` and every later state: what descends from it and is of its kind (:class:`Kinds`). And the state
     after the last of them, if there is one of its region and tensor with another body: a step at the edge of its
     matrix. A step that writes row ``i`` masks its store by ``i <= row < i + 1``, and at the last row the normal form
     drops the bound the extent already gives, so the body is the first step's advanced and no longer spells like it.
     Whether it is that step is the roll's own test of every step. A first step at the matrix's other edge is not
     offered."""
-    chain, reached, edge = [first], {first.id}, None
-    for node_id in graph.topological_order():
-        node = graph.nodes[node_id]
-        if not any(producer.id in reached for name in node.inputs if (producer := graph.producer(name)) is not None):
+    own = kind.of[first.id]
+    chain, edge = [first], None
+    for node_id in kind.order:
+        if node_id == first.id or first.id not in kind.ancestors[node_id] or kind.of[node_id][:3] != own[:3]:
             continue
-        reached.add(node_id)
-        if kind.get(node_id) == kind[first.id]:
-            chain.append(node)
+        if kind.of[node_id] == own:
+            chain.append(graph.nodes[node_id])
             edge = None
-        elif edge is None and kind.get(node_id, ())[:3] == kind[first.id][:3]:
-            edge = node
+        elif edge is None:
+            edge = graph.nodes[node_id]
     return chain, edge
 
 
@@ -109,14 +114,14 @@ def _external(graph: Graph, region: set[str]) -> set[str]:
     return {name for node_id in region for name in graph.nodes[node_id].inputs if graph.producer(name).id not in region}
 
 
-def _steps(graph: Graph, chain: list[Node]) -> tuple[list[set[str]], list[str], int]:
+def _steps(graph: Graph, chain: list[Node], ancestors: dict[str, frozenset[str]]) -> tuple[list[set[str]], list[str], int]:
     """``(one region per step, the state each step reads, how many states the recurrence spans)``.
 
     The first step has no state node before it: its state is the seed, the one buffer of the state's
     shape it reads beyond what every step reads — the tensor the loop started from, or the zeros it
     was seeded with. It is the buffer whose ancestry, taken out, leaves a first step shaped like
     every later one: as many nodes, reading the same things beside its state."""
-    regions = [_ancestors(graph, after.id) - _ancestors(graph, before.id) for before, after in zip(chain, chain[1:], strict=False)]
+    regions = [set(ancestors[after.id] - ancestors[before.id]) for before, after in zip(chain, chain[1:], strict=False)]
     states = [node.id for node in chain[:-1]]
     shared = _external(graph, regions[0]) - {states[0]}
     alike = (len(regions[0]), frozenset(shared))
@@ -131,15 +136,15 @@ def _steps(graph: Graph, chain: list[Node]) -> tuple[list[set[str]], list[str], 
     regions, states = regions[:steps], states[:steps]
     beyond: set[str] = set()
     for name in shared:
-        beyond |= _ancestors(graph, graph.producer(name).id)
-    first = _ancestors(graph, chain[0].id) - beyond
+        beyond |= ancestors[graph.producer(name).id]
+    first = ancestors[chain[0].id] - beyond
     tensor = chain[0].outputs[0]
     seeds = []
     for node_id in first:
         if node_id == chain[0].id or graph.nodes[node_id].outputs[0].shape != tensor.shape:
             continue
         seed = node_id
-        region = first - _ancestors(graph, node_id)
+        region = first - ancestors[node_id]
         if (len(region), frozenset(_external(graph, region) - {seed})) == alike:
             seeds.append((seed, region))
     if len(seeds) != 1:
@@ -161,7 +166,9 @@ def _stateful(graph: Graph, region: set[str], state: str) -> set[str]:
     return found
 
 
-def _readers(graph: Graph, regions: list[set[str]], states: list[str], chain: list[Node]) -> list[set[str]]:
+def _readers(
+    graph: Graph, regions: list[set[str]], states: list[str], chain: list[Node], ancestors: dict[str, frozenset[str]]
+) -> list[set[str]]:
     """What each step's own readers add to its region: every node outside the steps that reads the state the step
     starts from, or a value the step computes from it, and nothing of another step, with what such a node reads
     that no other step's readers read.
@@ -187,8 +194,8 @@ def _readers(graph: Graph, regions: list[set[str]], states: list[str], chain: li
                 readers[step[node_id]].add(node_id)
     # What the recurrence itself descends from is an input of the body or a step's own, and so is what the readers
     # of two steps both read: it is read at every step.
-    recurrence = _ancestors(graph, chain[-1].id)
-    reads = [set().union(*(_ancestors(graph, node_id) for node_id in found)) - recurrence for found in readers]
+    recurrence = ancestors[chain[-1].id]
+    reads = [set().union(*(ancestors[node_id] for node_id in found)) - recurrence for found in readers]
     seen: set[str] = set()
     shared: set[str] = set()
     for nodes in reads:
@@ -294,23 +301,28 @@ def _slice(tensor: Tensor, source: str, step: int | None) -> LoopOp:
 
 
 def roll(match: Match, partition: dict[str, frozenset[str]]) -> Graph | None:
-    """The fragment that rolls a recurrence one of the graph's regions holds, or ``None`` where none holds one: the
-    first of the regions' loops, in topological order, that starts one (:func:`roll_from`)."""
+    """The fragment that rolls the largest recurrence the graph's regions hold, or ``None`` where they hold none.
+
+    Every loop that starts a chain gives its readings (:func:`found`). They are held to the proof largest first, by
+    the nodes their steps hold, and in topological order where two hold as many; the first that is proved
+    (:func:`_proved`) is written (:func:`_fragment`). A short recurrence that shares a state with a long one — a
+    softmax's own division ahead of a Sinkhorn's row step — would otherwise be taken first and leave the long one a
+    step short."""
     graph = match.graph
     kind = kinds(graph, partition)
-    alike = Counter(kind.values())
-    for node_id in graph.topological_order():
-        # A chain is two states of one kind: most loops have no such second.
-        if alike[kind.get(node_id)] < 2:
-            continue
+    alike = Counter(kind.of.values())
+    # A chain is two states of one kind: most loops have no such second.
+    firsts = [graph.nodes[node_id] for node_id in kind.order if alike[kind.of[node_id]] > 1]
+    readings = [recurrence for first in firsts for recurrence in found(graph, first, kind)]
+    for recurrence in sorted(readings, key=lambda reading: -sum(map(len, reading.steps))):
         try:
-            return roll_from(match, graph.nodes[node_id], kind)
+            return _fragment(match, recurrence, *_proved(graph, recurrence))
         except RuleSkipped as why:
-            logger.debug("no recurrence rolls from %s: %s", node_id, why)
+            logger.debug("no recurrence rolls from %s: %s", recurrence.chain[0].id, why)
     return None
 
 
-def roll_from(match: Match, first: Node, kind: dict[str, tuple]) -> Graph:
+def roll_from(match: Match, first: Node, kind: Kinds) -> Graph:
     """The fragment that rolls the recurrence whose first state ``first`` stores: the first way to read one there
     (:func:`found`) whose steps are proved to be one step (:func:`_proved`), written as one kernel
     (:func:`_fragment`)."""
@@ -333,11 +345,11 @@ class Recurrence:
     states: list[str]
 
 
-def found(graph: Graph, first: Node, kind: dict[str, tuple]) -> Iterator[Recurrence]:
+def found(graph: Graph, first: Node, kind: Kinds) -> Iterator[Recurrence]:
     """The ways to read what follows ``first`` as a recurrence whose first state it stores, the one to take first:
     at a stride of one state then of two, with the step at the matrix's edge then without it, each step with its own
     readers then alone. Which of them is a recurrence is the proof's to say."""
-    if first.outputs[0].dtype != F32 or first.id not in kind:
+    if first.outputs[0].dtype != F32 or first.id not in kind.of:
         return  # a carried state is an f32 tensor a loop of a region stores
     chain, edge = _chain(graph, first, kind)
     for period in _PERIODS:
@@ -347,22 +359,24 @@ def found(graph: Graph, first: Node, kind: dict[str, tuple]) -> Iterator[Recurre
         # The step at the matrix's edge follows the chain's last where the stride reaches it.
         last = [edge] if edge is not None and len(chain) % period == 0 else []
         try:
-            steps, read, count = _steps(graph, [*states, *last])
+            steps, read, count = _steps(graph, [*states, *last], kind.ancestors)
         except RuleSkipped:
             continue
         if count == len(states) + 1:
-            yield from _with_readers(graph, [*states, *last], steps, read)
+            yield from _with_readers(graph, [*states, *last], steps, read, kind.ancestors)
             steps, read, count = steps[:-1], read[:-1], count - 1
-        yield from _with_readers(graph, states[:count], steps, read)
+        yield from _with_readers(graph, states[:count], steps, read, kind.ancestors)
 
 
-def _with_readers(graph: Graph, chain: list[Node], steps: list[set[str]], states: list[str]) -> Iterator[Recurrence]:
+def _with_readers(
+    graph: Graph, chain: list[Node], steps: list[set[str]], states: list[str], ancestors: dict[str, frozenset[str]]
+) -> Iterator[Recurrence]:
     """Each step with its own readers, where those are one body at a stride as the steps are; then the steps alone,
     where every reader takes its state from a store. Steps that are one body hold as many nodes each, which is asked
     before any of them is spliced: two unrelated products of one matrix are a chain of two by their bodies, the
     first one's readers are then everything that reads the matrix, and a splice of that many nodes over an unrolled
     recurrence does not come back."""
-    readers = _readers(graph, steps, states, chain)
+    readers = _readers(graph, steps, states, chain, ancestors)
     joined = [step | read for step, read in zip(steps, readers, strict=True)]
     if any(readers) and len({len(nodes) for nodes in joined}) == 1:
         yield Recurrence(chain, joined, states)

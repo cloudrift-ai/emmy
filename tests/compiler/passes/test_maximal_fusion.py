@@ -174,8 +174,9 @@ def _chain_beside_a_sibling(stages: dict[str, LoopOp], widths: dict[str, int] | 
 def test_a_recurrence_chain_rolls_and_the_rest_of_the_region_merges():
     """The maximal region contains a chain no splice can construct: each stage reads the last at
     two affine maps, so stage 0 is demanded under two to the twelfth σs. The roller replaces the
-    chain by one kernel that carries its state, and everything else — the producer, the broadcast
-    the first state reads, the plain sibling — is one region and one kernel. Fusion never declines
+    chain by one kernel that carries its state from the producer: the first state reads the producer
+    through a broadcast, which it reads through, so it is a step like the others. The producer and the
+    plain sibling are one region and one kernel. Fusion never declines
     a region: leaving the chain unrolled and shrinking around it is what shattered DeepSeek-V4's
     post block into 433 kernels where pre-maximal fusion produced 92, and it made the kernel set
     depend on the order the producers were visited in."""
@@ -194,9 +195,9 @@ def test_a_recurrence_chain_rolls_and_the_rest_of_the_region_merges():
     kernels = {nid: node.op for nid, node in fused.nodes.items() if isinstance(node.op, LoopOp)}
     (rolled,) = (op for op in kernels.values() if carries_state(op))
     (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
-    assert steps.axis.extent.as_static() == 11, "eleven states carried from the first, which reads the broadcast"
+    assert steps.axis.extent.as_static() == 12, "all twelve states, carried from what the producer stores"
     (merged,) = (nid for nid, op in kernels.items() if not carries_state(op) and "easy" in op.outputs)
-    assert set(kernels[merged].outputs) >= {"easy", "s0"}, "the producer, the broadcast, the first state and the sibling are one kernel"
+    assert set(kernels[merged].outputs) >= {"easy", "root"}, "the producer and the sibling are one kernel"
     assert len(kernels) == 2, sorted(kernels)  # the last state the graph exports is the rolled kernel's own store
     after = backend.run(backend.compile(fused), input_data=inputs)[0].outputs
     for name in (last, "easy"):
