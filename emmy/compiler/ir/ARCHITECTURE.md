@@ -947,7 +947,10 @@ placement computes once.
 `value_numbers_apart` is the same numbering with the integer of every affine coordinate expression taken apart: an
 index `a + 64` is the form `a`, shared as a parameter is, and the integer 64, a parameter of its own at every place
 one is written; a loop's static extent is a parameter of the loop. An offset inside a reduction then never reaches a
-number. No identity reads this mode. `numbering::prove` reads it for the copies of an unrolled step: their scope
+number. No kernel identity reads this mode. `Body.identity_apart` is the digest over it with those integers left
+out and the buffers keyed by use, as the identity keys them: the key a body shares with the same computation at
+other offsets, bounds and extents. The roll finds the candidates for the copies of a step by it; nothing is keyed
+by it and nothing stores it. `numbering::prove` reads the same mode for the copies of an unrolled step: their scope
 trees are one tree once those integers are left out, every integer moves by one amount per step, and the first copy
 with its integers moved to step `j` has copy `j`'s tree with every integer keyed by its value. `Proved::at` is the
 step at a step number or under the axis of the loop that walks, where a reduction that grows with the step walks a

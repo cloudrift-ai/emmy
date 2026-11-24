@@ -842,8 +842,8 @@ splices are those of the graph the rolls leave, since a kernel that carries a st
 the regions after the rules ahead of the merge have read them, so once every recurrence has rolled the merge asks for
 the pass's rules to be scanned again from the first (`Match.rescan`): the loops around the new kernel read through
 the copies of their new regions before any of them is spliced. The states
-are a chain of nodes of one shape — the same body once its integer literals are taken out (load
-anchors, mask bounds, static loop extents) — each depending on the last. A step is what lies between two of
+are a chain of nodes of one shape — the same body once the integers of its coordinates are left out (load
+anchors, mask bounds, static loop extents: `Body.identity_apart`) — each depending on the last. A step is what lies between two of
 them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
 reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
 shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a
@@ -880,7 +880,7 @@ offered no split across the sequence, since parts side by side cannot write that
 
 **A step at the edge of its matrix rolls with the rest.** A step that writes one row masks its store to that row, and
 at the last row the normal form drops the bound the matrix's extent already gives, so that step's body no longer
-spells like the others once the literals are taken out. The chain offers the state after its last, where that one has
+spells like the others once those integers are left out. The chain offers the state after its last, where that one has
 the same statements and another body, and the roll's own test of every step (the first step advanced must normalize
 to it) decides; where it is not that step, the chain rolls without it. Only the last step is offered this way.
 

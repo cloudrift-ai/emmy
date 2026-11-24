@@ -30,12 +30,11 @@ import logging
 from dataclasses import replace
 from functools import lru_cache
 
-from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, affine_form
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Statement, Write, prove_steps
 from emmy.compiler.pipeline import Match, RuleSkipped
@@ -71,68 +70,17 @@ def _census(body: Body) -> tuple[tuple[str, int], ...]:
     return tuple(sorted(counts.items()))
 
 
-@lru_cache(maxsize=256)
-def _literals_abstracted(body: Body) -> tuple[Body, tuple[int, ...]]:
-    """``body`` with every integer literal of its expressions replaced by a positional
-    variable ``__lit<i>``, and the literals it held, in that order. The copies of one computation
-    an unrolled loop leaves read at successive offsets and mask at successive bounds: they share
-    the abstracted body and differ in the literals, affinely in the step."""
-    literals: list[int] = []
-
-    def held(value: int) -> Var:
-        literals.append(value)
-        return Var(f"__lit{len(literals) - 1}")
-
-    def abstract(expression):
-        if isinstance(expression, Literal) and expression.dtype == "int" and type(expression.value) is int:
-            return held(expression.value)
-        return expression
-
-    def lift(expression):
-        # An affine index carries its anchor whole, a zero one included: ``a`` and ``a + 4`` are
-        # one shape read at two offsets, and normalization spells the first without the ``+ 0``.
-        # A value's float offset (``acc + 1e-6``) is no integer literal and stays as spelled.
-        if isinstance(expression, Literal):
-            return abstract(expression)
-        form = affine_form(expression, expression.free_vars())
-        try:
-            anchor = form[0].eval({}) if form is not None else None
-        except (KeyError, TypeError, ValueError):
-            anchor = None
-        if type(anchor) is not int:
-            return expression.rebuild(abstract)
-        rest = None
-        for name, coeff in sorted(form[1].items()):
-            term = Var(name) if coeff == 1 else BinaryExpression("*", Var(name), Literal(coeff, "int"))
-            rest = term if rest is None else BinaryExpression("+", rest, term)
-        return held(anchor) if rest is None else BinaryExpression("+", rest, held(anchor))
-
-    def abstracted(stmt):
-        # A loop's static extent is a literal too: a step whose reduction covers one more
-        # element than the last is still the same step.
-        if isinstance(stmt, Loop) and isinstance(stmt.axis.extent.expression, Literal) and type(stmt.axis.extent.expression.value) is int:
-            return stmt.replace(axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expression.value))))
-        return stmt.map_expressions(lift)
-
-    return body.map(abstracted), tuple(literals)
-
-
-@lru_cache(maxsize=256)
-def _literal_free_key(body: Body) -> str:
-    """The exact identity of ``body`` blind to its integer literals — what the copies of one
-    computation at successive offsets and bounds share (:func:`_literals_abstracted`)."""
-    return _literals_abstracted(body)[0].structural_key(structural=False)
-
-
 def _chain(graph: Graph, first: Node) -> tuple[list[Node], Node | None]:
     """``first`` and every later state: what descends from it with the same shape and the same body
-    once its integer literals are taken out. And the state after the last of them, if there is one
-    with the same statements and another body: a step at the edge of its matrix. A step that writes
+    once the integers of its coordinates and static extents are left out (``Body.identity_apart``). And the state
+    after the last of them, if there is one with the same statements and another body: a step at the edge of its
+    matrix. A step that writes
     row ``i`` masks its store by ``i <= row < i + 1``, and at the last row the normal form drops the
     bound the extent already gives, so the body is the first step's advanced and no longer spells
     like it. Whether it is that step is the roll's own test of every step. A first step at the
     matrix's other edge is not offered."""
     body, tensor = first.op.body, first.outputs[0]
+    key = body.identity_apart()
     chain, reached, edge = [first], {first.id}, None
     for node_id in graph.topological_order():
         node = graph.nodes[node_id]
@@ -140,11 +88,11 @@ def _chain(graph: Graph, first: Node) -> tuple[list[Node], Node | None]:
             continue
         reached.add(node_id)
         alike = isinstance(node.op, LoopOp) and node.outputs[0].shape == tensor.shape and node.outputs[0].dtype == tensor.dtype
-        # The exact key canonicalizes the body, which a fused kernel of thousands of statements pays
-        # for in seconds: ask only of a body with the same statements to begin with.
+        # The key ranks the body's buffers, which a fused kernel of thousands of statements pays for in seconds: ask
+        # only of a body with the same statements to begin with.
         if not alike or _census(node.op.body) != _census(body):
             continue
-        if _literal_free_key(node.op.body) == _literal_free_key(body):
+        if node.op.body.identity_apart() == key:
             chain.append(node)
             edge = None
         elif edge is None:

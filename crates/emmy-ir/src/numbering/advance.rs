@@ -9,8 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{
-    Chains, Effects, Key, Number, Numbering, Tag, effect_order, hash_parts, offset_of, spelled_key,
-    value_numbers_apart,
+    Chains, Effects, Key, Number, Numbering, scope_tree_apart, spelled_key, value_numbers_apart,
 };
 use crate::Name;
 use crate::axis::{Axis, Dim};
@@ -58,82 +57,6 @@ fn unshared(body: &Body) -> Body {
     })
 }
 
-/// The scope tree of `body` under an apart `numbering`, as the identity builds it (`digest::scope_tree`): each block
-/// by its header, its parameters, its children and the members it follows for an effect, each leaf by its number
-/// and its parameters, each scope's members sorted. An integer taken apart is keyed as `integer` keys it, and
-/// `sites` takes every one in the order of the sorted tree. Two members that key alike keep the order they are
-/// written in.
-fn tree(
-    numbering: &Numbering,
-    body: &Body,
-    integer: &dyn Fn(i64, i64) -> Key,
-    effects: &mut Effects,
-    sites: &mut Vec<i64>,
-) -> Number {
-    let order = effects
-        .entry(Arc::as_ptr(&body.0) as usize)
-        .or_insert_with(|| effect_order(body))
-        .clone();
-    let mut members: Vec<(Number, Vec<i64>)> = Vec::with_capacity(body.len());
-    for (index, sources) in order.iter().enumerate() {
-        let mut preceding: Vec<Key> = sources
-            .iter()
-            .map(|source| Key::Num(members[*source].0))
-            .collect();
-        preceding.sort();
-        let here = body.at(index);
-        let ordinal = numbering.ordinal(&here);
-        let mut own = Vec::new();
-        let keyed = |params: &[super::Param], own: &mut Vec<i64>| {
-            Key::Tuple(
-                params
-                    .iter()
-                    .map(|param| match offset_of(param) {
-                        Some((value, site)) => {
-                            own.push(site);
-                            integer(site, value)
-                        }
-                        None => Key::Param(param.clone()),
-                    })
-                    .collect(),
-            )
-        };
-        let number = match &numbering.blocks[ordinal] {
-            Some((header, params)) => {
-                let params = keyed(params, &mut own);
-                let children: Vec<Key> = here
-                    .stmt()
-                    .nested()
-                    .iter()
-                    .map(|child| Key::Num(tree(numbering, child, integer, effects, &mut own)))
-                    .collect();
-                hash_parts([
-                    Key::tag(Tag::Block),
-                    header.clone(),
-                    params,
-                    Key::Tuple(children),
-                    Key::Tuple(preceding),
-                ])
-            }
-            None => {
-                let (number, params) = match &numbering.numbers[ordinal] {
-                    Some((number, params)) => (Key::Num(*number), keyed(params, &mut own)),
-                    None => (Key::None, Key::Tuple(Vec::new())),
-                };
-                hash_parts([Key::tag(Tag::Stmt), number, params, Key::Tuple(preceding)])
-            }
-        };
-        members.push((number, own));
-    }
-    members.sort_by_key(|member| member.0);
-    let mut numbers = Vec::with_capacity(members.len());
-    for (number, own) in members {
-        numbers.push(Key::Num(number));
-        sites.extend(own);
-    }
-    hash_parts(numbers)
-}
-
 /// A body as the proof reads it: its apart numbering, its tree with the integers left out, and its integers in
 /// the order of that tree.
 struct Read<'a> {
@@ -147,7 +70,7 @@ impl Read<'_> {
     fn of(body: &Body) -> Read<'_> {
         let numbering = value_numbers_apart(body, &spelled_key, Chains::Flat);
         let mut sites = Vec::new();
-        let shape = tree(
+        let shape = scope_tree_apart(
             &numbering,
             body,
             &|_, _| Key::None,
@@ -164,7 +87,7 @@ impl Read<'_> {
 
     /// The tree with every integer keyed by the value `value` gives its site.
     fn valued(&self, value: &dyn Fn(i64) -> i64) -> Number {
-        tree(
+        scope_tree_apart(
             &self.numbering,
             self.body,
             &|site, _| Key::Int(value(site)),
@@ -492,7 +415,7 @@ mod tests {
             .numbers
             .iter()
             .flatten()
-            .all(|(_, params)| params.iter().all(|p| offset_of(p).is_none()));
+            .all(|(_, params)| params.iter().all(|p| super::super::offset_of(p).is_none()));
         assert!(none);
     }
 }

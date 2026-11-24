@@ -1202,7 +1202,7 @@ pub fn value_numbers_apart(
     numbered(body, resource_key, chains, true)
 }
 
-fn numbered(
+pub(super) fn numbered(
     body: &Body,
     resource_key: &dyn Fn(&Name) -> Key,
     chains: Chains,

@@ -633,6 +633,14 @@ impl PyBody {
             emmy_ir::identity::canonicalize_identity(&self.body, cluster, colors.as_ref()).py()?;
         Ok((identity.key, str_tuple(py, &identity.arguments)?))
     }
+
+    /// The key this body shares with the same computation at other offsets, bounds and static extents: its exact
+    /// identity with the integer of every affine coordinate expression and every static loop extent left out.
+    /// Bodies with one such key are candidates for the copies of one step, which `prove_steps` decides. It is no
+    /// kernel's identity: nothing is keyed by it and nothing stores it.
+    fn identity_apart(&self) -> PyResult<String> {
+        emmy_ir::identity::identity_apart(&self.body).py()
+    }
 }
 
 /// A dependence cone over one scope level: the members, in body order, and the names read from outside them.
