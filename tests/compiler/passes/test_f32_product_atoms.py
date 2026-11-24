@@ -38,7 +38,8 @@ from emmy.compiler.ir.schedule.classic import ClassicProblem
 from emmy.compiler.ir.schedule.classic import refusals as sched
 from emmy.compiler.ir.schedule.classic.schedule import classic_node_key
 from emmy.compiler.ir.schedule.staging import copied_b
-from emmy.compiler.ir.stmt import parse_body
+from emmy.compiler.ir.stmt import Load, free_names, parse_body
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp
 from emmy.compiler.ir.tile.ir import TileOp
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction
@@ -57,11 +58,6 @@ def _term(cap=(12, 0), *, a_dtype=F32, b_dtype=F32, k=512):
     free = (Axis("m", Dim(32)), Axis("n", Dim(512)))
     tile = TileOp(op=node, place=Placement(free=free), axes=(*free, ka), inputs=inputs)
     return tile, Context.from_target(cap), node
-
-
-def _offered(tile, ctx, node) -> tuple[str, ...]:
-    """The atoms the node's static facts allow, whatever the precision policy says."""
-    return sched._warp_atoms(tile, ctx, node)
 
 
 def _offered(tile, ctx, node) -> tuple[str, ...]:
@@ -269,3 +265,57 @@ def test_a_product_of_two_f32_matrices_runs_on_the_bf16_atom_and_matches_numpy()
     # either sign stays near that fraction of the result's size.
     assert float(np.sqrt(np.mean(error**2))) < 4e-3 * scale
     assert abs(float(np.mean(error * np.sign(exact)))) < 4e-4 * scale
+
+
+def _gathered_rows(picks: int, rows: int, n: int, k: int) -> Graph:
+    """A product whose left operand is computed: its row ``p`` is the stored row ``sel[p]`` of ``w``, times ``x``."""
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("w", (rows, k), F32), node_id="w")
+    graph.add_node(InputOp(), [], Tensor("sel", (picks,), "i64"), node_id="sel")
+    graph.add_node(InputOp(), [], Tensor("x", (picks, k), F32), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("b", (k, n), F32), node_id="b")
+    graph.add_node(GatherOp(axis=0), ["w", "sel"], Tensor("picked", (picks, k), F32), node_id="picked")
+    graph.add_node(ElementwiseOp("multiply"), ["picked", "x"], Tensor("a", (picks, k), F32), node_id="a")
+    graph.add_node(MatmulOp(), ["a", "b"], Tensor("o", (picks, n), F32), node_id="o")
+    graph.inputs, graph.outputs = ["w", "sel", "x", "b"], ["o"]
+    return graph
+
+
+_GATHERED_PINS = {"PLACE": "fuse", "TILE": f"{TF32}/f1x1", "WORK": "w1x2", "REDUCE": "", "STAGE": "d2/smem"}
+
+
+def test_a_staged_fill_addresses_a_gathered_row_by_the_index_it_read_back() -> None:
+    """A computed operand that gathers a stored row by a per-row index keeps the index in a row of shared memory,
+    and each cell of the fill reads it back. The fill merges a run of cell loads into one vector load, whose row
+    coordinate must read the run's own copy of that index: it read the name before the copy and did not compile."""
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    with pinned_knobs(_GATHERED_PINS):
+        _, kernels = compile_with_kernels(_gathered_rows(32, 5, 64, 128), ctx=Context.from_target((12, 0)))
+    assert _products(kernels)
+    loads = statements(kernels, Load)
+    read_back = {load.names[0] for load in loads if load.input.startswith("_a_stat_")}
+    rows = [load for load in loads if load.input == "w"]
+    assert read_back and rows and all(len(load.names) == 4 for load in rows)
+    assert all(read_back & set(free_names(load)) for load in rows)
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@requires_sm(8, 0)
+def test_a_product_over_gathered_rows_runs_on_the_atom_and_matches_numpy() -> None:
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    picks, rows, n, k = 32, 5, 64, 128
+    rng = np.random.default_rng(5)
+    backend = CudaBackend()
+    with pinned_knobs(_GATHERED_PINS):
+        compiled, kernels = compile_with_kernels(_gathered_rows(picks, rows, n, k))
+    assert _products(kernels)
+    w = rng.integers(-4, 5, (rows, k)).astype(np.float32)
+    x = rng.integers(-2, 3, (picks, k)).astype(np.float32)
+    b = rng.integers(-8, 9, (k, n)).astype(np.float32)
+    sel = rng.integers(0, rows, picks).astype(np.int64)
+    result, _ = backend.run(compiled, input_data={"w": w, "sel": sel, "x": x, "b": b})
+    np.testing.assert_array_equal(result.outputs["o"].reshape(picks, n), (w[sel] * x) @ b)
