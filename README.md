@@ -184,10 +184,11 @@ A hardware golden holds the best known schedule of each kernel. A candidate file
 `emmy/compiler/pipeline/search/candidates/records/`, holds a few other measured schedules of the same kernels: 3 where
 the kernel's schedule space is small, up to 10 where it is large, the slow ones beside the near misses. `emmy
 candidates build --db TUNE_DB` fills the files from the tune DB the card's tunes wrote and lists the groups still
-under their target; a tune of such a kernel on its card (`emmy run --golden PATH --kernel REF --bench --tune N`)
-measures the rows the next build takes. `emmy candidates check`, `restamp` and `realize --drop` keep the files
-current, as the `emmy golden` commands keep a golden. No compile reads a candidate file; the schedule dataset export reads them (`--candidates`), and a
-candidate over 1.1× slower than its group's golden trains the schedule prior as a negative.
+under their target; `emmy bench .github/candidates-fill --filter golden=PATH` tunes those kernels on the golden's
+card and returns the filled file. `emmy candidates check`, `restamp` and `realize --drop` keep the files current, as
+the `emmy golden` commands keep a golden; the `refresh-candidates` skill is the flow around them. No compile reads a
+candidate file; the schedule dataset export reads them (`--candidates`), and a candidate over 1.1× slower than its
+group's golden trains the schedule prior as a negative.
 
 ## Deploy
 

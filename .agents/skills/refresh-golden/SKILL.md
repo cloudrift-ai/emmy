@@ -148,7 +148,7 @@ isolated rows are recorded, `--no-record-evidence` keeps that check from replaci
 `torch.compile`; each measured row's `tried` is the number of schedules the DB held for that kernel. Missing
 `torch.compile` timing remains a reported gap. A `--tune` run's rows stay in the card's tune DB. After a hardware
 golden's tunes, copy that DB back with the working golden and fill the golden's candidate file from it
-(`emmy candidates build GOLDEN --db TUNE_DB`; README, "Candidate files").
+(`emmy candidates build GOLDEN --db TUNE_DB`; the `refresh-candidates` skill).
 
 Promote the validated entries through `GoldenFile.edit(path)` with `add_kernel`, `add_routing` and `upsert_row`,
 including qualified whole-target latency on its root seed. A canonical file holds the same exact kernel at another
@@ -197,9 +197,9 @@ evidence at a cut fork (DeepSeek V4, after #981 and again after #1003). It prove
 not that every fork a deploy meets has a measured arm.
 
 A hardware golden has a candidate file beside it (`emmy/compiler/pipeline/search/candidates/records/<same name>`,
-GLOSSARY "Candidate file"), which carries the golden's programs, kernels and decisions. After the golden changes, run
-`emmy candidates restamp` and then `emmy candidates build`, which copies the golden's tables again and keeps the
-candidate rows whose group the golden still holds.
+GLOSSARY "Candidate file"), which copies the golden's programs, kernels and decisions. A change to the golden leaves
+it stale and the candidate tests red: finish with the `refresh-candidates` skill's repair steps (`emmy candidates
+restamp`, then `emmy candidates build`) in the same PR.
 Keep the prior reproduction gate green (AGENTS.md finalization step 22): a refreshed hardware golden refits both priors
 in the same PR. The gate holds only hardware goldens: a refreshed recipe golden bears on the priors only through the
 rows promoted into the card's hardware golden, which then refits.
