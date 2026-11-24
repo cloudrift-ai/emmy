@@ -126,6 +126,20 @@ def test_a_reader_of_the_state_before_each_step_runs_in_the_step() -> None:
     assert list(rolled.outputs) == list(graph.outputs), "the states are stored for no one"
 
 
+def test_the_steps_joined_along_the_sequence_with_a_tail_are_stored_by_the_loop() -> None:
+    """The outputs of the chunks joined along the sequence, the last chunk's computed apart. The trips of the joined
+    coordinate that are a step read that step, a choice by the range of the coordinate that is one read. The trips
+    after the last step read the state the loop ends with: the loop runs one trip past its steps for them, with the
+    state held. One kernel, and neither the steps nor the state are stored."""
+    graph, _, _ = graph_from_code(_delta(cat=True))
+    graph = Pipeline.build(LOOP_PASSES).run(graph)
+
+    (rolled,) = (node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp))
+    (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
+    assert steps.axis.extent.as_static() == 4 and rolled.body.carries, "three steps and the trips after the last"
+    assert list(rolled.outputs) == list(graph.outputs)
+
+
 _SETUP = """
 import torch, torch.nn as nn
 class Walk(nn.Module):
