@@ -700,6 +700,7 @@ async def _bench_session(
     quantize=None,
     computed_from=None,
     sym_env=None,
+    keep_worker=False,
 ) -> _Session:
     """One ``--bench`` session, every GPU touch a job on the backend's one persistent SIGKILL-able worker: the parent
     launches no kernel. A hung kernel dies with the child, its row is reported ``bench_fail``, and the next job starts
@@ -720,7 +721,8 @@ async def _bench_session(
     not benched again, and a golden row with no knobs, which would compile to the same pick, is skipped. A wrong
     answer stops the pinned rows where it is fatal (``accuracy_fatal``: a traced module on its own inputs) or strict.
     ``same_input_greedy`` makes the greedy outputs the strict reference of a target with no Torch twin, and
-    ``measure_greedy`` benches the isolated row with no pinned row to compare, for a record."""
+    ``measure_greedy`` benches the isolated row with no pinned row to compare, for a record. ``keep_worker`` leaves the
+    worker to the session this one runs inside (a kernel's tune inside its program's)."""
     strict = bool(getattr(args, "strict_correctness", False))
     rows = list(rows) if source is not None else []
     tune = getattr(args, "tune", None) if source is not None else None
@@ -802,7 +804,8 @@ async def _bench_session(
                 isolated = await isolated_greedy()
             benched = (benched or []) + await _tune(backend, args, source, graph, ab_ref, ref_key, route=route)
     finally:
-        await backend.aclose_async_worker()
+        if not keep_worker:
+            await backend.aclose_async_worker()
     return _Session(
         results=results,
         bench=bench,
@@ -1674,19 +1677,104 @@ async def _bench_golden_variants(
     return out
 
 
+async def _tune_kernel_sets(backend, args, program, ctx, db, found) -> None:
+    """A tune of a program of several kernels (``search/autotune``): in rounds, tune each kernel of the kernel set the
+    greedy compile takes (``found``, of ``program()``) alone, then the kernels of each arm a fork of that compile
+    offered and did not take, the placement prior's best ``ARMS`` of them a fork, taken on the fork's kernel alone;
+    every decision whose pieces now hold rows is stored as a routing row. The next compile then picks each of those
+    forks from measured arms, and a round on its kernel set follows while that set changes, ``ROUNDS`` at most. A
+    kernel alone is a program of one kernel, tuned as any: its rows are benched, checked and recorded by a bench
+    session of its own."""
+    from emmy.compiler.pipeline.search.autotune import ARMS, ROUNDS, kernel_set  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import knobs_json  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.inventory import record_measured_routing  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_bindings, kernel_identity, kernel_name, kernel_tile  # noqa: PLC0415
+
+    def key_of(op) -> tuple:
+        return kernel_identity(op), kernel_bindings(kernel_tile(op))
+
+    def price(kernels) -> float | None:
+        times = [db.best_per_op_time(ctx, kernel, bindings=bindings) for kernel, bindings in map(key_of, kernels)]
+        return None if None in times else sum(times)
+
+    tuned: set = set()
+    explored: set = set()
+
+    async def measure(kernels, decisions) -> None:
+        for op, alone in kernels:
+            kernel, bindings = key_of(op)
+            if (kernel, knobs_json(bindings)) in tuned:
+                continue
+            tuned.add((kernel, knobs_json(bindings)))
+            if len(db.measured(ctx, kernel, bindings=bindings)) >= args.tune:
+                continue  # an earlier tune's rows
+            try:
+                compiled = backend.compile(alone.copy())
+                session = await _bench_session(
+                    args,
+                    backend,
+                    compiled,
+                    torch_spec=("frontend_graph", None),
+                    base_s=_IR_COMPARE_BASE_S,
+                    twin=None,
+                    source=alone,
+                    rows=[],
+                    keep_worker=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — a kernel that does not lower leaves its arm without a price
+                logger.warning("[tune] %s: not measured (%s)", kernel_name(op), exc)
+                continue
+            _record_bench_evidence(args, session.rows, session.isolated)
+        measured = {kernel for kernel, bindings in (key_of(op) for op, _ in kernels) if db.measured(ctx, kernel, bindings=bindings)}
+        record_measured_routing(db, decisions, measured)
+
+    last = None
+    for _ in range(ROUNDS):
+        kernels = sorted(str(kernel_identity(op)) for op, _ in found.kernels)
+        if kernels == last:
+            break
+        last = kernels
+        await measure(found.kernels, found.decisions)
+        logger.warning("[tune] kernel set of %d kernel(s): %s us", len(kernels), price(op for op, _ in found.kernels))
+        for kernel, alone, arms, taken in found.forks:
+            for arm in [arm for arm in arms if arm != taken][:ARMS]:
+                if (kernel, knobs_json(arm)) in explored:
+                    continue
+                explored.add((kernel, knobs_json(arm)))
+                try:
+                    other = kernel_set(alone.copy(), ctx, db, take=arm)
+                except Exception as exc:  # noqa: BLE001 — an arm that does not lower has no price
+                    logger.warning("[tune] arm %s: not measured (%s)", arm, exc)
+                    continue
+                await measure(other.kernels, other.decisions)
+                logger.warning("[tune] arm %s: %s us", arm, price(op for op, _ in other.kernels))
+        found = kernel_set(program(), ctx, db)
+    logger.warning("[tune] the compile now takes %d kernel(s): %s us", len(found.kernels), price(op for op, _ in found.kernels))
+
+
 async def _tune(backend, args, source, compiled, ref, ref_key, route=None) -> list:
     """``--tune N``: measure N schedule rows of the program's one scheduled kernel, in batches the autotuner
     proposes from the rows measured so far, each benched exactly as an ``--ab`` row. A row that failed, did not
-    realize, or was flagged (a wrong answer among them) counts as a failure, never as a time."""
+    realize, or was flagged (a wrong answer among them) counts as a failure, never as a time. A program of several
+    kernels, or one whose kernel met a kernel-set fork of several arms, is tuned kernel by kernel
+    (:func:`_tune_kernel_sets`) and adds no row to this session's table."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.autotune import Autotuner, prior_scores, schedule_space  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.autotune import Autotuner, kernel_set, prior_scores, schedule_space  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
 
-    graph = source.copy() if not isinstance(source, str) else graph_from_code(source)[0]
+    def program():
+        return source.copy() if not isinstance(source, str) else graph_from_code(source)[0]
+
     ctx = Context.probe()
     db = SearchDB.for_compile(backend.tune_db) if backend.tune_db is not None else None
-    op, rows = schedule_space(graph, ctx, db)
+    found = kernel_set(program(), ctx, db)
+    if len(found.kernels) != 1 or any(len(arms) > 1 for _, _, arms, _ in found.forks):
+        if db is None or not _records_evidence(args):
+            raise CommandError("--tune of a program of several kernels picks from the rows it records: it needs the tune DB")
+        await _tune_kernel_sets(backend, args, program, ctx, db, found)
+        return []
+    op, rows = schedule_space(program(), ctx, db)
     tuner = Autotuner(rows, prior_scores(op, rows, ctx))
     logger.warning("[tune] %s: %d schedule rows; measuring %d", op.name, len(rows), args.tune)
     ref_knobs = _cuda_knob_dicts(compiled)

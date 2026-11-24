@@ -42,7 +42,7 @@ lies ahead of the kernel (:func:`~emmy.compiler.pipeline.search.pins.fork_ahead`
 kernel has taken left another kernel, and prices that one. :func:`_route_candidates` turns them
 into candidates priced at those µs, nothing installed on the kernel, and the fastest wins. With no
 measured arm the placement prior ranks the arms by the kernels each leaves
-(:func:`_kernel_set_pick`). No arm is scheduled to decide the fork: the pieces an arm mints are
+(:func:`kernel_set_ranking`). No arm is scheduled to decide the fork: the pieces an arm mints are
 brand-new kernels, decided at their own forks from their own rows.
 
 **A measurement can also DISQUALIFY.** The measured sources above all RANK, and a
@@ -55,7 +55,7 @@ preference — the alternative is that an all-failed kernel has no ``ok`` row,
 therefore no evidence at all, and falls through to the prior as though nothing
 were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
 every benched variant hung. A failure of a kernel, or of a piece one of its cuts
-leaves, also takes the keep-whole arm off that kernel's fork (:func:`_kernel_set_pick`).
+leaves, also takes the keep-whole arm off that kernel's fork (:func:`kernel_set_ranking`).
 """
 
 from __future__ import annotations
@@ -184,12 +184,13 @@ def _load_placement_prior():
     return prior if prior.space == "placement" else None
 
 
-def _kernel_set_pick(fp: ForkPoint, prior, failed: set[str]) -> object:
-    """The placement prior's argmin over a kernel-set fork's arms — keep the kernel whole and every cut, split or
+def kernel_set_ranking(fp: ForkPoint, prior, failed: set[str]) -> list:
+    """A kernel-set fork's arms by the placement prior, best first — keep the kernel whole and every cut, split or
     layout the pass offers — each featurized from the kernels it leaves (``Featurizer.features``), exactly as the
     arms of the placement dataset the prior was fit on (``ranking.walk_placement``). An arm that leaves a kernel
     whose every measured variant failed (``failed``, ``SearchDB.failed``) is off the ballot while another arm
-    remains. With no ``prior`` the first arm left wins, and the first of equally scored arms wins.
+    remains. With no ``prior`` the arms left stay in the order offered, and equally scored arms keep that order. The
+    first is the greedy compile's pick where no arm is measured; a tune measures the rest in this order.
 
     A failure also rules out keeping the kernel whole wherever it or a piece one of its cuts leaves failed: each
     piece computes part of its parent, and a kernel that never finished does not finish inside a bigger one. That
@@ -199,7 +200,7 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: set[str]) -> object:
 
     leaves = fp.flat()
     if len(leaves) == 1:
-        return leaves[0]  # a pin, or legality, left one arm: nothing to rank
+        return leaves  # a pin, or legality, left one arm: nothing to rank
     root = fp.root_op.with_io(fp.match.graph, fp.match.root)
     parallel_expand([o for o in leaves if _is_structural_option(o)], workers=config.workers())
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
@@ -210,10 +211,10 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: set[str]) -> object:
             live = [i for i in live if _is_structural_option(leaves[i])] or live
         live = [i for i in live if not any(key in failed for key in left[i])] or live
     if prior is None:
-        return leaves[live[0]]
+        return [leaves[i] for i in live]
     featurizer = Featurizer.of(fp.ctx)
     scores = prior.mean_scores_features([featurizer.features(root, leaf_knobs(leaves[i]), pieces=pieces[i]) for i in live])
-    return leaves[live[min(range(len(live)), key=scores.__getitem__)]]
+    return [leaves[live[j]] for j in sorted(range(len(live)), key=scores.__getitem__)]
 
 
 def _find_decided_leaf(fp, want: dict) -> object | None:
@@ -652,7 +653,7 @@ def greedy_decide(
     A **kernel-set fork** — a placement cut, a split, a storage layout (``pins.KERNEL_SET_DOMAINS``) — is decided
     from what its arms are: the fastest measured arm (:func:`_route_candidates`, :func:`_layout_candidates`),
     else the ``placement_prior`` — the shipped placement weights, loaded lazily — over every arm
-    (:func:`_kernel_set_pick`), else the first arm. No arm is scheduled to decide it: the pieces an arm mints are
+    (:func:`kernel_set_ranking`), else the first arm. No arm is scheduled to decide it: the pieces an arm mints are
     brand-new kernels, decided at their own forks.
 
     A **schedule fork** descends directly to exact evidence when available, otherwise streams the complete rows
@@ -725,7 +726,7 @@ def greedy_decide(
             return chosen
         if len(fp.options) > 1:
             _require_evidence(fp, "no measured row spells a kernel-set arm")
-        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, failed(fp))
+        return kernel_set_ranking(fp, placement if fp.ctx.backend_name == "cuda" else None, failed(fp))[0]
 
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior

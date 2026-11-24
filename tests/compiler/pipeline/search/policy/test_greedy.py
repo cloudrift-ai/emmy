@@ -566,7 +566,7 @@ def test_a_failure_takes_the_keep_whole_arm_off_its_kernel(monkeypatch, failed_a
 def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(tmp_path) -> None:
     """The failure writer and the evidence pick name one kernel: ``persist_bench_failure`` files the ``bench_fail``
     row off the compiled CUDA op (``kernel_key``: the tile its schedule fork was offered), and the next compile's
-    kernel-set fork reads it back under the identity of the arm it offers (``_kernel_set_pick``) — through the tune DB,
+    kernel-set fork reads it back under the identity of the arm it offers (``kernel_set_ranking``) — through the tune DB,
     with no mocked index — so the fused kernel that hung is off the ballot and the fork takes a cut. The GDN audit
     read three hangs of one kernel name as three picks of one arm, back when a piece of a cut kept its parent's name;
     this test pins what the rows do, by identity."""

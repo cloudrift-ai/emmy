@@ -463,7 +463,7 @@ Dataset version 6 requires re-exporting older labels; the feature vocabulary and
 fork's group carries the report tier of its domain — `place`, `split` or `layout` — or `dyn` where the kernel has a
 symbolic axis, as every golden group of a symbolic kernel does. The tier comes from the root kernel's derived shape
 and must agree with the dynamic flag in every arm's features. The greedy asks it at every kernel-set fork no
-measured arm decides (`policy/greedy._kernel_set_pick`), with the same featurizer, so the dataset's rank and the
+measured arm decides (`policy/greedy.kernel_set_ranking`), with the same featurizer, so the dataset's rank and the
 deploy's pick are one computation. Both artifacts name their `space`, and a reader refuses the other's. A kernel's
 standalone definition reads every input as an activation, so the import files, beside a file's rows, the constant
 inputs its program binds on each target at the sizes the rows reach it (`GoldenFile.executable`, the `constant`
@@ -620,7 +620,7 @@ A split route prices the offered plan matching the `g<n>` half of its `REDUCE` v
 ballot decide nothing. The fastest measured arm wins; strict evidence refuses an unmeasured fork with multiple
 arms. A hand pin leaving one arm decides it, allowing a kernel set to be recorded before its routing row exists;
 the strict check then falls on the pieces. With no measured arm,
-the fork goes to the placement prior (`_kernel_set_pick`: its argmin over the arms' `P_*` rows, the arm that keeps the
+the fork goes to the placement prior (`kernel_set_ranking`: its argmin over the arms' `P_*` rows, the arm that keeps the
 kernel whole included); without the shipped placement weights, the first arm wins — the kernel stays fused, unsplit
 and folded. Disabling the schedule prior does not disable placement ranking. No arm is scheduled to decide the fork (Part 4). A measurement can
 also disqualify: an arm that leaves a kernel whose every measured variant failed (`_Measured.failed`, the watchdog's

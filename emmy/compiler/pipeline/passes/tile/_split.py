@@ -1,7 +1,7 @@
 """Offer and realize the cross-CTA reduce split as a STRUCTURAL graph rewrite.
 
 The split changes the kernel SET, exactly like a ``PLACE`` cut: a kernel that splits does not run, so
-the split is decided from the pieces it leaves (``policy/greedy._kernel_set_pick``), which is why it is
+the split is decided from the pieces it leaves (``policy/greedy.kernel_set_ranking``), which is why it is
 the ``030_cut`` fork and not a schedule row. It runs BEFORE scheduling — the
 rewrite consumes only the stored :class:`Fold` algebra, never a schedule decision — and each piece
 is a fresh unmapped :class:`TileOp` that re-enters the pass scan and decides its own row at

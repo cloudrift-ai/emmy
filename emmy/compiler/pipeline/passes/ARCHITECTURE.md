@@ -523,7 +523,7 @@ behind the explicit classic reconstruction boundary.
 
 **A schedule ranks one kernel; a kernel set is decided before it.** A schedule fork picks one alternative and its cost
 is that alternative's latency. A cut — and a cross-CTA split — changes which kernels exist, which is why each is a
-separate structural decision with a separate rule (`policy/greedy._kernel_set_pick`: a measured arm, priced as the sum
+separate structural decision with a separate rule (`policy/greedy.kernel_set_ranking`: a measured arm, priced as the sum
 of its pieces' rows, else the placement prior over the kernels each arm leaves) rather than something the per-row
 prior can rank. No arm is scheduled to decide it; each piece is scheduled afterwards, at its own fork.
 
