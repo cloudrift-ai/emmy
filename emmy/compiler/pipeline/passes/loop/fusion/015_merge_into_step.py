@@ -708,8 +708,10 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
     )
     reaching: set[str] = set()
     for reader in sorted(set().union(*(graph.buffer_users(name) for name in states)) if states and longer else ()):
-        if isinstance(graph.nodes[reader].op, LoopOp):
-            reach = _reach(_one_read(graph, graph.nodes[reader].op.body, stepped, before, steps, along), set(before.values()))
+        node = graph.nodes[reader]
+        if isinstance(node.op, LoopOp) and not (set(node.inputs) & set(standing) and copied(graph, node.outputs[0].name) is not None):
+            read = _one_read(graph, node.op.body, stepped, before, steps, along)
+            reach = _reach(_as_carried(read, states, before, set(standing), steps, None), set(before.values()))
             if reach > steps:
                 reaching.add(reader)
                 extent = max(extent, reach)
@@ -783,7 +785,8 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
                 # What it reads of a member that is of no step it reads where it stands, like the step does.
                 if any(name in standing for name in read) and copied(graph, node.outputs[0].name) is not None:
                     continue  # a copy of what the last step stored: the step stores it there (``020``)
-                body = _one_read(graph, node.op.body, stepped, before, steps, along).map(
+                body = _as_carried(_one_read(graph, node.op.body, stepped, before, steps, along), states, before, set(standing), steps, extent)
+                body = body.map(
                     lambda stmt: (
                         stmt.replace(input=standing[stmt.input].name, index=(last, *stmt.index))
                         if isinstance(stmt, Load) and stmt.input in standing
@@ -830,9 +833,42 @@ def _reach(body: Body, twins: set[str]) -> int:
         entry = load.index[0] if load.input in twins else None
         if isinstance(entry, Var):
             reach = max(reach, extents.get(entry.name, 0))
+        elif isinstance(entry, Literal):
+            reach = max(reach, entry.value + 1)
         elif isinstance(entry, BinaryExpression) and entry.op == "/" and isinstance(entry.left, Var) and isinstance(entry.right, Literal):
             reach = max(reach, extents.get(entry.left.name, 0) // entry.right.value)
     return reach
+
+
+def _as_carried(body: Body, states: dict[str, str], before: dict[str, str], standing: set[str], steps: int, extent: int | None) -> Body:
+    """PROTOTYPE. ``body`` with each read of a state after a step it names by a literal — or after the last of the
+    ``steps``, where the buffer holds no step — as the read of the state before the next step: the state as the loop
+    carries it. Read at its own step it is that step's work again, at every place it is read. The next step is a trip
+    of a loop of ``extent`` (``None``: however long).
+
+    A kernel that reads the state cell for cell stays as it is: every loop of it is a loop of the cell and it folds
+    nothing, so in the step it is one more store of the value the step computes."""
+
+    def after(load: Load) -> tuple[int, tuple] | None:
+        if load.input not in states or not plain_load(load):
+            return None
+        if load.input in standing:
+            return steps, tuple(load.index)
+        return (load.index[0].value + 1, tuple(load.index[1:])) if isinstance(load.index[0], Literal) else None
+
+    found = [after(load) for load in body.loads]
+    cells = [[entry for entry in cell if not isinstance(entry, Literal)] for _, cell in filter(None, found)]
+    loops = set(body.axis_names)
+    if not any(body.iter_of_type(Accum)) and all(len(set(cell)) == len(cell) and {Var(name) for name in loops} == set(cell) for cell in cells):
+        return body
+
+    def move(stmt: Statement) -> Statement:
+        where = after(stmt) if isinstance(stmt, Load) else None
+        if where is None or (extent is not None and where[0] >= extent):
+            return stmt
+        return stmt.replace(input=before[stmt.input], index=(Literal(where[0], "int"), *where[1]))
+
+    return body.map(move)
 
 
 def _with_states_before(op: LoopOp, twins: dict[str, tuple[str, ...]]) -> LoopOp:

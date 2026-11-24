@@ -81,16 +81,17 @@ def test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state() -
 
     (rolled,) = (node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp))
     (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
-    # Four chunks: the last chunk's state is never read, so three steps are carried.
-    assert steps.axis.extent.as_static() == 3 and list(steps.carries) == [carry.name for carry in rolled.body.carries]
+    # Four chunks: the last chunk's state is never read, so three steps are carried. The loop runs one trip more.
+    assert steps.axis.extent.as_static() == 4 and list(steps.carries) == [carry.name for carry in rolled.body.carries]
     # A chunk's output reads the state its step starts with and nothing of another step, so the step computes it and
-    # stores it at its own time. The last chunk's output reads the state the loop ends with: the last step stores it.
+    # stores it at its own time. The last chunk's output reads the state the loop ends with: it is stored on the trip
+    # after the last step, from the state as the loop carries it, and the last step's work is not done again for it.
     stored = {}
     for cond in rolled.body.iter_of_type(Cond):
         (write,) = cond.body.writes
         (at,) = (side.value for side in (cond.cond.left, cond.cond.right) if isinstance(side, Literal))
         stored[write.output] = at
-    assert sorted(stored.values()) == [0, 1, 2, 2] and set(stored) == set(graph.outputs)
+    assert sorted(stored.values()) == [0, 1, 2, 3] and set(stored) == set(graph.outputs)
     assert len(rolled.body.writes) == 4, "the kernel stores the four outputs and nothing else"
 
 
@@ -506,7 +507,7 @@ def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
 
     ((node_id, step),) = ((node_id, node.op) for node_id, node in lowered.nodes.items() if isinstance(node.op, CudaOp) and node.op.serial)
     ((axis, launches),) = step.serial
-    assert launches == 3 and axis in step.runtime_args
+    assert launches == 4 and axis in step.runtime_args  # three steps, and the trip after the last
     assert not [loop for loop in statements(kernels[node_id], Loop) if loop.axis.name == axis]
     assert axis in text(kernels[node_id]), "the body reads the step it runs"
     assert f"0 < {axis} ? {axis} - 1 : 0" in text(kernels[node_id])  # the comparison in its canonical form
