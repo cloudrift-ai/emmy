@@ -120,7 +120,7 @@ def tower_programs(source, td, cache, shared, scopes, traced=None):
 
     from emmy import config
     from emmy.compiler.backend.binding import numpy_storage
-    from emmy.compiler.backend.paging import _declare, _step
+    from emmy.compiler.backend.paging import _declare, _groups, _step
     from emmy.compiler.backend.plan import BufferSpec
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import I32, I64, get
@@ -202,7 +202,7 @@ def tower_programs(source, td, cache, shared, scopes, traced=None):
                 continue
             # The block's projection weights are pages: name each one's pool, declare it once, and move a host block's
             # pages into the slots ahead of the block's first launch.
-            moves = []
+            moves, geometry = [], {}
             for kind, (plan, sources) in (("pre", pre), ("post", post)):
                 for nid in sorted(n for n in plan.paged if n in plan.weights):
                     pool, spec = f"vision.{kind}.{nid}", next(b for b in plan.buffers if b.name == nid)
@@ -219,12 +219,15 @@ def tower_programs(source, td, cache, shared, scopes, traced=None):
                         # The tables are the pager's, lent at load: buffers of the program, not inputs the host binds.
                         step.plan.inputs[:] = interface
                     if block >= paging[1]:
-                        marks = f"vision.marks{block}"
-                        if marks not in {b.name for b in step.plan.buffers}:
-                            row = np.zeros(depth + 1, np.int32)
-                            row[block] = 1
-                            step.buffer(marks, row.shape, I32, "constant", data=lambda row=row: row)
-                        moves += _step(step.plan, f"vision.page{block}", pool, marks, entry["geometry"], 1)
+                        geometry[pool] = entry["geometry"]
+            if geometry:
+                marks = f"vision.marks{block}"
+                row = np.zeros(depth + 1, np.int32)
+                row[block] = 1
+                step.buffer(marks, row.shape, I32, "constant", data=lambda row=row: row)
+                # The pools of one geometry share one page list: one decision moves the block's page in each.
+                for names in _groups(geometry):
+                    moves += _step(step.plan, f"vision.page{block}", names, marks, geometry, 1)
             step.plan.launches[mark:mark] = moves
             # The pager's step brings scalar constants of its own, which a compiled program would bind.
             for buffer in step.plan.buffers:

@@ -112,7 +112,7 @@ def test_restamp_keys_a_carried_kernels_rows_against_its_serial_form() -> None:
     from emmy.compiler.pipeline.search.golden.restamp import restamp
 
     document = GoldenFile.load(Path(__file__).resolve().parents[4] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
-    kernel = document.kernels[626]  # a kernel that carries a state
+    kernel = document.kernels[615]  # a kernel that carries a state
     assert kernel.name == "k_077e426585c1"
     rows = [row for row in document.rows if row.kernel == kernel.ref and any("@" in key for key in row.knobs)]
     assert rows and all(any(key.startswith("REDUCE@") for key in row.knobs) for row in rows)

@@ -527,3 +527,23 @@ def test_a_tree_spelling_and_its_chain_lift_to_one_fold_tree() -> None:
     lifted, from_chain = lift_loop_op(op), lift_loop_op(spelled, body=chain)
     assert lifted.op.canonical() == from_chain.op.canonical()
     assert {seam.spelling for seam in cuttable_seams(lifted)} == {seam.spelling for seam in cuttable_seams(from_chain)}
+
+
+def test_a_size_only_an_output_carries_lifts_as_an_extent() -> None:
+    """The pager's base of its page-of-rank list: a scalar in, and the page count only on the output. The launch
+    binds that size, so the lift reads it free; a stored copy of the kernel must lift alone to the same kernel."""
+    body = parse_body(
+        """
+        let i64 v0 = n - 1
+        a = load x[0]
+        v1 = a + v0
+        for p in 0..n~65:
+            out[p] = v1
+        """
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1,)), node_id="x")
+    graph.add_node(LoopOp(body=body), ["x"], Tensor("out", (Dim("n", hint=65),)), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+    tile = Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
+    assert [spec.write.output for spec in tile.output_specs] == ["out"]
