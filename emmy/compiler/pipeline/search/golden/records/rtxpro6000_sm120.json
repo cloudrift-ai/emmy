@@ -181,9 +181,9 @@
     "for a0 in 0..2:",
     "  for a1 in 0..seq_len:",
     "    for a2 in 0..512:",
-    "      for a3 in 0..256 window(parent=a3 in 0..512, partition=true):",
-    "        in0 = load x1[256 * a0 + a3, a2]",
-    "        in1 = load x0[a1, 256 * a0 + a3]",
+    "      for a3 in 256 * a0..256 * a0 + 256 of 512 window(parent=a3 in 0..512, partition=true):",
+    "        in0 = load x0[a1, a3]",
+    "        in1 = load x1[a3, a2]",
     "        v0 = in0 * in1",
     "        acc0 <- add(acc0, v0) over a3",
     "      matmul[a1, a2] += acc0"
@@ -243,6 +243,5 @@
    "kernel":9,
    "bindings":{"seq_len":512},
    "pins":{"FAST_MATH":false},
-   "knobs":{"WORK":"t16x8","TILE":"f2x6","REDUCE":"","STAGE":"d4/smem-tma","RASTER":""},
-   "measurements":{"emmy_us":10.2,"reference_us":12.6,"reference_backend":"cublas"}}
+   "knobs":{"WORK":"t16x8","TILE":"f2x6","REDUCE":"","STAGE":"d4/smem-tma","RASTER":""}}
  ]}
