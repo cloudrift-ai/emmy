@@ -108,10 +108,18 @@ def stepped_stores(body: Body) -> tuple[Loop, _Stepped] | None:
     return loop, {name: next(iter(places)) for name, places in found.items() if len(places) == 1 and (-1, 0) not in places}
 
 
-def _one_read(graph: Graph, body: Body, stepped: _Stepped, before: dict[str, str] | None = None, steps: int = 0) -> Body:
+def _one_read(
+    graph: Graph,
+    body: Body,
+    stepped: _Stepped,
+    before: dict[str, str] | None = None,
+    steps: int = 0,
+    along: frozenset[tuple[str, int]] = frozenset(),
+) -> Body:
     """``body`` with each choice among reads of the steps of one buffer as the one read it is
     (:func:`chosen_cell`, :func:`_chosen_step`). ``before`` names, for a buffer that holds a state — after each step,
-    or after the last of the ``steps`` — the twin that holds it before each step."""
+    or after the last of the ``steps`` — the twin that holds it before each step; ``along``, the buffers the step
+    reads at its own step, and where."""
     before = before or {}
     body = _flat_choices(body)
     reads = {load.names[0]: load for load in body.loads if plain_load(load)}
@@ -149,6 +157,17 @@ def _one_read(graph: Graph, body: Body, stepped: _Stepped, before: dict[str, str
                 else stmt
             )
         )
+        # A buffer the step reads at its own step, read by nothing but those trips at the step past the last: they
+        # read it at their step too.
+        beyond = Literal(steps, "int")
+
+        def at_its_step(stmt: Statement, elsewhere: set[str] = elsewhere, step: Expression = step, beyond: Literal = beyond) -> Statement:
+            if not isinstance(stmt, Load) or stmt.input in elsewhere:
+                return stmt
+            index = tuple(step if (stmt.input, at) in along and entry == beyond else entry for at, entry in enumerate(stmt.index))
+            return stmt.replace(index=index)
+
+        body = body.map(at_its_step)
     used = body.ssa_uses
     return body.map(lambda stmt: () if isinstance(stmt, Load) and stmt.input in stepped and not set(stmt.names) & used else stmt)
 
@@ -467,10 +486,21 @@ def relate(producer: Body | None, reader: Body, stepped: _Stepped, steps: int, t
     return Alignment(trips * extents[own], inside, Place(over=own, stride=trips, shift=trips - 1), {}, twins)
 
 
-def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int], twins: dict[str, int], stores: bool) -> LoopOp | None:
+def placed(
+    op: LoopOp,
+    time: str,
+    extent: int,
+    place: Place,
+    now: dict[str, int],
+    twins: dict[str, int],
+    stores: bool,
+    roomy: frozenset[tuple[str, int]] = frozenset(),
+) -> LoopOp | None:
     """``op`` on the one loop over ``time``, at its :class:`Place`: its states read one time back and held where it
     has no step, its stores kept to its own steps, its pinned loops following the time. ``stores`` says the
-    ``twins`` are its own stores (it writes the twin) and not stores it reads (it reads the twin)."""
+    ``twins`` are its own stores (it writes the twin) and not stores it reads (it reads the twin). ``roomy`` names
+    the buffers it reads at its own step that hold a cell for every trip of the loop, and where: those it reads at
+    the trip, where the rest is read at step 0 on a trip it has no step."""
     body = op.body
     carried = [stmt for stmt in body if isinstance(stmt, Loop) and stmt.carries]
     if len(carried) > 1:
@@ -506,6 +536,10 @@ def placed(op: LoopOp, time: str, extent: int, place: Place, now: dict[str, int]
         if isinstance(stmt, Load) and stmt.input in now:
             at = now[stmt.input]
             return stmt.replace(index=(*stmt.index[:at], here, *stmt.index[at + 1 :]))
+        if isinstance(stmt, Load) and clamp and any((stmt.input, at) in roomy and entry == Var(own) for at, entry in enumerate(stmt.index)):
+            return stmt.replace(
+                index=tuple(step if (stmt.input, at) in roomy and entry == Var(own) else entry for at, entry in enumerate(stmt.index))
+            )
         if isinstance(stmt, Load) and stmt.input in twins and not stores:
             return stmt.replace(input=f"{stmt.input}__now", index=without(stmt.index, twins[stmt.input]))
         if isinstance(stmt, Carry):
@@ -652,10 +686,17 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
     states = _state_stores(carrying.op.body, stepped, set(standing)) if frame is not None else {}
     before = {name: f"{name}__before" for name in states}
     steps = extent = frame[0].axis.extent.as_static() if frame is not None else 0
+    # What the step reads at its own step, and where: a kernel that joins reads it at its step too.
+    along = frozenset(
+        (load.input, at)
+        for load in (carrying.op.body.loads if frame is not None else ())
+        for at, entry in enumerate(load.index)
+        if entry == Var(frame[0].axis.name) and graph.buffer(load.input) is not None
+    )
     reaching: set[str] = set()
     for reader in sorted(set().union(*(graph.buffer_users(name) for name in states)) if states and longer else ()):
         if isinstance(graph.nodes[reader].op, LoopOp):
-            reach = _reach(_one_read(graph, graph.nodes[reader].op.body, stepped, before, steps), set(before.values()))
+            reach = _reach(_one_read(graph, graph.nodes[reader].op.body, stepped, before, steps, along), set(before.values()))
             if reach > steps:
                 reaching.add(reader)
                 extent = max(extent, reach)
@@ -682,7 +723,8 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
     members[carrying.id] = _with_twins(from_a_read(graph, carrying.op, filled), standing)
     if frame is not None and extent > frame[0].axis.extent.as_static():
         window = _fresh("time", carrying.op.body)
-        members[carrying.id] = placed(members[carrying.id], window, extent, Place(over=frame[0].axis.name), {}, {}, False)
+        roomy = frozenset((name, at) for name, at in along if graph.buffer(name).shape[at] == Dim(extent))
+        members[carrying.id] = placed(members[carrying.id], window, extent, Place(over=frame[0].axis.name), {}, {}, False, roomy)
     if states:
         held = {state: tuple(before[name] for name in states if states[name] == state) for state in states.values()}
         members[carrying.id] = _with_states_before(members[carrying.id], held)
@@ -721,7 +763,7 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
                 # What it reads of a member that is of no step it reads where it stands, like the step does.
                 if any(name in standing for name in read) and copied(graph, node.outputs[0].name) is not None:
                     continue  # a copy of what the last step stored: the step stores it there (``020``)
-                body = _one_read(graph, node.op.body, stepped, before, steps).map(
+                body = _one_read(graph, node.op.body, stepped, before, steps, along).map(
                     lambda stmt: (
                         stmt.replace(input=standing[stmt.input].name, index=(last, *stmt.index))
                         if isinstance(stmt, Load) and stmt.input in standing
