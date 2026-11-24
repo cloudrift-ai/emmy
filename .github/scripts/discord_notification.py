@@ -150,7 +150,8 @@ def _job_status(result: str, success: str) -> str:
 
 
 def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, list[dict[str, Any]]]:
-    results = [environment.get(f"{job}_RESULT", "") for job in ("DURATIONS", "PRIOR", "DISCOVER", "GAPS", "FILL", "CANDIDATES")]
+    jobs = ("DURATIONS", "PRIOR", "DISCOVER", "GAPS", "FILL", "GOLDENS", "CANDIDATES")
+    results = [environment.get(f"{job}_RESULT", "") for job in jobs]
     if "cancelled" in results:
         title = "Nightly refresh cancelled"
         description = "The nightly refresh was cancelled before every job completed."
@@ -159,7 +160,8 @@ def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
         title = "Nightly refresh completed"
         description = (
             "CPU test durations, the priors and the recipe lifecycle were refreshed on main; "
-            "the compiler gaps were listed, the hardware goldens filled and the candidate files pruned."
+            "the compiler gaps were listed, every card's goldens held, the hardware goldens filled "
+            "and the candidate files pruned."
         )
         color = SUCCESS_COLOR
     else:
@@ -182,8 +184,9 @@ def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
     status = _job_status(results[4], "")
     value = fill if results[4] == "success" else " ".join(part for part in (status, fill) if part)
     fields.append({"name": "Golden fill", "value": (value or "No fill reported; open the run.")[:FIELD_VALUE_LIMIT], "inline": False})
-    realized = environment.get("CANDIDATES_REALIZED", "").strip() if results[5] == "success" else ""
-    value = realized or _job_status(results[5], "No report; open the run.")
+    fields.append({"name": "Other cards' goldens", "value": _job_status(results[5], "Held."), "inline": False})
+    realized = environment.get("CANDIDATES_REALIZED", "").strip() if results[6] == "success" else ""
+    value = realized or _job_status(results[6], "No report; open the run.")
     fields.append({"name": "Candidate files", "value": value[:FIELD_VALUE_LIMIT], "inline": False})
     if results[2] == "success":
         fields.extend(_modified_model_fields(environment.get("MODIFIED_MODELS", "")))

@@ -164,8 +164,8 @@ pytest session, `make test` or direct, also runs on a fresh tune DB (the root `t
 points `EMMY_TUNE_DB` at one unless the caller names one), so no test picks from a machine's stored measurements; a
 test that needs a DB sets its own.
 
-The default suite holds every repository golden — the hardware goldens and each maintained recipe's model golden —
-to the fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
+The suite holds every repository golden — the hardware goldens and each maintained recipe's model golden — to the
+fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
 per traced program so the work scatters over the xdist workers and a failure names the kernels, decisions and rows the
 compiler now disagrees with. Lowering is GPU-free, so a stale golden is detectable on any machine. There is no list of
 expected failures. The fix is `emmy golden restamp PATH`: every kernel takes the body a fresh lowering gives it, every
@@ -173,8 +173,10 @@ decision is taken again on the fresh parent, a row whose kernel was re-keyed —
 two kernels — keeps its schedule and loses its microseconds (a proposal, no evidence until a record run on the card
 measures it again), a kernel no fresh kernel writes is dropped with its rows. A golden stores no identity, so a change
 to how identity is computed re-keys nothing. The `refresh-golden` skill owns the whole flow, including the
-record run and the delete-or-re-record decision. Never re-record a row to make a red node green. The nightly
-`onboard-model` workflow still owns a model golden's exact-GPU replay.
+record run and the delete-or-re-record decision. Never re-record a row to make a red node green. `make test`
+holds the RTX 5090's goldens; every other card's carry the off-lane `goldens` marker and run in the nightly refresh
+(`pytest tests/ -m goldens`), so run that before a change that may re-key them. The nightly `onboard-model` workflow
+still owns a model golden's exact-GPU replay.
 
 When running a large subset (e.g. `tests/compiler/`), pass the same `-n auto --dist=loadgroup` flags `make test` uses to
 parallelize (add `-p no:randomly` for a stable order):
@@ -250,11 +252,11 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy golden {list,check,restamp,realize} [PATH…]` | list measured rows beside `torch.compile`, slowest relative to it first; say what a restamp onto the fresh lowering of a golden's own programs would change; write that rewrite (every repository golden by default); compile every row of the named files under its own schedule and say which the compiler no longer realizes, and with `--drop` write the files back without them |
 | `emmy candidates {build,check,restamp,realize} [PATH…]` | fill each hardware golden's candidate file — a few measured schedules that are not the best known one, per group — from the tune DB the card's tunes wrote (`--db PATH`), and list the groups still under their target (`--json`); check, restamp and prune those files as `emmy golden` does a golden; the `refresh-candidates` skill owns the flow, the card run included |
 | `emmy fit DATASET WEIGHTS [--folds N]` | fit the prior of a dataset's space from its golden groups and cross-validate it; the whole refit is README's "Fit the priors" |
-| `emmy db {import,export,check} --db PATH …` | fill a DB instance from the golden files and tune DBs named on the command line, or every repository golden (`--repository`; nothing by default, and never the tune DB), each golden's rows filed under the identity computed from its stored kernel; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; check its tables agree with themselves |
+| `emmy db {import,export,check} --db PATH …` | fill a DB instance from the golden files and tune DBs named on the command line, or every hardware golden (`--repository`, the priors' training set; nothing by default, and never the tune DB), each golden's rows filed under the identity computed from its stored kernel; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; check its tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
  Refitting the priors is the commands under README's "Fit the priors". Every path is explicit — the
 DB instance `emmy db import --db PATH` fills (the tune DB's tables in a file of their own, never read by a compile;
-`--repository` reads the repository goldens, and a tune DB named on the command line joins them with the rows it
+`--repository` reads the hardware goldens, and a tune DB named on the command line joins them with the rows it
 measured itself — README "Keep what a tune measured"), and the dataset `emmy db export` writes from it (a
 `manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
@@ -403,11 +405,10 @@ Then update the documentation:
 
 Then run the gates, in this order, after every edit above is in:
 
-22. **Keep the prior reproduction gate green.** A PR that changes a hardware golden refits both priors (README, "Fit
-    the priors") and commits the weights. A PR that adds or changes a recipe golden — model onboarding, a re-record —
-    leaves the weights to nightly refresh while the gate passes; when it does not, either refit or tag the recipe
-    `prior-pending`, which skips its golden in the gate until a refit reproduces it, and that refit drops the tag.
-    Never lower the tolerance, and never tag a hardware golden's failure away.
+22. **Keep the prior reproduction gate green.** The priors train on the hardware goldens, and the gate holds them to
+    those alone. A PR that changes a hardware golden refits both priors (README, "Fit the priors") and commits the
+    weights. A recipe golden bears on neither: its rows reach the priors once promoted into the card's hardware
+    golden, which is a hardware golden change. Never lower the tolerance.
 23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a repository golden stops being the fresh lowering, `emmy golden restamp`
     applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the PR body —

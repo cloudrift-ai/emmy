@@ -17,7 +17,6 @@ import hashlib
 import logging
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from multiprocessing import get_context
 
@@ -28,6 +27,7 @@ from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import Candidates, PoolSample
+from emmy.compiler.pipeline.search.progress import timed_map
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +157,11 @@ class _Packed:
     tier: str
     shape: str
     packed: tuple
+    rows: int
     total: int
     goldens: list[int]
+    negatives: list[int]
+    measured: list[int]
     pools: list[GoldenPool]
 
 
@@ -175,8 +178,8 @@ def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
 
 
 #: How much slower than the fastest verified row of its pool a verified row may measure and still train as a positive:
-#: the spread two records of one row show across days on one card. A verified row beyond it is measured slower, and
-#: is neither a positive nor drawn as a negative (:class:`~.prior.fit.catboost.CatBoostTrainer`).
+#: the spread two records of one row show across days on one card. A row measured beyond it — a verified row or a
+#: candidate — is a labeled negative (:class:`~.prior.fit.catboost.CatBoostTrainer`).
 POSITIVE_WITHIN = 1.1
 
 
@@ -205,15 +208,23 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     # Each golden row locates itself in the pool by schema-agnostic structural signature (free-axis slots +
     # reduce decomp + atom): the candidate rows use the native ``MOVE@element`` keys while a golden may
     # record legacy GEMM-letter keys, so comparing key-value tuples directly never matches.
-    # A pool's positives are its fastest verified rows: a verified row another verified row of the same pool beats by
-    # more than measurement noise is a measured slower row, and labelling it good would teach the fit to deploy it.
-    goldens, skipped = [], []
-    for golden in pool.rows:
-        want = features.tile_signature(golden.knobs)
-        gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
+    # A pool's positives are its fastest verified rows. A row measured slower than them by more than measurement
+    # noise — a verified row another one beats, or a candidate — is a labeled negative; a candidate within the noise,
+    # or faster (a stale golden), is neither. Every measured row stays out of the uniform draw.
+    index = {}
+    for i, r in enumerate(rows):
+        index.setdefault(features.tile_signature(r), i)
+    goldens, negatives, measured, skipped = [], [], [], []
+    for verified, row in [*((True, row) for row in pool.rows), *((False, row) for row in pool.candidates)]:
+        gidx = index.get(features.tile_signature(row.knobs))
         if gidx is None:
-            skipped.append((pool.gpu, pool.name, f"golden not in {len(rows)} candidates"))
-        elif golden.us <= POSITIVE_WITHIN * pool.emmy_us:
+            if verified:
+                skipped.append((pool.gpu, pool.name, f"golden not in {len(rows)} candidates"))
+            continue
+        measured.append(gidx)
+        if row.us > POSITIVE_WITHIN * pool.emmy_us:
+            negatives.append(gidx)
+        elif verified:
             goldens.append(gidx)
     if not goldens:
         return None, skipped, f"golden not in {len(rows)} candidates"
@@ -224,7 +235,28 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     # Featurized under the pool's regime, as it was enumerated: what a schedule space offers depends on it.
     with pinned_knobs(pool.pins):
         feats = [featurizer.features(kernel, r) for r in rows]
-    return _Packed(pool, tier, _shape_group(shape), pack_features(feats), candidates.total, goldens, [pool]), skipped, None
+    packed = _Packed(
+        pool, tier, _shape_group(shape), pack_features(feats), len(rows), candidates.total, goldens, negatives, measured, [pool]
+    )
+    return packed, skipped, None
+
+
+def describe_pool(pool: GoldenPool) -> dict:
+    """A pool as one of a phase's slowest tasks names it (``progress.timed_map``): its kernel, card, regime and
+    sizes."""
+    return {"kernel": pool.kernel.name, "card": pool.gpu, "regime": pool.regime or "default", "sizes": dict(pool.bindings)}
+
+
+def _describe_packed(task: tuple, result: tuple) -> dict:
+    """One golden pool as the slowest tasks list it: the pool, and how many schedule rows it enumerated — ``rows``,
+    the rows drawn and featurized, and ``total``, what the group records it was ranked among."""
+    entry, _missed, note = result
+    out = describe_pool(task[0])
+    if entry is not None:
+        out.update(rows=entry.rows, total=entry.total)
+    elif note is not None:
+        out["skipped"] = note
+    return out
 
 
 def build_golden_groups(
@@ -275,7 +307,8 @@ def build_golden_groups(
     keeps: dict[tuple, set] = defaultdict(set)
     if sample > 0:
         for pool in pools:
-            keeps[(pool.gpu, pool.regime)].update(tuple(sorted(row.items())) for row in pool.schedule_rows())
+            rows = (*pool.schedule_rows(), *(row.knobs for row in pool.candidates))
+            keeps[(pool.gpu, pool.regime)].update(tuple(sorted(row.items())) for row in rows)
     tasks = []
     for pool in pools:
         if kernel is not None and kernel not in pool.kernel.name:
@@ -284,13 +317,17 @@ def build_golden_groups(
             skipped.extend((pool.gpu, pool.name, "kernel formed from no loop op") for _ in pool.rows)
             continue
         tasks.append((pool, tuple(sorted(keeps.get((pool.gpu, pool.regime), ()))), sample, seed))
-    if jobs == 1:
-        results = map(_enumerate_packed, tasks)
-    else:
-        # Spawned: the one start method every platform has, and a fresh interpreter per worker, so what a worker
-        # imports is the whole contract (the kernel definition imports the IR it decodes with).
-        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
-            results = list(workers.map(_enumerate_packed, tasks, chunksize=1))
+    # Spawned: the one start method every platform has, and a fresh interpreter per worker, so what a worker
+    # imports is the whole contract (the kernel definition imports the IR it decodes with).
+    results = timed_map(
+        _enumerate_packed,
+        tasks,
+        name="golden pools",
+        jobs=jobs,
+        mp_context=get_context("spawn"),
+        describe=_describe_packed,
+        card=lambda task: task[0].gpu,
+    )
     packed_pools: dict[tuple, _Packed] = {}
     for (pool, *_), (entry, missed, note) in zip(tasks, results, strict=True):
         skipped.extend(missed)
@@ -307,6 +344,8 @@ def build_golden_groups(
             packed_pools[identity] = entry
         else:
             found.goldens.extend(entry.goldens)
+            found.negatives.extend(entry.negatives)
+            found.measured.extend(entry.measured)
             found.pools.append(pool)
 
     # Every pool now knows every golden in it, so each becomes ONE group whose labels are final at
@@ -326,6 +365,8 @@ def build_golden_groups(
                 entry.goldens,
                 entry.total,
                 pools=entry.pools,
+                negatives=entry.negatives,
+                measured=entry.measured,
             )
         )
     logger.info(
@@ -599,11 +640,15 @@ def build_placement_groups(pools: Sequence[GoldenPool], *, jobs: int = 1) -> tup
             skipped.append((pool.gpu, pool.name, "kernel formed from no loop op"))
             continue
         tasks.append((pool, placement_decisions(pools, pool)))
-    if jobs == 1:
-        results = map(_walk_packed, tasks)
-    else:
-        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
-            results = list(workers.map(_walk_packed, tasks, chunksize=1))
+    results = timed_map(
+        _walk_packed,
+        tasks,
+        name="placement pools",
+        jobs=jobs,
+        mp_context=get_context("spawn"),
+        describe=lambda task, result: {**describe_pool(task[0]), "forks": len(result[0]), "arms": sum(g.total for g in result[0])},
+        card=lambda task: task[0].gpu,
+    )
     for (pool, _), (found, missed, note) in zip(tasks, results, strict=True):
         if note is not None:
             logger.warning("  !! %s: %s", pool.name, note)

@@ -115,7 +115,7 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
         (
             "nightly-refresh.yml",
             "discover",
-            ["durations", "prior", "gaps", "fill", "candidates", "discover"],
+            ["durations", "prior", "gaps", "goldens", "fill", "candidates", "discover"],
             "nightly",
             "Send nightly summary",
         ),
@@ -147,7 +147,7 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
         assert "pr_number" not in lifecycle["outputs"]
         assert "PR_NUMBER" not in notify["env"]
         # One summary for the run: every job's result, each prior leg's own comparison line.
-        for job in ("durations", "prior", "gaps", "fill", "candidates", "discover"):
+        for job in ("durations", "prior", "gaps", "goldens", "fill", "candidates", "discover"):
             assert notify["env"][f"{job.upper()}_RESULT"] == f"${{{{ needs.{job}.result }}}}"
         assert notify["env"]["DURATIONS_UPDATED"] == "${{ needs.durations.outputs.updated }}"
         prior = document["jobs"]["prior"]

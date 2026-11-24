@@ -25,6 +25,7 @@ from emmy.compiler.pipeline.search.candidates import (
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Row, import_rows, regime_context, restamp
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, document_of
+from tests.compiler.helpers import golden_lane
 
 
 def test_a_group_is_filled_by_the_size_of_its_schedule_space() -> None:
@@ -91,7 +92,7 @@ def _golden_of(path: Path) -> GoldenFile:
     return document_of(_RECORDS_DIR / path.name)
 
 
-@pytest.mark.parametrize("path", [pytest.param(path, id=path.name) for path in candidate_paths()])
+@pytest.mark.parametrize("path", [pytest.param(path, id=path.name, marks=golden_lane(path)) for path in candidate_paths()])
 def test_a_candidate_file_holds_candidates_of_its_hardware_goldens_groups(path: Path) -> None:
     """A candidate file carries its hardware golden's programs, kernels and decisions; every row is a measured or
     proposed schedule of one of the golden's groups that the golden does not hold; no group holds more than the
@@ -117,7 +118,7 @@ def _program_parameters():
         # A piece has no program of its own: its rows are held to the program of the target it was cut from.
         roots = {path_to[0].parent if (path_to := document.path_to(row.kernel)) else row.kernel for row in document.rows}
         for index in sorted({document.kernel(root).traced for root in roots} - {None}):
-            parameters.append(pytest.param(path, index, id=f"{path.name}/program-{index}"))
+            parameters.append(pytest.param(path, index, id=f"{path.name}/program-{index}", marks=golden_lane(path)))
     return parameters
 
 

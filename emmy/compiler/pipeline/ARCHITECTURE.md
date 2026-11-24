@@ -491,7 +491,11 @@ log-scaled, rides the featurization as an ordinary fit signal.)
 What a newcomer needs to know about the fit:
 
 - **The objective is the deployed ranking.** `QuerySoftMax` over one group per candidate pool: every row a golden
-  verified is a positive, and a uniform draw of the other rows (`--negatives` per pool) are the negatives. The rank
+  verified is a positive. The negatives are the labeled ones (`GoldenGroup.negative_ids`: a candidate from the card's
+  candidate file, or a verified row, measured more than `ranking.POSITIVE_WITHIN` slower than the pool's golden),
+  every one in every fit, and a uniform draw (`--negatives` per pool) of the rows with no measurement
+  (`GoldenGroup.measured_ids`): a candidate within the noise of the golden, or faster than it (a stale golden, which
+  the dataset lists), is neither a positive nor a negative. The rank
   every report quotes is still taken over the FULL pool, through the same `CatBoostModel.score_rows` the deploy path
   ranks by, so the sampling never reaches a metric.
 - **The trainer is an object, and fitting is pure.** `CatBoostTrainer` carries the hyperparameters — feature names,
@@ -1030,8 +1034,8 @@ one way in.
   none of whose rows is a measurement — a restamped one keeps its schedules and loses its microseconds — is held and
   simply contributes no row.
 - **Importing goes row for row.** `emmy db import` reads the golden files and tune DBs named on its command line, or
-  every repository golden (`--repository`: the hardware goldens and each maintained recipe's, the priors' training
-  set — README, "Fit the priors"); nothing by default. A golden file goes to the golden importer
+  every hardware golden (`--repository`: the priors' training set, which a recipe golden's rows join only once
+  promoted into the card's hardware golden — README, "Fit the priors"); nothing by default. A golden file goes to the golden importer
   (`golden.evidence.import_file`) once per regime it holds: `record_kernel`, `record_routing`, `record_perf`, each
   under the exact identity computed from the stored kernel's Loop IR, then `record_constants` for each target the
   rows reach. A stored kernel whose body no longer lowers is skipped with a warning, with its rows; a stale file is
@@ -1051,7 +1055,8 @@ one way in.
   regime knob, since a tune's row spells every knob its kernel carries and a golden row only what its record pinned.
   `candidates.build` fills a file from the DB instance the card's tunes wrote (`SearchDB.measured`, the group's
   kernel on the card, in its regime and at its sizes) and keeps the rows it already holds. It is not a repository
-  golden: no compile, import, export, fit or gate reads it. It restamps as its golden does, and a change to a
+  golden: no compile, import, fit or gate reads it. The schedule export reads it when `--candidates` names it, to
+  label each golden pool's negatives (Part 8). It restamps as its golden does, and a change to a
   hardware golden is followed by a build, which copies the golden's tables again.
 
 **Recording benches** is Part 5's subject: a `run --bench` that benched rows with hand-forced knob values (golden or
@@ -1329,14 +1334,13 @@ pass with the placement prior deciding against the golden's arm) — the deploy-
 `make test` asserts a rate on, per slice of a repository golden's pools.
 
 **The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` checks both shipped priors
-against every hardware golden and maintained recipe golden with no measurements in scope. A placement fork must
+against every hardware golden with no measurements in scope. A placement fork must
 choose its recorded arm, at every fork of the golden's path to its kernel set; a recorded schedule must rank within
 the better half of its sampled pool. Tests split each golden's pools into slices of 16 — a placement slice walks with
 every decision of its golden in scope — drawing schedule rows with the same `EMMY_POOL_DRAW` as a greedy compile in
-the suite. A failure names the rows the prior cannot reproduce. A PR that changes a hardware golden refits both priors;
-a recipe golden that fails needs a refit or the recipe tag `prior-pending`. That tag skips its reproduction check
-until a refit reproduces it and removes the tag; the golden remains evidence and training data. Never lower the
-tolerance or exempt a hardware golden. The [refit commands](../../../README.md#fit-the-priors) and
+the suite. A failure names the rows the prior cannot reproduce. A PR that changes a hardware golden refits both priors.
+A recipe golden is evidence for compiles, but neither training data nor gated: its rows reach the priors once promoted
+into the card's hardware golden. Never lower the tolerance or exempt a hardware golden. The [refit commands](../../../README.md#fit-the-priors) and
 [routine refresh workflow](../../../.github/ARCHITECTURE.md) document the two maintenance paths.
 
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema

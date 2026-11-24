@@ -64,6 +64,7 @@ NIGHTLY_ENVIRONMENT = {
     "PLACEMENT_PRIOR": "Updated the weights on main; candidate qualifies: 2 of 3 cells improved by at least 5%, none regressed",
     "DISCOVER_RESULT": "success",
     "GAPS_RESULT": "success",
+    "GOLDENS_RESULT": "success",
     "FILL_RESULT": "success",
     "CANDIDATES_RESULT": "success",
     "CANDIDATES_REALIZED": "2704 of 2704 rows realize",
@@ -76,6 +77,8 @@ _FILL_FIELD = {
     "value": "rtx5090_sm120.json on NVIDIA GeForce RTX 5090: 62 of 62 missing measurements filled, 0 failed; committed to main",
     "inline": False,
 }
+
+_GOLDENS_FIELD = {"name": "Other cards' goldens", "value": "Held.", "inline": False}
 
 _CANDIDATES_FIELD = {"name": "Candidate files", "value": "2704 of 2704 rows realize", "inline": False}
 
@@ -113,6 +116,7 @@ def test_nightly_success_payload_reports_every_job_and_groups_modified_models():
         },
         _GAPS_FIELD,
         _FILL_FIELD,
+        _GOLDENS_FIELD,
         _CANDIDATES_FIELD,
         {"name": "Maintained", "value": "• `org/maintained` · heat **70**", "inline": False},
         {"name": "Best effort", "value": "• `org/best-effort` · heat **40**", "inline": False},
@@ -150,6 +154,7 @@ def test_nightly_failure_payload_names_the_failed_job_and_keeps_the_other_result
         {"name": "Placement prior", "value": "Failed; open the run for the failing step and logs.", "inline": False},
         _GAPS_FIELD,
         _FILL_FIELD,
+        _GOLDENS_FIELD,
         _CANDIDATES_FIELD,
         {"name": "Modified models", "value": "Failed; open the run for the failing step and logs.", "inline": False},
     ]

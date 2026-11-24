@@ -8,15 +8,18 @@ commit away from the repository. No compile ever reads it, so what is imported i
 
 - ``import SOURCES…`` loads golden files and tune DB files (the way a card's measurements from a rented GPU reach the
   dataset). Nothing is loaded by default: the sources are named on the command line, or ``--repository`` names the
-  repository goldens, the README's "Fit the priors" workflow. A golden file is the DB's shape, so the import is a copy
+  hardware goldens, the README's "Fit the priors" workflow: the priors train on those alone, and a recipe golden's
+  row reaches them once it is promoted into its card's hardware golden. A golden file is the DB's shape, so the import is a copy
   (``golden.evidence.import_file``); a stale file is what ``emmy golden check`` names. A tune DB is an instance of
   the same schema, so the rows it measured itself are copied row for row (``SearchDB.import_measured``). A source's
   rows are filed under its kind and digest (``golden:`` for a golden file, ``tune:`` for a tune DB), and one the
   instance already holds is skipped: ``--fresh`` rebuilds from nothing.
 - ``export OUT`` writes the instance's rows as a dataset directory (``search/dataset``): every golden pool
-  enumerated from its kernel's definition and packed, every measured pool, and the provenance; the placement space
-  reads the constants the import filed beside the rows, so it opens no golden file. ``emmy fit`` and ``emmy eval
-  prior`` read the dataset directory, never the DB.
+  enumerated from its kernel's definition and packed, labeled by the candidate files ``--candidates`` names (a
+  candidate over 1.1× slower than the golden is a negative; one faster, a stale golden the dataset lists), every
+  measured pool, and the provenance; the placement space reads the constants the import filed beside the rows, so it
+  opens no golden file. ``emmy fit`` and ``emmy eval prior`` read the dataset directory, never the DB. The export's
+  timing (``search/progress``) goes to ``timing.json`` beside the manifest, which carries no clock.
 - ``check`` counts the rows of an instance whose tables disagree with themselves (a reference, a card). A DB is a
   cache: a row the current code disagrees with is benched or imported again, so nothing here decodes what the
   compiler wrote.
@@ -31,6 +34,8 @@ import logging
 import sys
 from pathlib import Path
 
+from emmy import storage
+from emmy.compiler.pipeline.search import progress
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
 
 logger = logging.getLogger(__name__)
@@ -48,8 +53,8 @@ def register_db_command(subparsers) -> None:
     pi.add_argument(
         "--repository",
         action="store_true",
-        help="Also import every repository golden — the hardware goldens and each maintained recipe's — the set the priors are "
-        "fit on and the reproduction gate holds them to (README, 'Fit the priors').",
+        help="Also import every hardware golden, the set the priors are fit on (README, 'Fit the priors'). A recipe's "
+        "golden is no training data: its rows reach the priors once promoted into the card's hardware golden.",
     )
     pi.set_defaults(func=handle_db_import)
 
@@ -65,6 +70,14 @@ def register_db_command(subparsers) -> None:
         "Recorded in the dataset's provenance — two datasets are comparable only when it matches.",
     )
     pe.add_argument("--seed", type=int, default=0, help="Seed of the per-pool draw (default: 0).")
+    pe.add_argument(
+        "--candidates",
+        nargs="+",
+        default=[],
+        help="Candidate files, or directories of them (the repository's: emmy/compiler/pipeline/search/candidates/records), "
+        "whose rows label each golden pool of the schedule space: a candidate over 1.1x slower than the pool's golden is a "
+        "negative, one faster is reported as a stale golden. None by default.",
+    )
     pe.add_argument(
         "--jobs",
         type=int,
@@ -93,10 +106,9 @@ def handle_db_import(args) -> None:
     path = Path(args.db).expanduser()
     sources = [Path(s).expanduser() for s in args.sources]
     if getattr(args, "repository", False):
-        from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden.repository import hardware_golden_paths  # noqa: PLC0415
 
-        with repository_golden_paths() as paths:
-            sources.extend(sorted(paths))
+        sources.extend(hardware_golden_paths())
     if not sources:
         logger.error("nothing to import: name a source, or --repository")
         sys.exit(2)
@@ -109,23 +121,34 @@ def handle_db_import(args) -> None:
             path.with_name(path.name + suffix).unlink(missing_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     db = SearchDB(path)
-    try:
-        for src in sources:
+
+    def load(src: Path) -> int:
+        """Import one source; the perf rows it wrote."""
+        try:
+            if src.suffix == ".json":  # a golden file; anything else is a tune DB
+                return import_file(db, src, file_source("golden", src))["perf rows"]
+            if (source := file_source("tune", src)) in db.sources():
+                return 0
+            tune = SearchDB.open_readonly(src)
             try:
-                if src.suffix == ".json":  # a golden file; anything else is a tune DB
-                    import_file(db, src, file_source("golden", src))
-                elif (source := file_source("tune", src)) not in db.sources():
-                    tune = SearchDB.open_readonly(src)
-                    try:
-                        with db.transaction():
-                            logger.info("imported %s as %s: %d perf rows", src.name, source, db.import_measured(tune, source))
-                    finally:
-                        tune.close()
-            except (ValueError, RuntimeError) as exc:
-                logger.error("%s", exc)
-                sys.exit(2)
-    finally:
-        db.close()
+                with db.transaction():
+                    rows = db.import_measured(tune, source)
+                logger.info("imported %s as %s: %d perf rows", src.name, source, rows)
+                return rows
+            finally:
+                tune.close()
+        except (ValueError, RuntimeError) as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
+
+    with progress.recording("emmy db import") as report:
+        try:
+            progress.timed_map(
+                load, sources, name="import", unit="sources", describe=lambda src, rows: {"source": src.name, "perf_rows": rows}
+            )
+        finally:
+            db.close()
+    report.log()
     logger.info("DB: %s", path)
 
 
@@ -135,21 +158,31 @@ def handle_db_export(args) -> None:
 
     path = db_path(args.db)
     db = SearchDB.open_readonly(path)
-    try:
-        dataset = export_dataset(db, source=str(path), pool_sample=args.pool_sample, seed=args.seed, space=args.space, jobs=args.jobs)
-    finally:
-        db.close()
-    try:
-        out = dataset.dump(args.out)
-    except RuntimeError as exc:
-        logger.error("%s", exc)
-        sys.exit(2)
+    with progress.recording(f"emmy db export --space {args.space}") as report:
+        try:
+            candidates = [file for entry in map(Path, args.candidates) for file in (sorted(entry.glob("*.json")) or [entry])]
+            dataset = export_dataset(
+                db, source=str(path), pool_sample=args.pool_sample, seed=args.seed, space=args.space, jobs=args.jobs, candidates=candidates
+            )
+        finally:
+            db.close()
+        try:
+            with progress.phase("write dataset"):
+                out = dataset.dump(args.out)
+        except RuntimeError as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
+    report.log()
+    # Beside the manifest, never in it: the manifest carries no clock, so one DB exports to the same bytes.
+    storage.write_json(out / progress.TIMING, report.to_json(), indent=1)
     logger.info(
-        "dataset: %s (%d golden groups, %d measured groups, %d golden rows skipped)",
+        "dataset: %s (%d golden groups, %d labeled negatives, %d measured groups, %d golden rows skipped, %d stale goldens)",
         out,
         len(dataset.golden),
+        sum(len(group.negative_ids) for group in dataset.golden),
         len(dataset.measured),
         len(dataset.skipped),
+        len(dataset.stale),
     )
 
 

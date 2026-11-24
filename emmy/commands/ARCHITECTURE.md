@@ -999,8 +999,9 @@ The dataset DB is the tune DB's tables in a file of their own, never read by a c
 every subcommand — never a default, so nothing here can touch the tune DB (`_data/dataset.db` in the examples, under
 the ignored `_data/`).
 `import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a golden file or
-a tune DB file; `--repository` adds every repository golden — the hardware goldens and each maintained recipe's, the
-set the priors are fit on under `--fresh` (README, "Fit the priors"). A golden file is the DB's shape, so the import
+a tune DB file; `--repository` adds every hardware golden, the set the priors are fit on under `--fresh` (README, "Fit
+the priors"). A recipe's golden is no training data: its rows reach the priors once promoted into the card's hardware
+golden. A golden file is the DB's shape, so the import
 goes row for row (`golden.evidence.import_file`), each row under the context of its own regime and the exact identity
 computed from its stored kernel (one whose body no longer lowers is skipped with a warning). A tune DB is an instance
 of the same schema: the rows it measured itself are copied under the keys it holds them by
@@ -1009,10 +1010,12 @@ file stays behind. A source's rows are filed under its kind and digest — `gold
 tune DB; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A held source is
 recorded in the `source` table whatever became of its rows, so naming it again is a no-op and a report can list its
 sources. `export --db PATH OUT
-[--space {schedule,placement}] [--pool-sample N] [--seed N] [--jobs N]` writes the instance's rows as the dataset of
+[--space {schedule,placement}] [--pool-sample N] [--seed N] [--jobs N] [--candidates PATH…]` writes the instance's rows as the dataset of
 one space at `OUT` (`search/dataset/document.py` owns the format): the schedule space is every golden pool enumerated
 from its kernel's definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline
-ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with its microseconds; the placement space is
+ARCHITECTURE's Part 8 owns the pool), each holding the rows the candidate files `--candidates` names (files or
+directories) measured on its group — over 1.1× slower than the golden a labeled negative, faster a stale golden the
+manifest lists (`stale`) — and every measured pool labelled with its microseconds; the placement space is
 every golden kernel's placement forks, each the arms the cut pass offers with the golden's arm marked
 (`ranking.build_placement_groups`); each pool carries the constant inputs its own file's program binds, which the
 import filed beside the rows (the `constant` table), so the walk offers the forks a deploy sees, the layout fork of
@@ -1026,6 +1029,13 @@ the rows of an instance whose tables disagree with themselves (`SearchDB.drift`)
 subcommand resolves its instance through `commands/db.db_path`, which refuses a missing one with the command that
 fills it.
 
+Every refit command — `db import`, `db export`, `fit` and `eval prior` — logs a progress line about every 30 s while a
+long phase runs (done of total, rate, elapsed time, time left), also while no pool finishes, and a timing summary at the
+end: each phase's wall time and worker count, the pools per card, and the ten slowest pools by kernel, card, sizes and
+the schedule rows they enumerated (`search/progress.py`). Each worker times its own pool and sends the seconds back
+with the result. The export writes the summary to `timing.json` beside the manifest, the fit beside `metrics.json`,
+and `eval prior --json` under `timing`; the manifest and the metrics carry no clock, so they stay the same bytes.
+
 ### `emmy fit`
 Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db
 export` wrote — the directory the positional argument names — the same groups `eval prior` reads (`Dataset.load`; the
@@ -1036,11 +1046,11 @@ and any written one can be pointed at with `EMMY_OFFLINE_FILE` and A/B'd against
 The fit is a `QuerySoftMax` CatBoost ranker, one group per candidate pool with every golden matched into that pool as
 a positive: `--iterations N` (trees; 400 by default, 3000 for the placement space — `fit/catboost.PLACEMENT_ITERATIONS`
 records the cross-validation behind it), `--depth D`, `--learning-rate η`, `--negatives K` (sampled negatives per pool per
-round, drawn from the unpinned rows — the full corpus is ~38 M rows, so training samples while the rank metric still
+round, drawn from the rows with no measurement, beside every labeled negative the pool holds — the full corpus is ~38 M rows, so training samples while the rank metric still
 covers whole pools) and `--rounds R` (the first draws negatives uniformly, each further one mines hard negatives from
-what the current model ranks near the golden — **default 1, so mining is off**: the one measurement of it moved top-1
-from 545 to 517 over the 1278-group golden dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is
-the expected direction when the negatives are unlabeled rather than known-bad). Fits are not byte-reproducible —
+what the current model ranks near the golden — **default 1, so mining is off**: held out over the 2098-group dataset with the labeled negatives it moved top-1
+from 1113 to 1081, and `fit/catboost.DEFAULT_ROUNDS` records the numbers and why that is the expected direction while
+most negatives are unlabeled rather than known-bad). Fits are not byte-reproducible —
 CatBoost's histogram build is threaded — so two fits are compared by their metrics files rather than by a checksum.
 
 **A group is a candidate pool, not a golden.** A pool is one kernel on one card, in one precision regime, at one
@@ -1097,7 +1107,8 @@ which the loader checks against the fork it is asked at.
 
 ```bash
 emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json   # the rows
-emmy db export --db _data/dataset.db _data/schedule --space schedule     # the dataset the schedule fit reads
+emmy db export --db _data/dataset.db _data/schedule --space schedule \
+  --candidates emmy/compiler/pipeline/search/candidates/records          # the dataset the schedule fit reads
 emmy db export --db _data/dataset.db _data/placement --space placement   # the dataset the placement fit reads
 emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json     # the shipped weights, 5 shape folds
 emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
