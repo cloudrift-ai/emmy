@@ -2,7 +2,12 @@
 
 ``010_merge_loop_ops`` asks this before it splices a region (:func:`roll`): the copies of one step, each reading
 the state the copy before it stored, are rolled first, and the regions of the graph that leaves are what it splices.
-Two programs are one step where :func:`prove` says so.
+
+A roll is a splice with more asked of its nodes, in three parts. :func:`found` lists the ways to read part of a
+region as a recurrence: which nodes are its states and which are each step's. :func:`_proved` holds one of them to
+what a recurrence is: every step splices into one body, the bodies are one step once the integers of their
+coordinates are left out and each integer moves by one amount a step (:func:`prove`), and each step reads the
+state the step before it stored. :func:`_fragment` writes the kernel. The first reading that is proved is taken.
 
 A Python loop over chunks leaves the tracer unrolled: step ``j``'s kernels read the state step
 ``j − 1`` stored, so fusing them whole makes every later state re-derive every earlier one, and a
@@ -30,7 +35,8 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from dataclasses import replace
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
@@ -293,7 +299,7 @@ def _slice(tensor: Tensor, source: str, step: int | None) -> LoopOp:
 
 def roll(match: Match, partition: dict[str, frozenset[str]]) -> Graph | None:
     """The fragment that rolls a recurrence one of the graph's regions holds, or ``None`` where none holds one: the
-    first of the regions' loops, in topological order, that starts a chain :func:`prove` proves."""
+    first of the regions' loops, in topological order, that starts one (:func:`roll_from`)."""
     graph = match.graph
     kind = kinds(graph, partition)
     alike = Counter(kind.values())
@@ -309,73 +315,83 @@ def roll(match: Match, partition: dict[str, frozenset[str]]) -> Graph | None:
 
 
 def roll_from(match: Match, first: Node, kind: dict[str, tuple]) -> Graph:
-    """The fragment that rolls the recurrence whose first state ``first`` stores."""
-    graph = match.graph
-    if first.outputs[0].dtype != F32 or first.id not in kind:
-        raise RuleSkipped("a carried state is an f32 tensor a loop of a region stores")
-    chain, edge = _chain(graph, first, kind)
-    if len(chain) < 2:
-        raise RuleSkipped("no later state of this kind depends on this one")
-    declined: RuleSkipped | None = None
-    for period in _PERIODS:
-        if len(chain[::period]) < 2:
-            break
+    """The fragment that rolls the recurrence whose first state ``first`` stores: the first way to read one there
+    (:func:`found`) whose steps are proved to be one step (:func:`_proved`), written as one kernel
+    (:func:`_fragment`)."""
+    declined = RuleSkipped("no later state of this kind depends on this one")
+    for recurrence in found(match.graph, first, kind):
         try:
-            # The step at the matrix's edge follows the chain's last where the stride reaches it.
-            return _roll(match, chain[::period], edge if len(chain) % period == 0 else None)
+            return _fragment(match, recurrence, *_proved(match.graph, recurrence))
         except RuleSkipped as why:
             declined = why
-    assert declined is not None
     raise declined
 
 
-def _roll(match: Match, chain: list[Node], edge: Node | None) -> Graph:
-    """Roll ``chain``, with ``edge`` as its last state where the steps are alike with it and it is the first step
-    advanced; without it otherwise."""
-    regions, states, count = _steps(match.graph, chain if edge is None else [*chain, edge])
-    if count == len(chain) + 1:
+@dataclass(frozen=True)
+class Recurrence:
+    """One way to read part of a region as a recurrence: its states in order, the nodes of each step, and the state
+    each step starts from, the first one's the seed."""
+
+    chain: list[Node]
+    steps: list[set[str]]
+    states: list[str]
+
+
+def found(graph: Graph, first: Node, kind: dict[str, tuple]) -> Iterator[Recurrence]:
+    """The ways to read what follows ``first`` as a recurrence whose first state it stores, the one to take first:
+    at a stride of one state then of two, with the step at the matrix's edge then without it, each step with its own
+    readers then alone. Which of them is a recurrence is the proof's to say."""
+    if first.outputs[0].dtype != F32 or first.id not in kind:
+        return  # a carried state is an f32 tensor a loop of a region stores
+    chain, edge = _chain(graph, first, kind)
+    for period in _PERIODS:
+        states = chain[::period]
+        if len(states) < 2:
+            break
+        # The step at the matrix's edge follows the chain's last where the stride reaches it.
+        last = [edge] if edge is not None and len(chain) % period == 0 else []
         try:
-            return _with_readers(match, [*chain, edge], regions, states)
+            steps, read, count = _steps(graph, [*states, *last])
         except RuleSkipped:
-            regions, states, count = regions[:-1], states[:-1], count - 1
-    return _with_readers(match, chain[:count], regions, states)
+            continue
+        if count == len(states) + 1:
+            yield from _with_readers(graph, [*states, *last], steps, read)
+            steps, read, count = steps[:-1], read[:-1], count - 1
+        yield from _with_readers(graph, states[:count], steps, read)
 
 
-def _with_readers(match: Match, chain: list[Node], regions: list[set[str]], states: list[str]) -> Graph:
-    readers = _readers(match.graph, regions, states, chain)
-    joined = [region | read for region, read in zip(regions, readers, strict=True)]
-    # Each step with its own readers, where those are one body at a stride as the steps are; else the steps alone,
-    # and every reader takes its state from a store. Steps that are one body hold as many nodes each, which is asked
-    # before any of them is spliced: two unrelated products of one matrix are a chain of two by their bodies, the
-    # first one's readers are then everything that reads the matrix, and a splice of that many nodes over an
-    # unrolled recurrence does not come back.
+def _with_readers(graph: Graph, chain: list[Node], steps: list[set[str]], states: list[str]) -> Iterator[Recurrence]:
+    """Each step with its own readers, where those are one body at a stride as the steps are; then the steps alone,
+    where every reader takes its state from a store. Steps that are one body hold as many nodes each, which is asked
+    before any of them is spliced: two unrelated products of one matrix are a chain of two by their bodies, the
+    first one's readers are then everything that reads the matrix, and a splice of that many nodes over an unrolled
+    recurrence does not come back."""
+    readers = _readers(graph, steps, states, chain)
+    joined = [step | read for step, read in zip(steps, readers, strict=True)]
     if any(readers) and len({len(nodes) for nodes in joined}) == 1:
-        try:
-            return _replaced(match, chain, joined, states)
-        except RuleSkipped:
-            pass
-    return _replaced(match, chain, regions, states)
+        yield Recurrence(chain, joined, states)
+    yield Recurrence(chain, steps, states)
 
 
-def _replaced(match: Match, chain: list[Node], regions: list[set[str]], states: list[str]) -> Graph:
-    """The fragment that replaces the chain: one kernel that carries the state over ``regions``, one a step, and a
-    slice of its stores for each buffer of a step that is read outside."""
-    graph = match.graph
+def _proved(graph: Graph, recurrence: Recurrence) -> tuple[Body, list[tuple[str, ...]], tuple[tuple[str, object], ...], bool]:
+    """What makes ``recurrence`` one: each step splices into one body, the bodies keep as many buffers and read the
+    same constants, and they are one step taken again and again (:func:`prove`). Raises ``RuleSkipped`` with what
+    does not hold. Returns that step under the loop that carries the state, the buffers each step keeps (the state
+    it stores first), the constants the step reads, and whether every state is stored or the last alone."""
+    chain, steps, states = recurrence.chain, recurrence.steps, recurrence.states
     # A step is loops and the leaves they read — a constant, an input first read there — which the
     # splicer reads as external inputs of the merged body; anything else is not a step.
-    if len(regions) < 2 or not all(
-        isinstance(graph.nodes[node_id].op, (LoopOp, ConstantOp, InputOp)) for region in regions for node_id in region
-    ):
+    if len(steps) < 2 or not all(isinstance(graph.nodes[node_id].op, (LoopOp, ConstantOp, InputOp)) for step in steps for node_id in step):
         raise RuleSkipped("the steps are not alike")
 
-    spliced = [_spliced(graph, region, state, stored.id) for region, state, stored in zip(regions, states, chain, strict=True)]
-    _, kept, constants = spliced[0]
+    spliced = [_spliced(graph, step, state, stored.id) for step, state, stored in zip(steps, states, chain, strict=True)]
+    constants = spliced[0][2]
     # Fused whole, a chain re-derives a state only when a step reads it at another cell, or when a
     # state is read by anything but the next step. Without either it is straight-line code, which
     # fusion inlines once; rolling it would only store every state.
     # A state nothing but the next step reads is stored for no one: the store keeps the last state alone.
     every = any(
-        node.outputs[0].name in graph.outputs or not set(graph.buffer_users(node.outputs[0].name)) <= regions[index + 1]
+        node.outputs[0].name in graph.outputs or not set(graph.buffer_users(node.outputs[0].name)) <= steps[index + 1]
         for index, node in enumerate(chain[:-1])
     )
     if not every and all(
@@ -388,20 +404,26 @@ def _replaced(match: Match, chain: list[Node], regions: list[set[str]], states: 
     if any(tuple(value for _, value in read) != tuple(value for _, value in constants) for _, _, read in spliced):
         raise RuleSkipped("the steps read different constants")
     proved = prove(*(body for body, _, _ in spliced))
-
-    seed: float | str = 0.0 if _is_zero(graph, states[0]) else states[0]
-    stores = tuple(f"{chain[0].id}__steps{index}" for index in range(len(kept)))
     try:
-        step = proved.at("step", len(regions))
+        step = proved.at("step", len(steps))
     except ValueError as why:
         raise RuleSkipped(str(why)) from None
-    body = _rolled(step, len(regions), seed, every)
+    seed: float | str = 0.0 if _is_zero(graph, states[0]) else states[0]
+    return _rolled(step, len(steps), seed, every), [live for _, live, _ in spliced], constants, every
+
+
+def _fragment(match: Match, recurrence: Recurrence, body: Body, kept: list[tuple[str, ...]], constants: tuple, every: bool) -> Graph:
+    """The fragment that replaces the chain: one kernel that carries the state over the steps (``body``, as
+    :func:`_proved` returns it), and a slice of its stores for each buffer of a step that is read outside."""
+    graph = match.graph
+    chain, steps, states = recurrence.chain, recurrence.steps, recurrence.states
+    stores = tuple(f"{chain[0].id}__steps{index}" for index in range(len(kept[0])))
     back = {f"{_STEP}{i}": name for i, name in enumerate(stores)}
     back.update((f"{_CONST}{index}", name) for index, (name, _) in enumerate(constants))
     rolled = LoopOp(body=body.rename_buffers(back))
     tensors = tuple(
-        Tensor(name, (*((len(regions),) if every or index else ()), *graph.buffer(old).shape), graph.buffer(old).dtype)
-        for index, (name, old) in enumerate(zip(stores, kept, strict=True))
+        Tensor(name, (*((len(steps),) if every or index else ()), *graph.buffer(old).shape), graph.buffer(old).dtype)
+        for index, (name, old) in enumerate(zip(stores, kept[0], strict=True))
     )
     fragment = Graph()
     for name in rolled.inputs:
@@ -410,16 +432,16 @@ def _replaced(match: Match, chain: list[Node], regions: list[set[str]], states: 
         replace(rolled, outputs=dict(zip(stores, tensors, strict=True))), list(rolled.inputs), outputs=tensors, node_id=stores[0]
     )
     renamed: dict[str, str] = {}
-    for index, (_, live, _) in enumerate(spliced):
+    for index, live in enumerate(kept):
         for store, old in zip(stores, live, strict=True):
             last = store == stores[0] and not every
-            if last and index < len(spliced) - 1:
+            if last and index < len(steps) - 1:
                 continue
             # The splice restores the replaced buffer's id on the slice; its tensor carries that name.
             renamed[old] = f"{old}__rolled"
             tensor = replace(graph.buffer(old), name=old)
             fragment.add_node(_slice(tensor, store, None if last else index), [store], tensor, node_id=renamed[old])
     fragment.outputs = list(renamed.values())
-    match.consumed = set().union(*(_stateful(graph, region, state) for region, state in zip(regions, states, strict=True)))
+    match.consumed = set().union(*(_stateful(graph, step, state) for step, state in zip(steps, states, strict=True)))
     match.output = renamed
     return fragment

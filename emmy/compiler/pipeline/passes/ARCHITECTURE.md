@@ -841,7 +841,11 @@ The merge rule rolls it where it would have inlined it (`loop/fusion/_recurrence
 splices are those of the graph the rolls leave, since a kernel that carries a state is in no region. A roll changes
 the regions after the rules ahead of the merge have read them, so once every recurrence has rolled the merge asks for
 the pass's rules to be scanned again from the first (`Match.rescan`): the loops around the new kernel read through
-the copies of their new regions before any of them is spliced. The copies of a step are nodes of one region, what
+the copies of their new regions before any of them is spliced. A roll is a splice with more asked of its nodes:
+every step splices into one body, the bodies are one step up to the integers of their coordinates, and each step
+reads the state the step before it stored. The rule is three parts kept apart: the ways to read part of a region
+as a recurrence (the search), the test of one against those requirements, and the kernel written for the first
+that passes. The copies of a step are nodes of one region, what
 fusion would splice into one kernel, so a region is where they are looked for. The states are a chain of its nodes
 of one shape — the same body once the integers of its coordinates are left out (load anchors, mask bounds, static
 loop extents: `Body.identity_apart`) — each depending on the last. A step is what lies between two of
