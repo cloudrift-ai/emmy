@@ -1,35 +1,30 @@
-"""Roll an unrolled recurrence into ONE kernel that carries its state, where fusion would have inlined it.
+"""Roll an unrolled recurrence into ONE kernel that carries its state.
 
-The fusion pass's first rule asks this (``005_roll_recurrence``, :func:`roll`): the copies of one step, each
-reading the state the copy before it stored, are rolled before a loop reads through a copy or a region is spliced,
-and the regions of the graph that leaves are what the merge rule splices.
+A Python loop over chunks leaves the tracer unrolled: step ``j``'s loops read the state step ``j − 1`` stored, so
+splicing them whole makes every later state re-derive every earlier one, and a chain of twenty reductions demands
+two to the twentieth bindings of its first step. The fusion pass's first rule (``005_roll_recurrence``,
+:func:`roll`) rolls such a chain before a loop reads through a copy or a region is spliced, while the structure is
+as the tracer wrote it.
 
-A roll is a splice with more asked of its nodes, in three parts. :func:`found` lists the ways to read part of a
-region as a recurrence: which nodes are its states and which are each step's. :func:`_proved` holds one of them to
-what a recurrence is: every step splices into one body, the bodies are one step once the integers of their
-coordinates are left out and each integer moves by one amount a step (:func:`prove`), and each step reads the
-state the step before it stored. :func:`_fragment` writes the kernel. The first reading that is proved is taken.
+A roll is a splice with more asked of its nodes, in three parts kept apart:
 
-A Python loop over chunks leaves the tracer unrolled: step ``j``'s kernels read the state step
-``j − 1`` stored, so fusing them whole makes every later state re-derive every earlier one, and a
-chain of twenty reductions demands two to the twentieth bindings of its first step. Here the
-structure is still plain. The copies are nodes of one region, the set fusion would splice into one kernel, so
-the region is where they are looked for. The states are a chain of its nodes of one kind (:func:`kinds`: one
-tensor type and one body once the integers of its coordinates are left out), each depending
-on the last; what lies between two of them is one step; and the steps differ only in the integer
-literals they read and mask at — an offset, a slice bound — each advancing affinely with the step.
+- :func:`found` lists the ways to read part of a region as a recurrence. The copies of a step are nodes of one
+  region, the set the merge rule would splice into one kernel, so a region is where they are looked for. The states
+  are a chain of its nodes of one kind (:func:`kinds`), each depending on the last; a step is what lies between two
+  of them, and the first step starts from the seed. A reading may take the step at the edge of its matrix, whose
+  mask the normal form shortened by the bound the extent gives; each step's own readers; and every second state,
+  where the states alternate two bodies (a Sinkhorn row step then a column step).
+- :func:`_proved` holds a reading to what a recurrence is: every step splices into one body, the bodies are one step
+  once the integers of their coordinates are left out and each integer moves by one amount a step (:func:`prove`),
+  and each step reads the state the step before it stored. A chain that is not one step advanced is left alone: a
+  recurrence rolled wrongly is a wrong answer. So is a chain whose steps read their state only at the cell they
+  write and whose states nothing but the next step reads: fused whole it re-derives no state, so it is
+  straight-line code, and rolling it would only store every state.
+- :func:`_fragment` writes the kernel: the step under a loop that carries the state (``Carry``) from the seed and
+  stores what each step defined (the last state alone, where nothing but the next step reads a state), and one
+  slice of those stores per replaced buffer.
 
-Each step is spliced into one body by the fusion rule's own splicer, the steps must be the first step's body with
-its integers moved ``j`` steps on (:func:`prove`), and only then is the chain replaced — by
-one kernel that carries the state (``Carry``) from the tensor the loop started with, stores what
-each step defined (the last state alone, where nothing but the next step reads a state), and by one
-slice of those stores per replaced buffer. A chain whose states alternate two bodies (a Sinkhorn row
-step then a column step) rolls as one step of two; a chain that is not one step advanced is left
-alone: a recurrence rolled wrongly is a wrong answer. A chain whose steps read their state only at
-the cell they write, and whose states nothing but the next step reads, is left alone too: fused
-whole it re-derives no state, so it is straight-line code, and rolling it would only store every
-state. A step at the edge of its matrix, whose mask the normal form shortened by the bound the extent
-gives, is taken with the chain where it is the first step advanced (:func:`_chain`).
+The first reading that is proved is taken.
 """
 
 from __future__ import annotations
