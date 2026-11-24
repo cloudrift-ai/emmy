@@ -640,7 +640,9 @@ consumer's index, and a reading that cannot prove k-block invariance declines.
 There is one fusion pass and one fixpoint, and the graph decides every region before any is merged
 (`_region.regions`). Some nodes no region holds: a kernel that carries a state, an ordered prefix output
 (a scan, whose Write observes a running accumulator) and any op that is not a loop. Two loops share a region when the
-same such nodes — and the same packed producers — lie upstream of both and a chain of loop edges joins them; equal
+same such nodes — and the same packed producers — lie upstream of both and a chain of links joins them: a loop and a
+loop that reads it, whose value one kernel computes once, or two loops that read one buffer, which one kernel reads
+once for both; equal
 upstream boundaries are what keep a region convex, so the merged kernel never depends on a node that depends on it.
 Equal boundaries alone part two loops of which only one reads past a scan, though nothing lies between them, so two
 regions a loop edge joins then merge whenever the union stays convex — every node on a path between its members joins
@@ -651,13 +653,12 @@ visited in — what a walk that grew a region from each producer and shrank it o
 region the splicer cannot build is an error (`ir/ARCHITECTURE.md`, the construction bound), never a smaller region.
 That maximal result is final: no later placement rule cuts it apart.
 
-A copy joins nothing: every loop reads through it (`008_read_through_copies`). A loop that only re-lays out a buffer
-or widens it — the chunks of a sequence, a transpose, a broadcast, a 16-bit float read as f32 — holds no work a
-kernel could share. Before any region is merged, every loop that reads one takes the buffer behind the copy at the
-cell the copy reads, a kernel that carries a state among them; the copy is then read by no loop, and the kernel whose
-only work it was is gone. Loops share a region through a value that is computed, which one kernel computes once for
-all of them. Two loops that read one copy share what two loops that read one input share, and are two kernels as
-those are: whether the program wrote a transpose between an input and its readers decides no kernel boundary. A copy
+Every loop reads through a copy (`008_read_through_copies`). A loop that only re-lays out a buffer or widens it —
+the chunks of a sequence, a transpose, a broadcast, a 16-bit float read as f32 — holds no work a kernel could
+share. Before any region is merged, every loop that reads one takes the buffer behind the copy at the cell the copy
+reads, a kernel that carries a state among them; the copy is then read by no loop, and the kernel whose only work it
+was is gone. What two readers of a copy share is then the buffer behind it, and loops that read one buffer share a
+region: whether the program wrote a transpose between a buffer and its readers decides no kernel boundary. A copy
 the program itself holds, a graph output, is a buffer whoever reads it, and its readers read it there. It runs
 after the roll, which compares a recurrence's steps as the tracer left them. A copy that rounds is arithmetic and is
 not read through, nor is a copy of a buffer another kernel stores over, nor one of a packed buffer.

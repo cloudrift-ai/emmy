@@ -101,8 +101,10 @@ def test_a_reduction_reading_at_a_symbolic_dim_fuses(kind: str) -> None:
     x = np.random.default_rng(0).standard_normal((5, 8)).astype(np.float32)
     backend = NumpyBackend()
     fused = Pipeline.build(LOOP_PASSES).run(_reduction_reading_at_a_symbolic_dim(kind))
-    assert [node.id for node in fused.nodes.values() if isinstance(node.op, LoopOp) and node.id != "heads"] == ["y"]
-    assert any("num_tokens" in index.free_vars() for load in fused.nodes["y"].op.body.loads for index in load.index)
+    # One kernel: the reshape the program also returns reads the input the reduction reads, so it stores it too.
+    (kernel,) = (node for node in fused.nodes.values() if isinstance(node.op, LoopOp))
+    assert "y" in {tensor.name for tensor in kernel.outputs}
+    assert any("num_tokens" in index.free_vars() for load in kernel.op.body.loads for index in load.index)
     bound = specialize_program(fused, {"num_tokens": len(x)})
     got = backend.run(backend.compile(bound), input_data={"x": x})[0].outputs["y"]
     want = (x[-1:] if kind == "last_row" else x[None]) ** 2

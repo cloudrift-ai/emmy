@@ -4,7 +4,7 @@ no region holds stores its buffer where the one loop that reads it would only ha
 
 A loop that only re-lays out or widens a buffer was stored wherever a kernel outside its region read it: for a kernel
 that carries a state, which is in no region, and for a second region. Every reader now reads the buffer behind the
-copy, the copy is stored for no one, and it joins no two loops into one kernel. On the other side of such a kernel,
+copy, the copy is stored for no one, and what its readers share is the buffer behind it. On the other side of such a kernel,
 the loop that puts its outputs where the program wants them, rounded to the dtype it wants them at, was a kernel of
 its own.
 """
@@ -112,17 +112,14 @@ m(torch.randn(4, 8))
 """
 
 
-@pytest.mark.parametrize(
-    ("shared", "kernels"),
-    [("x", [1, 1]), ("x.transpose(0, 1)", [1, 1]), ("torch.sin(x)", [2])],
-    ids=["the-input", "a-transpose-of-it", "a-computed-value"],
-)
-def test_loops_are_joined_by_a_value_that_is_computed_never_by_one_that_is_moved(shared: str, kernels: list[int]) -> None:
-    """Two loops that read one input are two kernels, and a transpose between the input and them changes nothing:
-    it is read through by both and joins neither to the other. A value that is computed joins its readers: one
-    kernel computes it once and stores both of their results."""
+@pytest.mark.parametrize("shared", ["x", "x.transpose(0, 1)", "torch.sin(x)"], ids=["the-input", "a-transpose-of-it", "a-computed-value"])
+def test_two_loops_that_read_one_buffer_are_one_kernel_whatever_lies_between(shared: str) -> None:
+    """Two loops that read one buffer share a kernel, which reads it once for both. A transpose between the buffer
+    and them changes nothing: both read through it, and what they then share is the buffer. A value that is
+    computed joins its readers the same way: the kernel computes it once."""
     graph = Pipeline.build(LOOP_PASSES).run(graph_from_code(_TWO_READERS.format(shared=shared))[0])
-    assert [len(node.outputs) for node in _loops(graph)] == kernels
+    (kernel,) = _loops(graph)
+    assert len(kernel.outputs) == 2 and set(kernel.inputs) == {"x"}
 
 
 def _copy_graph(dtype, stored_over: bool = False) -> Graph:

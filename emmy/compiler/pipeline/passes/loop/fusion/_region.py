@@ -101,7 +101,9 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     what the kernel stores fuse into it like any other.
 
     Two loops share a region when the same such nodes lie upstream of both — the boundaries — and a
-    chain of loop edges joins them. Equal boundaries are what keep a region convex: a path between
+    chain of links joins them. A link is a loop and a loop that reads it, whose value one kernel computes once, or
+    two loops that read one buffer, which one kernel reads once for both: an input, a constant, what a kernel
+    outside the region stores. Equal boundaries are what keep a region convex: a path between
     two members through a node outside would put that node, or a boundary past it, upstream of one
     member and not the other, so the merged kernel never depends on a node that depends on it. Two regions a loop
     edge joins then merge while their union stays convex (:func:`_joined`).
@@ -145,12 +147,19 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
             nid = member[nid]
         return nid
 
+    # What links two loops: one reads the other, or both read one buffer. In topological order.
+    links: list[tuple[str, str]] = []
     for nid in order:
-        for user in sorted(graph.users(nid), key=position.get) if nid in fusable else ():
-            first, second = find(nid), find(user) if user in fusable else None
-            if second not in (None, first) and boundaries[user] == boundaries[nid] and not _apart(clash, held[first], held[second]):
-                member[second] = first
-                held[first] |= held.pop(second)
+        if nid in fusable:
+            links.extend((nid, user) for user in sorted(graph.users(nid), key=position.get) if user in fusable)
+        for name in graph.nodes[nid].buffer_names():
+            readers = sorted((user for user in graph.buffer_users(name) if user in fusable), key=position.get)
+            links.extend(zip(readers, readers[1:], strict=False))
+    for one, other in links:
+        first, second = find(one), find(other)
+        if second != first and boundaries[other] == boundaries[one] and not _apart(clash, held[first], held[second]):
+            member[second] = first
+            held[first] |= held.pop(second)
     region_of = {nid: find(nid) for nid in fusable}
     # Readers are downstream, so in reverse topological order every reader's region is final.
     for nid in reversed(order):
@@ -165,15 +174,14 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     member = dict(region_of)
     for nid in fusable:
         member[nid] = nid
-    for nid in fusable:
-        for user in graph.users(nid):
-            if user in fusable and region_of[user] == region_of[nid]:
-                member[find(user)] = find(nid)
+    for one, other in links:
+        if region_of[other] == region_of[one]:
+            member[find(other)] = find(one)
     grouped: dict[str, set[str]] = {}
     for nid in fusable:
         grouped.setdefault(find(nid), set()).add(nid)
     groups = list(grouped.values())
-    return {nid: frozenset(members) for members in _joined(graph, order, fusable, stops, clash, downstream, groups) for nid in members}
+    return {nid: frozenset(members) for members in _joined(order, fusable, stops, clash, downstream, groups, links) for nid in members}
 
 
 def _clashes(graph: Graph, fusable: set[str], downstream: dict[str, set[str]]) -> dict[str, set[str]]:
@@ -198,15 +206,15 @@ def _apart(clash: dict[str, set[str]], first: set[str], second: set[str]) -> boo
 
 
 def _joined(
-    graph: Graph,
     order: list[str],
     fusable: set[str],
     stops: set[str],
     clash: dict[str, set[str]],
     downstream: dict[str, set[str]],
     groups: list[set[str]],
+    links: list[tuple[str, str]],
 ) -> list[set[str]]:
-    """``groups`` with every two joined by a loop edge merged while the union stays convex. Equal boundaries part two
+    """``groups`` with every two that a link joins merged while the union stays convex. Equal boundaries part two
     loops one of which reads past a boundary the other does not (a scan feeding only one), though nothing lies between
     them: the union is still one kernel when every node on a path between its members can join it, no member
     reads past a stop of its own, and no two members clash (:func:`_clashes`)."""
@@ -234,18 +242,15 @@ def _joined(
     merged = True
     while merged:
         merged = False
-        for nid in order:
-            for user in graph.users(nid) if nid in fusable else ():
-                if user not in fusable or group_of[user] == group_of[nid]:
-                    continue
-                if (joined := union(group_of[nid], group_of[user])) is None:
-                    continue
-                keep = min(joined)
-                for index in joined - {keep}:
-                    groups[keep] |= groups[index]
-                    groups[index] = set()
-                group_of.update({member: keep for member in groups[keep]})
-                merged = True
+        for one, other in links:
+            if group_of[other] == group_of[one] or (joined := union(group_of[one], group_of[other])) is None:
+                continue
+            keep = min(joined)
+            for index in joined - {keep}:
+                groups[keep] |= groups[index]
+                groups[index] = set()
+            group_of.update({member: keep for member in groups[keep]})
+            merged = True
     return [members for members in groups if members]
 
 

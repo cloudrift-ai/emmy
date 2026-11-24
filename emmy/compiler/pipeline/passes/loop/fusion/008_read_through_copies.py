@@ -1,14 +1,14 @@
-"""Read through every copy: a loop that only moves values joins no two loops.
+"""Read through every copy: what its readers share is the buffer behind it.
 
 A loop that computes nothing — one read and one store of it, in another layout or at another dtype: the chunks of a
 sequence, a transpose, a broadcast, a cast to a wider float — holds no work a kernel could share. Every loop that
 reads one takes the read itself: the buffer behind the copy, at the cell the copy reads there. The copy is then read
 by no loop, and the kernel whose only work it was is gone.
 
-So a copy joins nothing. Loops share a region through a value that is computed (``_region.regions``): one kernel
-computes it once for all of them. Two loops that read one copy share what two loops that read one input share, and
-are two kernels as those are, whether or not the program wrote a transpose between the input and them. A kernel that
-carries a state, which no region holds, reads its operands where they are stored by the same rule.
+What two readers of a copy share is then the buffer they both read, and loops that read one buffer share a region
+(``_region.regions``): one kernel reads it once for all of them. Whether the program wrote a transpose between a
+buffer and its readers decides no kernel boundary: they are one kernel either way. A kernel that carries a state,
+which no region holds, reads its operands where they are stored by the same rule.
 
 A copy the program itself holds, a graph output, is a buffer whoever reads it: it is stored once and its readers
 read it there, like any stored value. A copy that rounds is arithmetic and is not read through, nor is a copy of a

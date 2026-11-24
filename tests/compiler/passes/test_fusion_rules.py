@@ -778,13 +778,12 @@ def test_shared_const_broadcast_no_pure_indexmap_remains():
 
 
 def test_shared_const_broadcast_consumers_load_constant_directly():
-    """Each consumer loads the constant directly. The broadcast computes nothing, so it joins nothing: the two are
-    two kernels, as two loops that read one input are."""
+    """The MIMO kernel loads the constant directly and shares the broadcast."""
     # FP16 retains a device buffer; a fixed FP32 scalar is bound before fusion.
     result = _fuse(_make_shared_const_broadcast(scalar_dtype="f16"))
-    kernels = _kernel_nodes(result)
-    assert [len(kernel.outputs) for kernel in kernels] == [1, 1]
-    assert all("one" in _loads_from(kernel.op) for kernel in kernels)
+    (kernel,) = _kernel_nodes(result)
+    assert len(kernel.outputs) == 2
+    assert "one" in _loads_from(kernel.op)
 
 
 @pytest.mark.parametrize("scalar_dtype", ["f16", "f32"])
@@ -827,11 +826,11 @@ def test_shared_transpose_no_pure_indexmap_remains():
 
 
 def test_shared_transpose_consumers_index_source_directly():
-    """Each consumer reads the transpose's source directly, in a kernel of its own: the transpose joins nothing."""
+    """One MIMO kernel reads the transpose source directly for both outputs."""
     result = _fuse(_make_shared_transpose())
-    kernels = _kernel_nodes(result)
-    assert [len(kernel.outputs) for kernel in kernels] == [1, 1]
-    assert all("x" in _loads_from(kernel.op) for kernel in kernels)
+    (kernel,) = _kernel_nodes(result)
+    assert len(kernel.outputs) == 2
+    assert "x" in _loads_from(kernel.op)
 
 
 def test_shared_transpose_correctness():
