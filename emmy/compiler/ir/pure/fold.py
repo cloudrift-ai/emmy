@@ -70,7 +70,6 @@ declare(
         ("operands", tuple[Fold, ...], ()),
         ("init", tuple[float | str, ...], ()),
         ("lift", Lambda, MISSING),
-        ("cells", tuple[str, ...], ()),
         ("base", Lambda | None, None),
         ("twist", Twist | None, None),
         ("observe", Lambda | None, None),

@@ -342,16 +342,16 @@ def test_a_carried_state_steps_through_its_loop(level):
         f"""
         for k in 0..{steps}:
             f32 x = load a[i * {steps} + k]
-            f32 p = pre s[0]
-            f32 q = pre u[1]
+            f32 p = load s[k - 1, 0]
+            f32 q = load u[k - 1, 1]
             f32 h = p * 0.5
             f32 w = h + x
             f32 v = q + w
-            f32 s[0] <- w seed 0.25
+            f32 s[k, 0] <- w seed 0.25
             if k < 4:
-                f32 u[1] <- v seed seeds
-        f32 last = pre s[0]
-        f32 kept = pre u[1]
+                f32 u[k, 1] <- v seed seeds
+        f32 last = load s[{steps - 1}, 0]
+        f32 kept = load u[{steps - 1}, 1]
         f32 o[i] = last
         f32 g[i] = kept
         """,

@@ -115,7 +115,7 @@ def _resident_tiles(tile: TileOp, ctx) -> tuple[Tile, ...]:
 
     if tile.resident_state is None:
         return ()
-    columns = tile.axis_of(tile.resident_state[2]).extent.as_static()
+    columns = tile.axis_of(tile.resident_state.col).extent.as_static()
     names = dict.fromkeys(name for dtype in (F16, BF16, F32) for acc in (F32, dtype) for name in atoms_for(dtype, acc=acc, ctx=ctx))
     return tuple(
         Tile.parse(f"{atom.name}/f1x{columns // atom.atom_n}/k{period}", Work.parse("w1x1"))

@@ -83,7 +83,8 @@ def test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state() -
     # Four chunks: the last chunk's state is never read, so three steps are carried.
     assert steps.axis.extent.as_static() == 3 and list(steps.carries) == [carry.name for carry in rolled.body.carries]
     # Every input is read at a step-relative offset, and the state is stored once per step.
-    assert all(steps.axis.name in load.index[1].free_vars() for load in rolled.body.loads)
+    states = {carry.name for carry in rolled.body.carries}
+    assert all(steps.axis.name in load.index[1].free_vars() for load in rolled.body.loads if load.input not in states)
     (store,) = rolled.outputs
     # Each consumer reads ONE stored step: nothing re-derives an earlier state.
     readers = [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp) and store in node.inputs]

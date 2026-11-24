@@ -915,15 +915,15 @@ fn a_carried_state_is_two_registers_a_cell() {
         "
         for k in 0..8:
             f32 x = load a[t * 8 + k]
-            f32 p = pre s[0]
-            f32 q = pre u[1]
+            f32 p = load s[k - 1, 0]
+            f32 q = load u[k - 1, 1]
             f32 w = p + x
             f32 v = q + w
-            f32 s[0] <- w seed 0.25
+            f32 s[k, 0] <- w seed 0.25
             if k < 4:
-                f32 u[1] <- v seed s0
-        f32 last = pre s[0]
-        f32 kept = pre u[1]
+                f32 u[k, 1] <- v seed s0
+        f32 last = load s[7, 0]
+        f32 kept = load u[7, 1]
         f32 both = last + kept
         f32 o[t] = both
         ",
@@ -1317,19 +1317,15 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
             "no PTX rule for a slab of s laid out as V70A",
         ),
         (
-            "for k in 0..8:\n            for j in 0..2:\n                f32 st[j] <- acc seed 0",
+            "for k in 0..8:\n            for j in 0..2:\n                f32 st[k, j] <- acc seed 0",
             "no PTX rule for a cell of the carried state st at an index known only where the kernel runs",
         ),
         (
-            "f32 p = pre st[0]",
-            "st is no carried state of a loop around",
-        ),
-        (
-            "for k in 0..8:\n            f16 st[0] <- acc seed 0",
+            "for k in 0..8:\n            f16 st[k, 0] <- acc seed 0",
             "acc is f32, not f16",
         ),
         (
-            "for k in 0..8:\n            f32 st[0] <- acc seed halves",
+            "for k in 0..8:\n            f32 st[k, 0] <- acc seed halves",
             "halves holds f16",
         ),
     ] {

@@ -7,7 +7,7 @@ use crate::body::Body;
 use crate::expr::Expression;
 use crate::field::{AxisRef, NumOr};
 use crate::statement::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// The seeded accumulators a reduce loop declares in its enclosing scope: the `Accum` targets of its immediate body.
 pub fn seeded_accumulators(stmt: &Statement) -> Vec<Name> {
@@ -27,53 +27,53 @@ pub fn seeded_accumulators(stmt: &Statement) -> Vec<Name> {
         .collect()
 }
 
-/// The carried states a loop over `body` carries, each with its cell shape: an axis per index position, `None`
-/// where normalization dropped a size-one axis.
-pub fn carried_cells(body: &Body) -> Vec<(Name, Vec<Option<AxisRef>>)> {
+/// The carried states the loop over `axis` carries, `body` its body, each with its cell shape: an axis per
+/// position of the cell, `None` where normalization dropped a size-one axis. A state is carried by the loop its
+/// first coordinate names.
+pub fn carried_cells(axis: &Name, body: &Body) -> Vec<(Name, Vec<Option<AxisRef>>)> {
     if body.carries().is_empty() {
         return vec![];
     }
     let mut out: Vec<(Name, Vec<Option<AxisRef>>)> = Vec::new();
     fn walk(
+        axis: &Name,
         body: &Body,
         inner: &HashMap<Name, AxisRef>,
         out: &mut Vec<(Name, Vec<Option<AxisRef>>)>,
     ) {
         for stmt in body.stmts() {
-            if let Statement::Carry(carry) = &**stmt {
-                let cells: HashSet<&Name> = carry.cells().into_iter().collect();
-                let keys: HashSet<&Name> = inner.keys().collect();
-                if cells == keys {
-                    let shape = carry
-                        .index
-                        .iter()
-                        .map(|e| e.as_var().and_then(|name| inner.get(name).cloned()))
-                        .collect();
-                    match out.iter_mut().find(|(name, _)| *name == carry.name) {
-                        Some(entry) => entry.1 = shape,
-                        None => out.push((carry.name, shape)),
-                    }
+            if let Statement::Carry(carry) = &**stmt
+                && carry.step() == Some(axis)
+            {
+                let shape = carry
+                    .cell()
+                    .iter()
+                    .map(|e| e.as_var().and_then(|name| inner.get(name).cloned()))
+                    .collect();
+                match out.iter_mut().find(|(name, _)| *name == carry.name) {
+                    Some(entry) => entry.1 = shape,
+                    None => out.push((carry.name, shape)),
                 }
             }
             for child in stmt.nested() {
                 if let Statement::Loop(l) = &**stmt {
                     let mut deeper = inner.clone();
                     deeper.insert(l.axis.name, l.axis.clone());
-                    walk(&child, &deeper, out);
+                    walk(axis, &child, &deeper, out);
                 } else {
-                    walk(&child, inner, out);
+                    walk(axis, &child, inner, out);
                 }
             }
         }
     }
-    walk(body, &HashMap::new(), &mut out);
+    walk(axis, body, &HashMap::new(), &mut out);
     out
 }
 
 impl Loop {
     /// The carried states this loop carries.
     pub fn carries(&self) -> Vec<(Name, Vec<Option<AxisRef>>)> {
-        carried_cells(&self.body)
+        carried_cells(&self.axis.name, &self.body)
     }
 
     /// Where the axis walks: its range, `0..extent` when the loop states none.
@@ -118,9 +118,19 @@ impl Loop {
 }
 
 impl Carry {
-    /// The axes of the cell this statement defines: the index entries that are variables.
+    /// The axis of the loop that carries the state: the first coordinate, the step.
+    pub fn step(&self) -> Option<&Name> {
+        self.index.first().and_then(|e| e.as_var())
+    }
+
+    /// The cell this statement defines: the coordinates past the step.
+    pub fn cell(&self) -> &[Expression] {
+        self.index.get(1..).unwrap_or(&[])
+    }
+
+    /// The axes of the cell this statement defines: the entries of the cell that are variables.
     pub fn cells(&self) -> Vec<&Name> {
-        self.index.iter().filter_map(|e| e.as_var()).collect()
+        self.cell().iter().filter_map(|e| e.as_var()).collect()
     }
 }
 
@@ -159,22 +169,22 @@ mod tests {
         for j in 0..4:
           for k in 0..4:
             w = load W[i, k]
-            other = pre S[k, j]
+            other = load S[c - 1, k, j]
             p = multiply(w, other)
             mixed <- add(mixed, p)
           u = load U[c, i, j]
-          own = pre S[i, j]
+          own = load S[c - 1, i, j]
           kept = multiply(own, decay)
           moved = add(kept, mixed)
           next = add(moved, u)
-          S[i, j] <- next seed 0.0
+          S[c, i, j] <- next seed 0.0
           out[c, i, j] = own
     ";
 
     #[test]
     fn a_loop_over_the_cells_carries_nothing() {
-        // One rule places every carrier, the nearest enclosing loop its index does not read: a scalar fold is
-        // carried by its own loop and a state by the loop outside its cells.
+        // A scalar fold is carried by its own loop, and a state by the loop its first coordinate names, outside
+        // its cells.
         let step = body(STEP);
         let Statement::Loop(outer) = &*step.stmts()[0] else {
             panic!("not a loop");
@@ -204,22 +214,23 @@ mod tests {
 
     #[test]
     fn a_carried_state_prints_as_its_statements() {
-        // The listing is the body's text: the state's update names its seed, and a read of it is a `pre`.
+        // The listing is the body's text: the state's update names its seed, and a read of it is a load: one step
+        // back inside the loop, the last step after it.
         let listing = |source: &str| indented(&text(&normalize_body(&body(source)).unwrap()));
         let fold_then_read = "
       for c in 0..3:
         for i in 0..4:
           u = load U[c, i]
-          own = pre S[i]
+          own = load S[c - 1, i]
           next = add(own, u)
-          S[i] <- next seed 0
+          S[c, i] <- next seed 0
       for r in 0..4:
-        last = pre S[r]
+        last = load S[2, r]
         out[r] = last
         ";
         assert_eq!(
             listing(fold_then_read),
-            "  for a0 in 0..3:\n    for a1 in 0..4:\n      in0 = load U[a0, a1]\n      v0 = pre acc0[a1]\n      v1 = in0 + v0\n      acc0[a1] <- v1 seed 0\n  for a2 in 0..4:\n    v2 = pre acc0[a2]\n    out[a2] = v2"
+            "  for a0 in 0..3:\n    for a1 in 0..4:\n      in0 = load acc0[a0 - 1, a1]\n      in1 = load U[a0, a1]\n      v0 = in0 + in1\n      acc0[a0, a1] <- v0 seed 0\n  for a2 in 0..4:\n    in2 = load acc0[2, a2]\n    out[a2] = in2"
         );
         // The same shape with a scalar fold in place of the carried state.
         let plain_fold = "

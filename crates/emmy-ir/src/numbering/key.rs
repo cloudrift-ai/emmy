@@ -36,7 +36,7 @@ closed_set! {
         Expr = "expr", Coordinate = "c", Operand = "v", Free = "free", State = "state", Buffer = "buffer",
         Bound = "bound", Parameter = "parameter",
         Load = "load", Assign = "assign", Affine = "affine", Init = "init", Reduce = "reduce",
-        Select = "select", Store = "store", Carry = "carry", Pre = "pre", Loop = "loop", Cond = "cond", Other = "other",
+        Select = "select", Store = "store", Carry = "carry", Loop = "loop", Cond = "cond", Other = "other",
         Composite = "composite",
     }
 }
@@ -362,7 +362,6 @@ mod tests {
                 "select",
                 "store",
                 "carry",
-                "pre",
                 "loop",
                 "cond",
                 "other",

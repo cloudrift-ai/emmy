@@ -412,17 +412,6 @@ impl Line {
             };
             return self.end(Arc::new(Statement::Call(call)));
         }
-        if self.parser.at_word("pre", 0) && !self.parser.at("(", 1) {
-            self.parser.index += 1;
-            let carrier = self.name()?;
-            self.parser.require("[")?;
-            let index = self.parser.expressions("]")?;
-            return self.end(Arc::new(Statement::Pre(Pre {
-                name,
-                carrier,
-                index: index.into(),
-            })));
-        }
         if self.parser.at_word("select", 0) && self.parser.at(":", 1) {
             self.parser.index += 2;
             let mut branches = Vec::new();

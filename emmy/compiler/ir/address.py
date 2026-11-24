@@ -405,9 +405,12 @@ def flat_index(index: tuple[Expression, ...], shape) -> Expression:
 def flat_accesses(body: Body, shapes, keeps=lambda stmt: False) -> Body:
     """``body`` with the index of every ``Load`` and ``Write`` one flat element index into its buffer
     (:func:`flat_index` over ``shapes``, each buffer's shape by name). ``keeps`` names the accesses that stay as
-    they are: the ones their dimensions define."""
+    they are: the ones their dimensions define, and a load of a carried state, whose index is the step and the cell."""
+    states = {carry.name for carry in body.carries}
 
     def flat(stmt: Statement) -> Statement:
+        if isinstance(stmt, Load) and stmt.input in states:
+            return stmt
         if isinstance(stmt, (Load, Write)) and len(stmt.index) != 1 and not keeps(stmt):
             buffer = stmt.input if isinstance(stmt, Load) else stmt.output
             try:

@@ -51,17 +51,17 @@ for a0 in 0..{_STEPS}:
         for a4 in 0..{n}:
           in2 = load k[a1, a0, a4]
           v3 = 0.0625 * in2
-          v4 = pre acc0[a1, a4, a3]
+          v4 = load acc0[a0 - 1, a1, a4, a3]
           v5 = v3 * v4
           acc1 <- add(acc1, v5) over a4
         in3 = load v[a1, a0, a3]
         v6 = in3 - acc1
         v7 = v6 * v2
-        v8 = pre acc0[a1, a2, a3]
+        v8 = load acc0[a0 - 1, a1, a2, a3]
         v9 = v1 * v8
         v10 = v7 + v9
         out[a0, a1, a2, a3] = v10
-        acc0[a1, a2, a3] <- v10 seed s
+        acc0[a0, a1, a2, a3] <- v10 seed s
 """
     )
     graph = Graph()

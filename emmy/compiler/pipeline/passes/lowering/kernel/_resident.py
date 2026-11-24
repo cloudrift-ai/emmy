@@ -35,7 +35,7 @@ from emmy.compiler.ir.kernel.ir import (
     Tile,
     fragment_args,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Pre
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop
 
 from ._atom import _direct_operand, _residence
 
@@ -64,10 +64,11 @@ class _Blocks:
 
     def __init__(self, tile, atom, period: int, row_base, state: tuple[str, ...]):
         self.tile, self.atom, self.period, self.row_base, self.state = tile, atom, period, row_base, state
-        self.carrying, self.batch, _, _ = tile.resident_state
-        self.time = self.carrying.axis
+        self.carrying, self.batch = tile.resident_state.fold, tile.resident_state.batch
+        self.time, self.carry = tile.resident_state.time, tile.resident_state.carry
+        self.carried = self.carry.name
         self.layout = atom.fragment_layout
-        self.extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
+        self.extents = {axis.name: axis.extent.as_static() for axis in (*tile.axes, *tile.place.free)}
         self.out: list = []
         self.memo: dict = {}
         self.blocks: dict = {}
@@ -99,7 +100,7 @@ class _Blocks:
         principle: seeding the fragments ahead of the loop does less work and ran 5 to 8% slower on an RTX 5090."""
         key = ("seeded", cb)
         if key not in self.memo:
-            seed = self.carrying.init[0]
+            seed = self.carry.seed
             if isinstance(seed, str):
                 cells = (*(Var(b) for b in self.batch), Var(FRAG_COL), Var(FRAG_ROW))
                 seed = self.copied(((seed, _at_unit_dims(cells, self.tile.inputs[seed].shape)),), (GMEM,), None, cb)
@@ -168,7 +169,7 @@ class _Blocks:
                     self.uniform.add(param)
                     self.out.append(Assign(param, Var(operand)))
         for stmt in cone.members:
-            if isinstance(stmt, Pre):
+            if isinstance(stmt, Load) and stmt.input == self.carried:
                 if rb is not None or stmt.index[-2:] != (Var(col), Var(row)):
                     raise Unresident("a read of the state off its own row and column")
                 frags[stmt.name] = self.seeded(cb)
@@ -274,12 +275,12 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     ``warps`` warps a CTA, a narrow accumulator promoted every ``period`` atom steps."""
     if tile.resident_state is None:
         raise Unresident("one state of static shape, its rows and columns whole fragments")
-    fold, batch, col, row = tile.resident_state
-    extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
-    widths = [extents[col], *(extents[spec.write.index[-2].name] for spec in tile.output_specs)]
+    fold, carry, step, batch, col, row, outputs = tile.resident_state
+    extents = {axis.name: axis.extent.as_static() for axis in (*tile.axes, *tile.place.free)}
+    widths = [extents[col], *(extents[spec.write.index[-2].name] for spec in outputs)]
     if extents[row] % atom.atom_m or any(width % atom.atom_n for width in widths):
         raise Unresident("a state or an output the atom's fragments do not tile exactly")
-    time = tile.axis_of(fold.axis)
+    time = tile.axis_of(step)
     row_base = Literal(atom.atom_m, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
     state = tuple(f"_state{j}" for j in range(extents[col] // atom.atom_n))
     blocks = _Blocks(tile, atom, period, row_base, state)
@@ -287,7 +288,7 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
 
     # Every stored value of the step, then the state's next value; the state's fragments are overwritten last.
     stores: list = []
-    for spec in tile.output_specs:
+    for spec in outputs:
         (value,) = spec.write.values
         out_col, out_row = (e.name for e in spec.write.index[-2:])
         for cb in range(0, extents[out_col], atom.atom_n):
@@ -306,7 +307,7 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
                     n_guard=(Literal(cb, "int"), Literal(extents[out_col], "int")),
                 )
             )
-    following = [blocks.fragment(fold, fold.lift.results[0], row, col, None, j * atom.atom_n) for j in range(len(state))]
+    following = [blocks.fragment(fold, carry.value, row, col, None, j * atom.atom_n) for j in range(len(state))]
     commit = [
         FragmentApply(
             out=name, op=ElementwiseImpl("copy"), args=fragment_args((value,), (FRAG,)), layout=atom.fragment_layout, in_place=True
@@ -318,6 +319,7 @@ def resident_walk(tile, atom, warps: int, period: int) -> Tile:
     )
     rows = extents[row]
     axes = (
+        *(axis for axis in tile.place.free if axis.name not in carry.cells),
         *(tile.axis_of(name) for name in batch),
         Axis("_rb", -(-rows // (warps * atom.atom_m))),
         Axis("_rw", warps),

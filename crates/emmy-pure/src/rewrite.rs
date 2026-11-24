@@ -156,11 +156,6 @@ impl TermRewrite {
             .base()
             .map(|base| base.rename(&self.names))
             .transpose()?;
-        parts.cells = fold
-            .cells()
-            .iter()
-            .map(|cell| self.coordinate(sigma, *cell))
-            .collect();
         // The observer renames in lockstep: its first param tracks the axis, the rest the carried state.
         parts.observe = fold
             .observe()
@@ -221,7 +216,6 @@ impl Fold {
                     names.extend(stmt.names());
                 }
             }
-            names.extend(term.cells());
             pending.extend(term.operands().iter().cloned());
         }
         let mut kept = HashSet::new();

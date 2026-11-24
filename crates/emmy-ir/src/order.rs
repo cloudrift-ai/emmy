@@ -8,7 +8,6 @@ use std::sync::Arc;
 use crate::Name;
 use crate::Result;
 use crate::body::{Body, free_ssa, loop_parts, ordered_sibling_defs};
-use crate::protocol::carried_cells;
 use crate::statement::Statement;
 
 /// The buffers a statement reads and writes and the carried states it updates, over its whole subtree.
@@ -54,7 +53,8 @@ pub fn is_protocol(stmt: &Statement) -> bool {
 /// scope reads lexically: its bindings keep their source order, a read binds the definition before it, or the first one
 /// when none precedes it (a scope is order-free), and precedes every later binding of the name. An accumulator is read
 /// where it stands: ahead of its update the step before, behind it the updated value. A state carried through `Carry`
-/// orders nothing in its scope: a `Pre` reads the step before wherever it sits.
+/// orders nothing inside the loop that carries it: a load reads the step before wherever it sits. The statement that
+/// holds that loop produces the state, and a load of the state beside it follows it.
 pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
     ordering_constraints_within(body, effects, &HashSet::new())
 }
@@ -67,9 +67,14 @@ pub fn ordering_constraints_within(
     outer: &HashSet<Name>,
 ) -> Vec<HashSet<usize>> {
     let stmts = body.stmts();
+    let states = carried_states(body);
     let defs_uses: Vec<(Vec<Name>, HashSet<Name>)> = stmts
         .iter()
-        .map(|stmt| (ordered_sibling_defs(stmt), free_ssa(stmt)))
+        .map(|stmt| {
+            let mut uses = free_ssa(stmt);
+            uses.extend(state_loads(stmt, &states));
+            (ordered_sibling_defs(stmt), uses)
+        })
         .collect();
     let mut definitions: HashMap<&Name, Vec<usize>> = HashMap::new();
     for (index, (defines, _)) in defs_uses.iter().enumerate() {
@@ -98,8 +103,8 @@ pub fn ordering_constraints_within(
             (*name, kind)
         })
         .collect();
-    // A carried state orders nothing in its scope: a `Pre` reads the step before, whichever side of the update it
-    // sits on. The loop that carries the state produces it, and its readers follow that loop.
+    // A carried state orders nothing inside the loop that carries it: a load reads the step before, whichever side
+    // of the update it sits on. The loop that carries the state produces it, and its readers follow that loop.
     let sites_of = |name: &Name| {
         if kinds.get(name) == Some(&Site::Carry) {
             return &[][..];
@@ -155,7 +160,8 @@ pub fn ordering_constraints_within(
         let mut readers: HashMap<Name, HashSet<usize>> = HashMap::new();
         let mut last_state: HashMap<Name, usize> = HashMap::new();
         for (index, (reads, writes, state)) in accesses.iter().enumerate() {
-            for name in reads {
+            // A carried state is ordered above, as a state: its update is no write a load stands ahead of or behind.
+            for name in reads.iter().filter(|name| !states.contains(*name)) {
                 if let Some(&writer) = last_write.get(name) {
                     incoming[index].insert(writer);
                 }
@@ -163,7 +169,7 @@ pub fn ordering_constraints_within(
                     readers.entry(*name).or_default().insert(index);
                 }
             }
-            for name in writes {
+            for name in writes.iter().filter(|name| !states.contains(*name)) {
                 if let Some(&writer) = last_write.get(name) {
                     incoming[index].insert(writer);
                 }
@@ -214,7 +220,7 @@ pub(crate) enum Site {
 
 /// How `stmt` defines each name it exposes, in one walk of its subtree. A leaf `Accum` or `Carry`, or a block holding
 /// one, is the update it holds, unless the block holds the loops that fold the accumulator (the loops on the path to
-/// it bind every one of its axes, or any loop when it names none) or carries the state (`carried_cells`) — that block
+/// it bind every one of its axes, or any loop when it names none) or the loop that carries the state — that block
 /// produces the value and its readers follow it. A statement that updates a name in place is an update too. A fold whose outer axis is bound outside the block is an update of the
 /// block's scope, whatever loops the block holds. A name the walk meets no update of is a binding.
 pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
@@ -256,8 +262,8 @@ pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
                         walk(child, &inner, under_loop || is_loop, kinds);
                     }
                 }
-                if let Some((_, body)) = loop_parts(stmt) {
-                    for (state, _) in carried_cells(body) {
+                if let Statement::Loop(l) = stmt {
+                    for (state, _) in l.carries() {
                         kinds.insert(state, Site::Binding);
                     }
                 }
@@ -267,6 +273,31 @@ pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
     let mut kinds = HashMap::new();
     walk(stmt, &HashSet::new(), false, &mut kinds);
     kinds
+}
+
+/// The carried states `body` defines, at any depth.
+fn carried_states(body: &Body) -> HashSet<Name> {
+    let named = |here: &crate::body::StmtRef| match &**here.stmt() {
+        Statement::Carry(c) => Some(c.name),
+        _ => None,
+    };
+    body.carries().iter().filter_map(named).collect()
+}
+
+/// The states of `states` a load of `stmt`'s subtree reads.
+fn state_loads(stmt: &Arc<Statement>, states: &HashSet<Name>) -> Vec<Name> {
+    if states.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    Body::new(vec![stmt.clone()]).walk(&mut |here| {
+        if let Statement::Load(load) = &**here.stmt()
+            && states.contains(&load.input)
+        {
+            out.push(load.input);
+        }
+    });
+    out
 }
 
 /// Stable recursive dependency sort used before structural normalization. A name bound twice in one scope, which
