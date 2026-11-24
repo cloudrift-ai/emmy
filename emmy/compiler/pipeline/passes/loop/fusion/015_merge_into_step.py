@@ -687,16 +687,19 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
     members: dict[str, LoopOp] = {carrying.id: carrying.op}
     kept: set[str] = set()
     frame = stepped_stores(carrying.op.body)
-    stepped: _Stepped = dict(frame[1]) if frame is not None else {}
+    # A kernel whose buffers have to exist as it writes them (it packs one) offers none of them to a reader: what
+    # reads them stays outside, as it does of a region.
+    offered = frame is not None and not stops_a_region(graph, carrying)
+    stepped: _Stepped = dict(frame[1]) if offered else {}
     last = Literal(frame[0].axis.extent.as_static() - 1, "int") if frame is not None else None
     # PROTOTYPE. A buffer the step stores at a cell that holds no step holds, after the loop, what the last step
     # stored. Its twin holds every step's, so a reader of the buffer is a reader of the last step.
-    standing = _standing(carrying, stepped) if frame is not None else {}
+    standing = _standing(carrying, stepped) if offered else {}
     stepped.update({twin.name: (0, 1) for twin in standing.values()})
     # PROTOTYPE. A buffer that holds a state after each step: its twin holds the state before each step, the seed
     # before the first and the state the loop ends with after the last. A kernel whose trip reads the step before
     # reads the twin at its own step, and where it has a trip after the last step the loop runs that trip too.
-    states = _state_stores(carrying.op.body, stepped, set(standing)) if frame is not None else {}
+    states = _state_stores(carrying.op.body, stepped, set(standing)) if offered else {}
     before = {name: f"{name}__before" for name in states}
     steps = extent = frame[0].axis.extent.as_static() if frame is not None else 0
     # What the step reads at its own step, and where: a kernel that joins reads it at its step too.
@@ -785,7 +788,9 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
                 # What it reads of a member that is of no step it reads where it stands, like the step does.
                 if any(name in standing for name in read) and copied(graph, node.outputs[0].name) is not None:
                     continue  # a copy of what the last step stored: the step stores it there (``020``)
-                body = _as_carried(_one_read(graph, node.op.body, stepped, before, steps, along), states, before, set(standing), steps, extent)
+                body = _as_carried(
+                    _one_read(graph, node.op.body, stepped, before, steps, along), states, before, set(standing), steps, extent
+                )
                 body = body.map(
                     lambda stmt: (
                         stmt.replace(input=standing[stmt.input].name, index=(last, *stmt.index))
@@ -859,7 +864,9 @@ def _as_carried(body: Body, states: dict[str, str], before: dict[str, str], stan
     found = [after(load) for load in body.loads]
     cells = [[entry for entry in cell if not isinstance(entry, Literal)] for _, cell in filter(None, found)]
     loops = set(body.axis_names)
-    if not any(body.iter_of_type(Accum)) and all(len(set(cell)) == len(cell) and {Var(name) for name in loops} == set(cell) for cell in cells):
+    if not any(body.iter_of_type(Accum)) and all(
+        len(set(cell)) == len(cell) and {Var(name) for name in loops} == set(cell) for cell in cells
+    ):
         return body
 
     def move(stmt: Statement) -> Statement:
@@ -950,17 +957,19 @@ def rewrite(match: Match, carrying: Node) -> Graph:
     graph = match.graph
     if not carrying.op.body.carries:
         raise RuleSkipped("the kernel carries no state")
-    for name in carrying.inputs:
-        inner = graph.producer(name)
-        if inner is not None and isinstance(inner.op, LoopOp) and inner.op.body.carries and inner.id != carrying.id:
-            merged = together(graph, carrying, inner)
-            if merged is not None:
-                fragment, output_map = wrap_multi_output_fragment(graph, merged[0], merged[1])
-                match.consumed = {carrying.id, inner.id}
-                match.output = merged[1][0] if len(merged[1]) == 1 else output_map
-                return fragment
+    # The kernels that run in this one's step join it first. Inside another's loop its steps are a digit of the time,
+    # and a kernel that reads one step a trip no longer finds them.
     members, kept, twins = _neighbours(graph, carrying)
     if len(members) == 1:
+        for name in carrying.inputs:
+            inner = graph.producer(name)
+            if inner is not None and isinstance(inner.op, LoopOp) and inner.op.body.carries and inner.id != carrying.id:
+                merged = together(graph, carrying, inner)
+                if merged is not None:
+                    fragment, output_map = wrap_multi_output_fragment(graph, merged[0], merged[1])
+                    match.consumed = {carrying.id, inner.id}
+                    match.output = merged[1][0] if len(merged[1]) == 1 else output_map
+                    return fragment
         raise RuleSkipped("no kernel beside this one runs in its step")
     live = tuple(name for name in live_outputs_of(graph, set(members)) if graph.producer(name).id not in kept)
     merged = build_merged_region(graph, set(members), live, members, twins)

@@ -20,7 +20,7 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Cond, Loop
+from emmy.compiler.ir.stmt import Cond, Loop, Select
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline, RuleSkipped
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
@@ -127,18 +127,25 @@ def test_a_reader_of_the_state_before_each_step_runs_in_the_step() -> None:
     assert list(rolled.outputs) == list(graph.outputs), "the states are stored for no one"
 
 
-def test_the_steps_joined_along_the_sequence_with_a_tail_are_stored_by_the_loop() -> None:
-    """The outputs of the chunks joined along the sequence, the last chunk's computed apart. The trips of the joined
-    coordinate that are a step read that step, a choice by the range of the coordinate that is one read. The trips
-    after the last step read the state the loop ends with: the loop runs one trip past its steps for them, with the
-    state held. One kernel, and neither the steps nor the state are stored."""
+def test_a_last_step_cut_short_is_a_trip_of_the_loop() -> None:
+    """The outputs of the chunks joined along the sequence. No one reads the last chunk's state, so the program
+    stores three states and the last chunk is a step cut short: its output from the state before it, and no state.
+    The roll takes it as a fourth trip, on which the state stays as it stands. Every chunk's output is then one
+    store of the step, with one read of the state the step starts from: the last chunk's work is in the kernel
+    once, as every chunk's is. One kernel, and neither the steps nor the state are stored."""
     graph, _, _ = graph_from_code(_delta(cat=True))
     graph = Pipeline.build(LOOP_PASSES).run(graph)
 
     (rolled,) = (node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp))
     (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
-    assert steps.axis.extent.as_static() == 4 and rolled.body.carries, "three steps and the trips after the last"
+    assert steps.axis.extent.as_static() == 4 and rolled.body.carries, "three steps and the step cut short"
     assert list(rolled.outputs) == list(graph.outputs)
+    (carry,) = rolled.body.carries
+    (held,) = (select for select in rolled.body.iter_of_type(Select) if select.name == carry.value)
+    assert str(held.branches[0].select) == f"{steps.axis.name} < 3", "the state moves on the three steps"
+    assert not list(rolled.body.iter_of_type(Cond)), "the output is stored on every trip"
+    assert len(rolled.body.writes) == 1
+    assert len([load for load in rolled.body.loads if load.input == carry.name]) == 2, "the step reads its state once, the output once"
 
 
 _SETUP = """

@@ -19,7 +19,9 @@ A roll is a splice with more asked of its nodes, in three parts kept apart:
   and each step reads the state the step before it stored. A chain that is not one step advanced is left alone: a
   recurrence rolled wrongly is a wrong answer. So is a chain whose steps read their state only at the cell they
   write and whose states nothing but the next step reads: fused whole it re-derives no state, so it is
-  straight-line code, and rolling it would only store every state.
+  straight-line code, and rolling it would only store every state. A walk whose last state nothing reads ends with
+  a step cut short, which keeps what a step keeps and stores no state: it is taken as one more trip, with the state
+  left as it stands (:func:`_cut_short`).
 - :func:`_fragment` writes the kernel: the step under a loop that carries the state (``Carry``) from the seed and
   stores what each step defined (the last state alone, where nothing but the next step reads a state), and one
   slice of those stores per replaced buffer.
@@ -39,9 +41,9 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expression import Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Statement, Write, prove_steps
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Select, SelectBranch, Statement, Write, prove_steps
 from emmy.compiler.pipeline import Match, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of
 
@@ -223,14 +225,22 @@ def _readers(
     return [nodes - shared for nodes in reads]
 
 
-def _spliced(graph: Graph, region: set[str], state: str, stored: str) -> tuple[Body, tuple[str, ...], tuple[tuple[str, object], ...]]:
+def _spliced(
+    graph: Graph, region: set[str], state: str, stored: str | None, kept: tuple[str, ...] = ()
+) -> tuple[Body, tuple[str, ...], tuple[tuple[str, object], ...]]:
     """The step as ONE body under step-independent buffer names, the buffers it keeps — the state
     it stores first, then whatever else of the recurrence is read outside the step — and the
     constants it reads, ``(name, value)`` in first-use order. The tracer gives every step its own
     copy of a scalar constant; the body names each by its position, so two steps reading equal
-    constants spell the same body, and the rolled kernel reads the first step's copies."""
+    constants spell the same body, and the rolled kernel reads the first step's copies.
+
+    A step that stores no state (``stored`` is ``None``) keeps ``kept``, named as the buffers a whole step keeps
+    after its state."""
     stateful = _stateful(graph, region, state)
-    live = (stored, *(name for name in live_outputs_of(graph, region) if name != stored and graph.producer(name).id in stateful))
+    others = tuple(name for name in live_outputs_of(graph, region) if name != stored and graph.producer(name).id in stateful)
+    if stored is None and set(others) != set(kept):
+        raise RuleSkipped("the step cut short keeps other buffers than a step does")
+    live = (stored, *others) if stored is not None else kept
     try:
         merged = build_merged_region(graph, region, live)
     except UnfusableStmt as doom:
@@ -243,7 +253,7 @@ def _spliced(graph: Graph, region: set[str], state: str, stored: str) -> tuple[B
         if load.input in region and isinstance(graph.nodes[load.input].op, ConstantOp)
     ]
     constants = list(dict.fromkeys(constants))
-    names = {state: _STATE, **{name: f"{_STEP}{index}" for index, name in enumerate(live)}}
+    names = {state: _STATE, **{name: f"{_STEP}{index + (stored is None)}" for index, name in enumerate(live)}}
     names.update((name, f"{_CONST}{index}") for index, (name, _) in enumerate(constants))
     return LoopOp(body=Body(merged.body).rename_buffers(names)).body, live, tuple(constants)
 
@@ -287,11 +297,14 @@ def prove(*programs: Body):
     return proved
 
 
-def _rolled(step: Body, steps: int, seed: float | str, every: bool) -> Body:
+def _rolled(step: Body, steps: int, seed: float | str, every: bool, short: bool = False) -> Body:
     """The step under a loop that carries its state: the state read becomes a load of the state one step
     back, its store the state's definition, and every kept buffer gains the step as its leading axis. A state
     read at its last step alone (``every`` false) gains none: each step stores over the last one's,
-    so the buffer holds the state the loop ended with."""
+    so the buffer holds the state the loop ended with.
+
+    ``short`` adds the trip of a step cut short (:func:`_cut_short`): the loop runs once more, and on that trip the
+    state stays as it stands."""
 
     def roll(stmt: Statement) -> Statement | tuple[Statement, ...]:
         if isinstance(stmt, Load) and stmt.input == _STATE:
@@ -303,9 +316,19 @@ def _rolled(step: Body, steps: int, seed: float | str, every: bool) -> Body:
             return kept
         if len(stmt.values) != 1 or not all(isinstance(e, Var) or e == Literal(0, "int") for e in stmt.index):
             raise RuleSkipped("the state is not stored one value per cell")
-        return (Carry(name=_STATE, value=stmt.values[0], index=kept.index, seed=seed), kept if every else stmt)
+        value = stmt.values[0]
+        if not short:
+            return (Carry(name=_STATE, value=value, index=kept.index, seed=seed), kept if every else stmt)
+        held, next_state = f"{value}__held", f"{value}__kept"
+        in_steps = BinaryExpression("<", Var("step"), Literal(steps, "int"))
+        return (
+            Load(names=(held,), input=_STATE, index=(Var("step") - Literal(1, "int"), *stmt.index)),
+            Select(name=next_state, branches=(SelectBranch(value, in_steps), SelectBranch(held, Literal(True, "bool")))),
+            Carry(name=_STATE, value=next_state, index=kept.index, seed=seed),
+            (kept if every else stmt).replace(values=(next_state,)),
+        )
 
-    return Body((Loop(axis=Axis("step", steps), body=step.map(roll)),))
+    return Body((Loop(axis=Axis("step", steps + short), body=step.map(roll)),))
 
 
 def _slice(tensor: Tensor, source: str, step: int | None) -> LoopOp:
@@ -335,7 +358,7 @@ def roll(match: Match, partition: dict[str, frozenset[str]]) -> Graph | None:
     readings = [recurrence for first in firsts for recurrence in found(graph, first, kind)]
     for recurrence in sorted(readings, key=lambda reading: -sum(map(len, reading.steps))):
         try:
-            return _fragment(match, recurrence, *_proved(graph, recurrence))
+            return _fragment(match, recurrence, *_proved(graph, recurrence, kind))
         except RuleSkipped as why:
             logger.debug("no recurrence rolls from %s: %s", recurrence.chain[0].id, why)
     return None
@@ -348,7 +371,7 @@ def roll_from(match: Match, first: Node, kind: Kinds) -> Graph:
     declined = RuleSkipped("no later state of this kind depends on this one")
     for recurrence in found(match.graph, first, kind):
         try:
-            return _fragment(match, recurrence, *_proved(match.graph, recurrence))
+            return _fragment(match, recurrence, *_proved(match.graph, recurrence, kind))
         except RuleSkipped as why:
             declined = why
     raise declined
@@ -403,11 +426,89 @@ def _with_readers(graph: Graph, chain: list[Node], steps: list[set[str]], states
     yield Recurrence(chain, steps, states)
 
 
-def _proved(graph: Graph, recurrence: Recurrence) -> tuple[Body, list[tuple[str, ...]], tuple[tuple[str, object], ...], bool]:
+def _in_bounds(graph: Graph, body: Body) -> bool:
+    """Whether every read ``body`` makes of a buffer of the graph is proved to stay inside it."""
+    ctx = SimplifyCtx.empty()
+    for loop in body.iter_of_type(Loop):
+        if not loop.axis.extent.is_static:
+            return False
+        extent = loop.axis.extent.as_static()
+        ctx = ctx.extend(loop.axis.name, Interval(0, extent - 1), Literal(extent, "int"))
+    for load in body.loads:
+        tensor = graph.buffer(load.input)
+        for entry, dim in zip(load.index, tensor.shape if tensor is not None else (), strict=False):
+            found = entry.range(ctx)
+            if found is None or not dim.is_static or found.lo < 0 or found.hi >= dim.as_static():
+                return False
+    return True
+
+
+def _cut_short(graph: Graph, recurrence: Recurrence, kind: Kinds, spliced: list, proved) -> tuple[set[str], tuple[str, ...]] | None:
+    """PROTOTYPE. The step after the last, where the program takes part of it: ``(its nodes, the buffers it keeps)``.
+
+    A walk whose last state nothing reads does not store it, and the last step is then cut short: it computes what
+    a step keeps beside its state, from the state the step before it stored, and leaves the state as it is. Its
+    nodes are found from what a step keeps: for each such buffer, the one node of its kind (:class:`Kinds`) that
+    descends from the last state and is in no step. They are that step where they splice into the step that follows
+    the last (the proof's step with its number put in), cut to what it keeps beside the state. The rolled loop then
+    runs that trip too, and what reads those buffers reads one more step of the same store.
+
+    The whole step is computed on that trip, its state left unchosen, so every read of the whole step has to stay
+    inside its buffer there."""
+    chain, steps = recurrence.chain, recurrence.steps
+    last, live = chain[-1], spliced[-1][1]
+    if len(live) < 2:
+        return None
+    taken = set().union(*steps)
+    ends = []
+    for name in live[1:]:
+        of = kind.of.get(graph.producer(name).id)
+        partners = [
+            node_id
+            for node_id in kind.order
+            if of is not None and kind.of[node_id] == of and last.id in kind.ancestors[node_id] and node_id not in taken
+        ]
+        if len(partners) != 1 or partners[0] in ends:
+            return None
+        ends.append(partners[0])
+    # What a step descends from is read at every step, or is an earlier step's: it is no part of this one.
+    nodes = set().union(*(kind.ancestors[end] for end in ends)) - set().union(*(kind.ancestors[node_id] for node_id in taken))
+    kept = tuple(graph.nodes[end].outputs[0].name for end in ends)
+    if not all(isinstance(graph.nodes[node_id].op, (LoopOp, ConstantOp, InputOp)) for node_id in nodes):
+        return None
+    try:
+        body, _, constants = _spliced(graph, nodes, last.id, None, kept)
+        whole = proved.at(len(steps))
+    except (RuleSkipped, ValueError) as why:
+        logger.debug("no step cut short after %s: %s", last.id, why)
+        return None
+    if not _in_bounds(graph, whole):
+        logger.debug("no step cut short after %s: the whole step reads past a buffer there", last.id)
+        return None
+    part = whole.map(lambda stmt: () if isinstance(stmt, Write) and stmt.output == f"{_STEP}0" else stmt)
+    part = part.pruned([value for write in part.writes for value in write.values])
+    # The part reads the constants a whole step reads that it still needs, in the order it first reads them.
+    read = list(dict.fromkeys(load.input for load in LoopOp(body=part).body.loads if load.input.startswith(_CONST)))
+    part = Body(part).rename_buffers({name: f"{_CONST}__{index}" for index, name in enumerate(read)})
+    part = part.rename_buffers({f"{_CONST}__{index}": f"{_CONST}{index}" for index in range(len(read))})
+    values = dict(zip((f"{_CONST}{index}" for index in range(len(spliced[-1][2]))), (value for _, value in spliced[-1][2]), strict=True))
+    if [values[name] for name in read] != [value for _, value in constants]:
+        logger.debug("no step cut short after %s: it reads other constants", last.id)
+        return None
+    if _spelling(LoopOp(body=part).body) != _spelling(body):
+        logger.debug("no step cut short after %s: it is another body than the step that follows", last.id)
+        return None
+    return nodes, kept
+
+
+def _proved(
+    graph: Graph, recurrence: Recurrence, kind: Kinds
+) -> tuple[Body, list[tuple[str, ...]], tuple[tuple[str, object], ...], bool, tuple[set[str], tuple[str, ...]] | None]:
     """What makes ``recurrence`` one: each step splices into one body, the bodies keep as many buffers and read the
     same constants, and they are one step taken again and again (:func:`prove`). Raises ``RuleSkipped`` with what
     does not hold. Returns that step under the loop that carries the state, the buffers each step keeps (the state
-    it stores first), the constants the step reads, and whether every state is stored or the last alone."""
+    it stores first), the constants the step reads, whether every state is stored or the last alone, and the step
+    cut short that follows the last (:func:`_cut_short`)."""
     chain, steps, states = recurrence.chain, recurrence.steps, recurrence.states
     # A step is loops and the leaves they read — a constant, an input first read there — which the
     # splicer reads as external inputs of the merged body; anything else is not a step.
@@ -434,17 +535,27 @@ def _proved(graph: Graph, recurrence: Recurrence) -> tuple[Body, list[tuple[str,
     if any(tuple(value for _, value in read) != tuple(value for _, value in constants) for _, _, read in spliced):
         raise RuleSkipped("the steps read different constants")
     proved = prove(*(body for body, _, _ in spliced))
+    after = _cut_short(graph, recurrence, kind, spliced, proved)
     try:
-        step = proved.at("step", len(steps))
+        step = proved.at("step", len(steps) + (after is not None))
     except ValueError as why:
         raise RuleSkipped(str(why)) from None
     seed: float | str = 0.0 if _is_zero(graph, states[0]) else states[0]
-    return _rolled(step, len(steps), seed, every), [live for _, live, _ in spliced], constants, every
+    return _rolled(step, len(steps), seed, every, after is not None), [live for _, live, _ in spliced], constants, every, after
 
 
-def _fragment(match: Match, recurrence: Recurrence, body: Body, kept: list[tuple[str, ...]], constants: tuple, every: bool) -> Graph:
+def _fragment(
+    match: Match,
+    recurrence: Recurrence,
+    body: Body,
+    kept: list[tuple[str, ...]],
+    constants: tuple,
+    every: bool,
+    after: tuple[set[str], tuple[str, ...]] | None = None,
+) -> Graph:
     """The fragment that replaces the chain: one kernel that carries the state over the steps (``body``, as
-    :func:`_proved` returns it), and a slice of its stores for each buffer of a step that is read outside."""
+    :func:`_proved` returns it), and a slice of its stores for each buffer of a step that is read outside. The step
+    cut short (``after``) is one more step of every store but the state's."""
     graph = match.graph
     chain, steps, states = recurrence.chain, recurrence.steps, recurrence.states
     stores = tuple(f"{chain[0].id}__steps{index}" for index in range(len(kept[0])))
@@ -452,7 +563,7 @@ def _fragment(match: Match, recurrence: Recurrence, body: Body, kept: list[tuple
     back.update((f"{_CONST}{index}", name) for index, (name, _) in enumerate(constants))
     rolled = LoopOp(body=body.rename_buffers(back))
     tensors = tuple(
-        Tensor(name, (*((len(steps),) if every or index else ()), *graph.buffer(old).shape), graph.buffer(old).dtype)
+        Tensor(name, (*((len(steps) + (after is not None),) if every or index else ()), *graph.buffer(old).shape), graph.buffer(old).dtype)
         for index, (name, old) in enumerate(zip(stores, kept[0], strict=True))
     )
     fragment = Graph()
@@ -471,7 +582,13 @@ def _fragment(match: Match, recurrence: Recurrence, body: Body, kept: list[tuple
             renamed[old] = f"{old}__rolled"
             tensor = replace(graph.buffer(old), name=old)
             fragment.add_node(_slice(tensor, store, None if last else index), [store], tensor, node_id=renamed[old])
+    for store, old in zip(stores[1:], after[1] if after is not None else (), strict=after is not None):
+        renamed[old] = f"{old}__rolled"
+        tensor = replace(graph.buffer(old), name=old)
+        fragment.add_node(_slice(tensor, store, len(steps)), [store], tensor, node_id=renamed[old])
     fragment.outputs = list(renamed.values())
     match.consumed = set().union(*(_stateful(graph, step, state) for step, state in zip(steps, states, strict=True)))
+    if after is not None:
+        match.consumed |= _stateful(graph, after[0], chain[-1].id)
     match.output = renamed
     return fragment
