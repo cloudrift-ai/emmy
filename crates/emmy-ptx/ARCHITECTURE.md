@@ -106,7 +106,7 @@ assembles without complaint and can give a right answer at one optimization leve
 ## Rules
 
 - **Loops.** A loop whose trip count is the same for every thread is a counter from zero to that count, the shape ptxas
-  unrolls. A strided loop that starts at a thread's own value steps its axis itself; one that runs at most one trip is
+  unrolls. A loop walks its range by its step; one that starts at a thread's own value steps its axis itself, and one that runs at most one trip is
   the condition that its start is below its end. The accumulators a loop folds are seeded ahead of it. A loop that
   says `unrolled` carries `.pragma "nounroll"`, so ptxas keeps it as it is. A short stepping loop is written out by
   the kernel lowering (`118_unroll_by_size`); a loop no unroll pass took stays unmarked, and ptxas decides its copies.

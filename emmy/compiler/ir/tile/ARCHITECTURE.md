@@ -102,7 +102,15 @@ form is a realization of the kernel, not another kernel: the kernel keeps the li
 fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
 no cell; a seed tensor keeps that dim, and every storage reads it with `0` there (`seed_index`). Register
 storage reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
-independent. An unmapped classic fallback takes the same serial form during materialization. Re-lifting a stored
+independent. An unmapped classic fallback takes the same serial form during materialization. Every reader of a
+kernel's schedule sites takes the kernel through one more step, `TileOp.scheduled` (`scheduled_form`): a block of a
+split walks from zero, and every term keeps its range, stated of its axis as a tier walks it. Like the serial form
+it is a realization of the kernel, and the kernel keeps the identity of the tile its fork was offered. The schedule
+is enumerated on that form and the kernel lowering takes it. A tier reads a range itself: a scalar walk and a
+cooperative reduce as their loop's bounds, the chunk tier as the chunks it walks and the mask of the block a bound
+cuts. A tile folds a rectangle of every position, so a contraction that walks a range is no tile site unless the
+chunk tier folds it (`TileOp.contracts`). `Fold.block_start` is the one place that says which coordinate
+moves a block; the lowering's nest order and the tile's shared coordinates (`batch_axes`) ask it. Re-lifting a stored
 kernel reuses the state ports it already owns. The state's port, added at the lift for the classic realization,
 disappears during materialization,
 and externally read snapshots remain global outputs. A state the term itself stores every step, beside its `Carry`,
@@ -366,7 +374,8 @@ creates one zero-axis root `Fold` over the lifted cell.
 tries every twist recipe (`ir/pure/twist.py`) on every reduce that reads a reduce as an operand — the shape the lift
 gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.fuse` returns, to a fixpoint. Pure
 softmax is the arity-two case; SDPA adds expectation components, which join by the same call once the `1/l` factor
-constant along the axis has hoisted out of the fold, and a causal mask is simply part of the shared score cone. The
+constant along the axis has hoisted out of the fold. Two folds fuse where they walk the same range of the axis, and
+the carrier keeps it: a causal attention's three reductions all walk the keys at or before the row. The
 pass has no operation-family matcher: a recipe clicks by canonical form, or it does not.
 
 The rewrite consumes the canonical Fold tree. It reuses the registered monoid generator, invariant-factor splitting,

@@ -129,7 +129,8 @@ def test_a_candidate_file_is_the_fresh_lowering(path: Path, traced: int) -> None
     golden's, lowered once in its own test."""
     document = document_of(path)
     fresh, report = restamp(document, traced=traced)
-    assert fresh == document and not report.changed, "\n".join(report.lines())
+    unchanged = fresh == document and not report.changed
+    assert unchanged, "\n".join(report.lines())
 
 
 def test_a_group_is_asked_for_no_more_candidates_than_its_schedule_space_holds(monkeypatch) -> None:
@@ -141,8 +142,30 @@ def test_a_group_is_asked_for_no_more_candidates_than_its_schedule_space_holds(m
     monkeypatch.setattr(candidates, "_others", lambda pool, taken: 1)
     document, report = build(golden, _measured(golden, head, [20.0, 30.0, 40.0]))
     assert [row.measurements.emmy_us for row in document.rows] == [20.0]
-    assert head.name not in [name for name, _held, _wanted in report.short]
+    assert head.name not in [entry["row"] for entry in report.short]
 
     monkeypatch.setattr(candidates, "space_size", lambda pool: 0)
     document, report = build(golden, _measured(golden, head, [20.0]))
     assert report.groups == 1 and report.rows == 1 and not report.short
+
+
+def test_a_build_lists_what_a_tune_must_fill_and_drops_a_row_with_no_measurement(monkeypatch) -> None:
+    """A group under its target is listed with what a tune of it needs — the kernel's name, the regime, the sizes —
+    beside what it holds; a candidate a restamp left with a schedule and no time is dropped, so the group is listed."""
+    golden = GoldenFile.load(_RECORDS_DIR / "rtx4080_sm89.json")
+    monkeypatch.setattr(candidates, "space_size", lambda pool: 1287)
+    head = next(row for row in golden.rows if row.measured and row.knobs)
+    document, _ = build(golden, _measured(golden, head, [20.0, 30.0]))
+    demoted = replace(document, rows=[replace(row, measurements=None) for row in document.rows])
+
+    rebuilt, report = build(golden, existing=demoted)
+    assert not rebuilt.rows
+    [entry] = [entry for entry in report.short if entry["row"] == head.name]
+    assert entry == {
+        "kernel": golden.kernel(head.kernel).name,
+        "row": head.name,
+        "pins": head.pins,
+        "bindings": head.bindings,
+        "held": 0,
+        "target": target(1287),
+    }

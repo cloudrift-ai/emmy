@@ -11,7 +11,7 @@ skills and CloudRift inference endpoint.
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
-| **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` + `agent-runners` / `agents` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`, refreshes recipe lifecycle tags and onboarding shells on `main`, lists the compiler gaps, fills one hardware golden's missing measurements on a rented CloudRift card, and posts one summary to #emmy-robots. |
+| **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` + `agent-runners` / `agents` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`, refreshes recipe lifecycle tags and onboarding shells on `main`, lists the compiler gaps, fills one hardware golden's missing measurements on a rented CloudRift card, drops the candidate rows the compiler no longer realizes, and posts one summary to #emmy-robots. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Corpus timings** | Weekly schedule or manual dispatch | `agent-runners` / `agents` | Rents one CloudRift card and records its realization corpus timings on a rolling PR. |
@@ -90,12 +90,22 @@ hardware golden, which `tests/github/test_golden_fill_recipe.py` keeps whole —
 `run --record-greedy` (a proposal) or `run --record` (a `torch.compile` time) until its two-hour budget is spent. The
 job copies the returned file over the golden, holds it to `emmy golden check`, and pushes it to `main`, after a
 timed-out fill too, so a large file fills over several nights. The other jobs tolerate the hardware goldens moving on
-`main` while they run.
+`main` while they run. A hardware golden's candidate file copies the golden's tables (GLOSSARY, "Candidate file"), so
+where the filled golden has one the job copies them again with `emmy candidates build`, from no tune DB, and pushes
+the two files together.
+
+The candidates job, after the fill job, compiles every row of the candidate files under its own schedule, drops the
+rows the compiler no longer realizes (`emmy candidates realize --drop`) and pushes the files. It rents nothing.
+
+`.github/candidates-fill/recipe.yaml` is the fill recipe's twin for the candidate files: one row per hardware golden
+on its card, a tune of every kernel `emmy candidates build --json` lists as under its target, then the candidate file
+built again from the tune DB those tunes wrote, returned with that tune DB. No workflow runs it; the
+`refresh-candidates` skill does, on a rented card or a box handed to it.
 
 The workflow ends with one GitHub-hosted notification job that waits for every other job and posts a single summary to
 #emmy-robots: each job's result, whether the durations changed, each prior's comparison and picks, the compiler gaps,
-the golden fill, and the discovery outcome described below; a discovery agent that stopped short reports how many tool
-calls and notes it finished (`discovery_partial.jq`). Because that job is independent of the self-hosted ones, it still
+the golden fill, the candidate rows that realize, and the discovery outcome described below; a
+discovery agent that stopped short reports how many tool calls and notes it finished (`discovery_partial.jq`). Because that job is independent of the self-hosted ones, it still
 reports a failure, cancellation, or timeout.
 
 ## Package publication

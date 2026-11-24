@@ -6,7 +6,6 @@ use std::sync::Arc;
 use super::{Key, Number, Param, Tag, expression_key, hash_parts, params_key};
 use crate::Name;
 use crate::body::{Body, StmtRef};
-use crate::elementwise::Operation;
 use crate::expr::{Expr, ExprClass, ExprType, Expression};
 use crate::field::NumOr;
 use crate::normalize::{affine_node, affine_terms};
@@ -146,7 +145,6 @@ fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
     };
     let flags = match stmt {
         Statement::Loop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
-        Statement::StridedLoop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
         other => Key::str(other.ty().name()),
     };
     Key::tuple([extent, window, flags])
@@ -167,6 +165,26 @@ fn depths(key: &Key, out: &mut Vec<usize>) {
 }
 
 impl Context<'_> {
+    /// [`descriptor`], and for a loop that walks a range or takes a step those too, every coordinate around the
+    /// loop spelled by its binding depth. A loop with neither keys as it always did.
+    fn descriptor(&self, axis: &crate::axis::Axis, stmt: &Statement) -> Key {
+        let plain = descriptor(axis, stmt);
+        let Statement::Loop(l) = stmt else {
+            return plain;
+        };
+        let mut parts = vec![plain];
+        if let Some((start, end)) = &l.range {
+            parts.extend([self.by_depth(start), self.by_depth(end)]);
+        }
+        if let Some(step) = &l.step {
+            parts.extend([Key::str("step"), self.by_depth(step)]);
+        }
+        match parts.len() {
+            1 => parts.remove(0),
+            _ => Key::tuple(parts),
+        }
+    }
+
     fn depth_of(&self, name: Name) -> Option<usize> {
         self.binding.iter().rposition(|bound| *bound == name)
     }
@@ -237,12 +255,11 @@ impl Context<'_> {
                     .collect::<Vec<_>>(),
             )),
             (None, Some((op, args))) if op.info().commutative && args.len() == 2 => {
-                let mut terms: Vec<Expression> = Vec::new();
-                if op.info().associative && self.chains == Chains::Flat {
-                    associative_terms(e, op, &mut terms);
+                let terms = if op.info().associative && self.chains == Chains::Flat {
+                    e.chain(op)
                 } else {
-                    terms = args.to_vec();
-                }
+                    args.to_vec()
+                };
                 Some((
                     Key::str(op.text()),
                     terms.into_iter().map(|term| (Key::None, term)).collect(),
@@ -828,7 +845,7 @@ impl Context<'_> {
                 _ if !stmt.nested().is_empty() => {
                     let header = match &*stmt {
                         Statement::Loop(l) => {
-                            Key::tuple([Key::tag(Tag::Loop), descriptor(&l.axis, &stmt)])
+                            Key::tuple([Key::tag(Tag::Loop), self.descriptor(&l.axis, &stmt)])
                         }
                         Statement::Cond(c) => {
                             let cond = self.abstract_(&c.cond, &mut params, &mut ops, &mut touched);
@@ -864,10 +881,11 @@ impl Context<'_> {
                         .map(|axis| (axis.name, self.axes.get(&axis.name).cloned()))
                         .collect();
                     for axis in &bound {
-                        self.axes.insert(axis.name, descriptor(axis, &stmt));
+                        let key = self.descriptor(axis, &stmt);
+                        self.axes.insert(axis.name, key);
                         self.binding.push(axis.name);
                     }
-                    let is_loop = matches!(&*stmt, Statement::Loop(_) | Statement::StridedLoop(_));
+                    let is_loop = matches!(&*stmt, Statement::Loop(_));
                     if is_loop {
                         self.loops.push(bound[0].name);
                         // A state the loop updates is read inside it as the step before, whatever bound it ahead of
@@ -1074,17 +1092,6 @@ fn placeholder(spellings: &mut Vec<(Name, String)>, spelling: String) -> Name {
 
 /// The terms a chain of the associative operation `op` combines, in spelled order: the operands of every nested
 /// `op` node, left to right.
-fn associative_terms(e: &Expression, op: Operation, out: &mut Vec<Expression>) {
-    match e.operation() {
-        Some((nested, args)) if nested == op && args.len() == 2 => {
-            for arg in args {
-                associative_terms(arg, op, out);
-            }
-        }
-        _ => out.push(e.clone()),
-    }
-}
-
 /// `key` with every operand placeholder replaced by the number of the value it stands for, and every coordinate
 /// placeholder by its parameter: what an operand computes, for ordering two operands of one commutative node.
 fn by_content(key: &Key, ops: &[Value], params: &[Param]) -> Key {

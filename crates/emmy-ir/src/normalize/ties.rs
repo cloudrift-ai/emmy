@@ -40,7 +40,6 @@ pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Result<Key> {
     let shell = Statement::rename_buffers(&renamed, &buffers);
     let extent = match &*shell {
         Statement::Loop(l) => Some(&l.axis.extent.expression),
-        Statement::StridedLoop(l) => Some(&l.axis.extent.expression),
         _ => None,
     };
     let fields = shell

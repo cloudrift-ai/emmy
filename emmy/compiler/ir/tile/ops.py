@@ -769,11 +769,11 @@ def carries_partition(tile) -> bool:
 
 
 def merges_partition(tile) -> bool:
-    """Whether this kernel is a split's deferred finalize: its head fold's axis is a partition window
-    over its WHOLE parent — the merge over every partition of a split that already happened, where a
-    partial's slice windows a fraction of the parent."""
+    """Whether this kernel is a split's deferred finalize: its head fold walks the whole of a partition window's
+    parent — the merge over every partition of a split that already happened, where a partial walks one block of
+    the parent."""
     node = head(tile.op)
-    if node is None or getattr(node, "axis", None) is None:
+    if node is None or getattr(node, "axis", None) is None or node.range is not None:
         return False
     axis = tile.axis_of(node.axis)
     return axis.window is not None and axis.window.partition and axis.window.parent.extent == axis.extent

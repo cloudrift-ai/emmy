@@ -25,7 +25,6 @@ from emmy.compiler.ir.stmt import (
     Select,
     SelectBranch,
     Statement,
-    StridedLoop,
     Write,
     ZeroPrologue,
     parse_body,
@@ -79,17 +78,16 @@ STATEMENTS = [
         Loop(Axis("kb", 16, window=Window(parent=Axis("ko", 32, window=Window(parent=K)), partition=True)), ()),
         "for kb in 0..16 window(parent=ko in 0..32 window(parent=k in 0..64), partition=true):",
     ),
-    (Loop(Axis("kb", 16, window=Window(base=A0, bound=A0 + ONE)), ()), "for kb in 0..16 window(base=a0, bound=a0 + 1):"),
     (Loop(Axis("kb", 16, window=Window()), ()), "for kb in 0..16 window():"),
     (
-        StridedLoop(K, Var("t"), Literal(32, "int"), (Write("y", (Var("k"),), ("v",)),)),
+        Loop.strided(K, Var("t"), Literal(32, "int"), (Write("y", (Var("k"),), ("v",)),)),
         """\
         for k in t..64 step 32:
           y[k] = v""",
     ),
     (
-        StridedLoop(K, Literal(0, "int"), Literal(8, "int"), (), unroll=True, end=Var("k_end")),
-        "for k in 0..64 step 8 until k_end unroll=true:",
+        Loop.strided(K, Literal(0, "int"), Literal(8, "int"), (), unroll=True, end=Var("k_end")),
+        "for k in 0..k_end of 64 step 8 unroll=true:",
     ),
     (
         Cond(A0.lt(ONE), (Write("y", (A0,), ("v",)),), (Write("y", (A0,), ("w",)),)),
@@ -105,7 +103,7 @@ STATEMENTS = [
 
 def _exact(body: Body) -> list:
     """Everything the statements hold, including what equality leaves out: an axis's window, a dim's hint."""
-    axes = [stmt.axis for stmt in body.iter() if isinstance(stmt, (Loop, StridedLoop))]
+    axes = [stmt.axis for stmt in body.iter() if isinstance(stmt, Loop)]
     return [list(body.iter()), [(axis.window, axis.extent.hint) for axis in axes]]
 
 

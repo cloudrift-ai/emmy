@@ -127,7 +127,7 @@ def find_all_bindings(graph: Graph, stage_filter: set[str] | None = None) -> lis
     ``KERNEL_PASSES`` first — :func:`simulate_graph` does)."""
     from emmy.compiler.ir.kernel import KernelOp  # noqa: PLC0415
     from emmy.compiler.ir.kernel.ir import Smem, Tile  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Loop, StridedLoop  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Loop  # noqa: PLC0415
 
     out: list[StageBinding] = []
     for node in graph.nodes.values():
@@ -146,7 +146,7 @@ def find_all_bindings(graph: Graph, stage_filter: set[str] | None = None) -> lis
                         out.append(
                             StageBinding(slab=slabs[s.input], load=s, thread_axes=taxes, enclosing_loop_axes=loops, tile_op_name=kname)
                         )
-                inner = (*loops, s.axis) if isinstance(s, (Loop, StridedLoop)) else loops
+                inner = (*loops, s.axis) if isinstance(s, Loop) else loops
                 for b in s.nested():
                     walk(list(b), inner)
 

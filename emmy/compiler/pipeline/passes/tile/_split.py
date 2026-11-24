@@ -10,10 +10,9 @@ is a fresh unmapped :class:`TileOp` that re-enters the pass scan and decides its
 Each partial evaluates the same ``Fold(init, combine)`` over a contiguous axis slice and writes its
 complete state tuple. The deferred finalize identity-lifts those tuples through the same ``init``
 and ``combine``, then applies the original projection. This is the common path for additive and
-exp-family monoids; the split does not recognize carrier families. A CONTRACTION slices through
-``Fold.contraction`` over the σ-reindexed operand edges — the cone's row-invariant prologue stays
-FULL-ROW in every partition (the redundant-statistic split); any other fold slices through the
-generic ``Fold.rewrite``.
+exp-family monoids; the split does not recognize carrier families. The fold keeps its body and walks
+the range of one block (``ir/tile/split.py``), so a cone's row-invariant prologue stays FULL-ROW in
+every partition (the redundant-statistic split).
 
 The atomic arm is the generic exception: it is legal only for a single additive state component
 whose projection distributes over addition. Otherwise the deferred f32 workspace preserves the
@@ -50,7 +49,7 @@ from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
+from emmy.compiler.ir.tile.ops import Sched, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.ir.tile.split import merged, split_axis
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
@@ -65,10 +64,10 @@ logger = logging.getLogger(__name__)
 
 
 def splitk_width(k_axis: Axis, width: int) -> str | None:
-    """A cross-CTA split needs a STATIC reduce axis its width divides evenly — the σ-reindex
-    reconstructs an absolute k from ``ksplit·(K/w) + kslice``, which is a bijection only when the
-    extent is known and ``w`` divides it. Total over a symbolic axis rather than raising out of
-    ``as_static``, so the catalog drops the width and a pin reports the reason."""
+    """A cross-CTA split needs a STATIC reduce axis its width divides evenly — blocks of ``K/w``
+    positions tile the stream exactly only when the extent is known and ``w`` divides it. Total over
+    a symbolic axis rather than raising out of ``as_static``, so the catalog drops the width and a
+    pin reports the reason."""
     if not k_axis.extent.is_static:
         return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is not built"
     big_k = k_axis.extent.as_static()
@@ -79,9 +78,8 @@ def splitk_width(k_axis: Axis, width: int) -> str | None:
 
 def _stream_refusal(node: Fold, k_axis: Axis, width: int) -> str | None:
     """Why the head fold's stream cannot split ``width`` ways (``None`` when it can): :func:`splitk_width` over a static
-    stream. A symbolic one splits into slices of ``⌈K/w⌉`` positions, the last overhanging ``K``, whose loads clamp
-    to the stream's last position and whose lift masks every position past its end (:func:`_masked`) — a monoid's or
-    a twisted carrier's, never a carried state's or an observed scan's."""
+    stream. A symbolic one splits into blocks of ``⌈K/w⌉`` positions, the last ending where the stream does, which
+    is built for a monoid and a twisted carrier."""
     if k_axis.extent.is_static:
         return splitk_width(k_axis, width)
     if node.carries or node.observe is not None:
@@ -221,8 +219,7 @@ def split_pending(tile: TileOp) -> bool:
         and node.combine is not None
         and node.observe is None
         and not node.carries
-        and not carries_partition(tile)
-        and not tile.split_consumed
+        and not tile.split_taken
     )
 
 
@@ -408,7 +405,7 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
     to add atomically. The pairwise compositions of the maps (``g<n>k<p>``) are offered at one step a part,
     where the maps cost no probe; a pin may name them at any width."""
     view = node.affine()
-    if view is None or carries_partition(tile) or tile.split_consumed or (body := _carrying_body(tile.loop_body)) is None:
+    if view is None or tile.split_taken or (body := _carrying_body(tile.loop_body)) is None:
         return None
     time = tile.axis_of(node.axis)
     if view.mixed is not None:

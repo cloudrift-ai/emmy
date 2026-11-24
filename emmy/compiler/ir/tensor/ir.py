@@ -36,7 +36,7 @@ from emmy.compiler.dim import Dim, to_dim
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.base import Op, _keepdim_axis
 from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
-from emmy.compiler.ir.expression import Expression
+from emmy.compiler.ir.expression import PLACEHOLDER_PREFIX, Expression
 from emmy.compiler.wire import Wire
 
 # ---------------------------------------------------------------------------
@@ -216,9 +216,15 @@ class ReduceOp(ReduceLikeOp):
 
     ``op`` is the combine (``sum`` / ``max`` / ``prod`` / …); ``axis`` is
     the reduced dimension (concrete int or symbolic name).
+
+    ``range`` is the part of ``axis`` the reduction walks, a start and an exclusive end over the other coordinates
+    of the input, each spelled as the placeholder of its dimension: a causal attention folds key ``j`` of row ``i``
+    over ``0 .. i + 1``. ``None`` walks the whole axis. A position outside the range folds nothing.
     """
 
     wire_tag = "tensor.reduce"
+
+    range: tuple[Expression, Expression] | None = None
 
     @property
     def identity(self) -> float:
@@ -227,8 +233,22 @@ class ReduceOp(ReduceLikeOp):
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return _keepdim_axis(input_shapes[0], self.axis)
 
+    def inside(self, shape: tuple[int, ...]):
+        """Where the reduction folds, as a boolean array over an input of ``shape``; ``None`` without a range."""
+        if self.range is None:
+            return None
+        grids = np.indices(shape)
+        at = {f"{PLACEHOLDER_PREFIX}{dim}": grid for dim, grid in enumerate(grids)}
+        start, end = (np.asarray(bound.eval(at)) for bound in self.range)
+        position = grids[self.axis]
+        return (start <= position) & (position < end)
+
     def forward(self, *inputs):
-        return self._spelling().np_reduce(inputs[0], axis=self.axis, keepdims=True)
+        (x,) = inputs
+        inside = self.inside(np.shape(x))
+        if inside is not None:
+            x = np.where(inside, x, self.identity)
+        return self._spelling().np_reduce(x, axis=self.axis, keepdims=True)
 
 
 @dataclass(frozen=True)

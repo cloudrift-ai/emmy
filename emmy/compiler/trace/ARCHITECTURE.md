@@ -72,7 +72,9 @@ chunk counts, nonconstant dimensions, a dynamic chunked extent, and invalid tupl
 present) as a 4th `SdpaOp` input — HF passes its precomputed `(1, 1, S, S)`
 causal mask this way (an additive `0` / `-inf` bias) rather than via the
 `is_causal` flag. The decomposition (`frontend/decomposition/010_sdpa.py`)
-broadcasts that mask to the scores shape and adds it before the softmax.
+broadcasts that mask to the scores shape and adds it before the softmax. `is_causal` and a stamped sliding window
+are no mask at all: the softmax's two reductions and the product with V walk a range of the key axis, the keys at or
+before the query's row and, under a window, the last `W` of them (`ReduceOp.range`).
 Dropping it silently turns masked attention into full bidirectional
 attention — invisible to uniform input but wrong on any varying sequence.
 The `scale=` kwarg is captured onto `SdpaOp.scale` (`None` = torch's `1/sqrt(head_dim)` default) and honored
@@ -352,8 +354,9 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   `SdpaOp.sliding_window` (+ `is_causal`) from `config.sliding_window` × `layer_types` — single-layer via the
   `layer_type` kwarg, whole-model by walking the graph's SDPA nodes in execution order (a count mismatch stamps
   nothing). Semantics: the stamped SDPA's mask keeps AT MOST the causal band `kv ∈ [m − W + 1, m]` (an explicit mask
-  operand may keep less, e.g. padding — it stays applied), which is what lets the lowering skip key blocks wholly
-  outside the band and both reference backends (`SdpaOp.forward`, `backend/torch_ref.py`) compute the band.
+  operand may keep less, e.g. padding — it stays applied). The decomposition states the band as the range of the key
+  axis, which is what lets the lowering skip key blocks wholly outside it, and both reference backends
+  (`SdpaOp.forward`, `backend/torch_ref.py`) compute the band.
   `commands/compile.py` calls it after every model/layer `trace_module`.
 
 `torch.py` converts only FX nodes observable through the exported value output, by reverse reachability; once every

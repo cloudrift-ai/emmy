@@ -42,7 +42,9 @@ def test_a_repository_golden_is_the_fresh_lowering(path: Path, traced: int) -> N
     re-record a stale row, not to detect one."""
     document = document_of(path)
     fresh, report = restamp(document, traced=traced)
-    assert fresh == document and not report.changed, "\n".join(report.lines())
+    # Compared outside the assert: a failure prints the report, where pytest would print both whole files.
+    unchanged = fresh == document and not report.changed
+    assert unchanged, "\n".join(report.lines())
 
 
 def test_a_cut_piece_is_the_kernel_its_stored_definition_lifts_to() -> None:
@@ -125,7 +127,8 @@ def test_lora_serving_golden_replays_nested_cuts() -> None:
     )
     document = GoldenFile.load(path, repository=False)
     fresh, report = restamp(document, traced=1)
-    assert fresh == document, "\n".join(report.lines())
+    unchanged = fresh == document
+    assert unchanged, "\n".join(report.lines())
 
 
 def _file_parameters():

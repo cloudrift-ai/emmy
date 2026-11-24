@@ -83,7 +83,21 @@ emmy golden restamp recipes/<model>/golden/<card>.json    # rewrites the file in
 It lowers every traced program again, gives each kernel the body the fresh lowering gives it, takes every kernel-set
 decision again on the fresh parent, and keeps each row on its kernel. A row keeps its measurement only while its
 kernel kept its exact identity; otherwise it keeps its schedule and loses its microseconds: a *proposal*, no evidence
-until measured again. It refuses to write a file nothing survives in. Read its report:
+until measured again. It refuses to write a file nothing survives in.
+
+When the compiler change re-spells kernels and is not meant to change their code, decide by the code instead. Take
+the baseline on the tree before the change, then restamp on the tree after it:
+
+```bash
+emmy golden realize --ptx <baseline-dir> recipes/<model>/golden/<card>.json            # before the change
+emmy golden restamp --ptx-baseline <baseline-dir> recipes/<model>/golden/<card>.json   # after it
+```
+
+A row then keeps its measurement exactly when its kernel compiles, under the row's schedule, to the PTX the
+baseline holds, re-keyed or not, and the report names each row whose code changed (`the code changed under NAME`).
+Run both from the same working directory: the baseline's folders are named by the file's path under it.
+
+Read the restamp's report:
 
 | Report line | Meaning | Next |
 | --- | --- | --- |
@@ -148,7 +162,7 @@ isolated rows are recorded, `--no-record-evidence` keeps that check from replaci
 `torch.compile`; each measured row's `tried` is the number of schedules the DB held for that kernel. Missing
 `torch.compile` timing remains a reported gap. A `--tune` run's rows stay in the card's tune DB. After a hardware
 golden's tunes, copy that DB back with the working golden and fill the golden's candidate file from it
-(`emmy candidates build GOLDEN --db TUNE_DB`; README, "Candidate files").
+(`emmy candidates build GOLDEN --db TUNE_DB`; the `refresh-candidates` skill).
 
 Promote the validated entries through `GoldenFile.edit(path)` with `add_kernel`, `add_routing` and `upsert_row`,
 including qualified whole-target latency on its root seed. A canonical file holds the same exact kernel at another
@@ -197,9 +211,9 @@ evidence at a cut fork (DeepSeek V4, after #981 and again after #1003). It prove
 not that every fork a deploy meets has a measured arm.
 
 A hardware golden has a candidate file beside it (`emmy/compiler/pipeline/search/candidates/records/<same name>`,
-GLOSSARY "Candidate file"), which carries the golden's programs, kernels and decisions. After the golden changes, run
-`emmy candidates restamp` and then `emmy candidates build`, which copies the golden's tables again and keeps the
-candidate rows whose group the golden still holds.
+GLOSSARY "Candidate file"), which copies the golden's programs, kernels and decisions. A change to the golden leaves
+it stale and the candidate tests red: finish with the `refresh-candidates` skill's repair steps (`emmy candidates
+restamp`, then `emmy candidates build`) in the same PR.
 Keep the prior reproduction gate green (AGENTS.md finalization step 22): a refreshed hardware golden refits both priors
 in the same PR. The gate holds only hardware goldens: a refreshed recipe golden bears on the priors only through the
 rows promoted into the card's hardware golden, which then refits.

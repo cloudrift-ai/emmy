@@ -1,6 +1,6 @@
-"""A cross-CTA split of a SYMBOLIC reduce stream: each partition's slice spans ``⌈K/w⌉`` positions, the last
-overhanging the stream's end, whose loads read the stream's last position and whose lift folds the monoid's seed
-past it. Run on a card at lengths no width divides, the split contraction is the unsplit one."""
+"""A cross-CTA split of a SYMBOLIC reduce stream: each block spans ``⌈K/w⌉`` positions and the last ends where the
+stream does. A tier reads a block as a walk from zero whose loads clamp onto the stream's last position and whose lift
+folds the monoid's seed past it. Run on a card at lengths no width divides, the split contraction is the unsplit one."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from emmy.compiler import dtype as dt
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expression import TernaryExpression
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import binding_extents
 from emmy.compiler.ir.stmt import Select
@@ -33,7 +34,7 @@ def _matvec(n: int = 96) -> Graph:
     return graph
 
 
-def test_a_symbolic_stream_splits_into_overhanging_masked_slices() -> None:
+def test_a_symbolic_stream_splits_into_blocks_that_end_where_the_stream_does() -> None:
     lifted = Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(_matvec())
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
     match = Match(graph=lifted, root_node_id=node.id, rule=None)
@@ -43,10 +44,19 @@ def test_a_symbolic_stream_splits_into_overhanging_masked_slices() -> None:
         split = realize_split(match, node, 4, "kernel")
     (partial,) = (n.op for n in split.nodes.values() if isinstance(n.op, TileOp) and n.id.endswith("__partial"))
     fold = head(partial.op)
-    # ⌈keys / 4⌉ positions a slice, and a lift that keeps a position only inside the stream.
-    extent = partial.axis_of(fold.axis).extent
+    # The block's range, and a body that reads the position itself: no mask and no clamp.
+    start, end = fold.range
+    (block,) = start.free_vars() - {"keys"}
+    assert [bound.eval({"keys": 37, block: 3}) for bound in (start, end)] == [30, 37]
+    assert not any(isinstance(stmt, Select) for stmt in fold.lift.body)
+    assert all(not isinstance(position, TernaryExpression) for load in partial.loop_body.loads for position in load.index)
+    # A tier walks the block from zero: ⌈keys / 4⌉ positions at most, and what the stream leaves of the last block.
+    tier = partial.scheduled()
+    extent = tier.axis_of(fold.axis).extent
     assert not extent.is_static and extent.expression.eval({"keys": 37}) == 10
-    assert any(isinstance(stmt, Select) for stmt in fold.lift.body)
+    start, end = head(tier.op).range
+    assert [bound.eval({"keys": 37, block: 3}) for bound in (start, end)] == [0, 7]
+    assert not any(isinstance(stmt, Select) for stmt in head(tier.op).lift.body)
 
 
 @requires_cuda

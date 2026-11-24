@@ -571,10 +571,8 @@ mod tests {
     fn axis_and_parent_names_do_not_order_ambiguous_windowed_loops() {
         let make = |[first, second]: [&str; 2], [a, b]: [&str; 2], reverse: bool| {
             let loops = [
-                format!("for {first} in 0..4 window(parent={a} in 0..8, base={a}, bound={a} + 4):"),
-                format!(
-                    "for {second} in 0..4 window(parent={b} in 0..8, base={b} + 4, bound={b} + 8, partition=true):"
-                ),
+                format!("for {first} in 0..4 window(parent={a} in 0..8):"),
+                format!("for {second} in 0..4 window(parent={b} in 0..8, partition=true):"),
             ];
             let (outer, inner) = if reverse {
                 (&loops[1], &loops[0])
@@ -605,8 +603,8 @@ mod tests {
                 "
             ))
         };
-        let first = make("parent=source in 0..8, base=0, bound=4");
-        let second = make("parent=other_source in 0..8, base=4, bound=8, partition=true");
+        let first = make("parent=source in 0..8");
+        let second = make("parent=other_source in 0..8, partition=true");
         assert_eq!(first, second);
         assert_ne!(identity_key(&first, false), identity_key(&second, false));
     }

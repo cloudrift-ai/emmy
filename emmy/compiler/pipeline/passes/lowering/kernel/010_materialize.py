@@ -51,6 +51,9 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
 
         tile = serial_form(tile, root.id)
+    # The schedule addressed the kernel with each range left on its term (``TileOp.scheduled``), and every tier
+    # reads a range itself: as the bounds of its loop, or as the chunks it walks and the mask of the block a bound cuts.
+    tile = tile.scheduled()
     rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:

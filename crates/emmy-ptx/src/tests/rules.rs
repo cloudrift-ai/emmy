@@ -1045,7 +1045,7 @@ fn an_unrolled_loop_is_kept_as_it_is() {
     ];
     for head in [
         "for j in 0..64 step 2 unrolled=true:",
-        "for j in 0..n step 2 until n - 1 unrolled=true:",
+        "for j in 0..n - 1 of n step 2 unrolled=true:",
     ] {
         let got = code(
             &format!(
