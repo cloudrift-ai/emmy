@@ -40,9 +40,11 @@ from emmy.compiler.pipeline.passes.loop.fusion._region import (
     copied,
     joins_a_region,
     live_outputs_of,
+    packs,
     plain_load,
     stops_a_region,
     wrap_multi_output_fragment,
+    writes_in_place,
 )
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
 
@@ -141,11 +143,18 @@ def _one_read(
     # PROTOTYPE. The trips after the last step. A state the loop ends with, read by nothing but what those trips
     # choose, is the state before their step: there the step is the one past the last.
     extents = _extents(body) or {}
+    # The choices of one coordinate at one stride are taken together: the trips after the last step are what all of
+    # them leave to their other branches.
+    after: dict[tuple[Var, int, int], dict[str, Load]] = {}
     for name, read, coordinate, wide, past in tails:
+        after.setdefault((coordinate, wide, past), {})[name] = read
+    for (coordinate, wide, past), reads_of in after.items():
         if past != wide * steps or extents.get(coordinate.name) != past + wide:
             continue
         alone = body.map(
-            lambda stmt, name=name, read=read: read.replace(names=(name,)) if isinstance(stmt, Select) and stmt.name == name else stmt
+            lambda stmt, reads_of=reads_of: (
+                reads_of[stmt.name].replace(names=(stmt.name,)) if isinstance(stmt, Select) and stmt.name in reads_of else stmt
+            )
         )
         elsewhere = {load.input for load in alone.pruned([value for write in alone.writes for value in write.values]).loads}
         ended = {source for source in before if source not in stepped and source not in elsewhere}
@@ -241,11 +250,15 @@ def _spans(select: Select, extents: dict[str, int]) -> tuple[Var, list[tuple[int
     found = [_bounds(test) for test in tests]
     if otherwise != _TRUE or not found or None in found or len({coordinate for coordinate, _, _ in found}) != 1:
         return None
-    coordinate = found[0][0]
+    coordinate, digit = found[0][0], 1
+    if isinstance(coordinate, BinaryExpression) and coordinate.op == "/" and isinstance(coordinate.right, Literal):
+        # The choice is by a digit of the coordinate: a range of the digit is that many trips of the coordinate.
+        coordinate, digit = coordinate.left, coordinate.right.value
     if not isinstance(coordinate, Var) or coordinate.name not in extents:
         return None
     extent = extents[coordinate.name]
-    ranges = [(max(low or 0, 0), min(extent if high is None else high, extent)) for _, low, high in found] + [(0, extent)]
+    ranges = [(max((low or 0) * digit, 0), min(extent if high is None else high * digit, extent)) for _, low, high in found]
+    ranges.append((0, extent))
     edges = sorted({0, extent, *(edge for low, high in ranges for edge in (low, high) if 0 <= edge <= extent)})
     spans: list[tuple[int, int]] = [(0, 0)] * len(ranges)
     for first, past in zip(edges, edges[1:], strict=False):
@@ -732,12 +745,13 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
     over = {tensor.alias for tensor in carrying.outputs if tensor.alias is not None}
 
     def joins(node: Node) -> bool:
-        if not isinstance(node.op, LoopOp) or not joins_a_region(node.op) or stops_a_region(graph, node):
+        if not isinstance(node.op, LoopOp) or not joins_a_region(node.op):
             return False
         if seeds & set(node.buffer_names()) or over & set(node.inputs):
             return False
-        # No kernel left outside lies between the members: the merged kernel never reads what reads it.
-        below = set().union(*(downstream[member] for member in members)) - set(members)
+        # No kernel left outside lies between the members: the merged kernel never reads what reads it. A member
+        # that stays a kernel of its own is read there by what follows it, not in the merged kernel.
+        below = set().union(*(downstream[member] for member in members if member not in kept)) - set(members)
         return not any(graph.producer(name).id in below for name in node.inputs)
 
     free: set[str] = set()
@@ -749,10 +763,16 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
             if nid in members or not joins(node):
                 continue
             read = [name for name in node.inputs if graph.producer(name).id in members]
-            if graph.users(nid) and graph.users(nid) <= set(members) and not set(node.buffer_names()) & set(graph.outputs):
+            # A kernel whose buffers have to exist as it writes them is computed in no other kernel. One that packs
+            # what it writes still takes in what it reads, as a region does: its buffers stay its stores, and what
+            # reads them stays outside.
+            stop = stops_a_region(graph, node)
+            if stop and (writes_in_place(node) or not packs(graph, node)):
+                continue
+            if not stop and graph.users(nid) and graph.users(nid) <= set(members) and not set(node.buffer_names()) & set(graph.outputs):
                 members[nid] = node.op
                 free.update(node.buffer_names())
-            elif not read and not nested and graph.users(nid) & set(members):
+            elif not stop and not read and not nested and graph.users(nid) & set(members):
                 # PROTOTYPE. A plain kernel the step reads beside other readers is computed in the step too, where
                 # the step reads it, and stays a kernel for the others. Storing it once for all of them is memory
                 # taken for recomputation: a cut's choice, on the merged kernel.
@@ -775,7 +795,8 @@ def _neighbours(graph: Graph, carrying: Node, longer: bool = True) -> tuple[dict
                 if moved is None:
                     continue
                 members[nid] = moved[0]
-                stepped.update(moved[1])
+                if not stop:
+                    stepped.update(moved[1])
             else:
                 continue
             grown = True

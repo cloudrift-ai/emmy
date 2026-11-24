@@ -102,7 +102,7 @@ def writes_in_place(node: Node) -> bool:
     return any(tensor.alias is not None for tensor in node.outputs)
 
 
-def _packed(graph: Graph, node: Node) -> bool:
+def packs(graph: Graph, node: Node) -> bool:
     """Whether ``node`` writes a PACKED buffer — the storage sense: one stored element carries
     several logical values (``dtype.logical_elems > 1``, two e2m1 codes to the byte), not a
     concatenated projection.
@@ -130,7 +130,7 @@ def stops_a_region(graph: Graph, node: Node) -> bool:
     over = any(
         stored.alias == name for name in node.buffer_names() for user in graph.buffer_users(name) for stored in graph.nodes[user].outputs
     )
-    return over or _packed(graph, node) or writes_in_place(node)
+    return over or packs(graph, node) or writes_in_place(node)
 
 
 def regions(graph: Graph) -> dict[str, frozenset[str]]:
@@ -138,7 +138,7 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
 
     Some nodes no region holds: a kernel that carries a state, an ordered prefix output
     (:func:`joins_a_region`) and any op that is not a loop. A region also stops at a
-    packed buffer it computes (:func:`_packed`): the producer stays, its readers begin another. A
+    packed buffer it computes (:func:`packs`): the producer stays, its readers begin another. A
     kernel that writes in place (:func:`writes_in_place`) is such a stop too, and so is the producer of
     the buffer it writes over: the output is that buffer's memory with some cells restored, a value no
     reader can inline, and the buffer has to exist for the store to land in — while the producers of
@@ -164,7 +164,7 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     order = graph.topological_order()
     nodes = graph.nodes
     fusable = {nid for nid in order if isinstance(nodes[nid].op, LoopOp) and joins_a_region(nodes[nid].op)}
-    stops = {nid for nid in fusable if _packed(graph, nodes[nid]) or writes_in_place(nodes[nid])}
+    stops = {nid for nid in fusable if packs(graph, nodes[nid]) or writes_in_place(nodes[nid])}
     stops |= {
         producer.id
         for nid in fusable
