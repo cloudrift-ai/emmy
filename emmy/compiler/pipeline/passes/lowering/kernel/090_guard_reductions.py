@@ -7,7 +7,7 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, TernaryExpression
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, StridedLoop, free_names
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, free_names
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import GUARD_REDUCTIONS
 
@@ -69,20 +69,17 @@ def _guard(body: Body, axes: frozenset[str] = frozenset()) -> Body:
             for name in free_names(stmt):
                 need(name, wanted)
         else:
-            if isinstance(stmt, (Loop, StridedLoop)) and stmt.seed:
+            if isinstance(stmt, Loop) and stmt.seed:
                 carriers = [s.name for s in stmt.body if isinstance(s, Accum)]
                 wanted = _FALSE
                 for name in carriers:
                     wanted = _boolean("||", wanted, demand.get(name, _TRUE))
                 scalar = all(
-                    isinstance(s, (Loop, StridedLoop, Load, Assign, Accum, Select)) and (not isinstance(s, (Loop, StridedLoop)) or s.seed)
-                    for s in stmt.body.iter()
+                    isinstance(s, (Loop, Load, Assign, Accum, Select)) and (not isinstance(s, Loop) or s.seed) for s in stmt.body.iter()
                 )
                 if carriers and scalar and wanted != _TRUE and wanted.free_vars() <= axes:
-                    end = stmt.end if isinstance(stmt, StridedLoop) and stmt.end is not None else stmt.axis.extent_expression()
-                    if isinstance(stmt, Loop):
-                        stmt = StridedLoop(stmt.axis, _FALSE, _TRUE, stmt.body, unroll=stmt.unroll, seed=stmt.seed)
-                    stmt = stmt.replace(end=TernaryExpression(wanted, end, _FALSE))
+                    start, end, step = stmt.walk()
+                    stmt = stmt.replace(range=(start, TernaryExpression(wanted, end, _FALSE)), step=step)
             for name in free_names(stmt):
                 need(name, _TRUE)
         rewritten.append(stmt)

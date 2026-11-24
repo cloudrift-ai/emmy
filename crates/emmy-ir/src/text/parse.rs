@@ -242,8 +242,6 @@ impl Line {
             self.parser.require("=")?;
             match &*key {
                 "parent" => window.parent = Some(self.whole_axis()?),
-                "base" => window.base = Some(self.parser.expression()?),
-                "bound" => window.bound = Some(self.parser.expression()?),
                 "partition"
                     if self.parser.at_word("true", 0) || self.parser.at_word("false", 0) =>
                 {
@@ -675,12 +673,16 @@ impl Line {
 
     fn loop_(&mut self, body: Body) -> Result<Arc<Statement>> {
         let (name, start, extent) = self.axis()?;
-        let step = if self.word("step") {
-            Some(self.parser.expression()?)
+        // `start..end of extent`: the loop walks a range, and what follows `of` is the most trips it takes. Without
+        // `of` the range ends with the axis, and a start of zero is no range to state.
+        let (range, extent) = if self.word("of") {
+            (Some((start, extent.expression)), self.dim()?)
+        } else if start != Expression::int(0) {
+            (Some((start, extent.expression.clone())), extent)
         } else {
-            None
+            (None, extent)
         };
-        let end = if self.word("until") {
+        let step = if self.word("step") {
             Some(self.parser.expression()?)
         } else {
             None
@@ -695,30 +697,14 @@ impl Line {
         let seed = self.flag("seed")?.unwrap_or(true);
         let unrolled = self.flag("unrolled")?.unwrap_or(false);
         self.parser.require(":")?;
-        if let Some(step) = step {
-            let loop_ = StridedLoop {
-                axis,
-                start,
-                step,
-                body,
-                unroll,
-                end,
-                seed,
-                unrolled,
-            };
-            return self.end(Arc::new(Statement::StridedLoop(loop_)));
-        }
-        if start != Expression::int(0) || end.is_some() {
-            return Err(self
-                .parser
-                .error("a loop that does not start at 0, or stops early, names its step"));
-        }
         self.end(Arc::new(Statement::Loop(Loop {
             axis,
             body,
             unroll,
             seed,
             unrolled,
+            range,
+            step,
         })))
     }
 }

@@ -285,7 +285,13 @@ a kernel that kept its identity keeps its entry and its rows' measurements, a re
 proposals, a kernel or decision the fresh lowering no longer takes is dropped with its rows). A whole-target timing
 names the kernel set it timed and is cleared when one of those kernels is re-keyed or dropped. Both default to every
 repository golden, neither needs a card, and the `refresh-golden` skill is the flow around them. The command never
-deletes a file: one nothing survives in is left alone and reported. Every command that reads a golden by path loads it
+deletes a file: one nothing survives in is left alone and reported. `restamp --ptx-baseline DIR [--jobs N]` decides
+every time by the code in place of the identity: each row of the restamped file is compiled under its own schedule
+and compared with the PTX `golden realize --ptx DIR` wrote for it before the change. Equal bytes keep the
+measurement, whether or not the kernel was re-keyed; changed bytes, or a row that no longer realizes, lose it, and
+the command names each such row. A row the baseline holds no PTX for stays as the plain restamp left it. A
+whole-target timing is kept when every kernel it timed still stands and every measured row of those kernels kept its
+code. Every command that reads a golden by path loads it
 through `GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
 
 `emmy candidates {build,check,restamp,realize}` maintains the candidate files (GLOSSARY, "Candidate file"; the module
@@ -300,14 +306,17 @@ fills, and `--json PATH` writes them with the kernel, regime and sizes a tune ru
 was measured on gets no file. `check`, `restamp` and `realize` are the
 `emmy golden` subcommands over the candidate files, every repository candidate file where no path is named.
 
-`emmy golden realize PATH… [--drop] [--jobs N] [--json PATH]` compiles every row that has a schedule under it — the
+`emmy golden realize PATH… [--drop] [--jobs N] [--json PATH] [--ptx DIR]` compiles every row that has a schedule under it — the
 row's kernel as the whole program, its regime and schedule pinned, the file the compile's golden evidence, at the file's
 card — and names the rows the compiler no longer realizes: the kernel it built is not the row's, or a knob the row
 spells is not the one the kernel carries (the gate a bench holds a pinned row to before it times it). A piece is
 rebuilt through the decisions the file records. `--drop` writes each file back without the rows named; the kernels
 and decisions stay (`search/golden/realize.py`). A directory argument is
 searched for golden files, rows compile `--jobs` at a time (`EMMY_WORKERS` by default), and the exit status is non-zero
-when a row does not realize and was not dropped.
+when a row does not realize and was not dropped. `--ptx DIR` also writes the code of every row that realizes, a folder
+per file (named by its path under the working directory) and a file per row (named by the row's position), the
+kernel named alike in every file so that a kernel whose identity moved and whose code did not compares equal. Taken
+before a change to the normal form or the lowering, it is the baseline `golden restamp --ptx-baseline` reads.
 
 **One golden flag pair on every command.** `--golden PATH` names a golden file (working or canonical) on `run`,
 `compile`, `serve`, `generate` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,

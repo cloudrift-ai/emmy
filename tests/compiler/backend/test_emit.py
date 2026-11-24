@@ -15,7 +15,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import Assign, LoopOp
-from emmy.compiler.ir.stmt import Accum, Loop, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: F401
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -24,7 +24,7 @@ from tests.compiler.helpers import compile_with_kernels, matmul_graph, operation
 
 def _folds_in_a_loop(kernel, op: str) -> bool:
     """Whether ``kernel`` holds a loop whose body folds an accumulator with ``op``."""
-    loops = statements(kernel, Loop, StridedLoop)
+    loops = statements(kernel, Loop)
     return any(isinstance(stmt, Accum) and stmt.op.name == op for loop in loops for stmt in loop.body.iter())
 
 
@@ -153,7 +153,7 @@ def test_softmax_sweeps_k_twice():
     folds = [at for at, stmt in enumerate(order) if isinstance(stmt, Accum)]
     stores = [at for at, stmt in enumerate(order) if isinstance(stmt, Write) and stmt.output == compiled.outputs[0]]
     assert folds and stores and folds[-1] < stores[0], f"the reduce must finish before the div stores\n{text(softmax)}"
-    for loop in statements(softmax, Loop, StridedLoop):
+    for loop in statements(softmax, Loop):
         inner = list(loop.body.iter())
         assert not (any(isinstance(s, Accum) for s in inner) and any(isinstance(s, Write) for s in inner)), text(softmax)
     assert operations(softmax) & {"exp", "exp_fast"}  # the softmax numerator / online-reduce normalizer

@@ -57,6 +57,13 @@ def register_golden_command(subparsers) -> None:
         "again, a row whose kernel's body changed keeps its schedule and loses its measurement (a proposal)",
     )
     pr.add_argument("paths", nargs="*", help="Golden files to restamp. Default: every repository golden.")
+    pr.add_argument(
+        "--ptx-baseline",
+        metavar="DIR",
+        help="Decide every time by the code: a row keeps its measurement when its kernel compiles to the PTX "
+        "`golden realize --ptx DIR` wrote for it before the change, re-keyed or not, and loses it when the PTX differs.",
+    )
+    pr.add_argument("--jobs", type=int, help="Worker processes compiling rows for --ptx-baseline (default: EMMY_WORKERS).")
     pr.set_defaults(func=handle_golden_restamp)
 
     pz = sub.add_parser(
@@ -67,6 +74,12 @@ def register_golden_command(subparsers) -> None:
     pz.add_argument("paths", nargs="+", help="Golden files, or directories searched for them.")
     pz.add_argument("--jobs", type=int, help="Worker processes compiling rows side by side (default: EMMY_WORKERS, one per core).")
     pz.add_argument("--drop", action="store_true", help="Write each file back without the rows the compiler no longer realizes.")
+    pz.add_argument(
+        "--ptx",
+        metavar="DIR",
+        help="Write the PTX of every row that realizes under DIR, a folder per file and a file per row: the baseline "
+        "`golden restamp --ptx-baseline DIR` compares a later compile with.",
+    )
     pz.add_argument(
         "--json",
         dest="json_out",
@@ -111,12 +124,14 @@ def handle_golden_check(args) -> None:
 
 def handle_golden_restamp(args) -> None:
     from emmy.compiler.pipeline.search.golden import GoldenFile, restamp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.restamp import carried  # noqa: PLC0415
 
+    baseline = Path(args.ptx_baseline) if getattr(args, "ptx_baseline", None) else None
     failed = False
     for path in _goldens(args.paths):
         document = GoldenFile.load(path)
         fresh, report = restamp(document)
-        if fresh == document:
+        if fresh == document and baseline is None:
             logger.info("%s: already the fresh lowering (%d kernels)", path, len(document.kernels))
             continue
         for line in report.lines():
@@ -126,6 +141,13 @@ def handle_golden_restamp(args) -> None:
             failed = True
             continue
         fresh.dump(path, overwrite=True)
+        if baseline is not None:
+            fresh, changed = carried(path, document, fresh, report, baseline, jobs=getattr(args, "jobs", None))
+            kept = sum(row.measurements is not None for row in fresh.rows)
+            logger.info("%s: %d rows keep a measurement, %d lost theirs to changed code", path, kept, len(changed))
+            for name in changed:
+                logger.info("%s: the code changed under %s", path, name)
+            fresh.dump(path, overwrite=True)
     if failed:
         sys.exit(1)
 
@@ -133,7 +155,7 @@ def handle_golden_restamp(args) -> None:
 def handle_golden_realize(args) -> None:
     from emmy.compiler.pipeline.search.golden.realize import realize  # noqa: PLC0415
 
-    reports = realize(_goldens(args.paths), jobs=args.jobs, drop=args.drop)
+    reports = realize(_goldens(args.paths), jobs=args.jobs, drop=args.drop, ptx=Path(args.ptx) if getattr(args, "ptx", None) else None)
     for report in reports:
         if not report.failed:
             continue

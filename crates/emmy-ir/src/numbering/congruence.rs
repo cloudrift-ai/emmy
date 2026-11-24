@@ -144,7 +144,6 @@ impl Sites {
             }
             let inner_seeded = match &**stmt {
                 Statement::Loop(l) => l.seed,
-                Statement::StridedLoop(l) => l.seed,
                 _ => false,
             };
             for (position, child) in stmt.nested().iter().enumerate() {

@@ -254,6 +254,8 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
         return padded.narrow(axis, 0, extent)
     if name == "ReduceOp":
         x, ax, fn = ins[0], op.axis, op.op.name
+        if (inside := op.inside(tuple(x.shape))) is not None:
+            x = torch.where(torch.as_tensor(inside, device=x.device), x, torch.full_like(x, op.identity))
         if fn in ("sum", "add"):
             return x.sum(dim=ax, keepdim=True)
         if fn in ("prod", "multiply"):

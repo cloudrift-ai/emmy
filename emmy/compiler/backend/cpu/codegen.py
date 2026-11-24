@@ -88,7 +88,7 @@ def _ext(loop):
 def _cost(stmts) -> int:
     total = 0
     for s in stmts:
-        if _kind(s) in ("Loop", "StridedLoop"):
+        if _kind(s) == "Loop":
             extent = s.axis.extent
             total += (extent.value if isinstance(extent.value, int) else (extent.hint or 512)) * _cost(s.body)
         elif _kind(s) == "Cond":
@@ -105,7 +105,7 @@ def _cost(stmts) -> int:
 def _loop_sizes(stmts) -> set[str]:
     names: set[str] = set()
     for s in stmts:
-        if _kind(s) in ("Loop", "StridedLoop") and isinstance(_ext(s), str):
+        if _kind(s) == "Loop" and isinstance(_ext(s), str):
             names.add(_ext(s))
         for attr in ("body", "else_body"):
             names |= _loop_sizes(getattr(s, attr, None) or ())
@@ -562,7 +562,17 @@ class _Fn:
                         raise Unsupported(f"accumulator {a.op.name}")
                 self.init_accs(opened)
                 self.open_accs |= {a.name for a in opened}
-                self.full(s, lambda s=s: self.serial(s.body))
+                if s.range is None:
+                    self.full(s, lambda s=s: self.serial(s.body))
+                else:
+                    # A range lies inside the extent: the whole extent is walked and the trips outside it do nothing.
+                    from emmy.compiler.ir.expression import BinaryExpression, Var  # noqa: PLC0415
+
+                    start, end = s.range
+                    inside = BinaryExpression(
+                        "&&", BinaryExpression("<=", start, Var(s.axis.name)), BinaryExpression("<", Var(s.axis.name), end)
+                    )
+                    self.full(s, lambda s=s, inside=inside: self.branch(self.pred(inside), lambda: self.serial(s.body), None))
                 self.open_accs -= {a.name for a in opened}
             elif k == "Cond":
                 self.branch(
@@ -718,8 +728,19 @@ def _serial(loop, buffers, shapes, dtypes, size_names):
     return str(m), Plan("serial", "range", _ext(split), 0, _cost(loop.body) >= PARALLEL_MIN_COST, size_names)
 
 
+def _ranged(stmts) -> bool:
+    """Whether a loop of ``stmts`` walks a range in place of its whole extent."""
+    return any(
+        (_kind(s) == "Loop" and s.range is not None) or any(_ranged(getattr(s, attr, None) or ()) for attr in ("body", "else_body"))
+        for s in stmts
+    )
+
+
 def _parallel(loop, buffers, shapes, dtypes, size_names, schedule=None):
     """Pick a strategy from the nest's shape. Every check runs before anything is emitted."""
+    if _ranged(loop.body):
+        # The strategies below split and vectorize whole extents; a range is walked by the serial one.
+        raise Unsupported("a loop over a range")
     parallel = _cost(loop.body) >= PARALLEL_MIN_COST
     writes = list(_writes_in(loop.body))
 

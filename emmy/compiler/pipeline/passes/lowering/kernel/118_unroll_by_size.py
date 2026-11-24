@@ -51,7 +51,7 @@ from emmy.compiler.ir.expression import (
     Var,
 )
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Cond, Init, Let, Load, Loop, Select, Statement, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Cond, Init, Let, Load, Loop, Select, Statement, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._approximate import approximate_forms
 from emmy.compiler.pipeline.passes.lowering.kernel._unroll import unroll_where
@@ -73,7 +73,7 @@ from emmy.compiler.target import (
 PATTERN = [Pattern("root", KernelOp)]
 
 #: The statements a sized body holds: the target-neutral ones.
-_NEUTRAL = (Load, Assign, Select, Accum, Write, Init, Let, Cond, Loop, StridedLoop)
+_NEUTRAL = (Load, Assign, Select, Accum, Write, Init, Let, Cond, Loop)
 
 
 def rewrite(root: Node, ctx: Context) -> KernelOp:
@@ -93,9 +93,9 @@ def _copies(loop: Statement, trips: tuple[int, int] | None, forms: dict[str, str
     if trips is None:
         fits = (n for n in _powers(RUNTIME_COPIES) if n * (size + RUNTIME_TRIP) <= RUNTIME_WORK)
         return next(fits, None) if size <= RUNTIME_LARGEST else None
-    if isinstance(loop, StridedLoop):
+    if loop.step is not None:
         copies = min(RUNTIME_COPIES, trips[1] & -trips[1])
-        uniform = trips[0] == trips[1] >= THREAD_START_LEAST and not isinstance(loop.start, Literal)
+        uniform = trips[0] == trips[1] >= THREAD_START_LEAST and not isinstance(loop.walk()[0], Literal)
         return copies if uniform and copies > 1 and size <= RUNTIME_LARGEST else None
     if trips[1] < 1:
         return None
@@ -119,7 +119,7 @@ def _size(loop: Statement, forms: dict[str, str]) -> int:
     each operation whose value changes from trip to trip (it reads the axis or a name the body defines). An access
     whose address changes pays one more for it, and the operations of its index that are no sum of scaled terms."""
     changing = {loop.axis.name} | {name for stmt in loop.body.iter() for name in stmt.defines()}
-    changing |= {stmt.axis.name for stmt in loop.body.iter() if isinstance(stmt, (Loop, StridedLoop))}
+    changing |= {stmt.axis.name for stmt in loop.body.iter() if isinstance(stmt, Loop)}
 
     def varies(expression: Expression) -> bool:
         return bool(expression.free_vars() & changing)
@@ -145,7 +145,7 @@ def _size(loop: Statement, forms: dict[str, str]) -> int:
             size += access(stmt.index)
         elif isinstance(stmt, Select):
             size += len(stmt.branches) - 1 + sum(work(branch.select) for branch in stmt.branches)
-        elif isinstance(stmt, (Accum, Cond, Loop, StridedLoop)):
+        elif isinstance(stmt, (Accum, Cond, Loop)):
             size += 1 + sum(work(expression) for expression in stmt.expressions())
         else:
             size += sum(work(expression) for expression in stmt.expressions())

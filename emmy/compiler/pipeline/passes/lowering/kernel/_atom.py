@@ -71,7 +71,7 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
-from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, select_masks
+from emmy.compiler.ir.schedule.mask import cell_uniform
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_dtype, chunk_slab_pad, copied_b
 from emmy.compiler.ir.sigma import Sigma
@@ -87,11 +87,9 @@ from emmy.compiler.ir.stmt import (
     Select,
     SelectBranch,
     Statement,
-    StridedLoop,
     Write,
     exposed_defines,
     free_names,
-    mask_select_predicate,
 )
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -479,7 +477,7 @@ def _staged_inner_atom_loop(
     producer filled the (plain row-major, NONE-swizzle) slab; ``mn`` is the ``(m, n)`` :class:`Side`
     pair.
 
-    ``reg_depth == 1`` (default): one ``StridedLoop`` over the ``bk`` atom-K steps, fragment-load-then-mma
+    ``reg_depth == 1`` (default): one loop over the ``bk`` atom-K steps, fragment-load-then-mma
     inline (the operand fragments ``_a{i}``/``_b{j}`` reused every step). ``reg_depth >= 2`` (the
     ``STAGE`` ``/p<n>`` smem→register double-buffer): the loop is **fully unrolled** into a software
     pipeline that ldmatrixes the next atom-K step into an alternate fragment slot (``_a{i}_s{slot}``)
@@ -643,7 +641,7 @@ def _staged_inner_atom_loop(
     if reg_depth < 2 or n_steps < 2:  # single-buffer: the inline fragment-load → mma loop
         body = ldms(Var(ki), "") + mmas("")
         return [
-            StridedLoop(
+            Loop.strided(
                 axis=Axis(name=ki, extent=bk_elems),
                 start=Literal(0, "int"),
                 step=Literal(atom_k, "int"),
@@ -1528,19 +1526,6 @@ def _block_scaled_operands(
     return (a_bits, *b_bits), copies, fills
 
 
-def _mask_add(stmt, selects: dict, frags) -> tuple[Select, str] | None:
-    """The coordinate mask ``stmt`` adds to a fragment value, with the value's name — the statement
-    pair the chunk tier lands as a coordinate-masking ``FragmentApply`` and reads for its stream bounds — or ``None``
-    for any other statement."""
-    op = stmt.value.operation if isinstance(stmt, Assign) else None
-    if op is None or op.name != "add":
-        return None
-    names = [operand.name for operand in stmt.value.operands if isinstance(operand, Var)]
-    selected = [name for name in names if name in selects]
-    source = [name for name in names if name in frags]
-    return (selects[selected[0]], source[0]) if len(selected) == len(source) == 1 else None
-
-
 def _negated(node: Expression) -> Expression | None:
     """The positive form of a negated term — ``-b`` as ``b``, ``(-c) * b`` as ``c * b`` — else ``None``."""
     if node.operation is None:
@@ -1556,26 +1541,8 @@ def _negated(node: Expression) -> Expression | None:
 
 def _one_operation(stmts) -> list[Statement]:
     """``stmts`` with every ``Assign`` and ``Accum`` value one operation over names and literals: a nested operation
-    node becomes a temp of its own, declared ahead, since a fragment program evaluates one operation at a time. A sum
-    adds its coordinate masks last, each to the value it masks, wherever the normal form's term order put them."""
+    node becomes a temp of its own, declared ahead, since a fragment program evaluates one operation at a time."""
     out: list[Statement] = []
-    masks = {stmt.name for stmt in stmts if isinstance(stmt, Select)}
-
-    def terms(node: Expression) -> list[Expression]:
-        if node.operation is None or node.operation.name != "add":
-            return [node]
-        return [term for operand in node.operands for term in terms(operand)]
-
-    def masks_last(node: Expression) -> Expression:
-        if node.operation is None or node.operation.name != "add":
-            return node
-        mask = [isinstance(term, Var) and term.name in masks for term in terms(node)]
-        if len(mask) < 3 or not any(mask) or all(mask):
-            return node
-        total, *rest = (term for _, term in sorted(zip(mask, terms(node), strict=True), key=lambda pair: pair[0]))
-        for term in rest:
-            total = apply("add", total, term)
-        return total
 
     for stmt in stmts:
         if not isinstance(stmt, (Assign, Accum)):
@@ -1586,7 +1553,6 @@ def _one_operation(stmts) -> list[Statement]:
         def leaf(node: Expression, stmt=stmt, temps=temps) -> Expression:
             if node.operation is None:
                 return node
-            node = masks_last(node)
             operation, children = node.operation.name, list(node.operands)
             # A sum with a negated term is the subtraction of that term's positive form: ``a + (-b)`` is ``a - b`` to
             # the bit, as is ``a + (-c) * b`` to ``a - c * b``, and one operation where the negation would be a
@@ -1607,8 +1573,7 @@ def _one_operation(stmts) -> list[Statement]:
         elif stmt.value.operation is None:
             out.append(stmt)
         else:
-            value = masks_last(stmt.value)
-            out.append(stmt.replace(value=apply(value.operation.name, *(leaf(child) for child in value.operands))))
+            out.append(stmt.replace(value=apply(stmt.value.operation.name, *(leaf(child) for child in stmt.value.operands))))
     return out
 
 
@@ -1619,37 +1584,44 @@ def _mask_affine(predicate: BinaryExpression, names: frozenset[str]) -> tuple[di
     return None if form is None else (form[1], form[0])
 
 
-def _mask_key_bounds(
-    stmts, held: str, key: Axis, row: str, offset, bk: int, uniform: frozenset[str] = frozenset()
-) -> tuple[Expression | None, Expression | None]:
-    """The chunk range outside which every key is masked for every row of this CTA — the stream's
-    ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side.
+def _outside(walked: tuple[Expression, Expression] | None, key: Axis, ragged: bool) -> tuple[BinaryExpression, ...]:
+    """Where a carrier that walks the range ``walked`` of ``key`` folds nothing, one comparison for each bound: a key
+    before a start, a key at or past an end. A start at zero bounds nothing. The axis's own extent is an end like
+    any other where the chunks do not tile it (``ragged``): the last chunk then overhangs the stream."""
 
-    The masks are the coordinate ``Select`` statements the prefix adds to the score (the pairs
-    :func:`_residence` turns into a coordinate mask), each read ONCE, ahead of the loop, for what
-    its masked branch says about whole chunks. ``key + ck > row + cr`` (or ``>=``) masks every key
-    from ``block_end + cr − ck`` on for the block's last row, and so for every row before it: the
-    stream stops there. ``key + ck < row + cr`` (or ``<=``) masks every key before
-    ``block_base + cr − ck`` for the block's first row, and so for every row after it: the stream
-    starts on the chunk that key falls in. Both are CTA-uniform in the grid var alone, and
-    bit-identical because a masked chunk folds the carrier identity exactly. The bound is derived
-    here and stored nowhere — the ``Select`` in the body is its one source. A mask that could take
-    a row's OWN key (a lead that stops a block before its last row, a lag that starts it after its
+    def past(bound: Expression) -> BinaryExpression:
+        # An end one past a coordinate is that coordinate, compared strictly: one comparison per element, no sum.
+        if isinstance(bound, BinaryExpression) and bound.op == "+" and bound.right == Literal(1, "int"):
+            return BinaryExpression(">", position, bound.left)
+        return BinaryExpression(">=", position, bound)
+
+    extent = key.extent_expression()
+    start, end = walked if walked is not None else (Literal(0, "int"), extent)
+    position = Var(key.name)
+    before = [BinaryExpression("<", position, bound) for bound in start.chain("maximum") if bound != Literal(0, "int")]
+    ends = [bound for bound in end.chain("minimum") if bound != extent]
+    return (*(past(bound) for bound in (*ends, *((extent,) if ragged else ()))), *before)
+
+
+def _key_bounds(
+    outside: tuple, key: Axis, row: str, offset, bk: int, uniform: frozenset[str]
+) -> tuple[Expression | None, Expression | None]:
+    """The chunk range outside which every key is outside the carrier's range for every row of this CTA — the
+    stream's ``(k_first, k_end)``, each ``None`` when the range bounds the keys on that side for no whole chunk.
+    ``outside`` holds the comparisons the range states (:func:`_outside`): where the carrier folds nothing.
+
+    Each is read ONCE, ahead of the loop, for what it says about whole chunks. ``key + ck > row + cr`` (or ``>=``)
+    leaves out every key from ``block_end + cr − ck`` on for the block's last row, and so for every row before it:
+    the stream stops there. ``key + ck < row + cr`` (or ``<=``) leaves out every key before ``block_base + cr − ck``
+    for the block's first row, and so for every row after it: the stream starts on the chunk that key falls in.
+    Both are CTA-uniform in the grid var alone, and bit-identical because a chunk outside the range folds the
+    carrier identity exactly. The bound is derived here and stored nowhere — the range is its one source. A bound
+    that could take a row's OWN key (a lead that stops a block before its last row, a lag that starts it after its
     first) could empty a row's stream, and is left to the per-element mask."""
-    selects = {stmt.name: stmt for stmt in stmts if isinstance(stmt, Select)}
-    fragments = {held}  # the score and every value the prefix derives from it (its scaling, say)
     first: Expression | None = None
     end: Expression | None = None
-    for stmt in _one_operation(stmts):  # a mask added inside a sum is one operation of its spelling
-        if isinstance(stmt, Assign) and stmt.value.free_vars() & fragments:
-            fragments.add(stmt.name)
-        masked = _mask_add(stmt, selects, fragments)
-        predicate = mask_select_predicate(masked[0]) if masked is not None else None
-        affine = _mask_affine(predicate, frozenset({key.name, row})) if predicate is not None else None
-        if affine is not None and affine[0] == {key.name: -1, row: 1}:
-            swapped = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
-            predicate = BinaryExpression(swapped[predicate.op], predicate.right, predicate.left)
-            affine = _mask_affine(predicate, frozenset({key.name, row}))
+    for predicate in outside:
+        affine = _mask_affine(predicate, frozenset({key.name, row}))  # the key is on the left of every comparison
         if affine is None or affine[0] != {key.name: 1, row: -1} or not affine[1].free_vars() <= uniform:
             continue
         if affine[1].free_vars():
@@ -1923,7 +1895,7 @@ def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
     ``(row, col)`` pair into its accumulator, then wrap the whole body in the reduce loop. The only
     per-atom variation is the four leaf constructors (the "atom factory"): ``read_row`` / ``read_col``
     build the operand read (a fragment load vs scalar ``Load``), ``contract`` the ⊗+accumulate
-    (``MmaSyncPtx`` vs ``Assign``+``Accum``), ``wrap`` the K-loop (``StridedLoop`` step ``atom_k`` vs a
+    (``MmaSyncPtx`` vs ``Assign``+``Accum``), ``wrap`` the K-loop (a loop of step ``atom_k`` vs a
     unit ``Loop``). Returns ``(pre_decls, kloop_stmts)`` — no pre-decls here (accumulators ride
     ``state``).
 
@@ -2401,7 +2373,7 @@ class _MmaOps(_AtomOps):
 
     def gmem_leaves(self, offset, mn):
         """The gmem-direct mma leaf constructors: ``ldmatrix`` each operand fragment straight from
-        gmem, ``mma.sync`` every cell, the K-loop a ``StridedLoop`` of step ``atom_k`` (a symbolic /
+        gmem, ``mma.sync`` every cell, the K-loop a loop of step ``atom_k`` (a symbolic /
         non-divisible K zero-fills the masked-K tail via the ``k_zero`` helper variants — canonical
         and transposed-B both have gmem-direct K zero-fill helpers)."""
         c = self.c
@@ -2527,7 +2499,7 @@ class _MmaOps(_AtomOps):
                 tail = promotes
             return [
                 *pre,
-                StridedLoop(axis=k_axis, start=Literal(0, "int"), step=step, body=Body(tuple(stmts)), unroll=unroll_ok(k_axis.extent)),
+                Loop.strided(axis=k_axis, start=Literal(0, "int"), step=step, body=Body(tuple(stmts)), unroll=unroll_ok(k_axis.extent)),
                 *tail,
             ]
 
@@ -2715,8 +2687,16 @@ class _ScalarOps(_AtomOps):
             rebound = [stmt.rewrite(lambda name: bound.get(name, name)) for stmt in step]
             return [*reads, *copy_cell(rebound, cell, f"__c{i}_{j}", prot | set(bound.values()))]
 
+        # A fold that walks a range walks it at the thread's own cell: the schedule offers a scalar tile on such a
+        # fold with one register cell along each output axis the range reads (``_plan_node_refusal``).
+        walked = c.applied_range
+        if walked is not None:
+            own = Sigma({**at_m(0), **at_n(0)})
+            walked = tuple(own.apply(bound) for bound in walked)
+
         def wrap(pre, body):
-            return [*uniform, *pre, Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]
+            unroll = walked is None and _unroll_inner(k_axis)
+            return [*uniform, *pre, Loop(axis=k_axis, range=walked, body=Body(tuple(body)), unroll=unroll)]
 
         return dict(read_row=read_row, read_col=read_col, contract=contract, wrap=wrap)
 
@@ -2772,10 +2752,6 @@ def _residence(
     memo: dict | None = None,
     frags_only: bool = False,
     layout: str = "m16n8k16",
-    select_sigma: Sigma | None = None,
-    row_base: Expression | None = None,
-    col_base: Expression | None = None,
-    mask_fill: float | None = None,
 ):
     """Evaluate one straight-line scalar program at the residence each value it reads has.
 
@@ -2805,43 +2781,8 @@ def _residence(
     out: list[Statement] = []
     frags, rows, memo = dict(frags), dict(rows), memo if memo is not None else {}
     frag_tag = tag if frag_tag is None else frag_tag
-    selects: dict[str, Select] = {}
     stmts = _one_operation(stmts)  # a sum is evaluated one operation at a time here
     for stmt in stmts:
-        if isinstance(stmt, Select) and select_sigma is not None:
-            selects[stmt.name] = stmt
-            continue
-        masked = _mask_add(stmt, selects, frags) if mask_fill is not None and select_sigma is not None else None
-        if masked is not None and row_base is not None and col_base is not None:
-            mask, source = masked
-            del selects[mask.name]
-            predicate = mask_select_predicate(mask)
-            if predicate is None:
-                raise RuleSkipped("the chunk tier needs complementary branches for a coordinate mask")
-            name = f"{frag_tag}{stmt.name}"
-            # The keep branch applies the authored scalar to every element; the masked elements then
-            # take the carrier's finite identity, so an all-masked chunk never sees ``-inf - -inf``.
-            out.append(
-                FragmentApply(
-                    out=name,
-                    op=stmt.value.operation,
-                    args=fragment_args((frags[source], mask.branches[0].value), (FRAG, UNIFORM)),
-                    layout=layout,
-                )
-            )
-            out.append(
-                FragmentApply(
-                    out=name,
-                    op=ElementwiseImpl("where"),
-                    args=fragment_args((select_sigma.apply(predicate), Literal(float(mask_fill)), name), (COORD, UNIFORM, FRAG)),
-                    in_place=True,
-                    layout=layout,
-                    row_base=row_base,
-                    col_base=col_base,
-                )
-            )
-            frags[stmt.name] = name
-            continue
         accum = isinstance(stmt, Accum)
         if not isinstance(stmt, (Assign, Accum)):
             if not frags_only:
@@ -2903,8 +2844,6 @@ def _residence(
             rows[stmt.name] = pair
         elif not frags_only:
             out.append(stmt)
-    if selects:
-        raise RuleSkipped("the chunk tier needs each coordinate Select to form an additive mask")
     return out, frags, rows
 
 
@@ -3051,39 +2990,43 @@ class _FlashOps(_MmaOps):
         # what scales it — the prefix reads that result and the carrier's uniform leaves, nothing
         # else. Both are the gate's own reading (``_chunk_refusal``).
         prefix = self.c.applied.cone(self.c.roles[0])
-        leaves = [edge for edge in self.c.operands[1:] if set(edge.exposes) & set(prefix.params)]
+        # The keys a row folds are the carrier's range, a program's own mask read as one (``TileOp.scheduled``), so
+        # the prefix reads no coordinate: every value it takes beside the score is one for the whole cell. The range
+        # reads such values too (a position loaded from memory), so their leaves stand ahead of the chunk loop.
+        walked = self.c.applied_range
+        ranged = {name for bound in walked or () for name in bound.free_vars()}
+        leaves = [edge for edge in self.c.operands[1:] if set(edge.exposes) & (set(prefix.params) | ranged)]
         assert all(self.c.axis not in edge.free_axes for edge in leaves), (
             "the chunk tier reads the score's prefix leaves once, ahead of the chunk loop"
         )
-        # The mask the prefix adds, in the one form the tier lands (``select_masks``): its coordinate aliases fold into
-        # the predicates, so the leaves' remaining values are uniform and read once.
         coord_axes = {self.c.axis, *self.c.as_contraction().left_axes}
         uniform = cell_uniform(self.axes, self.c, coord_axes)
-        aliases = coordinate_aliases((*prefix.body, *(stmt for edge in leaves for stmt in edge.lift.body)), coord_axes, uniform)
-        prefix_body = select_masks(prefix.body, aliases, uniform, coord_axes)
-        assert prefix_body is not None, "the score's prefix reads a coordinate outside an additive mask"
-        pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes) if not (isinstance(stmt, Let) and stmt.name in aliases)]
+        pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
         pre += self._query_slab(mn) if self._score_atom.is_wgmma else self._query(offset, mn)
-        # A coordinate mask makes every chunk outside this CTA's rows pure identity work, and the
-        # loop skips it: it stops at a causal diagonal (``k_end``) and starts at a band's near edge
-        # (``k_first``), which gives a causal stream half its work back and a banded one its band.
-        # Not with one bound alone on a one-wave launch: the kernel takes as long as its longest
-        # CTA, which walks the whole stream there, and the dynamic trip count only costs (9%
-        # measured at the 128-CTA head-width-256 shape). Bounded at both ends, every CTA shortens.
         scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
-        k_first, k_end = _mask_key_bounds(prefix_body, scored_name, key, m.axis.name, offset[0], bk, uniform)
+        # A key extent the chunk does not tile — a symbolic stream, or a static one with a remainder — leaves the
+        # last chunk ragged. Its overhanging columns are outside like any other: they fill with the pivot ⊕'s
+        # identity, so the pivot ignores them and every channel's pattern folds a zero weight through them; the
+        # loads that reach past the extent clamp and zero the same way every gmem-direct fragment loader already does.
+        ragged = not key.extent.is_static or key.extent.as_static() % bk
+        # Where the carrier folds nothing, one comparison for each bound of its range. The tier reads them twice:
+        # here, for the chunks every row of the CTA skips, and below, as the mask of the elements a bound cuts.
+        outside = _outside(walked, key, bool(ragged))
+        assert all(predicate.free_vars() <= {key.name, m.axis.name} | uniform for predicate in outside), (
+            "the carrier's range reads the row, the key and the values one CTA holds — the gate's own reading (``_chunk_refusal``)"
+        )
+        # Every chunk outside this CTA's rows is pure identity work, and the loop skips it: it stops at a causal
+        # diagonal (``k_end``) and starts at a band's near edge (``k_first``), which gives a causal stream half its
+        # work back and a banded one its band. Not with one bound alone on a one-wave launch: the kernel takes as
+        # long as its longest CTA, which walks the whole stream there, and the dynamic trip count only costs (9%
+        # measured at the 128-CTA head-width-256 shape). Bounded at both ends, every CTA shortens.
+        k_first, k_end = _key_bounds(outside, key, m.axis.name, offset[0], bk, uniform)
         if self.one_wave and (k_first is None or k_end is None):
             k_first = k_end = None
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
         select_sigma = Sigma({m.axis.name: Var(FRAG_ROW), key.name: Var(FRAG_COL)})
-        # A key extent the chunk does not tile — a symbolic stream, or a static one with a
-        # remainder — leaves the last chunk ragged. Its overhanging columns fill with the pivot ⊕'s
-        # identity, so the pivot ignores them and every channel's pattern folds a zero weight
-        # through them; the loads that reach past the extent clamp and zero the same way every
-        # gmem-direct fragment loader already does.
-        ragged = not key.extent.is_static or key.extent.as_static() % bk
         bound = key.extent_expression() if ragged else None
 
         streams = self._streams(mn, bk)
@@ -3107,34 +3050,27 @@ class _FlashOps(_MmaOps):
             for i in range(m.reg):
                 for j in range(cols):
                     stmts, frags, _ = _residence(
-                        prefix_body,
+                        prefix.body,
                         frags={held: self.frag(f"_s{i}_{j}")},
                         rows={},
                         tag=f"_w{i}_{j}_",
                         memo=memo.setdefault((i, j), {}),
                         layout=layout,
-                        select_sigma=select_sigma,
-                        row_base=offset[0].base(i),
-                        col_base=BinaryExpression("+", base, Literal(j * atom.atom_n, "int")),
-                        mask_fill=self.c.base.components()[0].identity,
                     )
                     body += stmts
                     scored[i, j] = frags[self.c.roles[0]]
-                    if bound is not None:
+                    for predicate in outside:
                         body.append(
                             FragmentApply(
                                 out=scored[i, j],
                                 op=ElementwiseImpl("where"),
                                 args=fragment_args(
-                                    (
-                                        BinaryExpression(">=", Var(FRAG_COL), bound),
-                                        Literal(float(self.c.base.components()[0].identity)),
-                                        scored[i, j],
-                                    ),
+                                    (select_sigma.apply(predicate), Literal(float(self.c.base.components()[0].identity)), scored[i, j]),
                                     (COORD, UNIFORM, FRAG),
                                 ),
                                 in_place=True,
                                 layout=layout,
+                                row_base=offset[0].base(i) if m.axis.name in predicate.free_vars() else None,
                                 col_base=BinaryExpression("+", base, Literal(j * atom.atom_n, "int")),
                             )
                         )
@@ -3201,7 +3137,7 @@ class _FlashOps(_MmaOps):
         if streams is None:
             gmem = Body(tuple(stmt for stmts, _ in chunk_segments((None,)) for stmt in stmts))
             start = k_first if k_first is not None else Literal(0, "int")
-            loop = StridedLoop(axis=chunk, start=start, step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
+            loop = Loop.strided(axis=chunk, start=start, step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
             return pre, [loop]
         # The staged form is the same body under the shared fill→drain skeleton, with the chunk loop
         # built by it: one operand group per staged operand, the score and the expectation as the

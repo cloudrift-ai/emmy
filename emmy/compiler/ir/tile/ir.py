@@ -42,6 +42,7 @@ from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, Sim
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.mask import keys_ranged
 from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.views import (
     ContractionFacts,
@@ -52,7 +53,7 @@ from emmy.compiler.ir.schedule.views import (
 from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, OutputSpec, Statement, Write
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
-from emmy.compiler.ir.tile.ops import Sched, chain_members, kernel_roots, refused_roots
+from emmy.compiler.ir.tile.ops import Sched, carries_partition, chain_members, kernel_roots, refused_roots
 from emmy.compiler.ir.tile.path import Site, sites
 
 
@@ -379,7 +380,7 @@ class TileOp(Op):
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
         if len(self.place.free) > 1:
             view = normalized.as_contraction()
-            if view is None or view.left_axes or view.shared_axes:
+            if view is None or view.left_axes or self.batch_axes(normalized):
                 unit_row = None
         if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
             object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
@@ -428,7 +429,7 @@ class TileOp(Op):
         if self.place.is_mapped and (not self.place.grid or self.place.grid[-1].name != free[-1].name):
             return
         roots = kernel_roots(self.op)
-        if not roots or not all(self._vector_against_matrix(root.as_contraction()) for root in roots):
+        if not roots or not all(self._vector_against_matrix(root) for root in roots):
             return
         unit = Axis("_um", Dim(1))
         grid = self.place.grid
@@ -436,21 +437,39 @@ class TileOp(Op):
             grid = (*grid[:-1], unit, grid[-1])
         object.__setattr__(self, "place", replace(self.place, free=(*free[:-1], unit, free[-1]), grid=grid))
 
-    def _vector_against_matrix(self, view) -> bool:
-        """Whether contraction ``view`` has one empty operand role, the other role owning the trailing free axis, and
-        the free axes are that role's axes, one dense column every boundary store writes, or shared batch coordinates
-        beside a column. The physical matrix pair then puts the unit coordinate in the empty role."""
+    def batch_axes(self, node: Fold) -> frozenset[str]:
+        """The coordinates both operands of the contraction ``node`` ride besides the reduction: the ones both read,
+        and the block coordinate of a split, which moves the positions both are read at. A tier reads such a block
+        with the coordinate in both indices (``Fold.scheduled``), so the two spellings of one kernel answer alike."""
+        view = node.as_contraction()
+        shared = frozenset(view.shared_axes) if view is not None else frozenset()
+        start = node.block_start(self.axes) if node.range is not None else None
+        return shared if start is None else shared | (frozenset(start.free_vars()) & {axis.name for axis in self.place.free})
+
+    def _vector_against_matrix(self, node: Fold) -> bool:
+        """Whether the contraction ``node`` reads as has one empty operand role, the other role owning the trailing
+        free axis, and the free axes are that role's axes, one dense column every boundary store writes, or shared
+        batch coordinates beside a column. The physical matrix pair then puts the unit coordinate in the empty role."""
         free = self.place.free
+        view = node.as_contraction()
         if view is None or (view.left_axes and view.right_axes):
             return False
         role = view.left_axes | view.right_axes
         if free[-1].name not in role:
             return False
-        if view.shared_axes:
+        if self.batch_axes(node):
             return len(free) >= 2
         if len(free) == 1:
             return all(_dense_axis_suffix(spec.write.index, free[0].name) for spec in self.output_specs)
         return {axis.name for axis in free} == role
+
+    @cached_property
+    def split_taken(self) -> bool:
+        """Whether the split question is answered for this kernel, the one reading of its two records: the flag
+        (:attr:`split_consumed`: the split was declined, or the kernel is a piece with no sliced axis), and the
+        receipt the kernel's own IR keeps and a stored kernel reads back, a partition window on a sliced axis
+        (``ops.carries_partition``)."""
+        return self.split_consumed or carries_partition(self)
 
     @cached_property
     def carries(self) -> bool:
@@ -616,6 +635,10 @@ class TileOp(Op):
         node = self.views[site]
         view = node.as_contraction()
         if view is None or not node.tiles_whole():
+            return False
+        # A tile folds a rectangle of every position. The chunk tier alone reads a range, as the chunks it walks
+        # and the mask of the block a bound cuts; any other contraction that walks one is no tile site.
+        if node.range is not None and not node.chunked():
             return False
         mn = self.grid_sched._mn_for(node)
         if (
@@ -811,6 +834,21 @@ class TileOp(Op):
             *(a.extent for a in self.axes),
         )
         return frozenset(name for dim in dims for name in dim.expression.free_vars())
+
+    def scheduled(self) -> TileOp:
+        """This kernel as the classic schedule addresses it and the kernel lowering takes it (``Fold.scheduled``):
+        a block of a partition walks from zero, and every term keeps its range, stated of its axis as a tier walks
+        it. A tier reads the range itself: a scalar walk and a cooperative reduce as their loop's bounds, the chunk
+        tier as the chunks it walks and the mask of the block a bound cuts. A tile, which folds a rectangle of every
+        position, is offered on no other term that walks one (:meth:`contracts`). A softmax carrier whose score a
+        program masked by the coordinates walks the range that mask states, the mask gone from its lift
+        (``schedule.mask.keys_ranged``), so a tier reads one thing whichever way the program said which keys a row
+        attends. The form does not change which kernel this is (``wire.kernel_tile``)."""
+        if self.op is None:
+            return self
+        op, axes = self.op.scheduled(self.axes)
+        op = keys_ranged(op, axes)
+        return self if op is self.op else replace(self, op=op, axes=axes)
 
     def axis_of(self, name: str) -> Axis:
         """The axis table's entry for ``name`` — a reduce axis's extent and window, a free axis's extent."""

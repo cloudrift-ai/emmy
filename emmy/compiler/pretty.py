@@ -122,7 +122,8 @@ def fmt_expression(node, graph, names: dict[str, str], syms: dict[str, Var]) -> 
         # keeps the name off the elementwise `maximum(a, b)`.
         name = _REDUCE_SPELLING.get(op.name, op.name)
         name = name if isinstance(op, ReduceOp) else f"scan_{name}"
-        return f"{name}({', '.join(args)}, axis={op.axis})"
+        walked = "" if getattr(op, "range", None) is None else f", range={op.range[0]}..{op.range[1]}"
+        return f"{name}({', '.join(args)}, axis={op.axis}{walked})"
     if isinstance(op, TransposeOp) and len(op.axes) != 2:
         # Two axes are torch's `transpose`; a full permutation is its `permute`.
         return f"permute({args[0]}, axes={op.axes})"

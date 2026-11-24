@@ -13,31 +13,35 @@ from itertools import chain, count
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var, apply_binop
 from emmy.compiler.ir.kernel.ir import Tile
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Body, Carry, Cond, Init, Loop, Statement, StridedLoop
+from emmy.compiler.ir.stmt import Accum, Body, Carry, Cond, Init, Loop, Statement
 
 
 def trip_counts(loop: Statement, ctx: SimplifyCtx) -> tuple[int, int] | None:
     """The trips of ``loop`` that every thread runs and the most any thread runs, or ``None`` when no static number
     bounds them.
 
-    A ``Loop`` over a static extent runs that many on every thread. A ``StridedLoop`` over a static extent with a
-    static step and no early stop runs the trips its start leaves: the two counts are those of its largest and its
-    smallest start under the ranges of ``ctx``. They are equal for a start of zero and for a lane index under a step
-    the extent divides, and differ where the lanes share a row their count does not divide.
+    A loop over a static extent with a static step and no early stop runs the trips its start leaves: the two
+    counts are those of its largest and its smallest start under the ranges of ``ctx``. They are equal for a start of
+    zero and for a lane index under a step the extent divides, and differ where the lanes share a row their count
+    does not divide.
     """
     if any(isinstance(stmt, Carry) for stmt in loop.body) or not loop.axis.extent.is_static:
         return None
     extent = loop.axis.extent.as_static()
-    if isinstance(loop, Loop):
-        return extent, extent
-    step = loop.step.value if isinstance(loop.step, Literal) else None
-    if loop.end is not None or not isinstance(step, int) or step < 1:
+    start, step = _constant_walk(loop)
+    at = start.range(ctx) if step is not None else None
+    if at is None:
         return None
-    start = loop.start.range(ctx)
-    if start is None:
-        return None
-    every, most = (max(0, -(-(extent - at) // step)) for at in (start.hi, start.lo))
+    every, most = (max(0, -(-(extent - first) // step)) for first in (at.hi, at.lo))
     return every, most
+
+
+def _constant_walk(loop: Statement) -> tuple[Expression, int | None]:
+    """``loop``'s start and its step, the step ``None`` unless it is a positive constant and the loop stops where
+    its axis does."""
+    start, end, step = loop.walk()
+    constant = isinstance(step, Literal) and isinstance(step.value, int) and step.value >= 1 and end == loop.axis.extent_expression()
+    return start, step.value if constant else None
 
 
 def runtime_bound(loop: Statement) -> bool:
@@ -45,10 +49,7 @@ def runtime_bound(loop: Statement) -> bool:
     and nothing carried. Such a loop takes its copies with a remainder (:func:`_runtime`)."""
     if any(isinstance(stmt, Carry) for stmt in loop.body) or loop.axis.extent.is_static:
         return False
-    if isinstance(loop, Loop):
-        return True
-    step = loop.step.value if isinstance(loop.step, Literal) else None
-    return loop.end is None and isinstance(step, int) and step >= 1
+    return _constant_walk(loop)[1] is not None
 
 
 #: What ``copies`` reads and answers: a loop and its :func:`trip_counts` (``None`` for a :func:`runtime_bound` loop),
@@ -68,14 +69,14 @@ def _walk(body: Body, copies: Copies, ctx: SimplifyCtx, outer: frozenset[str]) -
     outer = outer | {name for stmt in body for name in stmt.defines()}
     out: list[Statement] = []
     for stmt in body:
-        looping = isinstance(stmt, (Loop, StridedLoop))
+        looping = isinstance(stmt, Loop)
         inner = ctx
         if isinstance(stmt, Tile):
             for axis in stmt.axes:
                 if axis.extent.is_static:
                     inner = inner.extend(axis.name, Interval(0, axis.extent.as_static() - 1))
         elif looping and stmt.axis.extent.is_static:
-            start = stmt.start.range(ctx) if isinstance(stmt, StridedLoop) else Interval(0, 0)
+            start = stmt.walk()[0].range(ctx)
             if start is not None:
                 inner = inner.extend(stmt.axis.name, Interval(start.lo, stmt.axis.extent.as_static() - 1))
         nested = stmt.nested()
@@ -135,26 +136,26 @@ def _unroll(loop: Statement, trips: int, ctx: SimplifyCtx, outer: Collection[str
     own = _own(loop, outer) - _carried(loop) - {seed.name for seed in out}
     tags = chain(("",), (f"_{n}" for n in count(1)))
     tag = next(t for t in tags if not any(f"{name}__u{trip}{t}" in taken for name in own for trip in range(trips)))
+    start, step = _constant_walk(loop)
+    whole = loop.range is None and loop.step is None  # every thread runs every trip, so no copy needs a guard
     for trip in range(trips):
-        at = Literal(trip, "int")
-        if isinstance(loop, StridedLoop):
-            at = BinaryExpression("+", loop.start, Literal(trip * loop.step.value, "int"))
+        at = Literal(trip, "int") if whole else BinaryExpression("+", start, Literal(trip * step, "int"))
         copy = _copy(loop, at, {name: f"{name}__u{trip}{tag}" for name in own})
-        if isinstance(loop, StridedLoop):
+        if not whole:
             copy = Body((Cond(BinaryExpression("<", at, loop.axis.extent.expression), copy),))
         out.extend(_decided(copy, ctx))
     return out
 
 
-def _stepped(loop: Statement, copies: int, outer: Collection[str]) -> StridedLoop:
+def _stepped(loop: Statement, copies: int, outer: Collection[str]) -> Loop:
     """``loop`` stepping ``copies`` trips at a time: its body holds that many copies of the original, the ``n``-th at
     the axis ``n`` steps on. Every thread runs a number of trips ``copies`` divides, so no copy needs a guard. It says
     it is ``unrolled``, so whatever generates its code keeps it a loop."""
-    start, step = (loop.start, loop.step.value) if isinstance(loop, StridedLoop) else (Literal(0, "int"), 1)
+    start, step = _constant_walk(loop)
     own = _own(loop, outer) - _carried(loop)
     axis = Var(loop.axis.name)
     body = [stmt for n in range(copies) for stmt in _copy(loop, axis + Literal(n * step, "int"), {name: f"{name}__u{n}" for name in own})]
-    return StridedLoop(axis=loop.axis, start=start, step=Literal(step * copies, "int"), body=Body(body), seed=loop.seed, unrolled=True)
+    return Loop.strided(axis=loop.axis, start=start, step=Literal(step * copies, "int"), body=Body(body), seed=loop.seed, unrolled=True)
 
 
 def _runtime(loop: Statement, copies: int, outer: Collection[str]) -> list[Statement]:
@@ -171,7 +172,7 @@ def _runtime(loop: Statement, copies: int, outer: Collection[str]) -> list[State
     Each copy defines names of its own (``<name>__u<n>``, ``n`` counting every copy). Both loops say they are
     ``unrolled``, and the PTX compiler marks both ``nounroll``.
     """
-    start, step = (loop.start, loop.step.value) if isinstance(loop, StridedLoop) else (Literal(0, "int"), 1)
+    start, step = _constant_walk(loop)
     bound = loop.axis.extent.expression
     own = _own(loop, outer) - _carried(loop)
     serial = count()
@@ -195,7 +196,7 @@ def _runtime(loop: Statement, copies: int, outer: Collection[str]) -> list[State
         return BinaryExpression(op, left, right)
 
     axis = Var(loop.axis.name)
-    stepping = StridedLoop(
+    stepping = Loop.strided(
         axis=loop.axis,
         start=start,
         step=lit(step * copies),
@@ -219,7 +220,7 @@ def _runtime(loop: Statement, copies: int, outer: Collection[str]) -> list[State
         left.append(Cond(binary(">=", binary("%", trips, lit(2 * size)), lit(size)), Body(body)))
     if looped:
         done = binary("-", trips, binary("%", trips, lit(4)))
-        left.append(StridedLoop(axis=loop.axis, start=at(done), step=lit(step), body=loop.body, seed=False, unrolled=True))
+        left.append(Loop.strided(axis=loop.axis, start=at(done), step=lit(step), body=loop.body, seed=False, unrolled=True))
     return [stepping, Cond(binary("<", start, bound), Body(left))]
 
 

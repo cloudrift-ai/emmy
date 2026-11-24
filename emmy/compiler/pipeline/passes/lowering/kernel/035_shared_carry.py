@@ -23,7 +23,6 @@ from emmy.compiler.ir.stmt import (
     Loop,
     Pre,
     Select,
-    StridedLoop,
     Write,
     dtype_promote,
     free_names,
@@ -126,7 +125,7 @@ def _resident(op, program, retained=frozenset()):
                     end = TernaryExpression(condition.right.lt(end), condition.right, end)
                 if condition.op == "<=" and condition.right == Var(axis.name) and condition.left.free_vars() <= {*batch, loop.axis.name}:
                     start = TernaryExpression(start.lt(condition.left), condition.left, start)
-        step = Body((StridedLoop(axis, start, Literal(1, "int"), step, end=end),))
+        step = Body((Loop.strided(axis, start, Literal(1, "int"), step, end=end),))
     step = Body((Loop(loop.axis, (*copying, *step, Sync())),))
     suffix = _cells(Var("_carry_cell"), shape)
     initial = (*(Var(name) for name in batch), *suffix)
@@ -137,7 +136,7 @@ def _resident(op, program, retained=frozenset()):
     # A copy that follows the changed cells finds the unchanged ones in both buffers.
     seeded = tuple(Write(shared, (Literal(slot, "int"), *suffix), ("_carry_seed",), value_dtype=seed.dtype) for slot in range(1 + lagging))
     threads = Literal(tile.block_threads, "int")
-    initialize = StridedLoop(Axis("_carry_cell", prod(shape)), Builtin("thread_idx.x"), threads, (seed, *seeded))
+    initialize = Loop.strided(Axis("_carry_cell", prod(shape)), Builtin("thread_idx.x"), threads, (seed, *seeded))
     closing = ()
     if final:
         cells = _cells(Var("_carry_last"), shape)
@@ -146,7 +145,7 @@ def _resident(op, program, retained=frozenset()):
         stores = tuple(
             Write(s.output, seed_index(coordinates, op.outputs[s.output].shape), ("_carry_end",), value_dtype=tensor.dtype) for s in final
         )
-        closing = (StridedLoop(Axis("_carry_last", prod(shape)), Builtin("thread_idx.x"), threads, (ended, *stores)),)
+        closing = (Loop.strided(Axis("_carry_last", prod(shape)), Builtin("thread_idx.x"), threads, (ended, *stores)),)
     # One padding column per row keeps column-strided reads of the state off one bank.
     body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), tensor.dtype), initialize, Sync(), *step, *closing)
     return replace(op, serial=(), body=Body((tile.replace(axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
@@ -335,7 +334,7 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
         zero, extent, width = Literal(0, "int"), Literal(shape[0], "int"), Literal(prod(shape[1:]), "int")
         start = start + TernaryExpression(zero.lt(low), low, zero) * width
         end = TernaryExpression(high.lt(extent), high, extent) * width
-    copying = StridedLoop(Axis("_carry_copy", prod(shape)), start, Literal(threads, "int"), (load, *stores), end=end)
+    copying = Loop.strided(Axis("_carry_copy", prod(shape)), start, Literal(threads, "int"), (load, *stores), end=end)
     return (copying, Sync()), changed, predicate, lagging
 
 

@@ -191,6 +191,11 @@ impl Fold {
             if mine.extent != theirs.extent || mine.window != theirs.window {
                 continue;
             }
+            // The carrier walks one axis once: two folds fuse where they walk the same part of it. A range reads
+            // the coordinates around its fold, never the axis, so the two spell it alike.
+            if self.range() != pivot.range() {
+                continue;
+            }
             if let Some(fused) = self.twisted(pivot, recipe, scope)? {
                 return Ok(Some(fused));
             }
@@ -534,6 +539,7 @@ impl Fold {
                     recipe: recipe.clone(),
                     channels: order.iter().map(|slot| channels[*slot]).collect(),
                 }),
+                range: pivot.range().cloned(),
                 ..Parts::default()
             })
             .map(Some);

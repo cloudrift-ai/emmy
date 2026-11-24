@@ -294,34 +294,26 @@ macro_rules! with_statement_types {
                 /// The loop carries NO algebra — the fold's ⊕ lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node's
                 /// stored `combine`, and the dissolved fold `Accum`\ s in the body are the loop-level spelling; a loop folds iff
                 /// its body carries one.
+                ///
+                /// `range` is where the axis walks when that is not `0..extent`: a start and an exclusive end
+                /// (`axis::Range`), each over the coordinates around the loop, the symbolic dims and the values in
+                /// scope ahead of the loop. The axis then takes the values `start..end`, which lie inside `0..extent`:
+                /// the extent stays the bound every index is analysed under, and the range says how many trips the
+                /// loop takes. A reduce loop with a range folds the values of that range alone, where a select of the
+                /// fold's neutral element would mask the rest.
+                ///
+                /// `step` is how far the axis moves each trip when that is not one: `for (axis = start; axis < end;
+                /// axis += step)`. A kernel loop takes one where the threads of a block stride through an axis
+                /// (`start` a thread's lane, `step` the lanes) or a trip covers a block of positions; a Loop IR body
+                /// states none.
                 shared Loop {} {
                     axis: AxisRef [AXIS],
                     body: Body [BODY],
                     unroll: bool [] = false,
                     seed: bool [] = true,
                     unrolled: bool [] = false,
-                }
-                /// Strided iteration: `for (axis = start; axis < axis.extent; axis += step)`.
-                ///
-                /// Cooperative variant of `Loop` — used at Tile IR to express "threads of the CUDA block stride through this
-                /// axis" (typical `start = Var('t'), step = BLOCK_SIZE`). The body uses the original axis Var directly; the
-                /// strided iteration shape is encoded by the loop construct itself rather than via affine indexing in the body.
-                ///
-                /// `end` overrides the `<` bound with an arbitrary `Expression` over in-scope names (default: the axis extent) —
-                /// a data-independent early stop such as the causal flash stream's triangular kv bound. The axis extent stays the
-                /// analysis-visible range; `end` must never exceed it.
-                ///
-                /// Reduction detection mirrors `Loop`: a `StridedLoop` is a reduce-loop iff its body contains an `Accum`.
-                /// `unroll` and `unrolled` are `Loop`'s.
-                shared StridedLoop {} {
-                    axis: AxisRef [AXIS],
-                    start: Expression [EXPRESSION] : Index,
-                    step: Expression [EXPRESSION] : Index,
-                    body: Body [BODY],
-                    unroll: bool [] = false,
-                    end: Option<Expression> [EXPRESSION | READS] : Index = None,
-                    seed: bool [] = true,
-                    unrolled: bool [] = false,
+                    range: Option<(Expression, Expression)> [EXPRESSION | READS] : Index = None,
+                    step: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// Conditional block — `if (cond) { body } [else { else_body }]`.
                 ///
@@ -1440,7 +1432,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "eed8f32e87a0b1055192dd4e04c657b0bd527f33dd8d6808dac1840a43b78c6e",
+            "5ce539ac0a39332cca2089c52ca6a78dbc1a74423cdd5ca0b3fcdcff241fb31d",
             "{listing}"
         );
     }

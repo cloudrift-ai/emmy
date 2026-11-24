@@ -31,7 +31,6 @@ Loop = _ir.Loop
 Pre = _ir.Pre
 Select = _ir.Select
 SelectBranch = _ir.SelectBranch
-StridedLoop = _ir.StridedLoop
 Subroutine = _ir.Subroutine
 Write = _ir.Write
 ZeroPrologue = _ir.ZeroPrologue
@@ -49,7 +48,6 @@ simplify_body = _ir.simplify_body
 prepare_body = _ir.prepare_body
 free_names = _ir.free_names
 exposed_defines = _ir.exposed_defines
-mask_select_predicate = _ir.mask_select_predicate
 ordering_constraints = _ir.ordering_constraints
 dtype_promote = _ir.dtype_promote
 
@@ -77,7 +75,6 @@ __all__ = [
     "Select",
     "SelectBranch",
     "Statement",
-    "StridedLoop",
     "Subroutine",
     "Write",
     "ZeroPrologue",
@@ -87,7 +84,6 @@ __all__ = [
     "fields_of",
     "one_operation_per_definition",
     "free_names",
-    "mask_select_predicate",
     "normalize_body",
     "normalize_lambda_body",
     "optimize_body",

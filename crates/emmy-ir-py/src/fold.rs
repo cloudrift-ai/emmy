@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use emmy_ir::Name;
+use emmy_ir::expr::Expression;
 use emmy_pure::Lambda;
 use emmy_pure::fold::{Data, Fold, Parts, Seed};
 use emmy_pure::fuse::Scope;
@@ -28,7 +29,7 @@ use crate::convert::{
     ELEMENTWISE, Imported, IntoPyErr, Slots, axis_from_py, axis_to_py, cached, expression_from_py,
     name_from_py, op_to_py, slots, statement_from_py, str_tuple,
 };
-use crate::expression::{ctx_from_py, renames_from_py};
+use crate::expression::{PyExpression, ctx_from_py, renames_from_py};
 use crate::lambda::PyLambda;
 use crate::statement::sigma_from_py;
 
@@ -62,6 +63,18 @@ fn optional_lambda(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Lambda>>
         Some(value) if value.is_none() => Ok(None),
         Some(value) => PyLambda::from_py(value).map(Some),
     }
+}
+
+/// A term's range as Python gives it: `None`, or a pair of a start and an exclusive end.
+fn optional_range(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<(Expression, Expression)>> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
+        return Ok(None);
+    };
+    let (start, end): (Bound<'_, PyAny>, Bound<'_, PyAny>) = value.extract()?;
+    Ok(Some((
+        crate::convert::expression_from_py(&start)?,
+        crate::convert::expression_from_py(&end)?,
+    )))
 }
 
 fn seed_from_py(value: &Bound<'_, PyAny>) -> PyResult<Seed> {
@@ -769,6 +782,7 @@ impl PyFold {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn parts(
         operands: Option<&Bound<'_, PyAny>>,
         lift: &Bound<'_, PyAny>,
@@ -777,6 +791,7 @@ impl PyFold {
         base: Option<&Bound<'_, PyAny>>,
         twist: Option<&Bound<'_, PyAny>>,
         observe: Option<&Bound<'_, PyAny>>,
+        range: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Parts> {
         Ok(Parts {
             operands: PyFold::terms(operands)?,
@@ -786,6 +801,7 @@ impl PyFold {
             base: optional_lambda(base)?,
             twist: optional_twist(twist)?,
             observe: optional_lambda(observe)?,
+            range: optional_range(range)?,
         })
     }
 
@@ -808,7 +824,7 @@ impl PyFold {
 #[pymethods]
 impl PyFold {
     #[new]
-    #[pyo3(signature = (operands = None, init = None, *, lift, cells = None, base = None, twist = None, observe = None))]
+    #[pyo3(signature = (operands = None, init = None, *, lift, cells = None, base = None, twist = None, observe = None, range = None))]
     #[allow(clippy::too_many_arguments)]
     fn py_new<'py>(
         py: Python<'py>,
@@ -819,8 +835,9 @@ impl PyFold {
         base: Option<&Bound<'py, PyAny>>,
         twist: Option<&Bound<'py, PyAny>>,
         observe: Option<&Bound<'py, PyAny>>,
+        range: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Py<PyFold>> {
-        let parts = PyFold::parts(operands, lift, init, cells, base, twist, observe)?;
+        let parts = PyFold::parts(operands, lift, init, cells, base, twist, observe, range)?;
         Ok(PyFold::built(py, &Fold::new(parts).py()?)?.unbind())
     }
 
@@ -836,6 +853,7 @@ impl PyFold {
         base: &Bound<'py, PyAny>,
         twist: &Bound<'py, PyAny>,
         observe: &Bound<'py, PyAny>,
+        range: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyFold>> {
         let parts = PyFold::parts(
             Some(operands),
@@ -845,6 +863,7 @@ impl PyFold {
             Some(base),
             Some(twist),
             Some(observe),
+            Some(range),
         )?;
         PyFold::built(py, &Fold::formed(parts))
     }
@@ -915,6 +934,39 @@ impl PyFold {
             .observe()
             .cloned()
             .map(|l| PyLambda::wrap(py, l))
+            .transpose()
+    }
+
+    /// Where the axis this term binds walks, when the term states it: a start and an exclusive end. `None` is
+    /// the whole axis.
+    #[getter]
+    fn range<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        self.fold
+            .range()
+            .map(|(start, end)| {
+                PyTuple::new(
+                    py,
+                    [PyExpression::wrap(py, start)?, PyExpression::wrap(py, end)?],
+                )
+            })
+            .transpose()
+    }
+
+    /// The range applied to the operands, as `applied` is the lift: a value of an operand spelled as the operand
+    /// result it is (`Fold::applied_range`). What the lowering writes on the loop and a tier reads.
+    #[getter]
+    fn applied_range<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        self.fold
+            .applied_range()
+            .map(|(start, end)| {
+                PyTuple::new(
+                    py,
+                    [
+                        PyExpression::wrap(py, &start)?,
+                        PyExpression::wrap(py, &end)?,
+                    ],
+                )
+            })
             .transpose()
     }
 
@@ -1347,6 +1399,38 @@ impl PyFold {
         PyFold::wrap(py, &self.fold.rewrite(&rewrite).py()?)
     }
 
+    /// This tree as the schedule addresses it and a kernel tier lowers it, and the axis table it then reads: every
+    /// term keeps its range, and a block of a partition walks from zero (`Fold::scheduled`). `axes` is the kernel's
+    /// axis table.
+    fn scheduled<'py>(
+        &self,
+        py: Python<'py>,
+        axes: &Bound<'py, PyAny>,
+    ) -> PyResult<(Bound<'py, PyFold>, Bound<'py, PyTuple>)> {
+        let axes = axes_from_py(Some(axes))?;
+        let (scheduled, table) = self.fold.scheduled(&axes).py()?;
+        let table = table
+            .iter()
+            .map(|axis| crate::convert::axis_to_py(py, axis))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok((PyFold::wrap(py, &scheduled)?, PyTuple::new(py, table)?))
+    }
+
+    /// The start a block of a partition leaves from, for a term that walks such a block; `None` for any other
+    /// term (`Fold::block_start`).
+    fn block_start<'py>(
+        &self,
+        py: Python<'py>,
+        axes: &Bound<'py, PyAny>,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let axes = axes_from_py(Some(axes))?;
+        self.fold
+            .block_start(&axes)
+            .py()?
+            .map(|start| PyExpression::wrap(py, &start))
+            .transpose()
+    }
+
     /// This term with some of its parts replaced, formed and checked like any other.
     #[pyo3(signature = (**changes))]
     fn replace<'py>(
@@ -1365,6 +1449,7 @@ impl PyFold {
                 "base" => parts.base = optional_lambda(value)?,
                 "twist" => parts.twist = optional_twist(value)?,
                 "observe" => parts.observe = optional_lambda(value)?,
+                "range" => parts.range = optional_range(value)?,
                 other => return Err(PyTypeError::new_err(format!("Fold has no field {other:?}"))),
             }
         }
@@ -1386,8 +1471,12 @@ impl PyFold {
 
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
         let part = |name: &str| -> PyResult<String> { Ok(slf.getattr(name)?.repr()?.to_string()) };
+        let range = match slf.get().fold.range() {
+            None => String::new(),
+            Some(_) => format!(", range={}", part("range")?),
+        };
         Ok(format!(
-            "Fold(operands={}, lift={}, init={}, cells={}, base={}, twist={}, observe={})",
+            "Fold(operands={}, lift={}, init={}, cells={}, base={}, twist={}, observe={}{range})",
             part("operands")?,
             part("lift")?,
             part("init")?,
@@ -1403,7 +1492,7 @@ impl PyFold {
         slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
         let parts = [
-            "operands", "lift", "init", "cells", "base", "twist", "observe",
+            "operands", "lift", "init", "cells", "base", "twist", "observe", "range",
         ]
         .iter()
         .map(|name| slf.getattr(*name))
