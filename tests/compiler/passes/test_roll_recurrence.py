@@ -1,4 +1,4 @@
-"""An unrolled recurrence rolls into one kernel that carries its state, before fusion inlines it.
+"""An unrolled recurrence rolls into one kernel that carries its state, where fusion would have inlined it.
 
 A chunked delta rule traces as a Python loop, so fused whole, chunk ``j``'s consumer re-derives every
 earlier state. The fusion stage reads the chain of states instead: one step between two of them, the
@@ -252,6 +252,31 @@ def test_steps_that_are_not_one_body_at_a_stride_do_not_roll() -> None:
     graph, _, _ = graph_from_code(code)
 
     assert not _carriers(Pipeline.build(LOOP_PASSES).run(graph))
+
+
+def _read_at(offset: int, scale: str = "g") -> str:
+    return f"for a0 in 0..4:\n  in0 = load x[a0 + {offset}]\n  in1 = load {scale}[0]\n  v0 = in0 * in1\n  out[a0] = v0"
+
+
+def test_the_proof_gives_how_far_each_integer_moves_and_names_what_differs() -> None:
+    """Programs are one step where every integer of the first moves as far again in each later one. The proof gives
+    the first program at any step, and says which integer or which buffer keeps a program from being one."""
+    from importlib import import_module
+
+    from emmy.compiler.ir.stmt import parse_body
+    from emmy.compiler.pipeline import RuleSkipped
+
+    roll = import_module("emmy.compiler.pipeline.passes.loop.fusion._recurrence")
+    steps = [LoopOp(body=parse_body(_read_at(4 * index))).body for index in range(3)]
+    proved = roll.prove(*steps)
+    assert proved.moving == [(0, 4)] and proved.steps == 3
+    assert LoopOp(body=proved.at(2)).body.structural_key(structural=False) == steps[2].structural_key(structural=False)
+    assert "4 * `step`" in str(LoopOp(body=proved.at("step", 3)).body)
+    with pytest.raises(roll.Unproven, match="step 2 .* an integer of step 2 is 9, where 0 moving 4 a step gives 8"):
+        roll.prove(steps[0], steps[1], LoopOp(body=parse_body(_read_at(9))).body)
+    with pytest.raises(RuleSkipped, match=r"step 1 reads \['h'\] where step 0 reads \['g'\]") as other:
+        roll.prove(steps[0], LoopOp(body=parse_body(_read_at(4, "h"))).body)
+    assert not isinstance(other.value, roll.Unproven), "other buffers are other computations, not a step unproved"
 
 
 _GATED_DELTA_RULE = """

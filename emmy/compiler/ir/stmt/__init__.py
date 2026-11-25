@@ -37,6 +37,7 @@ ZeroPrologue = _ir.ZeroPrologue
 parse_body = _ir.parse_body
 pretty_body = _ir.pretty_body
 normalize_body = _ir.normalize_body
+prove_steps = _ir.prove_steps
 optimize_body = _ir.optimize_body
 check_types = _ir.check_types
 check_input = _ir.check_input
@@ -85,6 +86,7 @@ __all__ = [
     "normalize_body",
     "normalize_lambda_body",
     "optimize_body",
+    "prove_steps",
     "check_types",
     "check_input",
     "reduce_strength",

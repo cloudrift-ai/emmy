@@ -10,7 +10,7 @@ use crate::expr::{ExprClass, Expression};
 use crate::memo::{BODY_MEMO_WEIGHT, Memo};
 use crate::normalize::canonical::affine_terms;
 use crate::normalize::normalize_body;
-use crate::numbering::{Chains, digest, hex};
+use crate::numbering::{Chains, digest, digest_apart, hex};
 use crate::statement::{Accum, Assign, Statement};
 use crate::{Name, Result};
 
@@ -139,6 +139,20 @@ pub fn canonicalize_identity(
             key: hex(tree),
             arguments,
         })
+    })
+}
+
+/// The key `body` shares with the same computation at other offsets, bounds and static extents: its exact identity
+/// with the integer of every affine coordinate expression and every static loop extent left out (`digest_apart`).
+/// Bodies with one such key are candidates for the copies of one step, which `numbering::prove` decides. It is no
+/// kernel's identity: nothing is keyed by it and nothing stores it.
+pub fn identity_apart(body: &Body) -> Result<String> {
+    static MEMO: OnceLock<Memo<MemoKey, String>> = OnceLock::new();
+    let memo = MEMO
+        .get_or_init(|| Memo::weighted(BODY_MEMO_WEIGHT, |key, _| key.0.statement_count() as u64));
+    let stmts = normalize_body(body)?;
+    memo.get_or_try_insert(&MemoKey(stmts.clone()), || {
+        Ok(hex(digest_apart(&stmts, None, Chains::Flat).0))
     })
 }
 
@@ -1268,5 +1282,79 @@ mod tests {
             keys.insert(canonical);
         }
         assert_eq!(keys.len(), 1);
+    }
+
+    /// One row of a matrix summed from an offset up to a bound, stored at that row: a step an unrolled loop leaves
+    /// once per row.
+    fn row(index: usize, offset: usize, extent: usize, source: &str, output: &str) -> Body {
+        let read = if offset == 0 {
+            "a1".to_string()
+        } else {
+            format!("a1 + {offset}")
+        };
+        body(&format!(
+            "
+      for a0 in 0..4:
+        for a1 in 0..{extent}:
+          v = load {source}[a0, {read}]
+          acc <- add(acc, v) over a1
+        z = load s[a0]
+        w = select:
+          acc when a0 <= {index}
+          z when true
+        {output}[{index}, a0] = w
+            "
+        ))
+    }
+
+    #[test]
+    fn the_identity_with_its_integers_apart_is_shared_by_a_computation_at_other_offsets_bounds_and_extents()
+     {
+        // The first copy reads at no offset, as the normal form spells it, and every copy has buffers of its own.
+        let copies = [
+            row(0, 0, 2, "x", "p"),
+            row(1, 8, 3, "y", "q"),
+            row(2, 16, 4, "x", "r"),
+        ];
+        let apart: HashSet<String> = copies
+            .iter()
+            .map(|copy| identity_apart(copy).unwrap())
+            .collect();
+        let exact: HashSet<String> = copies
+            .iter()
+            .map(|copy| identity_key(copy, false))
+            .collect();
+        assert_eq!((apart.len(), exact.len()), (1, 3));
+        // Another function of the same loops is another computation, whatever its integers.
+        let other = body(
+            "
+      for a0 in 0..4:
+        for a1 in 0..2:
+          v = load x[a0, a1]
+          acc <- mul(acc, v) over a1
+        z = load s[a0]
+        w = select:
+          acc when a0 <= 0
+          z when true
+        p[0, a0] = w
+            ",
+        );
+        assert!(!apart.contains(&identity_apart(&other).unwrap()));
+        // So is one that reads a second buffer where the copies read one twice: buffers are told apart by use.
+        let twice = |second: &str| {
+            body(&format!(
+                "
+      for a0 in 0..4:
+        u = load x[a0 + 1]
+        v = load {second}[a0 + 2]
+        w = u * v
+        out[a0] = w
+                "
+            ))
+        };
+        assert_ne!(
+            identity_apart(&twice("x")).unwrap(),
+            identity_apart(&twice("y")).unwrap()
+        );
     }
 }
