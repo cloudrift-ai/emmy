@@ -1733,12 +1733,30 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     down-and-sum from 16.4 to 14.3 us at one row and from 63.5 to 51.2 at eight; no kernel set recorded here uses that
     kernel and the change moves code of other models' goldens, so it was left out.
 - **A tune that measures a kernel set's pieces before the set is compared (2026-11-24).** The item the 2026-11-21
-  round left for the search, main `10494ea1c`. In progress: the design and the gate are in the round's pull request.
+  round left for the search, main `10494ea1c`. A change to the tune only: a compile picks as before, so no golden,
+  corpus case or prior result moves.
   - Reproduced on the card, cold, from a tune DB with no row of the program: the compiler's own kernel set for post8
     is 15 kernels at 542.7 us (139.3 us pinned by hand, also 15 kernels), and for the one-row slot program with its
-    sum inside 2 kernels at 61.4 us (33.8 us pinned by hand, 3 kernels). `--tune` refuses both programs, because it
-    tunes a program of one kernel. The one-kernel tune itself is not the gap: on three of post8's hand-pinned pieces
-    it reached the pinned time within its first 8 tries, at 0.7 s a try.
+    sum inside 2 kernels at 61.4 us (33.8 us pinned by hand, 3 kernels). `--tune` refused both programs, because it
+    tuned a program of one kernel. The one-kernel tune itself was not the gap: on three of post8's hand-pinned pieces
+    it reached the pinned time within its first 8 tries, at about a second a cold try.
+  - What changed: `emmy run --bench --tune N` on a program of several kernels now runs in rounds. It tunes each
+    kernel of the kernel set the compile takes, alone, N rows; then, for each kernel-set fork that compile met, the
+    kernels each untaken arm leaves (the placement prior's best eight arms a fork, ten rows a kernel), the arm taken
+    on the fork's kernel alone; and it stores every decision whose pieces hold rows as a routing row. The next compile
+    picks those forks from measured arms. A round follows on the new kernel set while it changes, four at most.
+  - Gate, stated before building, from an empty tune DB with `--tune 20`: post8 at most 146 us, the slot program at
+    most 36 us, each tune within an hour and within ten times the tune of the first kernel set's kernels alone.
+    - Slot program: **met on time, missed on cost.** Three runs ended at 34.8, 35.8 and 32.8 us (the last in the
+      compiler's own 2 kernels, both tuned; the others in the hand-pinned 3). 16 minutes, 17 times the first set's
+      own tune.
+    - Post8: **missed, closely.** Three runs ended at 150.0, 151.0 and 153.1 us in 17 kernels (one of them benched
+      whole: 148.5 us), from 542.7. 32 minutes, 11.5 times the first set's own tune (43 minutes before arm kernels got
+      ten rows instead of twenty).
+  - Why post8 stops two kernels short. The hand-pinned set merges pieces across the root's first cut. The tune
+    explores arms one decision off the compiled kernel set, and prices another root arm by the kernel set the priors
+    give below it, with none of that set's own arms explored; such an arm loses to a set the rounds already refined.
+    A search that crosses it has to refine an arm before comparing it, which this round did not build.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
