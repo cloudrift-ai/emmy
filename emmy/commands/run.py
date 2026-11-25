@@ -7,6 +7,7 @@ kernel.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import logging
@@ -1683,11 +1684,13 @@ async def _tune_kernel_sets(backend, args, program, ctx, db, found) -> None:
     """A tune of a program of several kernels (``search/autotune``): in rounds, tune each kernel of the kernel set the
     greedy compile takes (``found``, of ``program()``) alone, then the kernels of each arm a fork of that compile
     offered and did not take, the placement prior's best ``ARMS`` of them a fork, taken on the fork's kernel alone;
-    every decision whose pieces now hold rows is stored as a routing row. The next compile then picks each of those
+    every decision whose pieces now hold rows is stored as a routing row. A kernel of the compiled set gets
+    ``--tune N`` rows; a kernel only an untaken arm leaves gets the prior's ``START`` best, enough to price the arm,
+    and the rest once a compile takes it. The next compile then picks each of those
     forks from measured arms, and a round on its kernel set follows while that set changes, ``ROUNDS`` at most. A
     kernel alone is a program of one kernel, tuned as any: its rows are benched, checked and recorded by a bench
     session of its own."""
-    from emmy.compiler.pipeline.search.autotune import ARMS, ROUNDS, kernel_set  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.autotune import ARMS, ROUNDS, START, kernel_set  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import knobs_json  # noqa: PLC0415
     from emmy.compiler.pipeline.search.inventory import record_measured_routing  # noqa: PLC0415
     from emmy.compiler.wire import kernel_bindings, kernel_identity, kernel_name, kernel_tile  # noqa: PLC0415
@@ -1699,21 +1702,22 @@ async def _tune_kernel_sets(backend, args, program, ctx, db, found) -> None:
         times = [db.best_per_op_time(ctx, kernel, bindings=bindings) for kernel, bindings in map(key_of, kernels)]
         return None if None in times else sum(times)
 
-    tuned: set = set()
+    tuned: dict = {}
     explored: set = set()
 
-    async def measure(kernels, decisions) -> None:
+    async def measure(kernels, decisions, rows: int) -> None:
+        tune = argparse.Namespace(**{**vars(args), "tune": rows})
         for op, alone in kernels:
             kernel, bindings = key_of(op)
-            if (kernel, knobs_json(bindings)) in tuned:
+            if tuned.get((kernel, knobs_json(bindings)), 0) >= rows:
                 continue
-            tuned.add((kernel, knobs_json(bindings)))
-            if len(db.measured(ctx, kernel, bindings=bindings)) >= args.tune:
+            tuned[kernel, knobs_json(bindings)] = rows
+            if len(db.measured(ctx, kernel, bindings=bindings)) >= rows:
                 continue  # an earlier tune's rows
             try:
                 compiled = backend.compile(alone.copy())
                 session = await _bench_session(
-                    args,
+                    tune,
                     backend,
                     compiled,
                     torch_spec=("frontend_graph", None),
@@ -1726,7 +1730,7 @@ async def _tune_kernel_sets(backend, args, program, ctx, db, found) -> None:
             except Exception as exc:  # noqa: BLE001 — a kernel that does not lower leaves its arm without a price
                 logger.warning("[tune] %s: not measured (%s)", kernel_name(op), exc)
                 continue
-            _record_bench_evidence(args, session.rows, session.isolated)
+            _record_bench_evidence(tune, session.rows, session.isolated)
         measured = {kernel for kernel, bindings in (key_of(op) for op, _ in kernels) if db.measured(ctx, kernel, bindings=bindings)}
         record_measured_routing(db, decisions, measured)
 
@@ -1736,7 +1740,7 @@ async def _tune_kernel_sets(backend, args, program, ctx, db, found) -> None:
         if kernels == last:
             break
         last = kernels
-        await measure(found.kernels, found.decisions)
+        await measure(found.kernels, found.decisions, args.tune)
         logger.warning("[tune] kernel set of %d kernel(s): %s us", len(kernels), price(op for op, _ in found.kernels))
         for kernel, alone, arms, taken in found.forks:
             for arm in [arm for arm in arms if arm != taken][:ARMS]:
@@ -1748,10 +1752,12 @@ async def _tune_kernel_sets(backend, args, program, ctx, db, found) -> None:
                 except Exception as exc:  # noqa: BLE001 — an arm that does not lower has no price
                     logger.warning("[tune] arm %s: not measured (%s)", arm, exc)
                     continue
-                await measure(other.kernels, other.decisions)
+                await measure(other.kernels, other.decisions, min(args.tune, START))
                 logger.warning("[tune] arm %s: %s us", arm, price(op for op, _ in other.kernels))
         found = kernel_set(program(), ctx, db)
     logger.warning("[tune] the compile now takes %d kernel(s): %s us", len(found.kernels), price(op for op, _ in found.kernels))
+    for op, _ in found.kernels:
+        logger.warning("[tune]   %s %s us", kernel_name(op), price([op]))
 
 
 async def _tune(backend, args, source, compiled, ref, ref_key, route=None) -> list:
