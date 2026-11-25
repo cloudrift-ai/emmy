@@ -3,7 +3,7 @@
 - :mod:`.ir` — dataclass definitions: the ``KernelOp`` wrapper plus the hardware
   primitives (launch geometry, shared memory, barriers, the transports into shared
   memory, the cross-thread combines, the tensor-core fragment nodes). Shared leaves and
-  structural types (``Load``, ``Assign``, ``Loop``, ``StridedLoop``, …) come from
+  structural types (``Load``, ``Assign``, ``Loop``, …) come from
   ``ir.stmt``.
 - :mod:`.ptx` — ``compile_kernel`` emitting PTX text.
 """
@@ -28,7 +28,6 @@ from emmy.compiler.ir.kernel.ir import (
     SelectBranch,
     Smem,
     Statement,
-    StridedLoop,
     Sync,
     TernaryExpression,
     Tile,
@@ -61,7 +60,6 @@ __all__ = [
     "Sync",
     "TreeHalve",
     "WarpShuffle",
-    "StridedLoop",
     "Statement",
     "KernelOp",
     "Axis",

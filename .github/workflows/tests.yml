@@ -37,23 +37,14 @@ jobs:
     runs-on:
       group: ubuntu-runners
     # The outer job includes dependency and cache setup; the test step below owns the stricter
-    # execution cap. The PR test step took 33 minutes before the RTX 5090 hardware golden held
-    # both recipes' kernels (2026-11-01) and timed out at 60 after: the reproduction gate over a
-    # 1,000-kernel golden is ~3 worker-hours, a quarter of the suite. Keep both caps above the
-    # measured run without dropping coverage.
+    # execution cap. The suite holds the RTX 5090's goldens alone: every other card's goldens (``-m goldens``) run
+    # in the nightly refresh, because the six full hardware goldens together outlast this job.
     timeout-minutes: 100
     steps:
+      # A plain checkout, never ``lfs: true``: the suite reads no LFS-tracked file, and the repo holds ~1 GB of them
+      # (the experiment result tarballs). Materializing them slows the checkout and makes ``git status`` slow enough
+      # that ``experiment_record``'s 10s provenance timeout fires.
       - uses: actions/checkout@v4
-
-      # The suite READS one LFS-tracked file — the checked-in measurement freeze
-      # (``search/freezes/``), which is what the prior is evaluated against; a plain checkout
-      # leaves a 3-line pointer in its place. Fetched by PATH rather than with checkout's
-      # ``lfs: true``, which pulls EVERY object: the repo holds ~1 GB of them (the experiment
-      # result tarballs), and materializing all of it both slows the checkout and makes
-      # ``git status`` slow enough that ``experiment_record``'s 10s provenance timeout fires.
-      # This pulls ~4 MB and leaves the rest as pointers, which is what the suite wants anyway.
-      - name: Fetch the measurement freeze from LFS
-        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
 
       - uses: ./.github/actions/setup-emmy
 

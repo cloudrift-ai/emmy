@@ -29,7 +29,6 @@ from emmy.compiler.ir.schedule.choices import (
     derive_inventory,
     resolve_site_tile,
 )
-from emmy.compiler.ir.schedule.register import REGISTER_WORKS, register_accepts, register_tiles
 from emmy.compiler.ir.schedule.staging import stage_target
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 from emmy.utils import cached_method
@@ -40,6 +39,8 @@ from .refusals import (
     _contraction_plan_refusal,
     _contraction_plans,
     _contraction_reductions,
+    _f32_as_bf16_atoms,
+    _f32_product,
     _fill_budget_refusal,
     _fragment_agreements,
     _FragmentAgreement,
@@ -161,7 +162,8 @@ class _LocalSupport:
 
 
 #: Every non-direct storage a carried state has a spelling for.
-_STATE_STAGES = (Stage(transport="smem"), Stage(transport="reg"))
+_RESIDENT = Stage(transport="reg")
+_STATE_STAGES = (Stage(transport="smem"), _RESIDENT)
 
 
 def _producers(tile_op) -> frozenset[NodeId]:
@@ -490,7 +492,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
 
             plans = self._select_plans(
                 self._named("TILE"),
-                (plan for plan in _contraction_plans(node, facts, self.problem.policy_atoms(self.id)) if not (swept and plan.is_tiled)),
+                (plan for plan in _contraction_plans(node, facts, self.problem.catalog_atoms(self.id)) if not (swept and plan.is_tiled)),
                 allowed=lambda plan: refusal(plan) is None,
                 work=self.problem.work,
                 why=refusal,
@@ -553,6 +555,11 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         facts = tile.contractions.get(self.id)
         if facts is None:
             return any(choice.tile.is_warp for choice in self.nodes)
+        # The reading the priors were fit on is of a product with an operand of 16 bits or fewer: a product of f32
+        # operands keeps the scalar ranking they learned, and its cells (TF32, and bf16 by rounding) join this
+        # reading with the featurizer version that refits them.
+        if _f32_product(tile, self.problem.target, node):
+            return False
         return any(self._placed_ok(ReductionSchedule(plan, Reduce())) for plan in _warp_plans(node, facts, self.problem.atoms_of(self.id)))
 
     @cached_property
@@ -603,11 +610,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             validate_pins=False if self.stage_key is None else self.problem.strict(self.stage_key),
             exact=self.stage_key is not None and self.problem._exact(self.stage_key),
             key=self.stage_key,
-            why=lambda choice: (
-                "register storage (d1/reg) is offered to a serial kernel's register program only"
-                if choice.stage.transport == "reg"
-                else "no tile this site offers is fed by that transport"
-            ),
+            why=lambda choice: "no tile this site offers is fed by that transport",
         )
 
     @cached_property
@@ -708,43 +711,33 @@ class ClassicKernelSite(Site[ClassicSchedule]):
 
     @cached_property
     def kernels(self) -> tuple[KernelSchedule, ...]:
-        classic = tuple(
-            KernelSchedule(work, raster, state)
-            for work in self._works()
-            for raster in self._rasters()
-            for state in self._states()
-            if state.is_direct or (state.transport == "smem" and holds_state(work, raster))
+        states = self._states()
+        return (
+            *(
+                KernelSchedule(work, raster, state)
+                for work in self._works()
+                for raster in self._rasters()
+                for state in states
+                if state.is_direct or (state.transport == "smem" and holds_state(work, raster))
+            ),
+            *(self._resident() if _RESIDENT in states else ()),
         )
-        return (*classic, *self._register_kernels())
 
-    def _register_kernels(self) -> tuple[KernelSchedule, ...]:
-        """The kernel choices that keep the carried state in registers: a warp inventory and the fragment
-        geometry of every stored value. Offered under the f16-accumulate precision policy, or where the row
-        names the geometry."""
+    def _resident(self) -> tuple[KernelSchedule, ...]:
+        """The kernel choices that keep the state in registers: warps to a CTA and the fragment geometry the
+        pipeline found a kernel for (:attr:`ClassicProblem.state_tiles`). A narrow accumulator is offered under the
+        f16-accumulate policy; a row that names a geometry gets it whatever the policy."""
         problem = self.problem
-        program, register = problem.tile.state_program, Stage(transport="reg")
-        if program is None or register not in self._states():
-            return ()
         (key,) = classic_state_tile_keys(problem.tile)
-        named = problem.row.get(key)
-        if not named and self._states() == (register,):
-            # A row that keeps the state in registers and spells one bare geometry names the state's.
-            named = problem.bare_pins.get("TILE")
-        if not named and not problem.allow_f16_accumulate:
-            return ()
-        works = REGISTER_WORKS if "WORK" not in problem.row else (() if problem.work is None else (problem.work,))
-        kernels = []
-        for work in works:
-            try:
-                plans = (Tile.parse(named, work),) if named else register_tiles(program, work)
-            except ValueError:
-                continue
-            kernels.extend(
-                KernelSchedule(work, Raster.parse(""), register, plan)
-                for plan in plans
-                if register_accepts(program, work, plan, problem.target)
-            )
-        return tuple(kernels)
+        named = problem.row.get(key) or (problem.bare_pins.get("TILE") if self._states() == (_RESIDENT,) else None)
+        pinned = problem.row.get("WORK")
+        return tuple(
+            KernelSchedule(work, Raster.parse(""), _RESIDENT, tile)
+            for work in (Work.parse(f"w{warps}x1") for warps in (1, 2, 4, 8))
+            if pinned is None or work.spell() == pinned
+            for tile in problem.state_tiles
+            if tile.spell() == named or (not named and not tile.atom.row_only and _atom_policy_ok(tile.atom, problem))
+        )
 
     def _states(self) -> tuple[Stage, ...]:
         """Where the carried state may be kept: direct, and the storage its ownership proof admits."""
@@ -758,8 +751,8 @@ class ClassicKernelSite(Site[ClassicSchedule]):
             # A bare pin names one site of the kernel: the state offers its value beside direct, and
             # ``unrealized_bare_pin`` asks the completed schedule which site carried it. Registers hold no
             # operand, so that value names the state alone.
-            if bare == "d1/reg":
-                return (spelled[bare],) if bare in spelled else ()
+            if bare == _RESIDENT.spell():
+                return (_RESIDENT,) if _RESIDENT in catalog else ()
             return tuple(dict.fromkeys((Stage.direct(), spelled.get(bare, Stage.direct()))))
         if named in spelled:
             return (spelled[named],)
@@ -858,6 +851,10 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     row: Mapping[str, str] = field(default_factory=frozendict)
     allow_f16_accumulate: bool = True
     allow_fp8: bool = True
+    allow_tf32: bool = True
+    #: Whether a product of f32 operands is offered the bf16 atoms, each operand rounded to bf16 in its fill. Those
+    #: cells stage through the compute fill alone, so a problem built with no policy keeps the copy stages' catalog.
+    allow_f32_as_bf16: bool = False
     validate_pins: bool = True
     #: A split's finalize tolerates a bare WORK / RASTER / REDUCE pin its own domain cannot take:
     #: it may name the partial's row, so the finalize keeps its catalog instead of offering nothing.
@@ -867,6 +864,9 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: such an operand, so the stage catalog keeps the transports that need one off it
     #: (:func:`~.refusals._stage_candidates`).
     paged: Mapping[str, tuple[int, int]] = field(default_factory=frozendict)
+    #: The fragment geometries a state in registers may take: the pipeline builds the kernel for each and keeps
+    #: those that build. Empty where :attr:`state_stages` holds no register storage.
+    state_tiles: tuple[Tile, ...] = ()
     #: The storage, beside direct, the kernel's one carried state may take: shared memory where one CTA owns
     #: each state whole, registers where the kernel has a register program. Empty for a kernel that carries no
     #: state, or whose state stays global.
@@ -958,12 +958,13 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
 
     @cached_method
     def policy_atoms(self, site: NodeId) -> tuple[str, ...]:
-        """The atoms the unpinned catalog offers: :meth:`atoms_of` under the precision policy."""
-        return tuple(
-            name
-            for name in self.atoms_of(site)
-            if _atom_policy_ok(ATOM_REGISTRY[name], allow_f16_accumulate=self.allow_f16_accumulate, allow_fp8=self.allow_fp8)
-        )
+        """The atoms a row a descent follows may deploy: :meth:`atoms_of` under the precision policy."""
+        rounded = () if self.allow_f32_as_bf16 else _f32_as_bf16_atoms(self.tile, self.target, self.tile.sites[site].node)
+        return tuple(name for name in self.atoms_of(site) if name not in rounded and _atom_policy_ok(ATOM_REGISTRY[name], self))
+
+    def catalog_atoms(self, site: NodeId) -> tuple[str, ...]:
+        """The atoms the unpinned catalog offers: :meth:`policy_atoms` less the cells only a row or a pin names."""
+        return tuple(name for name in self.policy_atoms(site) if not ATOM_REGISTRY[name].row_only)
 
     @cached_property
     def bare_pins(self) -> frozendict[str, str]:

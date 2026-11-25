@@ -1,14 +1,14 @@
 """Shared row builders for the search-package tests.
 
-The dicts here are PHYSICS-CALIBRATED against the freeze's plausibility predicates, which
-``freeze_reason`` composes: a row is kept or dropped by the same predicates every measured-pool
-reader applies, so these spellings must track the featurizer vocabulary and the GPU registry
-or the freeze suite silently stops exercising the real filter.
+The dicts here are PHYSICS-CALIBRATED against the admission rule's plausibility predicates, which
+``admission_reason`` composes: a row is kept or dropped by the same predicates every pool reader
+applies, so these spellings must track the featurizer vocabulary and the GPU registry or the
+admission tests silently stop exercising the real filter.
 """
 
 from __future__ import annotations
 
-from emmy.compiler.pipeline.search.db import KernelDef, PerfRow, PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import KernelDef, PerfRow, SearchDB
 
 GPU_5090 = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the plausibility gate is active
 
@@ -86,8 +86,7 @@ def perf_row(
         knobs=dict(F16_MATMUL_ROW if knobs is None else knobs),
         backend="cuda",
         status="ok",
-        stats=PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30),
-        measured_at="2026-07-09T00:00:00+00:00",
+        us=us,
     )
     kw.update(over)
     return PerfRow(**kw)

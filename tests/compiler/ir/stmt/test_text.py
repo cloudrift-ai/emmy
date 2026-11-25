@@ -2,7 +2,6 @@
 a window) prints as its text and reads back; every stored kernel and lowered Kernel IR round-trips. The text of each
 statement type on its own is the crate's test."""
 
-import json
 from textwrap import dedent
 
 import pytest
@@ -21,11 +20,9 @@ from emmy.compiler.ir.stmt import (
     Let,
     Load,
     Loop,
-    Pre,
     Select,
     SelectBranch,
     Statement,
-    StridedLoop,
     Write,
     ZeroPrologue,
     parse_body,
@@ -40,7 +37,6 @@ STATEMENTS = [
     (Load(names=("in0", "in1"), input="x", index=(A0,), dtype=F8E4M3), "f8e4m3 in0, in1 = load x[a0]"),
     (Load(("in0",), "x", (A0,), carried="unpack"), "in0 = load x[a0] carried=unpack"),
     (Load(("in0",), "model.layers.0.weight", (A0,)), "in0 = load `model.layers.0.weight`[a0]"),
-    (Pre("p", "state", (A0, Literal(0, "int"))), "p = pre state[a0, 0]"),
     (Assign("v1", apply("multiply", "in0", "in1")), "v1 = in0 * in1"),
     (Assign("v1", apply("exp", "in0"), F16), "f16 v1 = exp(in0)"),
     (Assign("load", Var("for")), "`load` = `for`"),
@@ -79,17 +75,16 @@ STATEMENTS = [
         Loop(Axis("kb", 16, window=Window(parent=Axis("ko", 32, window=Window(parent=K)), partition=True)), ()),
         "for kb in 0..16 window(parent=ko in 0..32 window(parent=k in 0..64), partition=true):",
     ),
-    (Loop(Axis("kb", 16, window=Window(base=A0, bound=A0 + ONE)), ()), "for kb in 0..16 window(base=a0, bound=a0 + 1):"),
     (Loop(Axis("kb", 16, window=Window()), ()), "for kb in 0..16 window():"),
     (
-        StridedLoop(K, Var("t"), Literal(32, "int"), (Write("y", (Var("k"),), ("v",)),)),
+        Loop.strided(K, Var("t"), Literal(32, "int"), (Write("y", (Var("k"),), ("v",)),)),
         """\
         for k in t..64 step 32:
           y[k] = v""",
     ),
     (
-        StridedLoop(K, Literal(0, "int"), Literal(8, "int"), (), unroll=True, end=Var("k_end")),
-        "for k in 0..64 step 8 until k_end unroll=true:",
+        Loop.strided(K, Literal(0, "int"), Literal(8, "int"), (), unroll=True, end=Var("k_end")),
+        "for k in 0..k_end of 64 step 8 unroll=true:",
     ),
     (
         Cond(A0.lt(ONE), (Write("y", (A0,), ("v",)),), (Write("y", (A0,), ("w",)),)),
@@ -105,7 +100,7 @@ STATEMENTS = [
 
 def _exact(body: Body) -> list:
     """Everything the statements hold, including what equality leaves out: an axis's window, a dim's hint."""
-    axes = [stmt.axis for stmt in body.iter() if isinstance(stmt, (Loop, StridedLoop))]
+    axes = [stmt.axis for stmt in body.iter() if isinstance(stmt, Loop)]
     return [list(body.iter()), [(axis.window, axis.extent.hint) for axis in axes]]
 
 
@@ -124,7 +119,7 @@ def _stored_bodies(value) -> list:
 
 
 def test_every_corpus_kernel_reads_back_from_its_text():
-    stored = [Body.from_wire(wire) for path in helpers.case_files() for wire in _stored_bodies(json.loads(path.read_text()))]
+    stored = [Body.from_wire(wire) for path in helpers.case_files() for wire in _stored_bodies(helpers.load_case(path).document.to_wire())]
     assert len(stored) > 200
     for body in stored:
         back = parse_body(str(body))

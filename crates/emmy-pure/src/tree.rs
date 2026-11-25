@@ -98,10 +98,14 @@ fn binds(node: &Fold) -> (Vec<Name>, Vec<Vec<Name>>, Vec<Name>) {
     )
 }
 
-/// The lift params `node` reads: its body's reads and its results.
+/// The lift params `node` reads: its body's reads, its results, and what its range reads, which is evaluated where
+/// the term is.
 fn reads(node: &Fold) -> HashSet<Name> {
     let mut read: HashSet<Name> = node.lift().body().ssa_uses().clone();
     read.extend(node.lift().results().iter().copied());
+    for bound in node.range().iter().flat_map(|(start, end)| [start, end]) {
+        read.extend(bound.free_vars());
+    }
     read
 }
 
@@ -165,11 +169,7 @@ fn prune_unread(root: &Fold, stored: &HashSet<Name>) -> Result<Fold> {
             let empty = HashSet::new();
             let want = kept.get(&edge.address()).unwrap_or(&empty);
             same = same && new.ptr_eq(edge);
-            if edge.twist().is_some()
-                || edge.observe().is_some()
-                || edge.carries()
-                || want.len() == slots.len()
-            {
+            if edge.twist().is_some() || edge.observe().is_some() || want.len() == slots.len() {
                 operands.push(new);
                 params.extend(slots.iter().copied());
                 continue;

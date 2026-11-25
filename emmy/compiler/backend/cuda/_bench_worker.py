@@ -6,16 +6,17 @@ Protocol (length-prefixed pickle on stdin/stdout):
 
 - Parent writes ``<8-byte little-endian length><pickled request>``.
 - One request shape, handled by :func:`_run_job`: ``{"graph": Graph, "torch_spec": None | (...), ...}``.
-  ``torch_spec`` selects the work — ``None`` is a pure emmy bench (the autotune sweep and ``run --bench``'s
-  pinned golden / ``--ab`` rows; ``kwargs`` carries warmup / num_iters / timeouts, an optional ``run_inputs`` ndarray dict adds one
+  ``torch_spec`` selects the work — ``None`` is a pure emmy bench (``run --bench``'s pinned golden / ``--ab`` /
+  ``--tune`` rows; ``kwargs`` carries warmup / num_iters / timeouts, an optional ``run_inputs`` ndarray dict adds one
   pre-bench execution on those inputs with the outputs returned — the wrong-answer gate's
   measurement side), otherwise the deployable eager / torch.compile / emmy comparison
-  (``tune --bench`` / ``run --bench``'s greedy row), rebuilt and run *here* so a hung kernel
+  (``run --bench``'s greedy row), rebuilt and run *here* so a hung kernel
   hangs this child (SIGKILL-recoverable). A ``trace_args`` comparison honors two extra flags:
   ``accuracy`` (bind the rebuilt module's real inputs, run the emmy program on them, compare vs
   eager — the verdict rides back as ``accuracy_error``, and a numeric failure skips the bench)
   and ``want_ref`` (return that run's ``(input_data, outputs)`` as ``run_io`` — the reference
-  the parent feeds each pinned row's wrong-answer check).
+  the parent feeds each pinned row's wrong-answer check; under ``strict_accuracy`` the outputs are
+  eager's, which a strict pinned row is held to).
 - Response: ``{"ok": True, "result": BenchmarkResult, "results": dict|None, "torch_available": bool,
   "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None,
   "greedy_error": str|None, "reference_run_us": float|None}``
@@ -24,7 +25,6 @@ Protocol (length-prefixed pickle on stdin/stdout):
   kinds a pickled string loses; ``_retire_worker`` is the child's own verdict that its context is
   done for (both response shapes carry it).
 - Worker imports the runtime / torch lazily on first request, writes ``<8-byte length><pickled response>``.
-- A ``worker_warmup`` request creates the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
 
 Errors raised inside ``benchmark_program`` (bench_compile_timeout_s,
@@ -57,28 +57,6 @@ import os
 import pickle
 import sys
 import traceback
-
-
-@contextlib.contextmanager
-def _reference_precision(strict: bool):
-    """Use full-width reductions for strict Torch comparisons, without changing the next worker job."""
-    if not strict:
-        yield
-        return
-    import torch
-
-    matmul = torch.backends.cuda.matmul
-    # Newer Torch versions pair the precision flag with an independent split-K flag.
-    # The native getter retains both; the public getter returns only the first.
-    fp16 = torch._C._get_cublas_allow_fp16_reduced_precision_reduction()
-    bf16 = torch._C._get_cublas_allow_bf16_reduced_precision_reduction()
-    try:
-        matmul.allow_fp16_reduced_precision_reduction = (False, fp16[1]) if isinstance(fp16, tuple) else False
-        matmul.allow_bf16_reduced_precision_reduction = (False, bf16[1]) if isinstance(bf16, tuple) else False
-        yield
-    finally:
-        matmul.allow_fp16_reduced_precision_reduction = fp16
-        matmul.allow_bf16_reduced_precision_reduction = bf16
 
 
 def _read_n(fd: int, n: int) -> bytes:
@@ -128,17 +106,13 @@ async def _run_job(req: dict) -> dict:
 
     Rebuilding the torch side **here** (not pickling a live module) means a hung emmy kernel
     hangs *this* child, which the parent SIGKILLs — recovering the device."""
-    if req.get("worker_warmup"):
-        from emmy.compiler.backend.cuda.device import device
-
-        device().synchronize()
-        return {"warmed": True}
-
+    from emmy.compiler.backend.correctness import reference_precision
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
+    # A strict comparison takes Torch's full-width reductions for the whole job, the timed forwards included.
     with (
         pinned_knobs({**req.get("precision", {}), "COLD_CACHE": req.get("cold_cache", False)}),
-        _reference_precision(req.get("strict_accuracy", False)),
+        reference_precision() if req.get("strict_accuracy", False) else contextlib.nullcontext(),
     ):
         spec = req.get("torch_spec")
         if spec is None:
@@ -174,7 +148,7 @@ async def _run_job(req: dict) -> dict:
         accuracy_error = run_io = correctness = greedy_error = reference_run_us = stats_sym_env = None
         retire_worker = False
         if kind == "frontend_graph":
-            from emmy.commands.run import bench_lowered_vs_torch
+            from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
 
             want_reference = req.get("want_ref", False) or req.get("strict_accuracy", False)
             refs, ref_times, sym_envs = [], [], []
@@ -219,7 +193,7 @@ async def _run_job(req: dict) -> dict:
             import types
 
             from emmy.commands.compile import load_or_trace
-            from emmy.commands.run import bench_full_model_real
+            from emmy.compiler.backend.cuda.compare import bench_full_model_real
 
             _, _, bundle = load_or_trace(types.SimpleNamespace(**payload))
             if bundle is None:
@@ -233,27 +207,30 @@ async def _run_job(req: dict) -> dict:
                 # benching a miscompiling program would be wasted GPU time. ``want_ref``
                 # ships this run's (inputs, outputs) back as the pinned rows' wrong-answer
                 # reference (bounded: pinned rows only exist for --code inputs).
-                from emmy.commands.run import (
-                    _bind_inputs,
-                    _check_accuracy,
-                    _comparison_outputs,
-                    _eager_output,
-                    _strict_correctness_proof,
-                    correctness_oracle,
+                from emmy.compiler.backend.correctness import (
+                    check_accuracy,
+                    comparison_outputs,
+                    eager_output,
+                    eager_outputs_by_name,
+                    strict_correctness_proof,
                 )
+                from emmy.compiler.loader.binder import bind_inputs
 
-                input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
+                input_data = bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
-                run_outputs = _comparison_outputs(run_result.outputs, req["graph"])
+                run_outputs = comparison_outputs(run_result.outputs, req["graph"])
+                reference_outputs = run_outputs
                 if req.get("accuracy") or req.get("strict_accuracy"):
-                    with correctness_oracle():
-                        eager_out = _eager_output(module, args_t, kwargs)
+                    with reference_precision():
+                        eager_out = eager_output(module, args_t, kwargs)
                     if req.get("strict_accuracy"):
-                        correctness = _strict_correctness_proof(run_outputs, eager_out)
+                        correctness = strict_correctness_proof(run_outputs, eager_out)
+                        # A strict pinned row is held to eager directly, as the greedy row is.
+                        reference_outputs = eager_outputs_by_name(run_outputs, eager_out, req["graph"])
                         if correctness["status"] != "pass":
                             accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
                     else:
-                        accuracy_error = _check_accuracy(run_outputs, eager_out)
+                        accuracy_error = check_accuracy(run_outputs, eager_out)
                     if accuracy_error is not None:
                         return {
                             "result": None,
@@ -264,7 +241,7 @@ async def _run_job(req: dict) -> dict:
                             "run_io": None,
                         }
                 if req.get("want_ref"):
-                    run_io = (input_data, run_outputs)
+                    run_io = (input_data, reference_outputs)
             results, bench, captured = await bench_full_model_real(
                 module,
                 args_t,
@@ -311,7 +288,7 @@ def main() -> None:
     # A bench worker never dumps compiler artifacts — but a child-built ``CudaBackend()``
     # defaults its dump to ``CompilerDump.from_env()``, whose ``__post_init__`` rmtrees the
     # directory. With ``EMMY_DUMP_DIR`` inherited from the parent that would wipe the
-    # parent's dump while ``tune --bench`` consumes its in-memory frontend slices.
+    # parent's dump while the run still reads it.
     from emmy import config
 
     os.environ.pop(config.DUMP_DIR, None)

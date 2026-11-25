@@ -684,8 +684,8 @@ impl Builtin {
 /// Names the reader gives a meaning of their own, so a variable of that name is written quoted.
 /// Words the text reader gives a meaning, in an expression or on a statement line, so a name spelled like one is
 /// written between backticks wherever it stands.
-const RESERVED: [&str; 28] = [
-    "true", "false", "inf", "nan", "none", "for", "in", "if", "else", "let", "init", "zero",
+const RESERVED: [&str; 29] = [
+    "true", "false", "inf", "nan", "none", "for", "in", "of", "if", "else", "let", "init", "zero",
     "load", "pre", "select", "when", "over", "seed", "step", "until", "window", "carried",
     "swizzle", "words", "unroll", "unrolled", "sub", "call",
 ];
@@ -783,6 +783,20 @@ impl Expression {
         match &**self {
             Expr::Apply(ElementwiseOp::Known(op), args) => Some((*op, args)),
             _ => None,
+        }
+    }
+
+    /// The operands of the chain of `op` this node heads, in order: `a`, `b` and `c` of `max(max(a, b), c)`, and the
+    /// node itself where it applies another operation or none. A range spells its start as such a chain of
+    /// `maximum` and its end as one of `minimum`.
+    pub fn chain(&self, op: Operation) -> Vec<Expression> {
+        match self.operation() {
+            Some((found, [left, right])) if found == op => {
+                let mut out = left.chain(op);
+                out.extend(right.chain(op));
+                out
+            }
+            _ => vec![self.clone()],
         }
     }
 

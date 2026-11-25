@@ -80,7 +80,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
     swizzle_base,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Let, Load, Loop, Statement, StridedLoop, Write, exposed_defines
+from emmy.compiler.ir.stmt import Body, Cond, Let, Load, Loop, Statement, Write, exposed_defines
 
 
 def _mul(a: Expression, b: Expression) -> Expression:
@@ -181,7 +181,7 @@ def cp_async_fill(
         swizzle=swizzle,
         valid=None if valid is None else valid(row, col),
     )
-    loop = StridedLoop(axis=fe, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body((copy,)), unroll=False)
+    loop = Loop.strided(axis=fe, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body((copy,)), unroll=False)
     return [loop]
 
 
@@ -217,7 +217,7 @@ def sync_copy_fill(
             Write(output=slab, index=(smem_row, col), values=names, swizzle=swizzle),
         )
     )
-    return [StridedLoop(axis=fe, start=cta.linear_tid, step=_lit(cta.n_threads), body=body, unroll=False)]
+    return [Loop.strided(axis=fe, start=cta.linear_tid, step=_lit(cta.n_threads), body=body, unroll=False)]
 
 
 def _sync_copy_runs(shape: tuple[int, int], cta: CtaTile, elem_bytes: int) -> tuple[int, int] | None:
@@ -424,7 +424,7 @@ def sync_row_fill(
     val = f"_{slab}_v"
     load = Load(names=(val,), input=src, index=(*grid_vars, Var(fe.name)))
     write = Write(output=slab, index=(Var(fe.name),), values=(val,))
-    loop = StridedLoop(axis=fe, start=linear_tid, step=_lit(n_threads), body=Body((load, write)), unroll=False)
+    loop = Loop.strided(axis=fe, start=linear_tid, step=_lit(n_threads), body=Body((load, write)), unroll=False)
     return [Smem(name=slab, extents=(extent,), dtype=dtype), loop, Sync()]
 
 
@@ -470,18 +470,18 @@ def sync_stat_fill(
     rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.is_reduce), None)
     if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:
         body = (*row_body, *writes)
-        loop = StridedLoop(axis=row_axis, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body(body), unroll=False)
+        loop = Loop.strided(axis=row_axis, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body(body), unroll=False)
         return [*decls, loop, Sync()]
     from emmy.compiler.pipeline.passes.lowering.kernel._factor import emit_combine  # noqa: PLC0415 — avoid an import cycle
 
     rl = row_body[rl_i]
     lane = BinaryExpression("%", cta.linear_tid, _lit(32))
     warp = BinaryExpression("/", cta.linear_tid, _lit(32))
-    fold = StridedLoop(axis=rl.axis, start=lane, step=_lit(32), body=rl.body, unroll=False)
+    fold = Loop.strided(axis=rl.axis, start=lane, step=_lit(32), body=rl.body, unroll=False)
     combine = emit_combine(stat, t="_lane", n_threads=32)
     guarded = Cond(cond=BinaryExpression("==", lane, _lit(0)), body=writes)
     body = (*row_body[:rl_i], fold, *combine, *row_body[rl_i + 1 :], guarded)
-    loop = StridedLoop(axis=row_axis, start=warp, step=_lit(cta.n_threads // 32), body=Body(body), unroll=False)
+    loop = Loop.strided(axis=row_axis, start=warp, step=_lit(cta.n_threads // 32), body=Body(body), unroll=False)
     return [*decls, loop, Sync()]
 
 
@@ -1039,17 +1039,17 @@ class SyncTransport:
             # merge the run's V scalar 2 B loads into ONE vector ``Load`` binding every cell's
             # suffixed name (one 16 B ld like the cp.async fill, instead of V scalar loads — the
             # compute fill issued 3.6x cuBLAS's LSU instructions). Everything else replicates per
-            # cell.
+            # cell. The vector load takes the first cell's index, renamed with it: a leading coordinate may read a name
+            # the cell binds (a weight gathered by a statistic row's index).
             local = {nm for st in cell_stmts[0] for nm in exposed_defines(st)}
+            renames = [{nm: f"{nm}__c{j}" for nm in local} for j in range(v)]
             for p in range(len(cell_stmts[0])):
+                cells = [cell_stmts[j][p].rewrite(lambda nm, names=names: names.get(nm, nm)) for j, names in enumerate(renames)]
                 if plans[p] == "vector":
-                    ld = cell_stmts[0][p]
-                    body.append(Load(names=tuple(f"{ld.names[0]}__c{j}" for j in range(v)), input=ld.input, index=ld.index, dtype=ld.dtype))
-                    continue
-                for j in range(v):
-                    sfx = f"__c{j}"
-                    ren = lambda nm, sfx=sfx, local=local: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
-                    body.append(cell_stmts[j][p].rewrite(ren))
+                    ld = cells[0]
+                    body.append(Load(names=tuple(cell.names[0] for cell in cells), input=ld.input, index=ld.index, dtype=ld.dtype))
+                else:
+                    body += cells
             # ONE vector Write per run (the run is ``V`` contiguous 16-byte-aligned cells, so the
             # store is a single st.128 like the cp.async fill's chunk deposit) — V scalar 2 B
             # stores at 16 B thread stride were 8-way bank-conflicted, and the downstream
@@ -1057,7 +1057,9 @@ class SyncTransport:
             # its affine alignment proof). A swizzled slab relocates the whole aligned chunk
             # (the XOR passes intra-chunk bits through), so the vector store stays legal.
             body.append(Write(output=op.slab, index=(smem_row, col), values=tuple(vals), swizzle=op.swizzle))
-            out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
+            out.append(
+                Loop.strided(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False)
+            )
         return out
 
     def deposit(self, *, slot: Expression, ring: int) -> list[Statement]:
@@ -1378,7 +1380,7 @@ def _producer_band_kloop(
     prod: list[Statement] = [SetMaxNReg(_PRODUCER_REGS, "dec")] if setmaxnreg else []
     for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (release generation 0)
         prod += transport.fill(k0=_lit(s * bk_elems), slot=_lit(s))
-    prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=end))
+    prod.append(Loop.strided(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=end))
 
     # Compute: wait the data parity, drain the slot, close the band on the named barrier, release.
     # A drain that leaves its group running (``in_flight``) has waited out the PREVIOUS chunk's
@@ -1403,7 +1405,7 @@ def _producer_band_kloop(
             )
         )
     cons: list[Statement] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
-    cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=end))
+    cons.append(Loop.strided(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=end))
 
     role = Cond(cond=BinaryExpression(">=", tid, _lit(block_threads)), body=tuple(prod), else_body=tuple(cons))
     return decls, [*pre, role]
@@ -1651,7 +1653,7 @@ def pipelined_kloop(
                     # iteration lands it. Past the barrier nothing can sink it into the mma stream.
                     body += g.transport.fill(k0=_fill_k0(2), slot=_lit(0), carried=True)
 
-    outer = StridedLoop(
+    outer = Loop.strided(
         axis=Axis(name=k0, extent=k_extent),
         start=k_first if k_first is not None else _lit(0),
         step=_lit(bk_elems),
@@ -1698,7 +1700,7 @@ def _carried_kloop(
             body += g.transport.wait(in_flight=in_flight, slot=slot, phase=_lit(0))
             body += next_loads(0, other)
         body += mmas(this)
-    outer = StridedLoop(
+    outer = Loop.strided(
         axis=Axis(name=k0, extent=k_extent),
         start=_lit(0),
         step=_lit(bk_elems),
@@ -1735,7 +1737,7 @@ def _in_flight_kloop(groups, in_flight, pre, i_expression, fill_k0, k0, k_extent
         *g.transport.fill(k0=fill_k0(g.lag), slot=fill_slot, k0_cur=Var(k0)),
         *g.transport.commit(),
     ]
-    outer = StridedLoop(
+    outer = Loop.strided(
         axis=Axis(name=k0, extent=k_extent),
         start=k_first if k_first is not None else _lit(0),
         step=_lit(bk_elems),

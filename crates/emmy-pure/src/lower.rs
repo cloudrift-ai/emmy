@@ -59,6 +59,7 @@ impl Store {
     fn values(&self) -> &[Name] {
         match &*self.write {
             Statement::Write(write) => &write.values,
+            Statement::Carry(carry) => std::slice::from_ref(&carry.value),
             _ => &[],
         }
     }
@@ -67,6 +68,7 @@ impl Store {
     fn reads(&self) -> Vec<Expression> {
         let mut out: Vec<Expression> = match &*self.write {
             Statement::Write(write) => write.index.to_vec(),
+            Statement::Carry(carry) => carry.index.to_vec(),
             _ => Vec::new(),
         };
         out.extend(self.when.iter().cloned());
@@ -131,7 +133,6 @@ struct Lowering<'a> {
     coordinates: Vec<(Name, Arc<Axis>)>,
     bound: HashSet<Name>,
     internal: HashSet<Name>,
-    declared: Vec<Name>,
     origin: HashMap<Name, (usize, Kind)>,
     terms: HashMap<usize, Fold>,
     indexed: HashSet<Name>,
@@ -312,6 +313,8 @@ impl Lowering<'_> {
                     unroll: false,
                     seed: true,
                     unrolled: false,
+                    range: None,
+                    step: None,
                 })));
             }
         }
@@ -438,9 +441,6 @@ impl Lowering<'_> {
             return self.place_map(term, &loops, path, nest, node, scope, stmts, step);
         };
         let here = node.clone().unwrap_or_default();
-        if term.carries() {
-            return self.place_carried(term, axis, nest, &here, &scope, stmts);
-        }
         let inner = self.new_list();
         let mut inner_scope = scope.clone();
         inner_scope.insert(axis);
@@ -468,6 +468,8 @@ impl Lowering<'_> {
             unroll: false,
             seed: true,
             unrolled: false,
+            range: term.applied_range(),
+            step: None,
         })));
         self.attach(term, Kind::State, target, &here, &scope, nest, None)
     }
@@ -559,93 +561,6 @@ impl Lowering<'_> {
         }
         Ok(())
     }
-
-    fn place_carried(
-        &mut self,
-        term: &Fold,
-        axis: Name,
-        nest: usize,
-        node: &[Name],
-        scope: &HashSet<Name>,
-        stmts: Option<usize>,
-    ) -> Result<()> {
-        if self
-            .owned
-            .get(&(term.address(), Kind::State))
-            .is_some_and(|s| !s.is_empty())
-        {
-            return Err(Error::Value(
-                "a carried state is stored per step, never after its loop".into(),
-            ));
-        }
-        let mut inside = scope.clone();
-        inside.insert(axis);
-        let reads: HashSet<Name> = term
-            .operands()
-            .iter()
-            .flat_map(|e| e.free_axes().iter().copied())
-            .collect();
-        let cells: Vec<Name> = term
-            .cells()
-            .iter()
-            .filter(|c| !inside.contains(c))
-            .copied()
-            .collect();
-        let extras: Vec<Name> = self
-            .declared
-            .iter()
-            .filter(|n| reads.contains(n) && !inside.contains(n) && !term.cells().contains(n))
-            .copied()
-            .collect();
-        let missing: Vec<Name> = std::iter::once(axis)
-            .chain(cells.iter().copied())
-            .chain(extras.iter().copied())
-            .filter(|n| !self.has_coordinate(n) && !self.bound.contains(n))
-            .collect();
-        if !missing.is_empty() {
-            let listed: Vec<String> = missing.iter().map(|n| format!("'{n}'")).collect();
-            return Err(Error::Value(format!(
-                "lower: no extent for [{}] — the kernel's axis table names a carried state's axis and cells",
-                listed.join(", ")
-            )));
-        }
-        let mut opened = cells.clone();
-        opened.extend(extras);
-        let local = self.new_nest(opened, inside.clone());
-        let (placed, _) = self.placed(term)?;
-        let mut within = inside.clone();
-        within.extend(cells.iter().copied());
-        for edge in placed {
-            let path = if edge.free_axes().is_subset(&within) {
-                Some(cells.clone())
-            } else {
-                None
-            };
-            self.place(&edge, &Vec::new(), path.as_deref(), local)?;
-        }
-        let target = self.sink(local, &cells);
-        let step = term.step()?;
-        self.lists[target].extend(step.stmts().iter().cloned());
-        self.attach(term, Kind::Observed, target, &cells, &within, local, None)?;
-        let body = self.assemble(local, &[])?;
-        let outer = match stmts {
-            Some(list) => list,
-            None => self.sink(nest, node),
-        };
-        if self.bound.contains(&axis) {
-            self.lists[outer].extend(body.stmts().iter().cloned());
-        } else {
-            let coordinate = self.coordinate(&axis).cloned().expect("checked above");
-            self.lists[outer].push(Arc::new(Statement::Loop(Loop {
-                axis: coordinate,
-                body,
-                unroll: false,
-                seed: true,
-                unrolled: false,
-            })));
-        }
-        Ok(())
-    }
 }
 
 impl Fold {
@@ -693,6 +608,14 @@ impl Fold {
                 Some(narrowed) => {
                     let mut read = narrowed.step()?.ssa_uses().clone();
                     read.extend(narrowed.exposes().iter().copied());
+                    // A range is evaluated where its term is, so an operand value it reads is taken too.
+                    for bound in narrowed
+                        .applied_range()
+                        .iter()
+                        .flat_map(|(start, end)| [start, end])
+                    {
+                        read.extend(bound.free_vars());
+                    }
                     read
                 }
                 None => HashSet::new(),
@@ -743,6 +666,24 @@ impl Fold {
         Ok(body)
     }
 
+    /// For each axis a term of this tree walks as a block of a partition, the names the block's start reads
+    /// ([`Fold::block_start`]): the block's coordinate.
+    fn range_origins(&self, axes: &[Arc<Axis>]) -> Result<HashMap<Name, HashSet<Name>>> {
+        let mut origins: HashMap<Name, HashSet<Name>> = HashMap::new();
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut pending = vec![self.clone()];
+        while let Some(term) = pending.pop() {
+            if !seen.insert(term.address()) {
+                continue;
+            }
+            if let (Some(axis), Some(start)) = (term.axis(), term.block_start(axes)?) {
+                origins.entry(axis).or_default().extend(start.free_vars());
+            }
+            pending.extend(term.operands().iter().cloned());
+        }
+        Ok(origins)
+    }
+
     fn lower_fresh(
         &self,
         bound: Option<&HashSet<Name>>,
@@ -774,6 +715,7 @@ impl Fold {
         let mut readers: HashMap<Name, usize> = HashMap::new();
         let mut origin: HashMap<Name, (usize, Kind)> = HashMap::new();
         let mut terms: HashMap<usize, Fold> = HashMap::new();
+        let origins = self.range_origins(axes)?;
         let mut seen: HashSet<usize> = HashSet::new();
         let mut pending = vec![self.clone()];
         while let Some(term) = pending.pop() {
@@ -790,14 +732,14 @@ impl Fold {
             if let Some(axis) = term.axis() {
                 internal.insert(axis);
             }
-            if term.carries() {
-                internal.extend(term.cells().iter().copied());
-                for edge in term.operands() {
-                    internal.extend(edge.free_axes().iter().copied());
-                }
+            // A term read along a block of a partition is evaluated at `start + trip`: over the block's coordinate
+            // too, as it would be were the start written into its index.
+            let mut over: HashSet<Name> = term.free_axes().clone();
+            for axis in term.free_axes() {
+                over.extend(origins.get(axis).into_iter().flatten().copied());
             }
-            for name in term.free_axes() {
-                *readers.entry(*name).or_default() += 1;
+            for name in over {
+                *readers.entry(name).or_default() += 1;
             }
             match term.base() {
                 None => {
@@ -813,11 +755,6 @@ impl Fold {
                     }
                     if let Some(observe) = term.observe() {
                         for name in observe.results() {
-                            origin.insert(*name, (term.address(), Kind::Observed));
-                        }
-                    }
-                    if term.carries() {
-                        for name in &term.exposes()[base.results().len()..] {
                             origin.insert(*name, (term.address(), Kind::Observed));
                         }
                     }
@@ -940,7 +877,6 @@ impl Fold {
             coordinates,
             bound: bound.clone(),
             internal,
-            declared,
             origin,
             terms,
             indexed,

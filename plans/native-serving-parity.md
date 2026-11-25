@@ -597,6 +597,18 @@ What the session changes for the milestones:
    a served chunk, as the decode matmul rows are), the two 6144-wide FP8 products (about 390 TFLOP/s against 515
    for the qkv one, no faster schedule in 150), and the 24 us recurrence across chunks.
 
+   Fifth rental, the same day: the 7,680-token first token is under the bar (the recipe's DISCOVERY has the
+   tables). The two 6144-wide FP8 products lost to the qkv one on the grid: at 256 rows a 5120- or 6144-wide
+   output gives the qkv product's 128 x 128 block only 80 or 96 blocks on 170 SMs, and per block it runs as fast
+   as the qkv one. The K split `030_cut` already offers fills the card, but a tune by name never measures a
+   kernel-set arm, so no card had timed it. `--ab` rows on the split arms, then a record of the readout root
+   alone: both products take a 4-way split (43.4 -> 34.1 and 43.5 -> 40.7 us), the root 158.8 -> 152.6 us.
+   Served from a strict export, audit 80 of 80, timed alternately with main's pack on one card: first token
+   0.047 / 1.32 / 77.0 s against 0.047 / 1.36 / 78.1 s at 256 / 7,680 / 197,632 tokens. 1.32 s is 1.97x stock,
+   inside 2x. TPOT 8.6 / 8.5 / 9.0 ms, inside the bar; it moves with the tokens greedy decoding takes. GSM8K and
+   draft acceptance were not read on this pack. The gate below (10) re-runs the protocol in one session with
+   stock.
+
    The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
    holds as written; the row cost above is what replaces it.
 
@@ -605,6 +617,17 @@ What the session changes for the milestones:
     its term. Gate: every 27B bar cell green, or each miss named with its measured kernel-level floor — the owner
     decides the cell's fate here, not at the switch. Needs 2-9.
 
+    Met on 2026-11-19, one rented RTX 5090, native, plugin and stock vLLM 0.32.0 in one session (the 27B
+    DISCOVERY's section of that date has the tables). Every bar cell is green: TPOT 1.07x / 1.12x / 1.14x stock at
+    256 / 7,680 / 197,632 tokens (1.19x on the worst 7,680-token pair), first token 0.23x / 1.83x / 1.22x. Native
+    beats the plugin in every cell. The full window serves (261,632 tokens, 141 s, 9.8 ms), memory at rest is 28.2
+    GiB against stock's 30.5, GSM8K is 0.580 / 0.645 against the plugin's 0.545 / 0.570, and every probe difference
+    is at a top-two near tie. Two things are open. By estimate the chunk term at 197,632 tokens is about 36 s,
+    above the 20 s above, while attention is about 54 s; the cell is inside 2x stock all the same. And both Emmy
+    lanes score about 0.15 lower on GSM8K than on 2026-11-12, level with stock, which did not move. An A/B on one
+    build the same day puts the whole drop on the W8A8 projections (#1411): 0.552 against 0.697 strict on all
+    1,319 questions, W8A8 against W8A16. The concurrency cells are milestones 19-25's.
+
 11. **Qwen3.6: the paging programs' cost out of the decode step.** Milestone 1's split sizes it; the dev-box
     figure is 7.8 ms a step of pager table programs, the decision kernel on one CTA times ~160 paging runs (40
     layers x four paged buffers: gate-up and down codes and their scales). By measurement, in order of least
@@ -612,6 +635,30 @@ What the session changes for the milestones:
     schedule, so no row could change it); the per-expert scale pages folded into their codes' paging run; one
     paging run per layer over its buffers' joint list. Gate: paging overhead <= 2 ms a captured one-row step;
     tokens unchanged. Needs 1.
+    **2026-11-20, #1454, gate not yet measured.** The four buffers are read by one expert launch, so the second
+    and third levers are one change: buffers of a program with the same pages and slots share one page list, one
+    run per launch. The first lever does not work by schedule (no offered schedule parallelizes the pairwise
+    count); the miss rank became a running count instead. RTX 4080 surrogate: paging 33 us a layer against 122,
+    about 1.3 ms a step; 5090 estimate 1.3-2.0 ms. Left for the card: the captured one-row step under nsys, tokens
+    against main, and the paging programs' new traces and rows in the 5090 golden (the scan's parallel schedule
+    needs a row to be picked).
+    **2026-11-21, one card.** The 5090 golden holds the new paging programs, recorded (scan 1.24 us parallel against
+    4.7 serial). The gate is still open: strict export refuses on main and the branch alike (four twins' cut
+    decisions have no row), and a drafter-off pack's first `emmy generate` wedged the GPU before either tree's
+    tokens came back. **Second card, same day:** main's pack hangs too. The stall is the 4-row chunk's first Gated
+    DeltaNet tail, one launch of one block (the uncovered `gdn4-sparse-linear` twin's unsplit fallback), not paging.
+    Next card: the same chain with prompts of exactly 64 tokens, which never reach the 4-row chunk. The real fix is
+    rows for the four uncovered twins' cuts (a follow-up, also what strict export needs).
+    **Third card, same day:** with 64-token prompts both trees serve, tokens the same. Paging programs per one-row
+    step: 6.29 ms on main, 2.60 ms on the branch; the step 19.3 → 15.5 ms. The gate missed because each layer paged
+    twice (one run per expert launch, the second moving nothing). Now one run covers both launches.
+    **Fourth card, 2026-11-22: gate met.** Paging programs 1.36 ms per one-row step, tokens the same as main's.
+    The page copies (10.9 ms on this host's 25.6 GB/s link) are expert reads over the link, 12's question.
+    **2026-11-25, #1476: the pack exports strictly.** The follow-up above is done, and it was 12 twins, not 4: the
+    four cut roots, the attention rows #1467 demoted, and the 3-row attention, which #1451 re-traced (a golden check
+    never re-traces, so only a fresh serving trace shows it). All 71 twins deploy from the golden rows; the 4-row
+    tail is 72 us; the 3-row attention takes a split (5.26 ms → 180 us at 131,072 cached tokens). The strict pack
+    serves a 256-token prompt: first token 9.87 s, TPOT 25.5 ms (16 owns the bar).
 
 12. **Qwen3.6: slots sized to the verify step's picks.** A verify step's three rows route past the 8 slots, so
     the drafter buys almost nothing (a 44-52 ms drafted step against a 19.6-19.8 ms one-row step). The pager's
@@ -976,6 +1023,10 @@ Perf ideas:
 
 Open items:
 
+- (2026-11-25) The 27B's verify-step attention may hold the program #1451 replaced, as Qwen3.6's did: `emmy golden
+  check` cannot see it. Compare a fresh `emmy trace --serving-twins` with the golden's programs before its next gate.
+- (2026-11-25) `emmy compile --help` still names `dolfstp`; with no stamp pass the string is read as one unknown
+  pass name and nothing past tracing runs. `dolftp` is the spelling that stops after the cut.
 - (2026-10-17) Needs a V100 record run: Qwen3.8 FP8's GDN rows (gdn16 `13e5d6`, gdn64 `353a47`) were restamped
   but not re-recorded or tuned after #1171.
 - (2026-10-22) Needs a record run on each card, after #1230's restamp: Qwen3.8 FP8 dropped 11 decisions on A100,

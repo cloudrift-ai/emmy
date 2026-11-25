@@ -50,11 +50,10 @@ from emmy.compiler.ir.pure.fold import (
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Carry, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import (
     UnbindableProjection,
-    carries_partition,
     edge_dtypes,
     output_regions,
     owns_outputs_it_cannot_bind,
@@ -294,7 +293,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         for edge in site.node.operands
         if isinstance(edge, Fold) and edge.as_slab() is None and edge.axis is None
     }
-    outer = tuple(axis.name for axis in (*tile.place.free, *(axis for store in tile.output_specs for axis in store.sweep)))
+    held = (*tile.place.serial, *tile.place.free)
+    outer = tuple(axis.name for axis in (*held, *(axis for store in tile.output_specs for axis in store.sweep)))
     occurrence_axes: dict[int, list[tuple]] = {}
     for site in all_sites[1:]:
         occurrence_axes.setdefault(id(site.node), []).append((*outer, *site.scope))
@@ -304,6 +304,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     narrowed = _narrowed_reads(tile)
     taken = _kept_components(tile)
     stored = _stored_values(tile)
+    states = {spec.write.name for spec in tile.states}
     out: list[CutSite] = []
     seen: set[int] = set()
     for site in family_sites("PLACE", all_sites):
@@ -311,12 +312,15 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         scopes = occurrence_axes.get(id(node), ())
         if not isinstance(node, Fold) or id(node) in seen or not scopes:
             continue
+        if states & _buffer_reads(node):
+            # The cone reads a carried state: it runs inside the step, after the step before it. Its own kernel
+            # would run every step before the first of this one.
+            continue
         if not all(_closed_at(node, scope) for scope in scopes):
             continue
-        if node.observe is not None or node.carries:
+        if node.observe is not None:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
-            # A carried state is the same: its steps run in order inside one loop.
             continue
         if not taken.get(id(node), node.exposes):
             # No reader takes any component: lowering drops the edge outright, so a workspace
@@ -1156,7 +1160,6 @@ def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
         or node.as_contraction() is None
         or node.twist is not None
         or node.observe is not None
-        or node.carries
         or {index for index, _ in node.bilinear_channels()} != set(range(len(node.exposes)))
     ):
         return None
@@ -1335,14 +1338,7 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
     channel's value at the address its index expression computes (:func:`_read_at`), so the workspace
     stores the plain channel and the copy reads it there."""
     node = seam.node
-    if (
-        len(node.exposes) < 2
-        or node.twist is not None
-        or node.observe is not None
-        or node.carries
-        or seam.frontier is not None
-        or seam.owned is not None
-    ):
+    if len(node.exposes) < 2 or node.twist is not None or node.observe is not None or seam.frontier is not None or seam.owned is not None:
         return {}  # a twisted or observed state is one whole: its components depend on each other
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     forms = [_value_forms(replace(seam, node=seam.node.exposing((name,))), axes) for name in seam.node.exposes]
@@ -1863,14 +1859,15 @@ def _buffer_reads(node: Fold) -> set[str]:
     return out
 
 
-def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = ()) -> list[str]:
-    """A piece's graph inputs: its workspaces, then every buffer of ``root``'s the piece reads.
+def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = (), stores: tuple = ()) -> list[str]:
+    """A piece's graph inputs: its workspaces, then every buffer of ``root``'s the piece reads — and the buffer a
+    state among its ``stores`` starts from.
 
     The read set is the STORED tree's (:func:`_buffer_reads`), walked through the operand edges a
     body cannot reach. A walk that stopped at the stored body named fewer inputs than the kernel
     went on to read; the workspace producers then had no consumer edge, were pruned as orphans,
     and the launch asked for a buffer nothing had allocated."""
-    reads = _buffer_reads(fold)
+    reads = _buffer_reads(fold) | {store.write.seed for store in stores if isinstance(store.write, Carry)}
     return [*first, *(name for name in root.inputs if name in reads)]
 
 
@@ -2080,7 +2077,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
 
     Every kernel the cut leaves is a new kernel and carries the :data:`PIECE` hint."""
     tile: TileOp = root.op
-    split_consumed = tile.split_consumed or carries_partition(tile)
+    split_consumed = tile.split_taken
     owning = tuple(seam for seam in seams if seam.owned is not None)
     contractions = tuple(group for seam in seams for group in seam.contraction)
     # The contractions of one seam are one decision and one producer, named by the seam like any cut piece.
@@ -2431,7 +2428,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         fragment,
         output_root(root, consumer_outputs),
         consumer,
-        _piece_inputs(root, consumer.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
+        _piece_inputs(root, consumer.op, tuple(buffer for buffer in all_buffers if buffer in reads), consumer.output_specs),
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, spelled, tile)

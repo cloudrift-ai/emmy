@@ -20,7 +20,7 @@ from sys import float_info
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Loop, Pre
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Loop
 from emmy.compiler.pipeline.knob import _SITE_FAMILIES, KnobType, axis_of, family_of, family_value, get
 from emmy.compiler.wire import kernel_tile
 
@@ -478,24 +478,18 @@ class Featurizer:
 
     def warp_eligible(self, kernel: Op) -> bool:
         """Whether the classic schedule space of ``kernel`` holds a warp plan on this card — the scheduling
-        problem's own answer, under the live precision pins. A schedule row reads it: a scalar tile on such a
+        problem's own answer, whatever the precision pins are. A schedule row reads it: a scalar tile on such a
         kernel competes against tensor cores. ``False`` for a kernel no tile stands behind and for a featurizer
         given no context. Computed once per kernel."""
         from emmy.compiler.ir.schedule.classic import ClassicProblem  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.tile._fromloop import scheduled_form  # noqa: PLC0415
 
         tile = kernel_tile(kernel)
         if tile is None or tile.op is None or self.ctx is None:
             return False
         if (known := self._warp_eligible.get(id(tile))) is not None:
             return known[1]
-        problem = ClassicProblem(
-            serial_form(tile, tile.name) if tile.carries else tile,
-            self.ctx,
-            allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
-            allow_fp8=precision_pin(FP8_MMA) is True,
-        )
+        problem = ClassicProblem(scheduled_form(tile, tile.name), self.ctx)
         self._warp_eligible[id(tile)] = (tile, problem.warp_eligible)  # the tile is held, so its id is not reused
         return problem.warp_eligible
 
@@ -739,8 +733,9 @@ def _geom_feats(
         # KERNEL combine (``c<cta>k``), 0.0 = in-place ATOMIC (``c<cta>a`` / bare). The
         # offline prior's split-K gate reads it.
         "D_finalize_kernel": 1.0 if (splitk > 1 and finalize == "kernel") else 0.0,
-        # A scalar tile on a warp-ELIGIBLE contraction (16-bit operands, atoms offered —
-        # ``Featurizer.warp_eligible``) competes against tensor cores: the
+        # A scalar tile on a warp-ELIGIBLE contraction (operands of 16 bits or fewer, atoms offered —
+        # ``Featurizer.warp_eligible``, which does not count the TF32 atom of an fp32 product) competes against
+        # tensor cores: the
         # roofline bar none of the flat geometry terms can see. 0 on warp rows and on kernels
         # with no warp offer, so fp32 / non-contraction ranking is untouched.
         "D_scalar_on_warp_eligible": 1.0 if (not warp and float(knobs.get("S_warp_eligible", 0.0) or 0.0) > 0) else 0.0,
@@ -1051,10 +1046,8 @@ def _serial_cell_work(body: Body) -> float:
     enclosing reduce is priced by the trips a thread actually serializes (DeepSeek-V4
     ``post4096``'s elected consumer piece recomputed a 16384-step statistics contraction inside a
     4096-step reduce: flat product 2^36-blind, nest product the honest 2^30). Free and sweep
-    loops are excluded (grid-distributed / conservative), a symbolic extent contributes no
-    factor, and so does a ``StridedLoop`` (like everywhere else in this feature block — a
-    strided respelling can therefore evade the count, in the conservative direction), so the
-    value is a lower bound; saturates at the largest finite float."""
+    loops are excluded (grid-distributed / conservative) and a symbolic extent contributes no
+    factor, so the value is a lower bound; saturates at the largest finite float."""
     best = 1.0
     for s in body:
         if isinstance(s, Loop):
@@ -1072,7 +1065,7 @@ def _serial_cell_work(body: Body) -> float:
 def _trips(body: Body) -> float:
     """The statement executions ``body`` performs: every leaf statement once per trip of the static loops around it,
     free and reduce alike, so a cone recomputed inside an output loop is counted once per output. A symbolic extent
-    counts one trip, a ``StridedLoop`` its body once (as in :func:`_serial_cell_work`), so the value is a lower bound;
+    counts one trip, so the value is a lower bound;
     saturates at the largest finite float. Where :func:`_serial_cell_work` says how long one thread's cell takes,
     this says how much work the kernel does in all, which is what a cut that computes a cone once instead of per
     output removes."""
@@ -1089,29 +1082,28 @@ def _trips(body: Body) -> float:
 
 def _varying_trips(body: Body) -> float:
     """The statement executions ``body`` performs where each statement runs only as often as its value changes: a
-    leaf once per trip of the static loops around it whose axis it depends on (``Body.axis_dependencies``; a read of
-    a carried state depends on the loop that carries it). :func:`_trips` charges a statement every loop around it,
+    leaf once per trip of the static loops around it whose axis it depends on (``Body.axis_dependencies``; a load of
+    a carried state reads the step, the axis of the loop that carries it). :func:`_trips` charges a statement every loop around it,
     so a contraction that sits inside an output loop it does not read is a matrix of work per step there and a row
     here. That is what tells a recurrence whose step is a rank-one update from one whose step is a dense product:
     their loop nests agree, and composing the first costs a matrix product where its walk paid a row. Symbolic
-    extents and strided loops count as in :func:`_trips`."""
+    extents count as in :func:`_trips`."""
     depends = body.axis_dependencies
 
-    def walk(stmts: Body, around: tuple[tuple[str, float, bool], ...]) -> float:
+    def walk(stmts: Body, around: tuple[tuple[str, float], ...]) -> float:
         total = 0.0
         for s in stmts:
             if isinstance(s, Loop):
                 ext = s.axis.extent
-                total += walk(s.body, (*around, (s.axis.name, float(ext.as_static()) if ext.is_static else 1.0, bool(s.carries))))
+                total += walk(s.body, (*around, (s.axis.name, float(ext.as_static()) if ext.is_static else 1.0)))
             elif nested := s.nested():
                 total += sum(walk(inner, around) for inner in nested)
             else:
-                before = isinstance(s, Pre)  # reads the cells its index names, at each step of the carrying loop
-                reads = set(s.deps()).union(*(e.free_vars() for e in s.expressions())) - ({s.carrier} if before else set())
+                reads = set(s.deps()).union(*(e.free_vars() for e in s.expressions()))
                 axes = reads.union(*(depends.get(name, ()) for name in reads))
                 runs = 1.0
-                for name, extent, carries in around:
-                    if name in axes or (carries and before):
+                for name, extent in around:
+                    if name in axes:
                         runs = _bounded_mul(runs, extent)
                 total += runs
         return min(total, float_info.max)

@@ -28,10 +28,8 @@ Init = _ir.Init
 Let = _ir.Let
 Load = _ir.Load
 Loop = _ir.Loop
-Pre = _ir.Pre
 Select = _ir.Select
 SelectBranch = _ir.SelectBranch
-StridedLoop = _ir.StridedLoop
 Subroutine = _ir.Subroutine
 Write = _ir.Write
 ZeroPrologue = _ir.ZeroPrologue
@@ -39,6 +37,7 @@ ZeroPrologue = _ir.ZeroPrologue
 parse_body = _ir.parse_body
 pretty_body = _ir.pretty_body
 normalize_body = _ir.normalize_body
+prove_steps = _ir.prove_steps
 optimize_body = _ir.optimize_body
 check_types = _ir.check_types
 check_input = _ir.check_input
@@ -49,7 +48,6 @@ simplify_body = _ir.simplify_body
 prepare_body = _ir.prepare_body
 free_names = _ir.free_names
 exposed_defines = _ir.exposed_defines
-mask_select_predicate = _ir.mask_select_predicate
 ordering_constraints = _ir.ordering_constraints
 dtype_promote = _ir.dtype_promote
 
@@ -73,11 +71,9 @@ __all__ = [
     "Load",
     "Loop",
     "OutputSpec",
-    "Pre",
     "Select",
     "SelectBranch",
     "Statement",
-    "StridedLoop",
     "Subroutine",
     "Write",
     "ZeroPrologue",
@@ -87,10 +83,10 @@ __all__ = [
     "fields_of",
     "one_operation_per_definition",
     "free_names",
-    "mask_select_predicate",
     "normalize_body",
     "normalize_lambda_body",
     "optimize_body",
+    "prove_steps",
     "check_types",
     "check_input",
     "reduce_strength",

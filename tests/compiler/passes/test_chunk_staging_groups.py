@@ -10,7 +10,7 @@ from emmy.commands.trace import graph_from_code
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.ir.kernel.ir import CpAsyncCopy, FragmentLoad, LdmatrixLoad, MbarrierWait, MmaSyncPtx, TmaLoad
-from emmy.compiler.ir.stmt import Body, StridedLoop
+from emmy.compiler.ir.stmt import Body, Loop
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm90, statements, text
 
@@ -32,7 +32,7 @@ def _chunk_loop(stage: str) -> str:
     with pinned_knobs(pins):
         _, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
     (kernel,) = kernels.values()
-    (loop,) = [loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "a2__ck"]
+    (loop,) = [loop for loop in statements(kernel, Loop) if loop.axis.name == "a2__ck"]
     return list(loop.body.iter())
 
 

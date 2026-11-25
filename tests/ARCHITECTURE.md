@@ -157,7 +157,7 @@ the shared module already provides.
   lowering stage is machine-independent and an sm_70 lockout is exercised on a box that has no sm_70. Only the build
   and accuracy stages consult the live card, and they gate on `device_compute_capability() == compute_cap`, beside
   `requires_sm90` in spirit but keyed on equality rather than a floor. The restamp check is machine-independent the
-  same way: every repository golden is held to the fresh lowering of its programs on the default lane, GPU-free, so a
+  same way: every repository golden is held to the fresh lowering of its programs, GPU-free, so a
   stale golden is detectable on any machine; re-recording a row is what needs the card.
 - **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
   records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
@@ -205,7 +205,7 @@ the shared module already provides.
 ## Running
 
 Cold-cache coverage lives with backend program tests, CLI recording tests and the search DB/pin tests. CPU tests
-check both directions of regime isolation, freeze/export retention, worker propagation and eviction ordering.
+check both directions of regime isolation, export retention, worker propagation and eviction ordering.
 The CUDA program tests compare hot timing against a single replay after eviction: one streams float buffers smaller
 than L2, and its kernel processes every allocated element; the other runs 32 KB of straight-line code, which a
 repeated launch finds in the instruction cache.
@@ -216,8 +216,9 @@ minutes and belongs to the finalization stage of a PR — see the Contribution I
 ```bash
 pytest tests/deploy/test_recipe.py -v   # single file — the development lane
 pytest tests/deploy/ -k recipe -v      # a few tests — the development lane
-pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf` and `sweep` tests)
+pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf`, `sweep`, `goldens` tests)
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
+pytest tests/ -m goldens -n auto       # every golden but the RTX 5090's, which the nightly refresh holds
 pytest tests/compiler/ptx/ -m sweep    # each math function over every f32 input, half a minute a function
 ```
 
@@ -287,7 +288,7 @@ machine-local evidence a CLI compile picks from, and the CI runners keep their h
 import, the one file reaches every xdist worker and subprocess; a test that needs a DB of its own still sets one.
 
 `tests/compiler/pipeline/search/test_golden.py` holds every repository golden — the hardware goldens and each
-maintained recipe's model golden — to the fresh lowering of its own traced programs on the DEFAULT lane: a restamp
+maintained recipe's model golden — to the fresh lowering of its own traced programs: a restamp
 (`golden.restamp`, the rewrite `emmy golden restamp` writes) must leave the file unchanged, one node per traced
 program so the work scatters over the workers and a failure names the kernels, decisions and rows the compiler now
 disagrees with. Neither this nor the import check has a list of expected failures: a golden the compiler re-keys is
@@ -295,7 +296,10 @@ red until `emmy golden restamp` rewrites the file, which needs no card (the `ref
 a re-keyed kernel keep their schedule and lose their microseconds until a record run on the card measures them again).
 Never re-record a row to make a red node green: a re-keyed kernel is a change in the lowering, and re-recording
 enshrines it. The realization corpus's staleness test is the same restamp (see
-`tests/compiler/realization/ARCHITECTURE.md`).
+`tests/compiler/realization/ARCHITECTURE.md`). Every test that reads the repository goldens one node per file or
+program marks its node through `golden_lane`: the RTX 5090's goldens stay on the default lane, every other card's
+carry the off-lane `goldens` marker and run in the nightly refresh, since all six full hardware goldens together
+outlast the PR job.
 
 A golden file and a corpus case store inputs only — no kernel identity, no `S_*` stamp — so a change to how
 identity is computed turns no golden red. What it does turn red is the pinned-identity test in

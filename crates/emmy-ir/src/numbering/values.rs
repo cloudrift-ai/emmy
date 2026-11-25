@@ -6,8 +6,7 @@ use std::sync::Arc;
 use super::{Key, Number, Param, Tag, expression_key, hash_parts, params_key};
 use crate::Name;
 use crate::body::{Body, StmtRef};
-use crate::elementwise::Operation;
-use crate::expr::{Expr, ExprClass, ExprType, Expression};
+use crate::expr::{Expr, ExprClass, ExprType, Expression, affine_form};
 use crate::field::NumOr;
 use crate::normalize::{affine_node, affine_terms};
 use crate::statement::Statement;
@@ -31,7 +30,19 @@ pub struct Numbering {
     pub buffers: Vec<Name>,
     pub states: Vec<Name>,
     pub operands: HashMap<Number, Vec<Number>>,
+    /// The integers taken apart ([`value_numbers_apart`]), in the order they were met: a parameter names one by
+    /// its place in this list.
+    pub sites: Vec<Site>,
     pub(super) trees: std::sync::Mutex<HashMap<usize, Vec<Number>>>,
+}
+
+/// One integer [`value_numbers_apart`] took apart: the node that holds it — the affine coordinate expression that
+/// adds it, or the axis of the loop whose static extent it is — and its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Site {
+    pub place: usize,
+    pub extent: bool,
+    pub value: i64,
 }
 
 impl Numbering {
@@ -127,9 +138,13 @@ struct Context<'a> {
     loops: Vec<Name>,
     path: Vec<usize>,
     carried: HashSet<Name>,
+    /// The carried states of the whole body: a load of one reads the state, whatever name it goes under.
+    states: HashSet<Name>,
     binding: Vec<Name>,
     defined_by: HashMap<Name, usize>,
     depths_of: HashMap<Param, Vec<usize>>,
+    /// Whether the integer a coordinate expression adds is a parameter of its own ([`value_numbers_apart`]).
+    apart: bool,
 }
 
 fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
@@ -146,7 +161,6 @@ fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
     };
     let flags = match stmt {
         Statement::Loop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
-        Statement::StridedLoop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
         other => Key::str(other.ty().name()),
     };
     Key::tuple([extent, window, flags])
@@ -167,6 +181,60 @@ fn depths(key: &Key, out: &mut Vec<usize>) {
 }
 
 impl Context<'_> {
+    /// [`descriptor`], and for a loop that walks a range or takes a step those too, every coordinate around the
+    /// loop spelled by its binding depth. A loop with neither keys as it always did.
+    fn descriptor(&self, axis: &crate::axis::Axis, stmt: &Statement) -> Key {
+        let mut plain = descriptor(axis, stmt);
+        let Statement::Loop(l) = stmt else {
+            return plain;
+        };
+        // With offsets apart a loop's static extent is one more integer: the loop keys by the rest, and the extent
+        // is a parameter of the loop ([`Context::extent_apart`]).
+        if self.apart
+            && Context::static_extent(axis).is_some()
+            && let Key::Tuple(parts) = &mut plain
+        {
+            parts[0] = Key::str(OFFSET);
+        }
+        let mut parts = vec![plain];
+        if let Some((start, end)) = &l.range {
+            parts.extend([self.by_depth(start), self.by_depth(end)]);
+        }
+        if let Some(step) = &l.step {
+            parts.extend([Key::str("step"), self.by_depth(step)]);
+        }
+        match parts.len() {
+            1 => parts.remove(0),
+            _ => Key::tuple(parts),
+        }
+    }
+
+    fn static_extent(axis: &crate::axis::Axis) -> Option<i64> {
+        axis.extent.expression.as_literal()?.value.int()
+    }
+
+    /// With offsets apart, the static extent of a loop as a parameter of the loop: a reduction over one more
+    /// element than the last is the same loop a step later.
+    fn extent_apart(&mut self, axis: &Arc<crate::axis::Axis>, params: &mut Vec<Param>) {
+        if let (true, Some(extent)) = (self.apart, Context::static_extent(axis)) {
+            params.push(self.site(Arc::as_ptr(axis) as usize, true, extent));
+        }
+    }
+
+    /// The parameter an integer taken apart is, and its record among the numbering's sites.
+    fn site(&mut self, place: usize, extent: bool, value: i64) -> Param {
+        let at = self.out.sites.len() as i64;
+        self.out.sites.push(Site {
+            place,
+            extent,
+            value,
+        });
+        Param::new(Key::tuple([
+            Key::tag(Tag::Expr),
+            Key::tuple([Key::str(OFFSET), Key::Int(value), Key::Int(at)]),
+        ]))
+    }
+
     fn depth_of(&self, name: Name) -> Option<usize> {
         self.binding.iter().rposition(|bound| *bound == name)
     }
@@ -237,12 +305,11 @@ impl Context<'_> {
                     .collect::<Vec<_>>(),
             )),
             (None, Some((op, args))) if op.info().commutative && args.len() == 2 => {
-                let mut terms: Vec<Expression> = Vec::new();
-                if op.info().associative && self.chains == Chains::Flat {
-                    associative_terms(e, op, &mut terms);
+                let terms = if op.info().associative && self.chains == Chains::Flat {
+                    e.chain(op)
                 } else {
-                    terms = args.to_vec();
-                }
+                    args.to_vec()
+                };
                 Some((
                     Key::str(op.text()),
                     terms.into_iter().map(|term| (Key::None, term)).collect(),
@@ -343,6 +410,15 @@ impl Context<'_> {
         touched: &mut Vec<Name>,
     ) -> Key {
         expression_key(e, &mut |e| {
+            if self.apart && self.coordinate_only(e) {
+                if let Some(key) = self.offset_apart(e, params) {
+                    return Some(key);
+                }
+                // No affine form: its parts are keyed one by one, each with its own integer apart.
+                if !matches!(&**e, Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_)) {
+                    return None;
+                }
+            }
             if self.reads_axis(e) && self.coordinate_only(e) {
                 let key = Param::new(Key::tuple([Key::tag(Tag::Expr), self.by_depth(e)]));
                 let index = match params.iter().position(|p| *p == key) {
@@ -362,6 +438,63 @@ impl Context<'_> {
                 _ => None,
             }
         })
+    }
+
+    /// An affine coordinate expression with the integer it adds taken apart: the form is every axis with its
+    /// coefficient, the axes by binding depth, shared by every expression of that form as a parameter is; the
+    /// integer is a parameter of its own at every place one is written, zero where none is. Two bodies that differ
+    /// only in such integers then number alike, statement by statement, and differ in those parameters. `None` for
+    /// an expression with no affine form over the axes, or one whose constant part is no integer.
+    fn offset_apart(&mut self, e: &Expression, params: &mut Vec<Param>) -> Option<Key> {
+        let integer = |e: &Expression| match &**e {
+            Expr::Literal(lit) => lit.value.int(),
+            _ => None,
+        };
+        let (offset, mut terms) = match integer(e) {
+            Some(value) => (value, Vec::new()),
+            None if self.reads_axis(e) => {
+                let (anchor, coeffs) = affine_form(e, &|name| self.axes.contains_key(&name))?;
+                let mut terms = Vec::with_capacity(coeffs.len());
+                for (name, coeff) in coeffs {
+                    terms.push((self.depth_of(name)?, coeff));
+                }
+                // The anchor comes as it was summed (`0 + 4`): its value is the integer.
+                (anchor.eval(&HashMap::new()).ok()?.int()?, terms)
+            }
+            None => return None,
+        };
+        terms.sort_unstable();
+        let mut parts = vec![Key::str("apart")];
+        if !terms.is_empty() {
+            let form = Key::Tuple(
+                terms
+                    .into_iter()
+                    .map(|(depth, coeff)| {
+                        let axis =
+                            Key::tuple([Key::str(ExprType::Var.text()), Key::Int(depth as i64)]);
+                        Key::tuple([axis, Key::Int(coeff)])
+                    })
+                    .collect(),
+            );
+            let key = Param::new(Key::tuple([Key::tag(Tag::Expr), form]));
+            let index = match params.iter().position(|p| *p == key) {
+                Some(index) => index,
+                None => {
+                    params.push(key);
+                    params.len() - 1
+                }
+            };
+            parts.push(Key::tuple([
+                Key::tag(Tag::Coordinate),
+                Key::Int(index as i64),
+            ]));
+        }
+        params.push(self.site(Arc::as_ptr(&e.0) as usize, false, offset));
+        parts.push(Key::tuple([
+            Key::tag(Tag::Coordinate),
+            Key::Int(params.len() as i64 - 1),
+        ]));
+        Some(Key::Tuple(parts))
     }
 
     fn operand(&mut self, name: &Name, ops: &mut Vec<Value>, touched: &mut Vec<Name>) -> Key {
@@ -685,7 +818,9 @@ impl Context<'_> {
                         .iter()
                         .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
                         .collect();
-                    let buffer = if self.env.contains_key(&s.input) {
+                    let buffer = if self.states.contains(&s.input) {
+                        self.resource(&s.input, Tag::State, &mut touched)
+                    } else if self.env.contains_key(&s.input) {
                         self.operand(&s.input, &mut ops, &mut touched)
                     } else {
                         self.resource(&s.input, Tag::Buffer, &mut touched)
@@ -808,27 +943,11 @@ impl Context<'_> {
                     let value = self.compose(Tag::Carry, payload, ops, &params, &[], false);
                     self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
-                Statement::Pre(s) => {
-                    let index: Vec<Key> = s
-                        .index
-                        .iter()
-                        .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
-                        .collect();
-                    let state = self.resource(&s.carrier, Tag::State, &mut touched);
-                    let value = self.compose(
-                        Tag::Pre,
-                        Key::tuple([state, Key::Tuple(index)]),
-                        ops,
-                        &params,
-                        &[],
-                        false,
-                    );
-                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
-                }
                 _ if !stmt.nested().is_empty() => {
                     let header = match &*stmt {
                         Statement::Loop(l) => {
-                            Key::tuple([Key::tag(Tag::Loop), descriptor(&l.axis, &stmt)])
+                            self.extent_apart(&l.axis, &mut params);
+                            Key::tuple([Key::tag(Tag::Loop), self.descriptor(&l.axis, &stmt)])
                         }
                         Statement::Cond(c) => {
                             let cond = self.abstract_(&c.cond, &mut params, &mut ops, &mut touched);
@@ -864,10 +983,11 @@ impl Context<'_> {
                         .map(|axis| (axis.name, self.axes.get(&axis.name).cloned()))
                         .collect();
                     for axis in &bound {
-                        self.axes.insert(axis.name, descriptor(axis, &stmt));
+                        let key = self.descriptor(axis, &stmt);
+                        self.axes.insert(axis.name, key);
                         self.binding.push(axis.name);
                     }
-                    let is_loop = matches!(&*stmt, Statement::Loop(_) | Statement::StridedLoop(_));
+                    let is_loop = matches!(&*stmt, Statement::Loop(_));
                     if is_loop {
                         self.loops.push(bound[0].name);
                         // A state the loop updates is read inside it as the step before, whatever bound it ahead of
@@ -1047,6 +1167,47 @@ pub fn value_numbers(
     resource_key: &dyn Fn(&Name) -> Key,
     chains: Chains,
 ) -> Numbering {
+    numbered(body, resource_key, chains, false)
+}
+
+/// What marks a parameter as the integer a coordinate expression adds, beside the integer and the place it is
+/// written at ([`value_numbers_apart`]).
+const OFFSET: &str = "offset";
+
+/// The integer a parameter of [`value_numbers_apart`] stands for and the place it is written at, in the order the
+/// body's statements are numbered; `None` for a parameter that is a coordinate form.
+pub fn offset_of(param: &Param) -> Option<(i64, i64)> {
+    match param.key() {
+        Key::Tuple(parts) => match &parts[..] {
+            [_, Key::Tuple(held)] => match &held[..] {
+                [Key::Str(mark), Key::Int(offset), Key::Int(site)] if &**mark == OFFSET => {
+                    Some((*offset, *site))
+                }
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// [`value_numbers`] with the integer every affine coordinate expression adds taken apart, as a parameter of its
+/// own: the copies of one step, which read at successive offsets and mask at successive bounds, number alike and
+/// differ in those parameters. No identity reads these numbers.
+pub fn value_numbers_apart(
+    body: &Body,
+    resource_key: &dyn Fn(&Name) -> Key,
+    chains: Chains,
+) -> Numbering {
+    numbered(body, resource_key, chains, true)
+}
+
+pub(super) fn numbered(
+    body: &Body,
+    resource_key: &dyn Fn(&Name) -> Key,
+    chains: Chains,
+    apart: bool,
+) -> Numbering {
     let mut context = Context {
         out: Numbering::default(),
         resource_key,
@@ -1056,9 +1217,18 @@ pub fn value_numbers(
         loops: Vec::new(),
         path: Vec::new(),
         carried: HashSet::new(),
+        states: body
+            .carries()
+            .iter()
+            .filter_map(|here| match &**here.stmt() {
+                Statement::Carry(c) => Some(c.name),
+                _ => None,
+            })
+            .collect(),
         binding: Vec::new(),
         defined_by: HashMap::new(),
         depths_of: HashMap::new(),
+        apart,
     };
     context.visit(body);
     context.out
@@ -1074,17 +1244,6 @@ fn placeholder(spellings: &mut Vec<(Name, String)>, spelling: String) -> Name {
 
 /// The terms a chain of the associative operation `op` combines, in spelled order: the operands of every nested
 /// `op` node, left to right.
-fn associative_terms(e: &Expression, op: Operation, out: &mut Vec<Expression>) {
-    match e.operation() {
-        Some((nested, args)) if nested == op && args.len() == 2 => {
-            for arg in args {
-                associative_terms(arg, op, out);
-            }
-        }
-        _ => out.push(e.clone()),
-    }
-}
-
 /// `key` with every operand placeholder replaced by the number of the value it stands for, and every coordinate
 /// placeholder by its parameter: what an operand computes, for ordering two operands of one commutative node.
 fn by_content(key: &Key, ops: &[Value], params: &[Param]) -> Key {

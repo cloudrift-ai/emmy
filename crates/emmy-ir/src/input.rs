@@ -42,7 +42,6 @@ fn structure(body: &Body, paged: &HashSet<Name>) -> Result<()> {
     for stmt in body.stmts() {
         let fault = match &**stmt {
             Statement::Loop(l) if l.unroll => Some(UNROLL),
-            Statement::StridedLoop(l) if l.unroll => Some(UNROLL),
             Statement::Load(load) if !paged.contains(&load.input) && load.index.len() != 1 => {
                 Some(FLAT)
             }

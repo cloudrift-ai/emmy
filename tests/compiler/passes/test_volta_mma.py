@@ -31,7 +31,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
 )
 from emmy.compiler.ir.schedule.catalog import MAX_FRAGMENT_REGISTERS, warp_tile_moves
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, StridedLoop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
@@ -210,11 +210,14 @@ def test_volta_warp_tiles_respect_accumulator_register_budget() -> None:
 
 def test_volta_chunks_reach_the_width_the_16_deep_atoms_do() -> None:
     """Volta's k4 atom reaches a 128-element K chunk at bk 32, the chunk a k16 atom reaches at bk 8: a skinny GEMM's
-    K-contiguous rows stream in 256 B runs rather than 64 B. No other atom's chunk domain moves."""
+    K-contiguous rows stream in 256 B runs rather than 64 B. The TF32 atom's k8 reaches it at bk 16 by the same rule,
+    and no deeper atom's chunk domain moves."""
     volta = {p.bk for p in warp_tile_moves((VOLTA,))}
     assert volta == {1, 2, 4, 8, 16, 32}
     for name in ATOM_REGISTRY:
-        if ATOM_REGISTRY[name].atom_k > 4:
+        if ATOM_REGISTRY[name].atom_k == 8:
+            assert {p.bk for p in warp_tile_moves((name,))} == {1, 2, 4, 8, 16}, name
+        elif ATOM_REGISTRY[name].atom_k > 8:
             assert {p.bk for p in warp_tile_moves((name,))} == {1, 2, 4, 8}, name
 
 
@@ -226,7 +229,7 @@ def test_sm70_deep_chunk_stages_k_contiguous_b_through_the_crosswise_layout(monk
     kernel, knobs, _ = _source(_graph(m=32, n=128, k=256, trans=True), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f2x4/k16"
     assert _slab_writes(kernel, "_b_smem", "V70A")
-    chunks = [loop for loop in statements(kernel, StridedLoop) if loop.axis.extent == Dim(256) and loop.step == Literal(64, "int")]
+    chunks = [loop for loop in statements(kernel, Loop) if loop.axis.extent == Dim(256) and loop.step == Literal(64, "int")]
     assert chunks, "one chunk carries 64 K elements"
 
 
@@ -440,7 +443,7 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     kernel, knobs, _ = _source(_graph(m=64, n=64, k=64), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "STAGE") == "d2/smem"
     ((grid,),) = [kernel.body]
-    (at,) = [i for i, stmt in enumerate(grid.body) if isinstance(stmt, StridedLoop) and stmt.axis.extent == Dim(64)]
+    (at,) = [i for i, stmt in enumerate(grid.body) if isinstance(stmt, Loop) and stmt.axis.extent == Dim(64)]
     (chunk,) = [grid.body[at]]
     assert chunk.step == Literal(32, "int")
     prologue, body = grid.body[:at], list(chunk.body)
@@ -521,12 +524,13 @@ def test_sm70_attention_uses_the_volta_fragment_layout(monkeypatch) -> None:
 def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch) -> None:
     _pin_sdpa(monkeypatch)
     kernel, _, src = _source(_sdpa_graph(d=256, causal=True, dynamic=True), Context(compute_capability=(7, 0)))
-    (bias,) = [apply for apply in statements(kernel, FragmentApply) if apply.op.name == "add"]
-    fragment = bias.out
+    # The tier reads the carrier's range: no zero is added to the score first, the mask is the whole of it.
+    assert not [apply for apply in statements(kernel, FragmentApply) if apply.op.name == "add"]
     # The causal mask compares the fragment element's query row with its key column; the key's bound masks it too.
     masks = {str(apply.args[0].expressions[0]): apply for apply in statements(kernel, FragmentApply) if apply.op.name == "where"}
     assert set(masks) == {"__frow < __fcol", "seq_len <= __fcol"}
-    assert all(mask.out == fragment and mask.layout == "m8n8k4" for mask in masks.values())
+    (fragment,) = {mask.out for mask in masks.values()}
+    assert all(mask.layout == "m8n8k4" for mask in masks.values())
     causal, bound = masks["__frow < __fcol"], masks["seq_len <= __fcol"]
     assert causal.row_base is not None and causal.col_base == bound.col_base, "both read the same key column"
     assert {repack.fragment_layout for repack in statements(kernel, FragmentRepack)} == {"m8n8k4"}
@@ -550,7 +554,7 @@ def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -
     monkeypatch.setenv("EMMY_RASTER", "")
     kernel, knobs, _ = _source(_sdpa_graph(d=128, causal=True), Context(compute_capability=(7, 0)))
     assert knobs["STAGE@map.1/twist"] == "d2/smem"
-    (chunk,) = [loop for loop in statements(kernel, StridedLoop) if loop.axis.name.endswith("__ck")]
+    (chunk,) = [loop for loop in statements(kernel, Loop) if loop.axis.name.endswith("__ck")]
     body = list(chunk.body)
     drain, deposit, barrier, issue = _register_ring_order(body)
     assert drain < deposit < barrier < issue, "the key and value of the chunk after next issue past the barrier"

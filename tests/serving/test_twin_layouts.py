@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from emmy.commands.compile import GoldenSelection
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
@@ -21,7 +22,7 @@ from emmy.serving.twins import twins_in_build_order
 from tests.compiler.terms import contraction, slab
 
 
-def _traced(width, source: str | None) -> Graph:
+def _traced(width, source: str | None, shape=(8, 8)) -> Graph:
     """A traced program with ``width`` tokens (``"num_tokens"``: symbolic) binding checkpoint tensor ``source``."""
     from emmy.compiler.dim import Dim
 
@@ -29,7 +30,7 @@ def _traced(width, source: str | None) -> Graph:
     tokens = Dim(width) if isinstance(width, str) else width
     graph.add_node(InputOp(), [], Tensor("x", (tokens, 8), "f32"), node_id="x")
     if source is not None:
-        graph.add_node(ConstantOp(name="w", source_path=source, source_shape=(8, 8)), [], Tensor("w", (8, 8), "f32"), node_id="w")
+        graph.add_node(ConstantOp(name="w", source_path=source, source_shape=shape), [], Tensor("w", shape, "f32"), node_id="w")
     graph.inputs, graph.outputs = ["x"], ["x"]
     return graph
 
@@ -57,6 +58,22 @@ def test_twins_bind_one_layers_tensors_and_build_narrowest_first():
         )
     )
     assert len({id(native[key]) for key in ("c", "c1-native", "e16-native")}) == 3 and native["c"] is native["a"]
+    # A record of one realization builds its own family alone, the same twins in the same order, and lowers no other.
+    lowered = []
+    family = list(twins_in_build_order(graphs, lambda graph: lowered.append(graph) or set(), of="e"))
+    assert [key for key, _ in family] == ["c", "e", "a"] and lowered == [graphs["a"], graphs["c"], graphs["e"]]
+
+
+def test_programs_of_two_models_that_name_a_tensor_alike_are_not_twins():
+    """A hardware golden holds programs of many models: a tensor path alone (``weight``) names a different tensor in
+    each, so programs reading it at another shape take scopes of their own, while one model's twins still share."""
+    graphs = {
+        "a1": _traced(1, "weight", (8, 8)),
+        "a16": _traced(16, "weight", (8, 8)),
+        "b1": _traced(1, "weight", (16, 8)),
+    }
+    scopes = dict(twins_in_build_order(graphs, lambda _graph: set()))
+    assert scopes["a1"] is scopes["a16"] and scopes["b1"] is not scopes["a1"]
 
 
 def _constants(*names):
@@ -161,15 +178,16 @@ def test_the_record_run_compiles_each_target_with_its_familys_settled_layouts(mo
     monkeypatch.setattr(run, "bench_lowered_vs_torch", no_bench)
     seen = []
 
-    def run_once(args):  # the golden branch of ``_handle_run_once``, past its GPU check and row resolution
-        args._golden_graph = programs[0 if args.realization.startswith("gdn16") else 1]
+    def run_once(args, *, on_compiled, **_walk):  # the golden branch of ``_handle_run_once``, past its GPU check and row resolution
+        selection = GoldenSelection(graph=programs[0 if args.realization.startswith("gdn16") else 1])
         settled = dict(_layout._SETTLED.get() or {})
-        run._handle_run_ir(args, CudaBackend, CompilerDump)
+        compiled = []
+        run._handle_run_ir(args, CudaBackend, CompilerDump, selection, lambda graph: (compiled.append(graph), on_compiled(graph)))
         seen.append(
             (
                 args.realization,
                 settled,
-                sorted(name for name, transposed in graph_layouts(args._compiled) if transposed or name.endswith("__source")),
+                sorted(name for name, transposed in graph_layouts(compiled[0]) if transposed or name.endswith("__source")),
             )
         )
 
@@ -219,33 +237,33 @@ def test_a_named_realization_compiles_with_the_layouts_its_narrower_twins_bound(
 
     def named(twin, **extra):
         args = SimpleNamespace(golden=str(path), realization=names[twin], code=None, input=None, ir=None, dynamic=None, **extra)
-        resolve_golden_arg(args)
-        return args
+        return args, resolve_golden_arg(args)
 
-    narrow = named("gdn1")
-    with run._family_layouts(narrow):
+    narrow, selection = named("gdn1")
+    with run._family_layouts(narrow, selection):
         assert not _layout._SETTLED.get()
-        graph = narrow._golden_graph.copy()
+        graph = selection.graph.copy()
         compiled = Pipeline.build(run._replay_stage_and_passes(graph, embedded_golden=True)[1]).run(graph)
     (weight,) = [name for name, transposed in graph_layouts(compiled) if transposed or name.endswith("__source")]
     bound = {weight.removesuffix("__source"): "source" if weight.endswith("__source") else "folded"}
-    with run._family_layouts(named("gdn16")):
+    with run._family_layouts(*named("gdn16")):
         assert _layout._SETTLED.get() == bound
     # A hand pin is for the twin under study; the narrower twins compile as serving builds them, with none.
     ((name, layout),) = bound.items()
-    with pinned_knobs({f"LAYOUT@{name}": "folded" if layout == "source" else "source"}), run._family_layouts(named("gdn16")):
+    with pinned_knobs({f"LAYOUT@{name}": "folded" if layout == "source" else "source"}), run._family_layouts(*named("gdn16")):
         assert _layout._SETTLED.get() == bound
-    with _layout.settled_layouts({"w": "source"}), run._family_layouts(named("gdn16", _explicit_realization=False)):
+    with _layout.settled_layouts({"w": "source"}), run._family_layouts(*named("gdn16"), explicit=False):
         assert _layout._SETTLED.get() == {"w": "source"}
     # A narrower twin whose rows spell every precision gate, as a record writes them, is still the same family.
     with GoldenFile.edit(path) as document:
         document.rows[:] = [replace(row, pins=regime_pins(row.pins)) if row.name == names["gdn1"] else row for row in document.rows]
-    with run._family_layouts(named("gdn16")):
+    with run._family_layouts(*named("gdn16")):
         assert _layout._SETTLED.get() == bound
 
 
 def _twin(n: int) -> Graph:
-    """A traced width twin: one kernel reading the transposed weight ``w`` at output width ``n``."""
+    """A traced width twin: one kernel reading the transposed weight ``w`` at output width ``n``. Every twin binds the
+    same checkpoint tensor (its source shape does not depend on ``n``), as one layer's twins do."""
     axis_n, axis_k = Axis("n", n), Axis("k", 8)
     tile = TileOp(
         op=contraction(axis_k, slab("xv", "x", "k"), (slab("wv", "w", "k", "n"), "acc")),
@@ -256,7 +274,7 @@ def _twin(n: int) -> Graph:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (8,), "f32"), node_id="x")
     graph.add_node(
-        ConstantOp(name="w", load_ops=(TransposeOp((-2, -1)),), source_path="w", source_shape=(n, 8)),
+        ConstantOp(name="w", load_ops=(TransposeOp((-2, -1)),), source_path="w", source_shape=(64, 8)),
         [],
         Tensor("w", (8, n), "f32"),
         node_id="w",
@@ -270,7 +288,6 @@ def _measure(db, graph, layout, ctx, pipeline):
     """Record one perf row for the kernel ``graph`` forms under ``layout``, kept whole and unsplit: pinned, so the
     measured kernel is the one the layout arms leave, whatever a prior would pick at those forks."""
     from emmy.compiler.pipeline.search.bench_record import kernel_row
-    from emmy.compiler.pipeline.search.db import PerfStats
     from emmy.compiler.pipeline.search.golden import evidence_scope
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
@@ -279,8 +296,7 @@ def _measure(db, graph, layout, ctx, pipeline):
     node = next(node for node in formed.nodes.values() if isinstance(node.op, TileOp))
     kernel = kernel_row(node.op.with_io(formed, node))
     db.record_kernel(kernel)
-    stats = PerfStats(median=17, min=17, max=17, mean=17, variance=0, n_samples=1)
-    db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, status="ok", stats=stats)
+    db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, status="ok", us=17.0)
 
 
 def test_a_twin_whose_rows_cover_only_the_other_layout_fails_the_audit():

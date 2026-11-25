@@ -831,6 +831,39 @@ impl Accum {
 
 #[pymethods]
 impl Carry {
+    /// The axis of the loop that carries the state: the first coordinate, the step.
+    #[getter]
+    fn step<'py>(slf: &Bound<'py, Self>) -> PyResult<Option<Bound<'py, PyString>>> {
+        let carry: &emmy_ir::statement::Carry = inner(slf.as_super().get())?;
+        Ok(carry.step().map(|name| PyString::new(slf.py(), name)))
+    }
+
+    /// The cell this statement defines: the coordinates past the step.
+    #[getter]
+    fn cell<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let carry: &emmy_ir::statement::Carry = inner(slf.as_super().get())?;
+        let cell: PyResult<Vec<_>> = carry
+            .cell()
+            .iter()
+            .map(|e| crate::expression::PyExpression::wrap(slf.py(), e))
+            .collect();
+        PyTuple::new(slf.py(), cell?)
+    }
+
+    /// The buffer this statement stores into, as a `Write` names its own: the state.
+    #[getter]
+    fn output<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyString>> {
+        let carry: &emmy_ir::statement::Carry = inner(slf.as_super().get())?;
+        Ok(PyString::new(slf.py(), &carry.name))
+    }
+
+    /// The values this statement stores, as a `Write` lists its own: the one value.
+    #[getter]
+    fn values<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let carry: &emmy_ir::statement::Carry = inner(slf.as_super().get())?;
+        PyTuple::new(slf.py(), [PyString::new(slf.py(), &carry.value)])
+    }
+
     /// The axes of the cell this statement defines.
     #[getter]
     fn cells<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
@@ -878,14 +911,56 @@ impl Loop {
         let l: &emmy_ir::statement::Loop = inner(slf.as_super().get())?;
         Ok(l.is_reduce())
     }
-}
 
-#[pymethods]
-impl StridedLoop {
-    #[getter]
-    fn is_reduce(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let l: &emmy_ir::statement::StridedLoop = inner(slf.as_super().get())?;
-        Ok(l.is_reduce())
+    /// Where the axis walks and how: `(start, end, step)`, each filled in where the loop states none (`0`, the
+    /// axis's extent, `1`).
+    fn walk<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let l: &emmy_ir::statement::Loop = inner(slf.as_super().get())?;
+        let (walk, py) = (l.walk(), slf.py());
+        PyTuple::new(
+            py,
+            [
+                PyExpression::wrap(py, &walk.start)?,
+                PyExpression::wrap(py, &walk.end)?,
+                PyExpression::wrap(py, &l.stride())?,
+            ],
+        )
+    }
+
+    /// The loop over `axis` from `start` by `step`, until `end` or else the axis's extent: what a kernel writes
+    /// where the threads of a block stride through an axis, or a trip covers a block of positions.
+    #[staticmethod]
+    #[pyo3(signature = (axis, start, step, body, unroll=false, end=None, seed=true, unrolled=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn strided(
+        py: Python<'_>,
+        axis: &Bound<'_, PyAny>,
+        start: &Bound<'_, PyAny>,
+        step: &Bound<'_, PyAny>,
+        body: &Bound<'_, PyAny>,
+        unroll: bool,
+        end: Option<&Bound<'_, PyAny>>,
+        seed: bool,
+        unrolled: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let axis = axis_from_py(axis, 0)?;
+        let start = expression_from_py(start)?;
+        let end = match end {
+            Some(end) => expression_from_py(end)?,
+            None => axis.extent.expression.clone(),
+        };
+        // The whole axis is no range to state.
+        let whole = start == Expression::int(0) && end == axis.extent.expression;
+        let stmt = Statement::Loop(emmy_ir::statement::Loop {
+            axis,
+            body: Body::new(statements_from_py(body)?),
+            unroll,
+            seed,
+            unrolled,
+            range: (!whole).then_some((start, end)),
+            step: Some(expression_from_py(step)?),
+        });
+        wrap_statement(py, &Arc::new(stmt))
     }
 }
 

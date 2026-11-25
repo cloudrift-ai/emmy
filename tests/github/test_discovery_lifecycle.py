@@ -115,7 +115,7 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
         (
             "nightly-refresh.yml",
             "discover",
-            ["durations", "prior", "freeze", "gaps", "fill", "discover"],
+            ["durations", "prior", "gaps", "goldens", "fill", "candidates", "discover"],
             "nightly",
             "Send nightly summary",
         ),
@@ -147,9 +147,8 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
         assert "pr_number" not in lifecycle["outputs"]
         assert "PR_NUMBER" not in notify["env"]
         # One summary for the run: every job's result, each prior leg's own comparison line.
-        for job in ("durations", "prior", "freeze", "gaps", "fill", "discover"):
+        for job in ("durations", "prior", "gaps", "goldens", "fill", "candidates", "discover"):
             assert notify["env"][f"{job.upper()}_RESULT"] == f"${{{{ needs.{job}.result }}}}"
-        assert notify["env"]["MEASUREMENT_FREEZE"] == "${{ needs.freeze.outputs.summary }}"
         assert notify["env"]["DURATIONS_UPDATED"] == "${{ needs.durations.outputs.updated }}"
         prior = document["jobs"]["prior"]
         assert prior["strategy"]["matrix"]["space"] == ["schedule", "placement"]
@@ -179,34 +178,45 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
     assert "DISCORD_EMMY_ROBOTS_ALERT_ROLE_ID" not in (Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text()
 
 
-def test_nightly_drops_the_rows_the_compiler_no_longer_realizes_after_the_fold():
-    """The freeze job runs after the prior job's fold, on the branch's tip rather than the run's commit: it drops the
-    rows the compiler no longer realizes, folds the files again and commits them, only from main and only while main
-    moved in no path the realization depends on."""
+def test_nightly_drops_the_candidate_rows_the_compiler_no_longer_realizes():
+    """The candidates job runs after the fill job, on the branch's tip rather than the run's commit: it drops the
+    candidate rows the compiler no longer realizes and commits the files, only from main and only while main moved
+    in no path the realization depends on."""
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
-    job = document["jobs"]["freeze"]
-    checkout, lfs, _setup, drop, commit, summary = job["steps"]
+    job = document["jobs"]["candidates"]
+    checkout, _setup, drop, commit, summary = job["steps"]
 
-    assert (job["needs"], job["if"]) == ("prior", "always()")
+    assert (job["needs"], job["if"]) == ("fill", "always()")
     assert job["outputs"]["summary"] == "${{ steps.summary.outputs.summary }}"
     assert (checkout["with"]["ref"], checkout["with"]["fetch-depth"]) == ("${{ github.ref_name }}", 0)
-    assert lfs["run"] == 'git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"'
-    freezes = job["env"]["FREEZES"]
-    assert freezes == "emmy/compiler/pipeline/search/freezes"
-    # A compiler change on main while the rows compiled must stop the push: the freeze and the compiler are not tolerated.
-    assert not any(path.startswith("emmy/compiler/pipeline/search/freezes") for path in job["env"]["TOLERATED_PATHS"].split())
-    steps = [
-        'emmy golden realize "$FREEZES" --drop --json _data/realize.json',
-        "emmy db import",
-        'emmy db freeze --db _data/fold.db --out "$FREEZES"',
-    ]
-    assert sorted(steps, key=drop["run"].index) == steps
+    candidates = job["env"]["CANDIDATES"]
+    assert candidates == "emmy/compiler/pipeline/search/candidates/records"
+    # A compiler change on main while the rows compiled must stop the push: neither it nor the files are tolerated.
+    assert not any(path.startswith("emmy/compiler/pipeline/search/candidates") for path in job["env"]["TOLERATED_PATHS"].split())
+    assert 'emmy candidates realize "$CANDIDATES" --drop --json _data/realize.json' in drop["run"]
     assert "continue-on-error" not in drop
     assert commit["if"] == "steps.drop.outputs.updated == 'true' && github.ref == 'refs/heads/main'"
-    assert (commit["uses"], commit["with"]["paths"]) == ("./.github/actions/push-to-main", freezes)
+    assert (commit["uses"], commit["with"]["paths"]) == ("./.github/actions/push-to-main", candidates)
     assert summary["if"] == "always()" and summary["env"]["DROPPED"] == "${{ steps.commit.outcome }}"
-    assert "jq -r -f .github/workflows/scripts/freeze_realized.jq _data/realize.json" in summary["run"]
-    assert (Path(__file__).parents[2] / ".github" / "workflows" / "scripts" / "freeze_realized.jq").is_file()
+    assert "jq -r -f .github/workflows/scripts/candidates_realized.jq _data/realize.json" in summary["run"]
+    assert (Path(__file__).parents[2] / ".github" / "workflows" / "scripts" / "candidates_realized.jq").is_file()
+
+
+def test_nightly_fill_rebuilds_the_candidate_file_of_the_golden_it_filled():
+    """A candidate file copies its golden's tables, so the fill job copies them again after it takes the filled
+    golden — where the golden has a candidate file, from no DB — and commits the two together; the jobs that
+    write no candidate file let one land on main meanwhile."""
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
+    jobs = document["jobs"]
+    candidates = jobs["fill"]["env"]["CANDIDATES"]
+    take = next(step for step in jobs["fill"]["steps"] if step.get("id") == "take")
+    commit = next(step for step in jobs["fill"]["steps"] if step.get("id") == "commit")
+    steps = ['cp "$working" "$GOLDEN"', 'emmy golden check "$GOLDEN"', 'emmy candidates build "$GOLDEN"']
+    assert sorted(steps, key=take["run"].index) == steps
+    assert 'if [ -f "$candidates" ]' in take["run"]
+    assert commit["with"]["paths"] == "${{ steps.choose.outputs.golden }} ${{ steps.take.outputs.candidates }}"
+    for job in ("durations", "prior", "fill"):
+        assert f"{candidates}/*.json" in jobs[job]["env"]["TOLERATED_PATHS"].split()
 
 
 def test_onboarding_requires_platform_results_snapshot_and_git_lfs():

@@ -43,7 +43,7 @@ The invariant is what stops facts from acquiring a second home. A term that rend
 no private spelling of anything the statements already carry:
 
 - the neutral elements come from `Accum.op.identity` through the ONE identity placement
-  (`Loop`'s render / `StridedLoop`'s render), so no `identities` field rides on the term and no
+  (`Loop`'s render), so no `identities` field rides on the term and no
   `Init` seed is emitted beside it;
 - the rescale temps arrive as ordinary `Assign`s, so the generic SSA rename, liveness and read
   counters see them with no special `deps()` channel to keep complete.
@@ -186,14 +186,14 @@ kernel it produced went on to read.
 - **Tile → kernel** (after `lowering/kernel`): `TileOp` materialized to
   `KernelOp` whose body is a `Tile` (the thread-grid decode) over the
   lowered op tree. A cooperative `Reduce` lowers the reduce as a
-  `StridedLoop` (lane-strided fold) + the derived algebra-generic
+  `Loop` with a `step` (lane-strided fold) + the derived algebra-generic
   cross-thread combine (`_factor.emit_combine`, reading the fold node's
   stored combine → `WarpShuffle` /
   `Smem`+`Sync`+`TreeHalve`, multi-component for a twisted fold) +
   the projection (a full-row output sweep distributed across the coop
   lanes, a scalar output guarded to lane 0); the `Tile` gains the coop
   lane axis and `block_threads = coop`. A **symbolic reduce axis**
-  (dynamic `seq_len`) is supported — the `StridedLoop`'s `< seq_len`
+  (dynamic `seq_len`) is supported — the strided `Loop`'s `< seq_len`
   bound is the runtime-extent mask (idle lanes fold the identity; no
   ceil-div / clamp) and the `Dim` name is threaded as a runtime `int`
   arg. Cross-CTA reduction splits are structural choices in `030_cut`. A symbolic FREE axis
@@ -242,7 +242,7 @@ lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrou
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and nothing
 else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`, `check_input`),
+`ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`, `check_input`),
 the text form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own
 (`one_operation_per_definition`, `simplify_body`, `prepare_body`), the lambda normalization (`normalize_lambda_body`),
 the two statement types fusion's body assembly in `ir/loop/`
@@ -292,10 +292,9 @@ expressions mention are names the statement reads (a `Load`'s index, a `Select`'
 number where a name, a buffer or an expression is expected is plain data (a constant stride, a literal seed).
 
 The shared statement types and the Kernel IR statement types are all declared, in one list. A statement type whose
-member the roles cannot give is a missing role, not a hand-written member; the shared statement types state four, which
-`test_protocol.py` pins: an `Accum`'s reduced axes follow a substitution that splits an axis, a `Let` and a `Call` read
-buffers their fields do not name (inside an expression, through the subroutine), and a `StridedLoop` with an `end` binds
-one more name than its axis.
+member the roles cannot give is a missing role, not a hand-written member; the shared statement types state three, which
+`test_protocol.py` pins: an `Accum`'s reduced axes follow a substitution that splits an axis, and a `Let` and a `Call`
+read buffers their fields do not name (inside an expression, through the subroutine).
 
 Behaviour that is not on this list lives outside the module as a function over statements. The Loop IR runner's
 host C++ is the main case: `ir/loop/render.py` holds the render context, the index flattening and one render
@@ -371,7 +370,7 @@ them.
 
 Shared expression sublanguage used by every IR layer: `Load.index`,
 `Write.index`, `SelectBranch.select`, `IndexMapOp.coord_map`,
-`StridedLoop.start`/`step`, `Cond.cond`, etc. Imports nothing from
+`Loop.range`/`step`, `Cond.cond`, etc. Imports nothing from
 other IR files.
 
 An expression has one text, `str(expression)`, and `parse` reads it back to an equal expression: C-like, parenthesized
@@ -418,7 +417,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 | `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…); unary `pad` is the frontend's exact zero-width identity. |
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
 | `RangeOp`                            | One-dimensional integer sequence, static or of a symbolic length. |
-| `ReduceOp`                           | Collapse one axis via associative binary op.                   |
+| `ReduceOp`                           | Collapse one axis via associative binary op, over the whole axis or the `range` of it the op states. |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |
 | `IndexMapOp` + `IndexSource`         | Unified layout-only op over `Expression`.                            |
@@ -461,21 +460,37 @@ stored `combine`). Commutativity
 is unused — split/reorder legality is a future cooperative-tier concern, recorded
 structurally when it returns.
 
-A recurrence's state is NOT a fold, and has its own two statements. A fold's meaning is its op: ⊕ is a monoid, so
+A recurrence's state is NOT a fold, and has a statement of its own. A fold's meaning is its op: ⊕ is a monoid, so
 its steps may run in any order, its seed is the op's identity, and the carrier is one scalar inside the loops over
 the cells. A carried state is the opposite on each count: its steps run in order, its step is any computation, its
 seed is named, and it has cells — a delta rule's step reads OTHER cells of its own state (`k @ S`), which needs the
-loop over the steps OUTSIDE the cells and the state kept across them. `Carry` (`S[i, j] <- next`, with its `seed`)
-defines the NEXT value of one cell, and `Pre` (`v = pre S[k, j]`) reads what the PREVIOUS step left at any cell: the
-seed on the first step, the last step's value once the loop has closed. No read of a step sees what that step
-defines, so the reads and the definition of one step are order-free. Nothing is declared: the state is carried by the
-nearest enclosing loop whose axis the `Carry` index does not read (`carried_cells`), which is therefore a reduce loop
-the free-axis order never sorts under the cells, and its shape is the loops over its cells. The Loop IR rendering
-keeps two slots of the cell shape and commits the second after each step; how many slots survive and where they are
-stored is a schedule's question, not the statement's. The Tile lift keeps the state in the term: a `Fold` whose ⊕ is
-the action `next`, with the `Carry` index as its `cells` and a `Pre` as a carrier-read slab (`ir/tile/ARCHITECTURE.md`).
-The classic schedule realizes the loop as a serial launch axis over a state buffer, or, where the row's `STAGE` keeps
+loop over the steps OUTSIDE the cells and the state kept across them. The state is a buffer of the kernel's own,
+neither an input nor an output, and the step is its first coordinate. `Carry` (`S[c, i, j] <- next`, with its
+`seed`) defines one cell at one step, and a `Load` reads the state as it reads any buffer. Inside the loop that
+carries it a load reads one step back (`v = load S[c - 1, k, j]`), at any cell: the seed on the first step, and what
+the last step that defined the cell left. After the loop a load reads the last step. No read of a step sees what that
+step defines, so the loads and the definition of one step are order-free. The state is carried by the loop its first
+coordinate names (`carried_cells`), which is therefore a reduce loop the free-axis order never sorts under the
+cells, and its shape is the loops over its cells. The Loop IR rendering keeps two slots of the cell shape and
+commits the second after each step; how many slots survive and where they are stored is a schedule's question, not
+the statement's. The Tile lift takes the loop that carries a state as the kernel's serial axis: the term is one
+step, the `Carry` one of the kernel's stores, and a load of the state a slab (`ir/tile/ARCHITECTURE.md`).
+The classic schedule realizes the steps as launches in order over a state buffer, or, where the row's `STAGE` keeps
 the state in shared memory or registers, inside a CTA as a loop.
+
+**A loop may walk a range.** A `Loop` states where its axis walks when that is not all of it: a start and an exclusive
+end (`axis::Range`), each over the coordinates around the loop and the symbolic dims, affine or a `min` / `max` of
+affine forms. The text is `for a4 in 0..a0 + 2 of 62:`. The values lie inside `0..extent`, so the extent stays the
+bound every index is analysed under, and the range says how many trips the loop takes. A condition on a coordinate is
+a select in a body or a range on a loop. A select decides what a cell computes and every trip evaluates it. A range
+says which trips there are. Three writers state ranges: the cross-CTA split (each block of the stream), the roll (a
+loop that grows with the step) and the attention decomposition (the keys a row folds). The normal form gives a range
+one spelling (`canonical_ranges`) and writes none itself: a mask a body spells as a select stays a select. The `Fold`
+term keeps the range of the axis it binds as a stored part, the lift and `Fold.lower` carry it, and the Loop IR runner
+and the CPU code generator walk it. The classic schedule and the kernel lowering read the kernel through
+`TileOp.scheduled`, in which every term keeps its range and a kernel tier reads it (`ir/tile/ARCHITECTURE.md`). A loop
+may also state a `step`, how far its axis moves each trip: a kernel loop takes one where the threads of a block stride
+through an axis, and a Loop IR body states none.
 
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
@@ -627,19 +642,17 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 
 | Symbol                       | Role                                                                                                              |
 |------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `Axis`                       | Named iteration variable (`name`, `extent`). Defined in `ir/axis.py`, re-exported here. Carries an optional `window` (`Window` — the `parent` axis this one is a slice of, and whether the slice is a cross-CTA `partition`; its `base` / `bound` are declared but unused, kept only because recorded split identities spell them): the ONE windowing concept, and never a range — a loop's data-independent `start` / `end` is the kernel loop's own (`StridedLoop`), derived where it opens; `source_axis` is the derived compat read (`window.parent`). Excluded from equality / hashing. |
+| `Axis`                       | Named iteration variable (`name`, `extent`). Defined in `ir/axis.py`, re-exported here. Carries an optional `window` (`Window` — the `parent` axis this one is a slice of, and whether the slice is a cross-CTA `partition`): the ONE windowing concept, and never a range — a reduce states the range it walks on its own loop or fold, and a kernel loop its own range and step, derived where it opens; `source_axis` is the derived compat read (`window.parent`). Excluded from equality / hashing. |
 | `LoopOp`                     | One kernel. Stored field: `body` (nested `Loop` tree). Computed: `axes`, `loads`, `accums`.                       |
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
 | `Assign`                     | The one scalar definition: `name = value`, `value` one operation over names and literals (`exp(x)`, `2 * x - y`: an affine region is one node), with an optional `dtype`. |
 | `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expression.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
-| `Carry`                      | The next value of one cell of a carried state: `name[index...] <- value`, holding `seed` before the first step. No op: a state folds nothing. |
-| `Pre`                        | Read of one cell of a carried state: `name = pre carrier[index...]`, the previous step's value inside the loop that carries it. |
+| `Carry`                      | One cell of a carried state at one step: `name[step, cell...] <- value`, holding `seed` before the first step. `name` is a buffer of the kernel's own, which a `Load` reads: one step back inside the loop that carries it, the last step after it. No op: a state folds nothing. |
 | `Init`                       | Explicit `<dtype> name = identity;` seed at this scope (`name` + scalar `identity` + `dtype`). Used for a carried state's seed (one per component), emitted above the streaming `Loop`. Scope-bound (never hoisted); shadows a deeper same-named `Accum` init. |
 | `Let`                        | Pure binding of one `Expression` to a name: a scalar literal (the twisted carrier's injected `1`), a precomputed integer index, a `FlatIndex` offset. Scoped like an `Assign`; legal inside a stored `Lambda`. |
 | `Write`                      | Write an SSA value to output at `index`.                                                                          |
 | `Select` + `SelectBranch`    | Coord-predicated binding (replaces the old Mux).                                                                  |
-| `Loop`                       | Serial iteration block: `axis` + nested `body`.                                                                   |
-| `StridedLoop`                | Strided iteration (`start`, `step`) — cooperative thread-stride loop reused by Tile/Kernel IR.                    |
+| `Loop`                       | Iteration block: `axis` + nested `body`, the `range` the axis walks when that is not `0..extent`, and the `step` it takes when that is not one (a kernel's lane-strided or chunked loop). |
 | `Cond`                       | If/else block over an `Expression` predicate.                                                                           |
 | `Statement`                       | Base class — every body statement subclasses it. Leaves and control-flow nodes live in `ir/stmt/`.               |
 
@@ -771,7 +784,8 @@ is no coordinate, so the definition reads it free, as it reads a buffer. Fusion 
 body: ordering, placement and coordinate simplification operate on the calls, and on each shared definition once.
 Identical calls to the same definition share by argument structure without searching their bodies. Fusion then
 expands the calls with the demand reconstruction that built the region. Independent reductions with equal extents
-and reduction depths share axes; coordinate substitutions keep different arguments distinct. Terminal values also
+and reduction depths that walk the same range share axes (a reduce loop's range travels with it, read at the
+coordinates the reader binds); coordinate substitutions keep different arguments distinct. Terminal values also
 seed expansion, so a body without output writes expands too. The expanded body is the only form that leaves fusion:
 normalization refuses a body that holds a call, so validation, executable identity, serialization and Tile IR
 lifting never meet one. Placement then shares common producers across definitions, and operation clustering starts
@@ -817,8 +831,10 @@ from that CSE form. Subroutine boundaries never limit fusion.
   temps and one tree are one body up to the single-reader guard — a sum two statements read stays a definition — so
   the readers of the normal form (the tile lift, the kernel passes, the code generators) read one operation per
   statement; the host renderer spells a nested value as temps of its own.
+- `canonical_ranges` — every range a loop states takes one spelling: its bounds simplified under the loops around
+  it, no range where it is the whole axis, and the extent the least bound the analysis proves of the end.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
-  before descending into their children. A parent merge therefore exposes child reductions to the same walk.
+  before descending into their children. Two loops match when they walk one extent and one range. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
   `silu(x@Wg) * (x@Wu)` that both index `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`,
   read through `affine_form`: a blocked reduce indexes its stream at `o·B + i` and still walks that dimension, while
@@ -859,7 +875,7 @@ from that CSE form. Subroutine boundaries never limit fusion.
   come from names, and a body with no two candidates in one scope is not numbered again). Placement numbers the group
   alike (it takes the numbering that found the groups stable), so it merges the cones the members compute: the twin
   pivots and denominators of two online softmaxes over one row become one pair. A member then goes when nothing reads
-  it in its own scope but its update (a carried state, read through `pre` the step before wherever it sits, always
+  it in its own scope but its update (a carried state, loaded one step back wherever the load sits, always
   goes), its reads after the loop reading the group's first member. Two seeded reductions of one value, each read only
   after the loop, are the simplest case.
 - `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
@@ -867,14 +883,15 @@ from that CSE form. Subroutine boundaries never limit fusion.
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Scalar
   accumulators bind beside their own reduction loop, without exporting a nested loop's private state into its
   ancestors. Conditions and unseeded loops preserve the state they update, including an explicit enclosing seed.
-  Axis renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
+  Axis renames reach conditions, reduction metadata, and a `Window`'s parent as well as indices; a
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
   so indirect indices cannot be renamed twice. The order reads a scope lexically: two bindings of one name, which
   motion can produce, keep their source order and a read binds the one before it (or the first, where none precedes:
   a scope is order-free); an accumulator is read where it stands — ahead of its update the step before, behind it the
   updated value — so the online softmax's rescale reads the old maximum beside the new one; a carried state orders
-  nothing within its step, since a `Pre` reads the step before wherever it sits, while the loop that carries the state
-  produces it. A scope whose bindings and reads wait on each other has no reading, and normalization refuses it.
+  nothing within its step, since a load of it reads the step before wherever it sits, while the loop that carries the
+  state produces it and a load beside that loop follows it. A scope whose bindings and reads wait on each other has no
+  reading, and normalization refuses it.
 - The driver repeats whole rounds until one leaves the body alone, takes the least by text of forms the rounds
   alternate between (the crate's `ARCHITECTURE.md` says which bodies do that), and refuses a body that does neither
   in eight.
@@ -926,6 +943,18 @@ state an operation reads
 ahead of its update — the previous step's value — is keyed by use, like every other read of a state; only a name free in
 the body is spelled. The same number applied to the same coordinate expressions in one scope is one instance — what
 placement computes once.
+
+`value_numbers_apart` is the same numbering with the integer of every affine coordinate expression taken apart: an
+index `a + 64` is the form `a`, shared as a parameter is, and the integer 64, a parameter of its own at every place
+one is written; a loop's static extent is a parameter of the loop. An offset inside a reduction then never reaches a
+number. No kernel identity reads this mode. `Body.identity_apart` is the digest over it with those integers left
+out and the buffers keyed by use, as the identity keys them: the key a body shares with the same computation at
+other offsets, bounds and extents. The roll finds the candidates for the copies of a step by it; nothing is keyed
+by it and nothing stores it. `numbering::prove` reads the same mode for the copies of an unrolled step: their scope
+trees are one tree once those integers are left out, every integer moves by one amount per step, and the first copy
+with its integers moved to step `j` has copy `j`'s tree with every integer keyed by its value. `Proved::at` is the
+step at a step number or under the axis of the loop that walks, where a reduction that grows with the step walks a
+range of it.
 
 ### Structural identity — `emmy-ir`'s `identity.rs`
 
@@ -1034,9 +1063,9 @@ recurrence left unrolled — each stage re-demanded under compositions of σs, D
 being the live case — multiplies bindings per stage instead of deduplicating, and such a merge cannot be constructed
 at any budget. The first binding past `_BINDING_RATIO` times the region's statement count raises `UnfusableStmt`,
 which names the loop. Fusion never catches it: its regions are decided before any is spliced, so a region that
-multiplies is a recurrence for `loop/fusion/005_roll_recurrence` to roll, not a region to shrink — shrinking made the
-kernel set depend on the order the producers were visited in. This is a termination bound, not a fusion-quality gate:
-placement still owns every cut on a merge that CAN be built.
+multiplies is a recurrence for the merge rule to roll (`loop/fusion/_recurrence`), not a region to shrink —
+shrinking made the kernel set depend on the order the producers were visited in. This is a termination bound, not a
+fusion-quality gate: placement still owns every cut on a merge that CAN be built.
 
 Each splice memoizes `Expression.free_vars()` by expression identity while placing dependencies. Sigma expressions
 remain live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing
@@ -1130,11 +1159,11 @@ row-reduce masks). The table also counts a fragment's registers, so no statement
 | `WgmmaMma`         | One `wgmma.mma_async.sync.aligned.m64nNk16` cell over N/8 of the per-warp 16×8 C fragments (instruction register d[4j+k] is fragment j, register k); A from a descriptor or a 4-register fragment, B always from a descriptor; the transpose bits are immediates of the instruction. |
 | `WgmmaFence` / `WgmmaCommit` / `WgmmaWait` | The asynchronous discipline around a chunk of `WgmmaMma` cells: fence before the first cell after the accumulators were touched, commit after the chunk, wait before any accumulator read and before the ring slot is released. |
 | `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (PTX `cvt.f32.f16` + add per element, with warp shuffles on Volta to align its distinct f16 and f32 C layouts) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
-| `FragmentApply`    | The one pointwise node over a C fragment. Each argument resides in another fragment, a per-row register pair, a cell-uniform scalar, a predicate over the element's absolute coordinates (`COORD`), or a global-memory load template at those coordinates (`GMEM`). A coordinate mask is a `where` over a `COORD` predicate — the masked branch takes the carrier's finite identity, avoiding `-inf - -inf` in an all-masked chunk, and an additive mask applies its keep op first; an additive bias is an `add` of a `GMEM` operand. The atom's fragment-layout descriptor supplies the element count and row mapping, so the same leaf serves m16n8k16 and Volta m8n8k4. |
+| `FragmentApply`    | The one pointwise node over a C fragment. Each argument resides in another fragment, a per-row register pair, a cell-uniform scalar, a predicate over the element's absolute coordinates (`COORD`), or a global-memory load template at those coordinates (`GMEM`). A coordinate mask is a `where` over a `COORD` predicate, one for each bound of a carrier's range — the element outside the range takes the carrier's finite identity, avoiding `-inf - -inf` in a chunk wholly outside it; an additive bias is an `add` of a `GMEM` operand. The atom's fragment-layout descriptor supplies the element count and row mapping, so the same leaf serves m16n8k16 and Volta m8n8k4. |
 | `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `shfl.sync.bfly` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
 | `FragmentRepack`   | Convert C fragments into a 16-bit operand in registers. The m16n8k16 f16 B form exchanges packed column pairs across the warp; the A form uses the existing lane layout. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects a four-column A slice or four-row B slice from one logical 16×16 C fragment with warp shuffles of packed FP16 pairs. |
 | `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure term over the projection tail's own `Load` / `Assign` / `Select` stmts, stored as its body with the names bound to the store's fragments and the name of the stored value; it is evaluated at each element's own coordinates. The type pass types it over f32 params: a floating load widens to f32 by a conversion of its own, while an integer load keeps its type so shifts and bitwise operations on packed codes stay integer operations. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
-| Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
+| Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
 
 A fragment load reads the elements of a register in one access where they stand in memory in a row, as the register
 holds them, and the address is provably aligned; otherwise it gathers them one by one. The PTX compiler decides this

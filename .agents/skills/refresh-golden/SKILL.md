@@ -83,7 +83,21 @@ emmy golden restamp recipes/<model>/golden/<card>.json    # rewrites the file in
 It lowers every traced program again, gives each kernel the body the fresh lowering gives it, takes every kernel-set
 decision again on the fresh parent, and keeps each row on its kernel. A row keeps its measurement only while its
 kernel kept its exact identity; otherwise it keeps its schedule and loses its microseconds: a *proposal*, no evidence
-until measured again. It refuses to write a file nothing survives in. Read its report:
+until measured again. It refuses to write a file nothing survives in.
+
+When the compiler change re-spells kernels and is not meant to change their code, decide by the code instead. Take
+the baseline on the tree before the change, then restamp on the tree after it:
+
+```bash
+emmy golden realize --ptx <baseline-dir> recipes/<model>/golden/<card>.json            # before the change
+emmy golden restamp --ptx-baseline <baseline-dir> recipes/<model>/golden/<card>.json   # after it
+```
+
+A row then keeps its measurement exactly when its kernel compiles, under the row's schedule, to the PTX the
+baseline holds, re-keyed or not, and the report names each row whose code changed (`the code changed under NAME`).
+Run both from the same working directory: the baseline's folders are named by the file's path under it.
+
+Read the restamp's report:
 
 | Report line | Meaning | Next |
 | --- | --- | --- |
@@ -146,10 +160,9 @@ For the whole-target check, request `--bench-backends eager,tcompile,emmy --stri
 isolated rows are recorded, `--no-record-evidence` keeps that check from replacing their measurements. The
 `--record-greedy` writer copies the picked kernel set from the DB and records a root seed's whole-pick latency beside
 `torch.compile`; each measured row's `tried` is the number of schedules the DB held for that kernel. Missing
-`torch.compile` timing remains a reported gap. A `--tune` run on the card also writes its rows as a file beside the
-card's under `search/freezes/`; copy those files back with the working golden (`scp`, as the golden itself comes
-back) and commit them from the local checkout, where `git lfs install` has run once (README, "Keep what a tune
-measured").
+`torch.compile` timing remains a reported gap. A `--tune` run's rows stay in the card's tune DB. After a hardware
+golden's tunes, copy that DB back with the working golden and fill the golden's candidate file from it
+(`emmy candidates build GOLDEN --db TUNE_DB`; the `refresh-candidates` skill).
 
 Promote the validated entries through `GoldenFile.edit(path)` with `add_kernel`, `add_routing` and `upsert_row`,
 including qualified whole-target latency on its root seed. A canonical file holds the same exact kernel at another
@@ -164,7 +177,8 @@ When the restamp leaves nothing, or drops the kernels a deploy needs (a serving 
 
 - **Still a maintained recipe** — the `onboard-model` skill re-traces the inventory on the card, records it
   (`emmy run --golden PATH --bench --record` / `--record-greedy`) and promotes the winners. Start from a fresh
-  `emmy trace` inventory; the old file is history, not a seed.
+  `emmy trace` inventory; the old file is history, not a seed. Its measured rows reach the priors only once they are
+  promoted into the card's hardware golden (the `onboard-model` skill, "Promote into the hardware golden").
 - **A kernel regrouped into a bigger one** (a whole layer fused into one) — the unpinned greedy may hang on it.
   Loop fusion stays maximal, so the fix is a cut, never a smaller region. Find one without scheduling:
   `emmy compile --golden PATH --realization NAME --ir tile --passes dolftp` under `EMMY_KNOBS="PLACE@<seam>=cut,…"`
@@ -197,11 +211,12 @@ evidence at a cut fork (DeepSeek V4, after #981 and again after #1003). It prove
 not that every fork a deploy meets has a measured arm.
 
 A hardware golden has a candidate file beside it (`emmy/compiler/pipeline/search/candidates/records/<same name>`,
-GLOSSARY "Candidate file"), which carries the golden's programs, kernels and decisions. After the golden changes, run
-`emmy candidates restamp` and then `emmy candidates build`, which copies the golden's tables again and keeps the
-candidate rows whose group the golden still holds.
+GLOSSARY "Candidate file"), which copies the golden's programs, kernels and decisions. A change to the golden leaves
+it stale and the candidate tests red: finish with the `refresh-candidates` skill's repair steps (`emmy candidates
+restamp`, then `emmy candidates build`) in the same PR.
 Keep the prior reproduction gate green (AGENTS.md finalization step 22): a refreshed hardware golden refits both priors
-in the same PR; a refreshed recipe golden the shipped priors do not reproduce is refit for or tagged `prior-pending`.
+in the same PR. The gate holds only hardware goldens: a refreshed recipe golden bears on the priors only through the
+rows promoted into the card's hardware golden, which then refits.
 
 ## Record-run traps
 

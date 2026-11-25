@@ -509,9 +509,11 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Define `reg` as `parts`, the lowest first: two halves by one move, bytes by shifts and sums.
+    /// Define `reg` as `parts`, the lowest first: one 32-bit element as it is, two halves by one move, bytes by
+    /// shifts and sums.
     fn pack_into(&mut self, reg: Reg, parts: &[Reg]) {
         let packed = match parts {
+            [whole] => (*whole).into(),
             [low, high] => Operand::Tuple(vec![*low, *high]),
             parts => self.pack(parts).into(),
         };
@@ -1113,9 +1115,8 @@ impl Lowerer {
                 None => None,
             };
             let mut values = Vec::with_capacity(group);
-            for element in at..at + group {
-                let val =
-                    self.stored_value(node, &frags, element, &lanes.registers[element][0], ctx)?;
+            for (element, registers) in lanes.registers.iter().enumerate().skip(at).take(group) {
+                let val = self.stored_value(node, &frags, element, &registers[0], ctx)?;
                 values.push(self.stored_element(val, elem)?);
             }
             let store = Opcode::St(buffer.space);

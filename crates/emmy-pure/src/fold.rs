@@ -2,7 +2,7 @@
 //!
 //! A pure term: a tuple of `operands` (each a term, bound POSITIONALLY to the lift's params), a pure `lift` lambda
 //! whose first param is the iteration var when the term reduces, the monoid's `(init, base)` pair, the optional
-//! `twist` recipe that conjugates it, a carried state's `cells` and an optional per-step `observe`r. Every reading is
+//! `twist` recipe that conjugates it and an optional per-step `observe`r. Every reading is
 //! derived from those and computed once per term ([`Fold::exposes`], [`Fold::bindings`], [`Fold::applied`],
 //! [`Fold::free_axes`], [`Fold::combine`], [`Fold::canonical`]); the term is immutable, so a structural copy that
 //! keeps a subtree keeps its answers. Construction ([`Fold::new`]) states the formation rules: it drops a shadowed
@@ -14,53 +14,42 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use emmy_ir::elementwise::ElementwiseOp;
 use emmy_ir::expr::Expr;
+use emmy_ir::expr::Expression;
 use emmy_ir::statement::Statement;
 use emmy_ir::{Error, Name, Result};
 
 use crate::lambda::Lambda;
 use crate::twist::Twist;
 
-/// A ⊕ seed: an op identity, or for a carried state the value it holds before the first step — a constant, or the
-/// name of a buffer of the state's shape.
+/// A ⊕ seed: the op's identity, a number.
 #[derive(Clone, Debug)]
 pub enum Seed {
     Int(i64),
     Float(f64),
-    Buffer(Name),
 }
 
 impl Seed {
-    fn number(&self) -> Option<f64> {
+    fn number(&self) -> f64 {
         match self {
-            Seed::Int(value) => Some(*value as f64),
-            Seed::Float(value) => Some(*value),
-            Seed::Buffer(_) => None,
+            Seed::Int(value) => *value as f64,
+            Seed::Float(value) => *value,
         }
     }
 }
 
 impl PartialEq for Seed {
-    /// Python's equality: a number equals the same number of the other kind, a buffer name only itself.
+    /// Python's equality: a number equals the same number of the other kind.
     fn eq(&self, other: &Seed) -> bool {
-        match (self, other) {
-            (Seed::Buffer(a), Seed::Buffer(b)) => a == b,
-            (Seed::Buffer(_), _) | (_, Seed::Buffer(_)) => false,
-            _ => self.number() == other.number(),
-        }
+        self.number() == other.number()
     }
 }
 
 impl Hash for Seed {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Seed::Buffer(name) => name.hash(state),
-            _ => {
-                let value = self.number().unwrap_or_default();
-                (if value == 0.0 { 0.0f64 } else { value })
-                    .to_bits()
-                    .hash(state);
-            }
-        }
+        let value = self.number();
+        (if value == 0.0 { 0.0f64 } else { value })
+            .to_bits()
+            .hash(state);
     }
 }
 
@@ -82,15 +71,14 @@ pub struct Data {
     operands: Vec<Fold>,
     lift: Lambda,
     init: Vec<Seed>,
-    cells: Vec<Name>,
     base: Option<Lambda>,
     twist: Option<Twist>,
     observe: Option<Lambda>,
+    range: Option<(Expression, Expression)>,
     hash: u64,
     exposes: OnceLock<Vec<Name>>,
     bindings: OnceLock<Vec<Binding>>,
     applied: OnceLock<Lambda>,
-    carries: OnceLock<bool>,
     combine: OnceLock<Option<Lambda>>,
     free_axes: OnceLock<HashSet<Name>>,
     canonical: OnceLock<Fold>,
@@ -105,10 +93,12 @@ pub struct Parts {
     pub operands: Vec<Fold>,
     pub lift: Option<Lambda>,
     pub init: Vec<Seed>,
-    pub cells: Vec<Name>,
     pub base: Option<Lambda>,
     pub twist: Option<Twist>,
     pub observe: Option<Lambda>,
+    /// Where the axis this term binds walks, when that is not all of it: a start and an exclusive end over the
+    /// coordinates around the term and the symbolic dims (`emmy_ir::axis::Range`).
+    pub range: Option<(Expression, Expression)>,
 }
 
 impl PartialEq for Fold {
@@ -120,10 +110,10 @@ impl PartialEq for Fold {
         a.hash == b.hash
             && a.lift == b.lift
             && a.init == b.init
-            && a.cells == b.cells
             && a.base == b.base
             && a.twist == b.twist
             && a.observe == b.observe
+            && a.range == b.range
             && a.operands == b.operands
     }
 }
@@ -162,11 +152,6 @@ fn operand_names(stmt: &Statement) -> Vec<Name> {
 /// Whether a statement is an `Assign` whose value is an operation over exactly two operands.
 fn binary_assign(stmt: &Statement) -> bool {
     matches!(stmt, Statement::Assign(assign) if matches!(&*assign.value, Expr::Apply(_, args) if args.len() == 2))
-}
-
-/// Whether a componentwise ⊕ is the action `next` on every component: what a carried state folds with.
-fn is_action(ops: &[ElementwiseOp]) -> bool {
-    !ops.is_empty() && ops.iter().all(|op| op.name() == "next")
 }
 
 /// The lift params one operand each, in order: the positional binding past `lead` params.
@@ -376,16 +361,13 @@ fn check_zero_axis(parts: &Parts, lift: &Lambda) -> Result<()> {
 
 fn check_reduce(parts: &Parts, lift: &Lambda, base: &Lambda) -> Result<()> {
     let n = parts.init.len();
-    let Some(ops) = base
-        .components()
-        .filter(|_| base.params().len() == 2 * n && base.results().len() == n)
-    else {
+    if base.components().is_none() || base.params().len() != 2 * n || base.results().len() != n {
         return Err(Error::Value(format!(
             "Fold base must be the componentwise ⊕ at arity {n}: params={:?} results={:?}",
             base.params(),
             base.results()
         )));
-    };
+    }
     if lift.params().is_empty() {
         return Err(Error::Value(
             "a reducing lift binds its iteration var first".into(),
@@ -398,50 +380,49 @@ fn check_reduce(parts: &Parts, lift: &Lambda, base: &Lambda) -> Result<()> {
             lift.params().len() - 1
         )));
     }
-    if !is_action(&ops) {
-        if lift.results().len() != n {
-            return Err(Error::Value("one lift result per monoid component".into()));
-        }
-        if !parts.cells.is_empty() {
-            return Err(Error::Value(
-                "cell axes belong to a carried state: a fold whose ⊕ is `next`".into(),
-            ));
-        }
-        return Ok(());
-    }
-    if lift.results().len() < n {
-        return Err(Error::Value(
-            "a carried state's lift defines every state's next value first".into(),
-        ));
-    }
-    if parts.twist.is_some() || parts.observe.is_some() {
-        return Err(Error::Value(
-            "a carried state streams its step's own results; it is neither twisted nor observed"
-                .into(),
-        ));
-    }
-    // Every read of the carried state, anywhere under it, indexes every cell axis.
-    let mut pending: Vec<Fold> = parts.operands.clone();
-    let mut seen: HashSet<usize> = HashSet::new();
-    while let Some(edge) = pending.pop() {
-        if !seen.insert(edge.address()) {
-            continue;
-        }
-        if let Some(read) = edge.as_carrier_read()
-            && let Statement::Pre(pre) = &**read
-            && base.results().contains(&pre.carrier)
-            && pre.index.len() != parts.cells.len()
-        {
-            return Err(Error::Value(format!(
-                "carrier read {}[{}] against a state with {} cell axes",
-                pre.carrier,
-                pre.index.len(),
-                parts.cells.len()
-            )));
-        }
-        pending.extend(edge.operands().iter().cloned());
+    if lift.results().len() != n {
+        return Err(Error::Value("one lift result per monoid component".into()));
     }
     Ok(())
+}
+
+/// `lift` with every coordinate the term's range reads among its trailing params, in sorted order after the ones it
+/// has: the range is evaluated where the term is, so what it reads is part of what the term is evaluated over. A
+/// range is a reduce axis's. It reads the coordinates around the term and the values of operands, each one value
+/// for the whole walk (which its writer sees to: an operand's coordinates are its own names here); it does not
+/// read the axis itself.
+fn over_range(parts: &Parts, lift: Lambda) -> Result<Lambda> {
+    let Some((start, end)) = &parts.range else {
+        return Ok(lift);
+    };
+    if parts.base.is_none() {
+        return Err(Error::Value(
+            "a range is where a reduce axis walks: a zero-axis term has none".into(),
+        ));
+    }
+    let mut read: Vec<Name> = start.free_vars();
+    read.extend(end.free_vars());
+    read.sort();
+    read.dedup();
+    if let Some(axis) = lift.params().first().filter(|axis| read.contains(axis)) {
+        return Err(Error::Value(format!(
+            "a range reads the coordinates around its term, and '{axis}' is the term's own axis"
+        )));
+    }
+    let missing: Vec<Name> = read
+        .into_iter()
+        .filter(|name| !lift.params().contains(name))
+        .collect();
+    if missing.is_empty() {
+        return Ok(lift);
+    }
+    let mut params = lift.params().to_vec();
+    params.extend(missing);
+    Ok(Lambda::formed(
+        params,
+        lift.body().clone(),
+        lift.results().to_vec(),
+    ))
 }
 
 impl Fold {
@@ -502,6 +483,7 @@ impl Fold {
         if parts.base.is_none() {
             check_zero_axis(&parts, &lift)?;
         }
+        let lift = over_range(&parts, lift)?;
         parts.lift = Some(lift);
         let fold = Fold::formed(parts);
         // What the term exposes is read off its applied lift: a lift that does not apply is refused here.
@@ -518,23 +500,23 @@ impl Fold {
             operands,
             lift,
             init,
-            cells,
             base,
             twist,
             observe,
+            range,
         } = parts;
         let lift = lift.expect("a formed Fold has a lift");
         let hash = {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             lift.hash(&mut hasher);
             init.hash(&mut hasher);
-            cells.hash(&mut hasher);
             base.hash(&mut hasher);
             twist
                 .as_ref()
                 .map(|t| (t.recipe.name.clone(), t.channels.clone()))
                 .hash(&mut hasher);
             observe.hash(&mut hasher);
+            range.hash(&mut hasher);
             for edge in &operands {
                 edge.0.hash.hash(&mut hasher);
             }
@@ -544,15 +526,14 @@ impl Fold {
             operands,
             lift,
             init,
-            cells,
             base,
             twist,
             observe,
+            range,
             hash,
             exposes: OnceLock::new(),
             bindings: OnceLock::new(),
             applied: OnceLock::new(),
-            carries: OnceLock::new(),
             combine: OnceLock::new(),
             free_axes: OnceLock::new(),
             canonical: OnceLock::new(),
@@ -569,10 +550,10 @@ impl Fold {
             operands: self.0.operands.clone(),
             lift: Some(self.0.lift.clone()),
             init: self.0.init.clone(),
-            cells: self.0.cells.clone(),
             base: self.0.base.clone(),
             twist: self.0.twist.clone(),
             observe: self.0.observe.clone(),
+            range: self.0.range.clone(),
         }
     }
 
@@ -630,10 +611,6 @@ impl Fold {
         &self.0.init
     }
 
-    pub fn cells(&self) -> &[Name] {
-        &self.0.cells
-    }
-
     pub fn base(&self) -> Option<&Lambda> {
         self.0.base.as_ref()
     }
@@ -644,6 +621,27 @@ impl Fold {
 
     pub fn observe(&self) -> Option<&Lambda> {
         self.0.observe.as_ref()
+    }
+
+    /// Where the axis this term binds walks, when the term states it: `None` is the whole axis. A value of an
+    /// operand it reads is spelled as the lift's param for it.
+    pub fn range(&self) -> Option<&(Expression, Expression)> {
+        self.0.range.as_ref()
+    }
+
+    /// [`Fold::range`] APPLIED to the operands, as [`Fold::applied`] is the lift: a value of an operand spelled as
+    /// the operand result it is. What the lowering writes on the loop, and what a tier reads.
+    pub fn applied_range(&self) -> Option<(Expression, Expression)> {
+        let (start, end) = self.0.range.as_ref()?;
+        let applied = |bound: &Expression| {
+            bound.rename(&mut |name| {
+                self.bindings()
+                    .iter()
+                    .find(|binding| binding.param == name)
+                    .map(|binding| self.0.operands[binding.operand].exposes()[binding.component])
+            })
+        };
+        Some((applied(start), applied(end)))
     }
 
     fn structural_hash(&self) -> u64 {
@@ -690,18 +688,13 @@ impl Fold {
     }
 
     /// The result names this term defines for its consumer, one per produced component: a reducing term its carried
-    /// state (an observed one its observer's values beside it, a carried one its per-step outputs), a zero-axis term
-    /// its applied lift's results.
+    /// state (an observed one its observer's values beside it), a zero-axis term its applied lift's results.
     pub fn exposes(&self) -> &[Name] {
         self.0.exposes.get_or_init(|| match &self.0.base {
             None => self.applied_checked().results().to_vec(),
             Some(base) => {
                 let state = base.results();
-                if self.carries() {
-                    let mut out = state.to_vec();
-                    out.extend_from_slice(&self.applied_checked().results()[state.len()..]);
-                    out
-                } else if let Some(observe) = &self.0.observe {
+                if let Some(observe) = &self.0.observe {
                     let mut out = state.to_vec();
                     out.extend_from_slice(observe.results());
                     out
@@ -710,14 +703,6 @@ impl Fold {
                 }
             }
         })
-    }
-
-    /// Whether this fold CARRIES A STATE: its ⊕ is the action `next` on every component.
-    pub fn carries(&self) -> bool {
-        *self
-            .0
-            .carries
-            .get_or_init(|| is_action(&self.ops().unwrap_or_default()))
     }
 
     /// THE ⊕ this fold folds with, `None` at zero axes: the base itself for a planar fold, the recipe's stable
@@ -733,7 +718,8 @@ impl Fold {
         Ok(self.0.combine.get_or_init(|| combine).clone())
     }
 
-    /// The one `Load` of a SLAB — no operands, no monoid, a body of one load — or `None`.
+    /// The one `Load` of a SLAB — no operands, no monoid, a body of one load — or `None`. The load reads an input of
+    /// the kernel, or a carried state of the kernel's own one step back.
     pub fn as_slab(&self) -> Option<&Arc<Statement>> {
         let body = self.0.lift.body();
         if !self.0.operands.is_empty() || self.0.base.is_some() || body.len() != 1 {
@@ -742,18 +728,9 @@ impl Fold {
         matches!(&*body.stmts()[0], Statement::Load(_)).then(|| &body.stmts()[0])
     }
 
-    /// The one `Pre` of a CARRIER READ — a slab over an enclosing fold's carried state at some cell — or `None`.
-    pub fn as_carrier_read(&self) -> Option<&Arc<Statement>> {
-        let body = self.0.lift.body();
-        if !self.0.operands.is_empty() || self.0.base.is_some() || body.len() != 1 {
-            return None;
-        }
-        matches!(&*body.stmts()[0], Statement::Pre(_)).then(|| &body.stmts()[0])
-    }
-
     /// The coordinates this term is evaluated over as seen from outside: the lift's trailing params (past the axis
-    /// and the operand binding) and its operands' free coordinates, less what the operands produce, the axis it binds
-    /// and a carried state's cells. A carried state's operands are its own loops' business and add nothing.
+    /// and the operand binding) and its operands' free coordinates, less what the operands produce and the axis it
+    /// binds.
     pub fn free_axes(&self) -> &HashSet<Name> {
         self.0.free_axes.get_or_init(|| {
             let lead = usize::from(self.axis().is_some()) + self.bindings().len();
@@ -766,15 +743,8 @@ impl Fold {
                 .iter()
                 .copied()
                 .collect();
-            if let Some(read) = self.as_carrier_read()
-                && let Statement::Pre(pre) = &**read
-            {
-                space.remove(&pre.carrier);
-            }
-            if !self.carries() {
-                for edge in &self.0.operands {
-                    space.extend(edge.free_axes().iter().copied());
-                }
+            for edge in &self.0.operands {
+                space.extend(edge.free_axes().iter().copied());
             }
             for edge in &self.0.operands {
                 for name in edge.exposes() {
@@ -783,9 +753,6 @@ impl Fold {
             }
             if let Some(axis) = self.axis() {
                 space.remove(&axis);
-            }
-            for cell in &self.0.cells {
-                space.remove(cell);
             }
             space
         })
@@ -854,14 +821,18 @@ impl Fold {
             .as_ref()
             .map(|o| o.rename(&mapping))
             .transpose()?;
+        let range = self.0.range.as_ref().map(|(start, end)| {
+            let rename = |e: &Expression| e.rename(&mut |name| mapping.get(&name).copied());
+            (rename(start), rename(end))
+        });
         let canonical = Fold::new(Parts {
             operands,
             lift: Some(lift.rename(&mapping)?),
             init: self.0.init.clone(),
-            cells: self.0.cells.clone(),
             base,
             twist: self.0.twist.clone(),
             observe,
+            range,
         })?;
         Ok(self.0.canonical.get_or_init(|| canonical).clone())
     }

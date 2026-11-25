@@ -458,3 +458,6 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path):
     assert artifact["cols"] == sorted({name for group in _cases() for name in group.feat_names})
     assert artifact["provenance"]["groups"] == {"static": 6, "dynamic": 2} and artifact["provenance"]["positives"] == 8
     assert "top1=" in artifact["provenance"]["notes"]
+    # The timing goes beside the metrics, which carry no clock.
+    timing = json.loads((tmp_path / "run" / "timing.json").read_text())
+    assert [p["name"] for p in timing["phases"]] == ["load dataset", "full-train fit", "cross-validation"]

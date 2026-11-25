@@ -17,6 +17,13 @@ import numpy as np
 import pytest
 
 
+def golden_lane(path: Path) -> tuple:
+    """The marks of a node that reads the repository golden at ``path``. The default suite holds the RTX 5090's
+    goldens alone; every other card's runs nightly under ``-m goldens``, because all of them together outlast the
+    PR job."""
+    return () if path.name == "rtx5090_sm120.json" else (pytest.mark.goldens,)
+
+
 def classic_cartesian_schedules(context):
     """Enumerate a classic context's literal kernel × node × edge test oracle."""
     from emmy.compiler.ir.schedule import Schedule, ScheduleRefused
@@ -194,6 +201,9 @@ requires_sm90 = pytest.mark.skipif(
     reason="mma.sync warp tier needs sm_90+ (pin-only / non-functional on sm_80-89: ldmatrix fault + sm_NNa TMA compile)",
 )
 
+# Skip the warp-group tests off Hopper: datacenter Blackwell has a different instruction and consumer Blackwell none.
+requires_hopper = pytest.mark.skipif(device_compute_capability() != (9, 0), reason="wgmma runs on sm_90 only")
+
 
 def direct_classic_leaf(fork_point):
     """Select the direct classic schedule without flattening the schedule tree."""
@@ -242,6 +252,12 @@ def grouped_raster_decode(kernel, group: int) -> list[str]:
         for decode in decodes
         if "block_idx.x" in decode and "thread_idx" not in decode and (f" * {group} + " in decode or decode.startswith(f"{group} * ("))
     ]
+
+
+#: Pins for a test that holds an f32 program's numbers to f32 arithmetic and leaves its schedule to the prior. Under
+#: fast math a product of two f32 operands may take a cell that rounds them (the TF32 atom, the bf16 atoms); the rest
+#: of the default lane stays as a deploy compiles it.
+F32_PRODUCTS = {"TF32_MMA": False, "F32_AS_BF16_MMA": False}
 
 
 def skip_if_no_cuda() -> None:

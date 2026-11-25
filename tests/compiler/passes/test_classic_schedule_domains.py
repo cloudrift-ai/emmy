@@ -26,7 +26,6 @@ from emmy.compiler.ir.schedule.classic import refusals as classic
 from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works, packed_works
 from emmy.compiler.ir.stmt import Assign, Body, Loop, parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import compile_with_kernels, enumerate_classic_reference, requires_cuda, statements
@@ -49,7 +48,7 @@ def _enumerate_context(context: ScheduleContext):
 
 def _row(tile, pins) -> dict[str, str]:
     """Production's pin row: a kernel that consumed a split reads a REDUCE pin without its g<n> half."""
-    consumed = carries_partition(tile) or tile.split_consumed
+    consumed = tile.split_taken
     row = {}
     for family, pairs in (pins or {}).items():
         for key, value in pairs:
@@ -806,6 +805,8 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
     )
     target = Context.from_target((12, 0))
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [Stage.parse("d1/smem-async")])
+    # The copy stage alone: the bf16 cell of a product of f32 operands stages through the compute fill instead.
+    monkeypatch.setenv("EMMY_F32_AS_BF16_MMA", "0")
     offers = _offers(tile, target)
     context = _plain(tile, target)
 

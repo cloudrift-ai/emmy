@@ -749,7 +749,10 @@ def carries_partition(tile) -> bool:
 
     The receipt sits on the sliced axis, and that axis is not always a NODE: a computed-A cone can
     keep its sliced contraction inside the lift as a plain ``Loop``, so a ``sites``-only scan
-    misses it. Scan the loop bodies too; the receipt is in the IR either way."""
+    misses it. Scan the loop bodies too; the receipt is in the IR either way. A walk split across the sequence keeps
+    it on its serial axis, which no node binds."""
+    if any(axis.window is not None and axis.window.partition for axis in tile.place.serial):
+        return True
 
     def loops(stmts):
         for s in stmts:
@@ -769,11 +772,11 @@ def carries_partition(tile) -> bool:
 
 
 def merges_partition(tile) -> bool:
-    """Whether this kernel is a split's deferred finalize: its head fold's axis is a partition window
-    over its WHOLE parent — the merge over every partition of a split that already happened, where a
-    partial's slice windows a fraction of the parent."""
+    """Whether this kernel is a split's deferred finalize: its head fold walks the whole of a partition window's
+    parent — the merge over every partition of a split that already happened, where a partial walks one block of
+    the parent."""
     node = head(tile.op)
-    if node is None or getattr(node, "axis", None) is None:
+    if node is None or getattr(node, "axis", None) is None or node.range is not None:
         return False
     axis = tile.axis_of(node.axis)
     return axis.window is not None and axis.window.partition and axis.window.parent.extent == axis.extent

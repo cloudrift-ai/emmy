@@ -111,8 +111,13 @@ impl Sites {
         for stmt in body.stmts() {
             let ordinal = self.next;
             self.next += 1;
-            for name in stmt.defines() {
-                *self.defining.entry(name).or_default() += 1;
+            // A carried state's update names the state it defines, a buffer of the body's own.
+            let defined = match &**stmt {
+                Statement::Carry(c) => vec![c.name],
+                _ => stmt.defines(),
+            };
+            for name in &defined {
+                *self.defining.entry(*name).or_default() += 1;
             }
             let candidate = match &**stmt {
                 Statement::Accum(_) => Some(seeded && scope.is_some()),
@@ -121,7 +126,7 @@ impl Sites {
                 _ => None,
             };
             if let Some(candidate) = candidate {
-                for name in stmt.defines() {
+                for name in defined {
                     match self.sites.get_mut(&name) {
                         Some(site) => {
                             site.definitions += 1;
@@ -144,7 +149,6 @@ impl Sites {
             }
             let inner_seeded = match &**stmt {
                 Statement::Loop(l) => l.seed,
-                Statement::StridedLoop(l) => l.seed,
                 _ => false,
             };
             for (position, child) in stmt.nested().iter().enumerate() {

@@ -74,8 +74,10 @@ class PagingProgram(nn.Module):
         # A hit refreshes its slot's age; a miss is a marked page with no slot.
         hit_slot = torch.where(marked & resident, page_slot, S)
         miss = marked & ~resident
-        # Each miss's rank among the misses: the misses before it, counted per page so no step waits on the last.
-        miss_rank = (miss.unsqueeze(0) & (page_ids.unsqueeze(0) < page_ids.unsqueeze(1))).to(torch.int64).sum(1)
+        # Each miss's rank among the misses: the misses before it, a running count over the pages.
+        counted = miss.to(torch.int64)
+        running = counted.cumsum(0)
+        miss_rank = running - counted
         # The victims: slots whose page is not marked, least recently used first. A slot holding a marked page, and
         # the spare slot, are never victims: their key is pushed past every age.
         held_marked = marks[slot_page] != 0
@@ -93,7 +95,7 @@ class PagingProgram(nn.Module):
         # list, not over every page. The j-th move is the j-th miss, into the j-th victim. An entry past the moves
         # names the spare page and a slot past the spare.
         ranks = _ids(moved_page)
-        moves = torch.minimum(miss.to(torch.int64).sum(0, keepdim=True), victims)
+        moves = torch.minimum(running[-1:], victims)
         # The page at each rank: each miss that takes a slot stores its page at its rank, every other page at the
         # spare entry; a rank no miss reached keeps the spare page.
         page_of_rank = (torch.zeros_like(page_ids) + P).index_copy(0, torch.where(takes, miss_rank, P), page_ids)
@@ -103,16 +105,15 @@ class PagingProgram(nn.Module):
 
 
 class PagingUpdate(nn.Module):
-    """The step's decisions applied to the tables in place. It reads no table it writes — only the decisions, the
-    fixed addresses and the clock — so its scatters can share a kernel without one thread reading what another
-    writes."""
+    """The step's decisions applied to the slots' state in place: which page each slot holds, which slot each page
+    sits in, the slots' ages and the clock. It reads no table it writes — only the decisions and the clock — so its
+    scatters can share a kernel without one thread reading what another writes. Buffers that share a page list share
+    this state, so it runs once for all of them; :class:`PageTableUpdate` points each one's page table."""
 
-    def forward(self, table, slot_page, page_slot, age, host, slot_address, clock, hit_slot, miss_slot, evicted_page):
+    def forward(self, slot_page, page_slot, age, clock, hit_slot, miss_slot, evicted_page):
         P, S = _count(page_slot) - 1, _count(slot_page) - 1
         taken_page = torch.where(miss_slot < S, _ids(page_slot), P)
-        # The evicted pages lose their slot and point at host memory again; the misses move into their slots.
-        table = table.index_copy(0, evicted_page, host[torch.minimum(evicted_page, P - 1)])
-        table = table.index_copy(0, taken_page, slot_address[torch.minimum(miss_slot, S - 1)])
+        # The evicted pages lose their slot; the misses move into theirs.
         page_slot = page_slot.index_copy(0, evicted_page, torch.zeros_like(evicted_page) + S)
         page_slot = page_slot.index_copy(0, taken_page, miss_slot)
         slot_page = slot_page.index_copy(0, miss_slot, taken_page)
@@ -122,7 +123,18 @@ class PagingUpdate(nn.Module):
         age = age.index_copy(0, miss_slot, now)
         # The clock advances in place too: a scatter of the next time into its one cell.
         clock = clock.index_copy(0, torch.zeros(1, dtype=torch.int64), clock + 1)
-        return table, slot_page, page_slot, age, clock
+        return slot_page, page_slot, age, clock
+
+
+class PageTableUpdate(nn.Module):
+    """The step's decisions applied to one buffer's page table in place: the evicted pages point at their homes
+    again, the misses at the slots they took. It reads only the decisions and the buffer's fixed addresses."""
+
+    def forward(self, table, host, slot_address, miss_slot, evicted_page):
+        P, S = _count(table) - 1, _count(slot_address)
+        taken_page = torch.where(miss_slot < S, _ids(table), P)
+        table = table.index_copy(0, evicted_page, host[torch.minimum(evicted_page, P - 1)])
+        return table.index_copy(0, taken_page, slot_address[torch.minimum(miss_slot, S - 1)])
 
 
 class PageCopy(nn.Module):
@@ -139,7 +151,12 @@ class PageCopy(nn.Module):
 #: name for each. ``marks`` is per launch (the inspector writes it); every other one is per paged buffer.
 TABLES = ("table", "slot_page", "page_slot", "age", "host", "slot_address", "clock", "slots")
 
-#: What the step decides per page, passed from :class:`PagingProgram` to :class:`PagingUpdate` per launch.
+#: The slots' state, which buffers sharing a page list share: the tables :class:`PagingProgram` decides from and
+#: :class:`PagingUpdate` writes. The rest of :data:`TABLES` is each buffer's own.
+STATE = ("slot_page", "page_slot", "age", "clock")
+
+#: What the step decides per page, passed from :class:`PagingProgram` to :class:`PagingUpdate` and to every
+#: :class:`PageTableUpdate` of the step.
 DECISIONS = ("hit_slot", "miss_slot", "evicted_page")
 
 #: The step's list of moved pages, passed from :class:`PagingProgram` to :class:`PageCopy` per launch.
@@ -170,11 +187,12 @@ def _lower(graph, passes=None):
 
 
 def _paging_plan(word):
-    """The paging step's plans — the decisions, the table update, the copy — compiled once per process for pages of
-    the dtype ``word``, every size symbolic (:data:`SYMBOLS`, named apart from every buffer): the pages and the slots
-    and one more of each (the tables' spare entry), the most pages one step can move and a page's length in words.
-    One kernel then serves every geometry, so a golden row measured at one prices them all. The decisions pass to the update under
-    :data:`DECISIONS`, the list of moves to the copy under :data:`MOVES`."""
+    """The paging step's plans — the decisions, the state update, a page table's update, the copy — compiled once
+    per process for pages of the dtype ``word``, every size symbolic (:data:`SYMBOLS`, named apart from every
+    buffer): the pages and the slots and one more of each (the tables' spare entry), the most pages one step can move
+    and a page's length in words. One kernel then serves every geometry, so a golden row measured at one prices them
+    all. The decisions pass to the updates under :data:`DECISIONS`, the list of moves to the copy under
+    :data:`MOVES`."""
     from torch.export import Dim  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.policy.greedy import evidence_reads, note_reads  # noqa: PLC0415
@@ -215,20 +233,21 @@ def _paging_plan(word):
             return tuple((n, *tables[n]) for n in names)
 
         decide = trace(PagingProgram(), inputs("marks", "slot_page", "page_slot", "age", "clock", *MOVES), DECISIONS)
-        update = trace(PagingUpdate(), inputs(*TABLES[:7], *DECISIONS))
+        update = trace(PagingUpdate(), inputs(*STATE, *DECISIONS))
+        table = trace(PageTableUpdate(), inputs("table", "host", "slot_address", "miss_slot", "evicted_page"))
         copy = trace(PageCopy(), inputs(*MOVES, "pages", "slots"))
         copy.hints.set("cuda.paged_buffers", (("pages", 0, 1),))
         with evidence_reads() as reads:
-            _programs[word.name] = (_lower(decide), _lower(update), _lower(copy)), frozenset(reads)
+            _programs[word.name] = tuple(_lower(graph) for graph in (decide, update, table, copy)), frozenset(reads)
     plans, reads = _programs[word.name]
     note_reads(reads)  # every program that splices them read what their compile read
     return plans
 
 
-def _inspector_plan(graph, node, name: str, axis: int, page: int, pages: int):
+def _inspector_plan(graph, node, name: str, axis: int, page: int, pages: int, marks: str):
     """The launch's inspector — the kernel's Loop IR cut to what the index along ``name``'s paged axis is computed
-    from, each access replaced by a mark of the page it touches, compiled like any kernel — and the most pages the
-    launch can touch: per access, the iterations of the loops its index depends on."""
+    from, each access replaced by a mark in ``marks`` of the page it touches, compiled like any kernel — and the
+    most pages the launch can touch: per access, the iterations of the loops its index depends on."""
     from math import prod  # noqa: PLC0415
 
     from emmy.compiler.dtype import I32  # noqa: PLC0415
@@ -249,7 +268,6 @@ def _inspector_plan(graph, node, name: str, axis: int, page: int, pages: int):
     if tile is None or tile.loop_body is None:
         raise ValueError(f"launch {node.id!r} reads the paged buffer {name!r} but has no Loop IR to inspect")
     body = tile.loop_body
-    marks = f"{node.id}__{name}__marks"
     accesses = [s for s in body.iter() if (isinstance(s, Load) and s.input == name) or (isinstance(s, Write) and s.output == name)]
     # What the indices read, closed over the statements defining it.
     needed = {var for s in accesses for var in s.index[axis].free_vars()}
@@ -336,17 +354,39 @@ def _declare(plan, name: str, pages: int, slots: int, elements: int, dtype):
     return pages, slots, page_bytes // word.nbytes, word
 
 
-def _step(plan, prefix: str, name: str, marks: str, geometry, moved: int) -> list:
-    """The paging program's launches for paged buffer ``name`` over the page list ``marks``, scoped by ``prefix``:
-    at most ``moved`` pages move."""
+def _groups(geometry: dict) -> list[tuple[str, ...]]:
+    """The paged buffers of ``geometry`` that share one page list: those of the same page count and slots, the
+    first by name leading. Their slots move in step, so they share the leader's state (:data:`STATE`) and one
+    decision moves a page into the same slot of each: a MoE layer's expert stacks, codes and scales, are read at one
+    expert's index by every launch that reads them, so their pages are touched together and one paging run serves
+    them all. Every program that pages one buffer of a group pages the whole group, so every program groups them
+    alike and the leader's state stays the group's."""
+    groups: dict[tuple, list[str]] = {}
+    for name in sorted(geometry):
+        groups.setdefault(geometry[name][:2], []).append(name)
+    return [tuple(names) for names in groups.values()]
+
+
+def _step(plan, prefix: str, names: tuple[str, ...], marks: str, geometry: dict, moved: int) -> list:
+    """The paging program's launches for the paged buffers ``names``, which share one page list (:func:`_groups`),
+    over the page list ``marks``, scoped by ``prefix``: at most ``moved`` pages move. The leader's state decides and
+    takes the update once; every buffer's page table points at the slots, and its pages are copied into them."""
     from emmy.compiler.backend.plan import splice  # noqa: PLC0415
 
-    pages, slots, words, word = geometry
-    decided = {decision: f"{prefix}.{name}.{decision}" for decision in (*DECISIONS, *MOVES)}
-    sizes = dict(zip(SYMBOLS, (pages + 1, slots + 1, pages, slots, min(pages, slots, moved), words), strict=True))
-    launches = []
-    for part, sub in zip(("page", "page.update", "copy"), _paging_plan(word), strict=True):
-        renames = {"marks": marks, "pages": f"{name}__view", **{table: f"{name}__{table}" for table in TABLES}, **decided}
+    lead = names[0]
+    pages, slots = geometry[lead][:2]
+    decided = {decision: f"{prefix}.{lead}.{decision}" for decision in (*DECISIONS, *MOVES)}
+
+    def place(sub, name: str, part: str) -> list:
+        words = geometry[name][2]
+        sizes = dict(zip(SYMBOLS, (pages + 1, slots + 1, pages, slots, min(pages, slots, moved), words), strict=True))
+        renames = {
+            "marks": marks,
+            "pages": f"{name}__view",
+            **{table: f"{name}__{table}" for table in TABLES},
+            **{table: f"{lead}__{table}" for table in STATE},
+            **decided,
+        }
         # An output stored over an input takes the input's name: written in place, one buffer.
         alias = {b.name: b.alias for b in sub.buffers}
         for output in sub.outputs:
@@ -354,14 +394,25 @@ def _step(plan, prefix: str, name: str, marks: str, geometry, moved: int) -> lis
             while alias.get(root) is not None:
                 root = alias[root]
             renames[output] = renames[root]
-        launches.extend(splice(plan, sub, prefix=f"{prefix}.{name}.{part}", renames=renames, sizes=sizes))
+        return splice(plan, sub, prefix=f"{prefix}.{name}.{part}", renames=renames, sizes=sizes)
+
+    decide, update, _, _ = _paging_plan(geometry[lead][3])
+    launches = [*place(decide, lead, "page"), *place(update, lead, "page.update")]
+    for name in names:
+        _, _, table, copy = _paging_plan(geometry[name][3])
+        launches += [*place(table, name, "page.table"), *place(copy, name, "copy")]
     return launches
 
 
 def with_paging(plan, graph):
     """``plan`` with the inspector and the paging program spliced ahead of every launch that reads or writes a
     paged buffer declared with one slot or more (``cuda.paged_buffers``'s fourth element). Tables, slots and clock
-    enter as inputs named ``<buffer>__<table>``; the buffer's ``[pages, words]`` view is ``<buffer>__view``."""
+    enter as inputs named ``<buffer>__<table>``; the buffer's ``[pages, words]`` view is ``<buffer>__view``. Buffers
+    that share a page list (:func:`_groups`) take one paging run for the launches that touch them while what their
+    inspectors read stands: ahead of the first, the inspectors of that launch and of each later one up to the first
+    whose inspector reads a buffer written since mark one page list, an inspector another one already spliced
+    repeats is dropped, and the run moves the marked pages for every buffer of the group. A MoE layer's two expert
+    launches read one selection, so they take one run."""
     from dataclasses import replace  # noqa: PLC0415
     from math import prod  # noqa: PLC0415
 
@@ -387,17 +438,46 @@ def with_paging(plan, graph):
     for name, (axis, page, slots) in managed.items():
         shape = specs[name].resolve_shape({})
         geometry[name] = _declare(spliced, name, -(-shape[axis] // page), slots, prod(shape) // shape[axis] * page, specs[name].dtype)
-    for launch in plan.launches:
-        node = graph.nodes[launch.node_id]
-        for name, (axis, page, _) in managed.items():
-            if f"{name}__pages" not in launch.arg_names:
+    groups = _groups(geometry)
+    covered = set()
+    alias = {b.name: b.alias for b in plan.buffers}
+
+    def stored(buffer: str) -> str:
+        """The buffer ``buffer`` is stored in: an output written in place over an input is that input."""
+        while alias.get(buffer) is not None:
+            buffer = alias[buffer]
+        return buffer
+
+    for at, launch in enumerate(plan.launches):
+        for names in groups:
+            if (at, names) in covered or not any(f"{name}__pages" in launch.arg_names for name in names):
                 continue
-            marks = f"{launch.node_id}__{name}__marks"
-            inspector, moved = _inspector_plan(graph, node, name, axis, page, geometry[name][0])
-            # The inspector reads the plan's own buffers, under their own names.
-            renames = {**{buffer: buffer for buffer in inspector.inputs}, inspector.outputs[0]: marks}
-            spliced.launches.extend(splice(spliced, inspector, prefix=f"{launch.node_id}.{name}.inspect", renames=renames, zero=(marks,)))
-            spliced.launches.extend(_step(spliced, launch.node_id, name, marks, geometry[name], moved))
+            marks = f"{launch.node_id}__{names[0]}__marks"
+            inspected, moved, written = set(), 0, set()
+            # The run marks the pages of this launch and of every later one of the group whose inspectors read nothing
+            # written in between, which then take no run of their own.
+            for later_at in range(at, len(plan.launches)):
+                later = plan.launches[later_at]
+                touched = [name for name in names if f"{name}__pages" in later.arg_names]
+                node = graph.nodes[later.node_id]
+                inspectors = [(name, *_inspector_plan(graph, node, name, *managed[name][:2], geometry[name][0], marks)) for name in touched]
+                if any({stored(buffer) for buffer in inspector.inputs} & written for _, inspector, _ in inspectors):
+                    break
+                for name, inspector, most in inspectors:
+                    key = (tuple(inspector.inputs), tuple((lc.kernel_name, lc.arg_names) for lc in inspector.launches))
+                    if key in inspected:
+                        continue
+                    # The inspector reads the plan's own buffers, under their own names; the first clears the page list.
+                    renames = {**{buffer: buffer for buffer in inspector.inputs}, inspector.outputs[0]: marks}
+                    zero = () if inspected else (marks,)
+                    prefix = f"{later.node_id}.{name}.inspect"
+                    spliced.launches.extend(splice(spliced, inspector, prefix=prefix, renames=renames, zero=zero))
+                    inspected.add(key)
+                    moved += most
+                if touched:
+                    covered.add((later_at, names))
+                written.update(stored(buffer) for buffer in later.writes or (later.node_id,))
+            spliced.launches.extend(_step(spliced, launch.node_id, names, marks, geometry, moved))
         spliced.launches.append(launch)
     return spliced
 
@@ -415,8 +495,11 @@ def listed_paging(pages: int, buffers: dict):
     from emmy.compiler.dtype import I32  # noqa: PLC0415
 
     plan = ExecutionPlan("cuda", ["marks"], [], [BufferSpec("marks", (Dim(pages + 1),), I32, "input")], {}, {}, [], {})
+    geometry = {}
     for name, (slots, shape, dtype) in buffers.items():
         plan.buffers.append(BufferSpec(name, (Dim(pages), Dim(prod(shape))), dtype, "input"))
         plan.paged[name] = (0, 1, slots)
-        plan.launches.extend(_step(plan, "listed", name, "marks", _declare(plan, name, pages, slots, prod(shape), dtype), 1))
+        geometry[name] = _declare(plan, name, pages, slots, prod(shape), dtype)
+    for names in _groups(geometry):
+        plan.launches.extend(_step(plan, "listed", names, "marks", geometry, 1))
     return plan

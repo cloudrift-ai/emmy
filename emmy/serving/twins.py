@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
 from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph, nvfp4_head_stored
-from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, slot_widths
+from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M, SUMMED_SLOT_ROWS, slot_widths
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -66,8 +66,15 @@ def twin_width(name: str) -> int | None:
 
 
 def _bound_tensors(graph) -> frozenset:
-    """The checkpoint tensors a traced program binds."""
-    return frozenset(path for _, op in graph.loadable_constants() for path in (op.source_path, *(p for p, _ in op.source_parts)) if path)
+    """The checkpoint tensors a traced program binds, each with the shape it is read at. A path alone names a tensor
+    inside one checkpoint only: a hardware golden holds programs of many models, whose ``weight`` or
+    ``input_layernorm.weight`` are different tensors, and the shape keeps them apart where it differs."""
+    return frozenset(
+        (path, tuple(shape or ()))
+        for _, op in graph.loadable_constants()
+        for path, shape in ((op.source_path, op.source_shape), *op.source_parts)
+        if path
+    )
 
 
 def _width(graph) -> float:
@@ -89,7 +96,7 @@ def fork_less_weights(graph, ctx) -> set[str]:
     return fork_less_reads(Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(graph.copy(), ctx=ctx, db=None))
 
 
-def twins_in_build_order(graphs, fork_less):
+def twins_in_build_order(graphs, fork_less, *, of=None):
     """``(key, scope)`` for each traced program of ``graphs`` (key -> program), in the order the serving runner builds a
     wrapper's twins (it orders its builds explicitly; the serving audit, the golden target walk and a run of one named
     realization order through this).
@@ -100,12 +107,15 @@ def twins_in_build_order(graphs, fork_less):
     names; :func:`fork_less_weights`) finds a fork-less reader of in any of them. A program that binds no checkpoint
     tensor has a scope of its own, and so does each of native generation's twins (``-native``): native preparation
     compiles every program alone, under no settled layout. The grouping needs the exact same set: two twins of one
-    wrapper that differed by one bound tensor would get separate scopes here, though serving shares one per wrapper."""
+    wrapper that differed by one bound tensor would get separate scopes here, though serving shares one per wrapper.
+    With ``of``, only the family of program ``of`` is built: no other program is lowered for ``fork_less``."""
     families: dict[frozenset, list] = {}
     for key, graph in graphs.items():
         alone = "-native" in str(key) or not _bound_tensors(graph)
         families.setdefault(frozenset({("own", key)}) if alone else _bound_tensors(graph), []).append(key)
     for keys in families.values():
+        if of is not None and of not in keys:
+            continue
         scope = LayoutScope()
         for key in keys:
             scope.fix(str(key), fork_less(graphs[key]))
@@ -439,12 +449,22 @@ def capture_twin_graphs(
         # program stays the one-token step's.
         top_k = int(getattr(text, "num_experts_per_tok", 0) or 0)
         chunk = slot_width if expert_slices > 1 and slot_width > 1 and not transposed else 1
+        # A Qwen4Exp program of up to ``SUMMED_SLOT_ROWS`` rows also weights its picks by the router's scores, sums
+        # them and adds the shared expert's output: the layer's routed sum (``ExpertFFN.slots_sum``).
+        qwen4_exp = getattr(text, "model_type", None) == "qwen4_exp_text"
         for rows in (1, *slot_widths(chunk)) if top_k else ():
+            summed = qwen4_exp and rows <= SUMMED_SLOT_ROWS
             count = int(parts[1].gate_up_proj.shape[0])
             one = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
-            sel = torch.zeros((top_k,) if rows == 1 else (rows, top_k), dtype=torch.int64)
-            stacked = [one[0], sel, *(torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:])]
-            graph = trace_split(build_moe_slots_wrapper(expert_w), stacked, None)
+            picks = (top_k,) if rows == 1 else (rows, top_k)
+            sums = [torch.zeros(picks, dtype=td), torch.zeros(rows, hidden, dtype=td)] if summed else []
+            stacked = [
+                one[0],
+                torch.zeros(picks, dtype=torch.int64),
+                *sums,
+                *(torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:]),
+            ]
+            graph = trace_split(build_moe_slots_wrapper(expert_w, "slots_sum" if summed else "slots"), stacked, None)
             spell(f"expert-slots{rows if rows > 1 else ''}{suffix}", graph, (count,))
         # The grouped prefill programs on sliced experts, for a boot with an any-width program: one launch over
         # ``EXPERT_GROUP`` experts, each against a block of its routed rows (``x[G, R, H]``, ``sel[G]``), gathered from

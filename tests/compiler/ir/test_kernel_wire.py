@@ -2,7 +2,7 @@
 from.
 
 The tune DB keys a kernel on its EXACT identity and stores :func:`kernel_wire`'s wire beside it: the body the
-kernel was formed from, bound to its own buffers. A freeze is re-lowered from those wires, so each has to come
+kernel was formed from, bound to its own buffers. An export lowers those wires again, so each has to come
 back as the same kernel under the current compiler — the lift, the twist and the identity strategy giving it the
 same exact identity, clustered identity and ``S_*`` stamps — for every kind of kernel the compiler mints, which is
 what the realization corpus lets this assert without a GPU: a fused kernel, the pieces of a placement cut, a

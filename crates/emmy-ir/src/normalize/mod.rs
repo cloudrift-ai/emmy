@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use crate::axis::Axis;
+use crate::axis::{Axis, SYMBOLIC_AXIS_HI};
 use crate::body::{Body, MemoKey};
 use crate::dtype::DType;
 use crate::expr::{Expression, Interval, SimplifyCtx};
@@ -14,8 +14,6 @@ use crate::numbering::{congruent_states, group_keys};
 use crate::order::topological_sort;
 use crate::statement::*;
 use crate::{Error, Name, Result};
-
-const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
 
 /// Push an iteration axis `[0, extent)` into a simplification context so index expressions over it fold.
 pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
@@ -46,8 +44,16 @@ pub fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<SimplifyCtx> {
     })
 }
 
-/// `ctx` inside `stmt`'s child bodies: under the ranges of the axes it binds for them.
+/// `ctx` inside `stmt`'s child bodies: under the ranges of the axes it binds for them. A loop that walks a range
+/// binds its axis to that range, with the comparisons it states.
 pub fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
+    // A loop that steps is a kernel's, whose builder wrote its body under the axis's extent: it is analysed so.
+    if let Statement::Loop(l) = stmt
+        && l.range.is_some()
+        && l.step.is_none()
+    {
+        return l.walk().extend(ctx, l.axis.name, &l.axis.extent);
+    }
     stmt.bound_axes()
         .iter()
         .fold(ctx.clone(), |inner, axis| extend_simplify_ctx(&inner, axis))
@@ -169,7 +175,7 @@ fn prepared(body: &Body, canonical_loops: bool) -> Result<Body> {
     let mut placed: Option<Body> = None;
     for _ in 0..8 {
         let merged = if canonical_loops {
-            merge_sibling_reduce_loops(&stmts)?
+            merge_sibling_reduce_loops(&canonical_ranges(&stmts)?)?
         } else {
             stmts.clone()
         };
@@ -239,6 +245,7 @@ pub mod congruent;
 pub mod definitions;
 pub mod fold;
 pub mod place;
+pub mod ranges;
 pub mod siblings;
 pub mod simplify;
 pub mod ties;
@@ -249,6 +256,7 @@ pub use congruent::*;
 pub use definitions::*;
 pub use fold::*;
 pub use place::*;
+pub use ranges::*;
 pub use siblings::*;
 pub use simplify::*;
 
@@ -435,17 +443,17 @@ for k in 0..3:
 
     #[test]
     fn a_carry_sorts_after_every_pure_leaf() {
-        // A `Pre` reads the step before and a `Carry` writes the step's state; neither orders the other by data flow,
-        // so where the carry's value is a load the order alone decides. Load, carry, pre, write is what the lift
-        // refuses (the state's store ahead of its load); the carry sorts after every pure leaf.
+        // A load of the state reads the step before and a `Carry` writes the step's state; neither orders the other
+        // by data flow, so where the carry's value is a load the order alone decides. The state's store ahead of its
+        // load is what the lift refuses; the carry sorts after every pure leaf.
         let normal = crate::text::body_text(
             &normalize_uncached(&testing::body(
                 "
         for a0 in 0..8:
           for a1 in 0..4:
             in0 = load U[a0, a1]
-            acc0[a1] <- in0 seed 0
-            v2 = pre acc0[a1]
+            acc0[a0, a1] <- in0 seed 0
+            v2 = load acc0[a0 - 1, a1]
             out[a0, a1] = v2
                 ",
             ))
@@ -453,7 +461,10 @@ for k in 0..3:
         )
         .unwrap();
         let lines: Vec<&str> = normal.lines().map(str::trim).collect();
-        assert!(lines.last().unwrap().starts_with("acc0[a1] <-"), "{normal}");
+        assert!(
+            lines.last().unwrap().starts_with("acc0[a0, a1] <-"),
+            "{normal}"
+        );
         assert!(
             lines.iter().position(|l| l.starts_with("out[")).unwrap() < lines.len() - 1,
             "{normal}"
@@ -774,7 +785,6 @@ pub(crate) mod testing {
     pub(crate) fn axis(stmt: &Statement) -> &str {
         match stmt {
             Statement::Loop(l) => &l.axis.name,
-            Statement::StridedLoop(l) => &l.axis.name,
             _ => panic!("not a loop: {}", stmt.ty()),
         }
     }

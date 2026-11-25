@@ -97,9 +97,13 @@ file imports what it uses by name; no child module takes its parent's imports.
   The neutral element is the real one (`-inf` for a maximum) and `seed` is what a kernel initializes with, the bounded
   stand-in `±1e30`. A string of any of these sets exists where the text is read or written, at the Python boundary,
   and nowhere else.
-- **Axes** (`axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window
-  is provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
-  holds a name (or an axis's parts) and the extension makes the object on first read.
+- **Axes** (`axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
+  provenance. `Range` is where an axis walks, a start and an exclusive end, with the few questions every reader asks
+  of one: its trips where it fixes them, the interval the axis stays in, and the simplification context inside the
+  loop. A `Loop` holds its range as a field and a `Fold` as a stored part. A `Loop` may also state a `step`, how far
+  its axis moves each trip: a kernel loop takes one where the threads of a block stride through an axis, and a Loop IR
+  body states none. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a
+  statement holds a name (or an axis's parts) and the extension makes the object on first read.
 
 ## Protocol and body
 
@@ -137,8 +141,11 @@ line.
 
 `numbering/values.rs` is the value numbering (`value_numbers`); `digest.rs` the scope-tree hash, the use-keyed buffer
 roles and the digest; `congruence.rs` the congruent carried states (`congruent_states`), numbered with every grouped
-state keyed by its group until the groups hold. Statements are keyed by their position in the body they sit in (a
-`StmtRef`), so a body that holds one statement object twice numbers it twice and nothing is copied first; digest
+state keyed by its group until the groups hold; `advance.rs` the proof that bodies are one step taken again and
+again (`prove`), over the numbering with coordinate integers apart (`value_numbers_apart`), which no kernel identity
+reads; the digest over that numbering with those integers left out (`digest_apart`, `identity_apart`) is the key a
+body shares with the same computation at other offsets. Statements are keyed by their position in the body they sit
+in (a `StmtRef`), so a body that holds one statement object twice numbers it twice and nothing is copied first; digest
 material is a `Key` tree hashed with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total
 order. A value carries its parameters to every statement that reads it, so a `Param` is shared, not copied, and keeps a
 fingerprint; inside a key it hashes, compares and orders as the key it holds. The operands of a commutative operation that share a number take the order whose layout key is least under a

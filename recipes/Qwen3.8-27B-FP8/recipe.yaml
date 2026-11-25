@@ -17,7 +17,6 @@
 # far slower than stock today. See RESULTS.md.
 tags:
   - maintained
-  - prior-pending
 
 model:
   huggingface: Qwen/Qwen3.8-27B-FP8

@@ -239,10 +239,19 @@ pages than its buffer has slots reads host memory, so residency does not join th
 no slots (a fourth element of `0`) takes no inspector and no paging program, since nothing can move: its launches
 read every page in place, through a page table the pager points at the pages' homes once.
 
-The paging step is three programs — the decisions, the table update, and the copy over the step's list of moved
-pages — traced once per page word with every size symbolic and read off the tables (`arange` over a table's length),
-so one kernel serves every paged buffer of every geometry. Ranks are counted per element and inverted by a scatter,
-never by a scan, so the decision kernels have no serial step. They are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
+The paging step is four programs — the decisions, the update of the slots' state, the update of one buffer's page
+table, and the copy over the step's list of moved pages — traced once per page word with every size symbolic and read
+off the tables (`arange` over a table's length), so one kernel serves every paged buffer of every geometry. A miss's
+rank is a running count of the misses before it (a scan, O(pages) work), and the victims' ranks, over the slots, are
+counted per element; both are inverted by a scatter. A pairwise count of the misses ran pages-squared steps on one
+thread block, 34 us a run at 256 pages on the RTX 5090. Buffers of one program with the same page count and slots
+share one page list (`paging._groups`): a MoE layer's expert codes and scales are read at one expert's index, so a
+launch that reads them takes one inspector, one decision and one state update over the first buffer's tables by
+name, then each buffer's page table update and copy. Their slots move in step, so every program that pages one of
+them pages them all. One run serves every later launch of the group whose inspector reads nothing written since the
+first: its inspector marks the same page list ahead of the run, and the launch takes no run of its own. A MoE layer's
+gate-up and down launches read one selection, so they take one run; a run per launch paged the layer twice, the
+second moving nothing. The programs are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
 golden holds their rows at those sizes, so a serving compile picks the recorded kernels whatever its geometry. Each
 launch's inspector is a slice of a kernel, with no program a record run could bench. The pager's kernels lower with
 strict evidence off: a fork no row decides — an inspector's, or a kernel with nothing to re-bench alone — takes the
@@ -263,10 +272,11 @@ Compiler version stays out; a pack keeps serving its frozen snapshot.
 
 The golden rows are validity per program, since a re-recorded golden exists to change what a compile deploys. Each
 entry keeps the exact identities of the kernels whose evidence its compile read (`policy.greedy.evidence_reads`;
-the plan template cache hands a hit its template's reads) and a digest of the golden rows in scope that those reach
-(`golden.rows_digests`). The manifest also keeps the card's scope digest (`golden.scope_digest`, file bytes only):
-while it holds, nothing is compared. When it moved, `load_pack` computes the digests again over the files in scope;
-an entry whose digest moved comes back with no plan, and so does every other twin of its wrapper (the plans binding
+the plan template cache hands a hit its template's reads) and a digest of the evidence those reach in the tune DB,
+the golden rows in scope imported among it (`SearchDB.evidence_digest`). The manifest also keeps the card's scope
+digest (`golden.scope_digest`, file bytes only): while it holds, nothing is compared. When it moved, `load_pack`
+imports the scope into the tune DB as a compile does and computes the digests again from its rows; an entry whose
+digest moved comes back with no plan, and so does every other twin of its wrapper (the plans binding
 the same checkpoint tensors), since the first twin built settles the layout of each weight for the rest. When no
 entry moved, the manifest takes the new scope digest. Cubins are **not** copied — plans
 reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and

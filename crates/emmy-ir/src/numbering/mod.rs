@@ -9,11 +9,13 @@
 //!
 //! Statements are numbered by position in the pre-order walk, so no statement is keyed by object identity.
 
+pub mod advance;
 pub mod congruence;
 pub mod digest;
 pub mod key;
 pub mod values;
 
+pub use advance::*;
 pub use congruence::*;
 pub use digest::*;
 pub use key::*;

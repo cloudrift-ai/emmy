@@ -326,7 +326,6 @@ def _stmt_eval_scope() -> dict:
         Loop,
         Select,
         SelectBranch,
-        StridedLoop,
         Write,
     )
     from emmy.compiler.ir.tensor.ir import IndexSource
@@ -351,7 +350,6 @@ def _stmt_eval_scope() -> dict:
         "Select": Select,
         "SelectBranch": SelectBranch,
         "Loop": Loop,
-        "StridedLoop": StridedLoop,
         "Cond": Cond,
         # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
         # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
@@ -424,12 +422,6 @@ def _serialize_op_fields(op: Op) -> dict:
 
     if not isinstance(op, TileOp) or op.schedule is None:
         return fields
-    from emmy.compiler.ir.schedule.register import RegisterMaterialization, register_row  # noqa: PLC0415
-
-    if isinstance(op.materialization, RegisterMaterialization):
-        fields["schedule"] = register_row(op.schedule)
-        fields["materialization"] = {"register": True}
-        return fields
     from emmy.compiler.ir.schedule.classic import (
         # noqa: PLC0415,
         ClassicScheduleCodec,
@@ -481,12 +473,6 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict, *, inputs=None, outputs=
     )
 
     source = op_cls(**fields)
-    if materialization_row == {"register": True}:
-        from emmy.compiler.ir.schedule.register import RegisterMaterialization, register_schedule  # noqa: PLC0415
-
-        fields["schedule"] = register_schedule(source, _wire_mapping(schedule_row, "register schedule"))
-        fields["materialization"] = RegisterMaterialization()
-        return op_cls(**fields)
     codec = ClassicScheduleCodec(ClassicScheduleContext(source))
     schedule_wire = _wire_mapping(schedule_row, "classic schedule")
     schedule = codec._parse(schedule_wire)
@@ -1637,7 +1623,8 @@ def _fmt_op(node: Node, graph: Graph) -> str:
     if cls == "ElementwiseOp":
         return f"{op.name}({', '.join(arg_names)})"
     if cls == "ReduceOp":
-        return f"{op.name}({', '.join(arg_names)}, axis={op.axis})"
+        walked = "" if op.range is None else f", range={op.range[0]}..{op.range[1]}"
+        return f"{op.name}({', '.join(arg_names)}, axis={op.axis}{walked})"
     if cls == "ScanOp":
         return f"scan_{op.name}({', '.join(arg_names)}, axis={op.axis})"
     if cls == "GatherOp":

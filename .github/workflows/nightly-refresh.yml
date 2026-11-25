@@ -24,7 +24,7 @@ jobs:
         emmy/compiler/pipeline/search/prior/weights/schedule.json
         emmy/compiler/pipeline/search/prior/weights/placement.json
         emmy/compiler/pipeline/search/golden/records/*.json
-        emmy/compiler/pipeline/search/freezes/*.json
+        emmy/compiler/pipeline/search/candidates/records/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
@@ -32,9 +32,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Fetch the measurement freeze from LFS
-        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
 
       - uses: ./.github/actions/setup-emmy
 
@@ -90,7 +87,7 @@ jobs:
       TOLERATED_PATHS: >-
         tests/durations_cpu.json
         emmy/compiler/pipeline/search/golden/records/*.json
-        emmy/compiler/pipeline/search/freezes/*.json
+        emmy/compiler/pipeline/search/candidates/records/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
@@ -99,12 +96,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch the measurement freeze from LFS
-        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
-
       - uses: ./.github/actions/setup-emmy
 
-      - name: Export repository goldens and the measurement freeze
+      - name: Export the hardware goldens
         run: |
           ./venv/bin/emmy db import --db _data/ci-prior.db --fresh --repository
           ./venv/bin/emmy db export --db _data/ci-prior.db _data/ci-prior --space "$SPACE"
@@ -132,12 +126,6 @@ jobs:
         timeout-minutes: 120
         run: ./venv/bin/emmy eval prior _data/ci-prior --offline-file "$WEIGHTS" --json _data/eval.json
 
-      # The measured pools — the freeze's rows beside the goldens', every row of a pool benched: what the prior's pick
-      # costs against the measured best, per card. Reported, not gated: one card's pools are too few to hold a bar.
-      - name: Evaluate the prior over the measured pools
-        if: matrix.space == 'schedule'
-        run: ./venv/bin/emmy eval prior _data/ci-prior --pools measured --offline-file "$WEIGHTS" --json _data/measured.json
-
       - name: Commit improved prior to main
         if: steps.compare.outputs.updated == 'true' && github.ref == 'refs/heads/main'
         id: commit
@@ -148,45 +136,12 @@ jobs:
           message: "compiler: refresh ${{ matrix.space }} prior"
           paths: ${{ env.WEIGHTS }}
 
-      # The files tunes wrote beside each card's since the last fold, folded into one file per card: a freeze-only
-      # DB (the goldens' rows and decisions stay out of the card files), read in name order so each card's file comes
-      # out holding the newest row per schedule. LFS installed here, locally, so the push uploads the payload.
-      - name: Fold the tunes' files into the measurement freeze
-        id: fold
-        if: matrix.space == 'schedule'
-        env:
-          FREEZES: emmy/compiler/pipeline/search/freezes
-        run: |
-          git lfs install --local
-          echo "runs=$(find "$FREEZES" -name '*.r*.json' | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
-          if compgen -G "$FREEZES/*.json" > /dev/null; then
-            ./venv/bin/emmy db import --db _data/fold.db --fresh "$FREEZES"
-            ./venv/bin/emmy db freeze --db _data/fold.db --out "$FREEZES"
-          fi
-          if [ -n "$(git status --porcelain -- "$FREEZES")" ]; then
-            echo "updated=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "updated=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Commit the measurement freeze to main
-        if: steps.fold.outputs.updated == 'true' && github.ref == 'refs/heads/main'
-        id: freeze
-        uses: ./.github/actions/push-to-main
-        with:
-          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
-          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          message: "compiler: fold ${{ steps.fold.outputs.runs }} tune file(s) into the measurement freeze"
-          paths: emmy/compiler/pipeline/search/freezes
-
       # Runs after a failed or timed-out step too, so the message carries what the leg finished.
       - name: Summarize the comparison
         id: summary
         if: always()
         env:
           COMMITTED: ${{ steps.commit.outcome }}
-          FOLDED: ${{ steps.freeze.outcome }}
-          RUNS: ${{ steps.fold.outputs.runs }}
         run: |
           summary="No comparison finished"
           if [ -f _data/decision.json ]; then
@@ -195,14 +150,8 @@ jobs:
           if [ "$COMMITTED" = success ]; then
             summary="Updated the weights on main; $summary"
           fi
-          if [ "$FOLDED" = success ]; then
-            summary="$summary. Folded $RUNS tune file(s) into the measurement freeze on main"
-          fi
           if [ -f _data/eval.json ]; then
             summary="$summary. $(jq -r -f .github/workflows/scripts/prior_picks.jq _data/eval.json)"
-          fi
-          if [ -f _data/measured.json ]; then
-            summary="$summary. $(jq -r -f .github/workflows/scripts/measured_regret.jq _data/measured.json)"
           fi
           echo "$SPACE=$summary" >> "$GITHUB_OUTPUT"
 
@@ -236,6 +185,25 @@ jobs:
           echo "$summary"
           echo "summary=$summary" >> "$GITHUB_OUTPUT"
 
+  # Every repository golden but the RTX 5090's, which the PR suite holds: the fresh lowering of each traced program,
+  # the import, the fusion and normal-form checks, and the prior reproduction gate. Together they outlast the PR job.
+  goldens:
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-emmy
+
+      - name: Hold every other card's goldens
+        timeout-minutes: 230
+        run: EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -m goldens -q -p no:randomly -n auto --dist=loadgroup
+
   # Fill one hardware golden's missing measurements on its own card: the file with the most rows `emmy golden list
   # --missing` names among the cards CloudRift can rent now. Skipped when every row is measured or no card is free.
   fill:
@@ -248,6 +216,7 @@ jobs:
       summary: ${{ steps.summary.outputs.summary || steps.choose.outputs.summary }}
     env:
       GOLDENS: emmy/compiler/pipeline/search/golden/records
+      CANDIDATES: emmy/compiler/pipeline/search/candidates/records
       EMMY_RENTAL_TAGS: emmy,workflow:golden-fill,gh-job:${{ github.run_id }}-${{ github.run_attempt }}
       SSH_KEY: /tmp/emmy-fill-ssh-${{ github.run_id }}-${{ github.run_attempt }}
       PROVIDER_CONFIG: /tmp/emmy-fill-provider-${{ github.run_id }}-${{ github.run_attempt }}.yaml
@@ -257,7 +226,7 @@ jobs:
         tests/durations_cpu.json
         emmy/compiler/pipeline/search/prior/weights/schedule.json
         emmy/compiler/pipeline/search/prior/weights/placement.json
-        emmy/compiler/pipeline/search/freezes/*.json
+        emmy/compiler/pipeline/search/candidates/records/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
@@ -338,6 +307,13 @@ jobs:
           cp "$working" "$GOLDEN"
           ./venv/bin/emmy golden check "$GOLDEN"
           ./venv/bin/emmy golden list "$GOLDEN" --missing --json _data/still_missing.json
+          # A candidate file copies its golden's tables: copy them again and keep its rows. No tune DB is read, so no
+          # candidate is added here.
+          candidates="$CANDIDATES/$(basename "$GOLDEN")"
+          if [ -f "$candidates" ]; then
+            ./venv/bin/emmy candidates build "$GOLDEN"
+            echo "candidates=$candidates" >> "$GITHUB_OUTPUT"
+          fi
           failed=$(find .github/golden-fill -name '*_failed.txt' | sort | tail -1)
           echo "failed=$(cat "${failed:-/dev/null}" | wc -l)" >> "$GITHUB_OUTPUT"
           if git diff --quiet -- "$GOLDEN"; then
@@ -354,7 +330,7 @@ jobs:
           app-id: ${{ secrets.EXPERIMENT_APP_ID }}
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           message: "goldens: fill missing measurements on ${{ steps.choose.outputs.gpu }}"
-          paths: ${{ steps.choose.outputs.golden }}
+          paths: ${{ steps.choose.outputs.golden }} ${{ steps.take.outputs.candidates }}
 
       - name: Summarize the fill
         id: summary
@@ -371,6 +347,77 @@ jobs:
           if [ "$COMMITTED" = success ]; then
             summary="$summary; committed to main"
           fi
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+
+  # Every row of the candidate files compiled under its own schedule, on the files the fill job left on main. A
+  # candidate the compiler no longer realizes is dropped; a tune on the card refills its group.
+  candidates:
+    needs: fill
+    if: always()
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      summary: ${{ steps.summary.outputs.summary }}
+    env:
+      CANDIDATES: emmy/compiler/pipeline/search/candidates/records
+      # The other jobs may land their files on main while this job compiles; any other move stops the push, so rows
+      # realized under one compiler are never dropped from under another.
+      TOLERATED_PATHS: >-
+        tests/durations_cpu.json
+        emmy/compiler/pipeline/search/prior/weights/schedule.json
+        emmy/compiler/pipeline/search/prior/weights/placement.json
+        emmy/compiler/pipeline/search/golden/records/*.json
+        recipes/*/recipe.yaml
+        recipes/*/DISCOVERY.md
+    steps:
+      # The branch's tip, not the commit the run started on: the fill may have landed a candidate file since.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-emmy
+
+      - name: Drop the rows the compiler no longer realizes
+        id: drop
+        run: |
+          mkdir -p _data
+          ./venv/bin/emmy candidates realize "$CANDIDATES" --drop --json _data/realize.json
+          if [ -n "$(git status --porcelain -- "$CANDIDATES")" ]; then
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit the candidate files to main
+        if: steps.drop.outputs.updated == 'true' && github.ref == 'refs/heads/main'
+        id: commit
+        uses: ./.github/actions/push-to-main
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          message: "compiler: drop the candidate rows the compiler no longer realizes"
+          paths: emmy/compiler/pipeline/search/candidates/records
+
+      # Runs after a failed step too, so the message carries what the job finished.
+      - name: Summarize the realization
+        id: summary
+        if: always()
+        env:
+          DROPPED: ${{ steps.commit.outcome }}
+        run: |
+          summary="No report; open the run."
+          if [ -f _data/realize.json ]; then
+            summary=$(jq -r -f .github/workflows/scripts/candidates_realized.jq _data/realize.json)
+          fi
+          if [ "$DROPPED" = success ]; then
+            summary="$summary. Dropped the rows not realized on main"
+          fi
+          echo "$summary"
           echo "summary=$summary" >> "$GITHUB_OUTPUT"
 
   discover:
@@ -620,89 +667,9 @@ jobs:
             "$DISCOVERY_SUMMARY"
           git config --unset-all credential.helper || true
 
-  # Every row of the measurement freeze compiled under its own schedule, the card's file as the compile's golden
-  # evidence, on the files the prior job's fold left on main. A freeze stores no program a restamp could lower afresh,
-  # so this is the check it admits. A row the compiler no longer realizes is evidence no compile takes: the job drops
-  # it, folds the files again so each card's sheds the kernels and decisions no row is left under, and commits them.
-  freeze:
-    needs: prior
-    if: always()
-    runs-on:
-      group: ubuntu-runners
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    outputs:
-      summary: ${{ steps.summary.outputs.summary }}
-    env:
-      FREEZES: emmy/compiler/pipeline/search/freezes
-      # The other jobs may land their files on main while this job compiles; any other move stops the push, so rows
-      # realized under one compiler are never dropped from under another.
-      TOLERATED_PATHS: >-
-        tests/durations_cpu.json
-        emmy/compiler/pipeline/search/prior/weights/schedule.json
-        emmy/compiler/pipeline/search/prior/weights/placement.json
-        emmy/compiler/pipeline/search/golden/records/*.json
-        recipes/*/recipe.yaml
-        recipes/*/DISCOVERY.md
-    steps:
-      # The branch's tip, not the commit the run started on: the fold may have landed card files since.
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Fetch the measurement freeze from LFS
-        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
-
-      - uses: ./.github/actions/setup-emmy
-
-      # LFS installed here, locally, so the push uploads the payload.
-      - name: Drop the rows the compiler no longer realizes
-        id: drop
-        run: |
-          git lfs install --local
-          mkdir -p _data
-          ./venv/bin/emmy golden realize "$FREEZES" --drop --json _data/realize.json
-          if [ -n "$(git status --porcelain -- "$FREEZES")" ]; then
-            ./venv/bin/emmy db import --db _data/fold.db --fresh "$FREEZES"
-            ./venv/bin/emmy db freeze --db _data/fold.db --out "$FREEZES"
-            echo "updated=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "updated=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Commit the measurement freeze to main
-        if: steps.drop.outputs.updated == 'true' && github.ref == 'refs/heads/main'
-        id: commit
-        uses: ./.github/actions/push-to-main
-        with:
-          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
-          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          message: "compiler: drop the rows the compiler no longer realizes from the measurement freeze"
-          paths: emmy/compiler/pipeline/search/freezes
-
-      # Runs after a failed step too, so the message carries what the job finished.
-      - name: Summarize the realization
-        id: summary
-        if: always()
-        env:
-          DROPPED: ${{ steps.commit.outcome }}
-        run: |
-          summary="No report; open the run."
-          if [ -f _data/realize.json ]; then
-            summary=$(jq -r -f .github/workflows/scripts/freeze_realized.jq _data/realize.json)
-          fi
-          if [ "$DROPPED" = success ]; then
-            summary="$summary. Dropped them from the measurement freeze on main"
-          fi
-          echo "$summary"
-          echo "summary=$summary" >> "$GITHUB_OUTPUT"
-
   notify:
     name: Notify Discord
-    needs: [durations, prior, freeze, gaps, fill, discover]
+    needs: [durations, prior, gaps, goldens, fill, candidates, discover]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -716,11 +683,12 @@ jobs:
       PRIOR_RESULT: ${{ needs.prior.result }}
       SCHEDULE_PRIOR: ${{ needs.prior.outputs.schedule }}
       PLACEMENT_PRIOR: ${{ needs.prior.outputs.placement }}
-      FREEZE_RESULT: ${{ needs.freeze.result }}
-      MEASUREMENT_FREEZE: ${{ needs.freeze.outputs.summary }}
       GAPS_RESULT: ${{ needs.gaps.result }}
+      GOLDENS_RESULT: ${{ needs.goldens.result }}
       FILL_RESULT: ${{ needs.fill.result }}
       GOLDEN_FILL: ${{ needs.fill.outputs.summary }}
+      CANDIDATES_RESULT: ${{ needs.candidates.result }}
+      CANDIDATES_REALIZED: ${{ needs.candidates.outputs.summary }}
       COMPILER_GAPS: ${{ needs.gaps.outputs.summary }}
       DISCOVER_RESULT: ${{ needs.discover.result }}
       DISCOVER_PARTIAL: ${{ needs.discover.outputs.partial }}

@@ -67,8 +67,8 @@ def host_bindings(plan: ExecutionPlan, input_data: dict, sym_values: dict[str, i
     to a device tensor is skipped: its memory is lent to the runtime instead; so is a paged one with slots, whose
     pages the pager keeps, and a paged one nothing supplied — the runtime fills only the pages it allocated
     itself. Output and scratch buffers start
-    zeroed inside the runtime. Saturating casts here are intended, not bugs: an
-    SDPA mask-fill constant (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after
+    zeroed inside the runtime. Saturating casts here are intended, not bugs: a
+    mask-fill constant (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after
     softmax)."""
     out: dict[str, bytes] = {}
     with np.errstate(over="ignore", invalid="ignore"):

@@ -278,9 +278,9 @@
     "for a0 in 0..2:",
     "  for a1 in 0..512:",
     "    for a2 in 0..512:",
-    "      for a3 in 0..256 window(parent=a3 in 0..512, partition=true):",
-    "        in0 = load x1[256 * a0 + a3, a2]",
-    "        in1 = load x0[a1, 256 * a0 + a3]",
+    "      for a3 in 256 * a0..256 * a0 + 256 of 512 window(parent=a3 in 0..512, partition=true):",
+    "        in0 = load x0[a1, a3]",
+    "        in1 = load x1[a3, a2]",
     "        v0 = in0 * in1",
     "        acc0 <- add(acc0, v0) over a3",
     "      matmul__partial[a0, a1, a2] = acc0"
@@ -416,9 +416,9 @@
     "for a0 in 0..2:",
     "  for a1 in 0..seq_len:",
     "    for a2 in 0..512:",
-    "      for a3 in 0..256 window(parent=a3 in 0..512, partition=true):",
-    "        in0 = load x1[256 * a0 + a3, a2]",
-    "        in1 = load x0[a1, 256 * a0 + a3]",
+    "      for a3 in 256 * a0..256 * a0 + 256 of 512 window(parent=a3 in 0..512, partition=true):",
+    "        in0 = load x0[a1, a3]",
+    "        in1 = load x1[a3, a2]",
     "        v0 = in0 * in1",
     "        acc0 <- add(acc0, v0) over a3",
     "      matmul__partial[a0, a1, a2] = acc0"
@@ -1292,25 +1292,25 @@
     "    add_6__place_0b0ace5cd4_0[a0, a1] = acc0"
    ]},"inputs":["add_6__place_0b0ace5cd4_0__partial"],"outputs":[["add_6__place_0b0ace5cd4_0","f16",[16,4096]]]}
   ]},"formed":true},
-  {"loop_ir":{"inputs":["reshape__place_a611683c20_0","linear_6_wt","linear_3_wt"],"outputs":["reshape__place_f51e6b9f09_0__partial"],"nodes":[
+  {"loop_ir":{"inputs":["reshape__place_23870512e0_0","linear_6_wt","linear_3_wt"],"outputs":["reshape__place_419141a473_0__partial"],"nodes":[
    {"id":"linear_3_wt","op":"input","outputs":[["linear_3_wt","f16",[4096,1024]]]},
    {"id":"linear_6_wt","op":"input","outputs":[["linear_6_wt","f16",[4096,1024]]]},
-   {"id":"reshape__place_a611683c20_0","op":"input","outputs":[["reshape__place_a611683c20_0","f16",[16,4096]]]},
-   {"id":"reshape__place_f51e6b9f09_0__partial","op":"loop","attrs":{"body":[
+   {"id":"reshape__place_23870512e0_0","op":"input","outputs":[["reshape__place_23870512e0_0","f16",[16,4096]]]},
+   {"id":"reshape__place_419141a473_0__partial","op":"loop","attrs":{"body":[
     "for a0 in 0..8:",
     "  for a1 in 0..16:",
     "    for a2 in 0..1024:",
-    "      for a3 in 0..512 window(parent=a3 in 0..4096, partition=true):",
-    "        in0 = load linear_3_wt[512 * a0 + a3, a2]",
-    "        in1 = load linear_6_wt[512 * a0 + a3, a2]",
-    "        in2 = load reshape__place_a611683c20_0[a1, 512 * a0 + a3]",
-    "        f32 v0 = in0 * in2",
+    "      for a3 in 512 * a0..512 * a0 + 512 of 4096 window(parent=a3 in 0..4096, partition=true):",
+    "        in0 = load linear_3_wt[a3, a2]",
+    "        in1 = load linear_6_wt[a3, a2]",
+    "        in2 = load reshape__place_23870512e0_0[a1, a3]",
+    "        f32 v0 = in2 * in1",
     "        acc0 <- add(acc0, v0) over a3",
-    "        f32 v1 = in1 * in2",
+    "        f32 v1 = in2 * in0",
     "        acc1 <- add(acc1, v1) over a3",
-    "      reshape__place_f51e6b9f09_0__partial[0, a0, a1, a2] = acc0",
-    "      reshape__place_f51e6b9f09_0__partial[1, a0, a1, a2] = acc1"
-   ]},"inputs":["reshape__place_a611683c20_0","linear_6_wt","linear_3_wt"],"outputs":[["reshape__place_f51e6b9f09_0__partial","f32",[2,8,16,1024]]]}
+    "      reshape__place_419141a473_0__partial[0, a0, a1, a2] = acc0",
+    "      reshape__place_419141a473_0__partial[1, a0, a1, a2] = acc1"
+   ]},"inputs":["reshape__place_23870512e0_0","linear_6_wt","linear_3_wt"],"outputs":[["reshape__place_419141a473_0__partial","f32",[2,8,16,1024]]]}
   ]},"formed":true},
   {"loop_ir":{"inputs":["reshape__place_f51e6b9f09_0__partial"],"outputs":["reshape__place_f51e6b9f09_0","reshape__place_f51e6b9f09_1"],"nodes":[
    {"id":"reshape__place_f51e6b9f09_0__partial","op":"input","outputs":[["reshape__place_f51e6b9f09_0__partial","f32",[2,8,16,1024]]]},
@@ -1326,30 +1326,30 @@
     "    reshape__place_f51e6b9f09_1[a0, a1] = acc1"
    ]},"inputs":["reshape__place_f51e6b9f09_0__partial"],"outputs":[["reshape__place_f51e6b9f09_0","f16",[16,1024]],["reshape__place_f51e6b9f09_1","f16",[16,1024]]]}
   ]},"formed":true},
-  {"loop_ir":{"inputs":["reshape__place_a611683c20_0","v_a","k_a","q_a"],"outputs":["reshape__place_93a6108ea6_0__partial"],"nodes":[
+  {"loop_ir":{"inputs":["reshape__place_23870512e0_0","v_a","k_a","q_a"],"outputs":["reshape__place_d6f309ee52_0__partial"],"nodes":[
    {"id":"k_a","op":"input","outputs":[["k_a","f16",[8,4096]]]},
    {"id":"q_a","op":"input","outputs":[["q_a","f16",[8,4096]]]},
-   {"id":"reshape__place_a611683c20_0","op":"input","outputs":[["reshape__place_a611683c20_0","f16",[16,4096]]]},
+   {"id":"reshape__place_23870512e0_0","op":"input","outputs":[["reshape__place_23870512e0_0","f16",[16,4096]]]},
    {"id":"v_a","op":"input","outputs":[["v_a","f16",[8,4096]]]},
-   {"id":"reshape__place_93a6108ea6_0__partial","op":"loop","attrs":{"body":[
+   {"id":"reshape__place_d6f309ee52_0__partial","op":"loop","attrs":{"body":[
     "for a0 in 0..4:",
     "  for a1 in 0..16:",
     "    for a2 in 0..8:",
-    "      for a3 in 0..1024 window(parent=a3 in 0..4096, partition=true):",
-    "        in0 = load k_a[a2, 1024 * a0 + a3]",
-    "        in1 = load q_a[a2, 1024 * a0 + a3]",
-    "        in2 = load reshape__place_a611683c20_0[a1, 1024 * a0 + a3]",
-    "        f32 v0 = in0 * in2",
+    "      for a3 in 1024 * a0..1024 * a0 + 1024 of 4096 window(parent=a3 in 0..4096, partition=true):",
+    "        in0 = load k_a[a2, a3]",
+    "        in1 = load q_a[a2, a3]",
+    "        in2 = load reshape__place_23870512e0_0[a1, a3]",
+    "        f32 v0 = in2 * in1",
     "        acc0 <- add(acc0, v0) over a3",
-    "        f32 v1 = in1 * in2",
+    "        f32 v1 = in2 * in0",
     "        acc1 <- add(acc1, v1) over a3",
-    "        in3 = load v_a[a2, 1024 * a0 + a3]",
+    "        in3 = load v_a[a2, a3]",
     "        f32 v2 = in2 * in3",
     "        acc2 <- add(acc2, v2) over a3",
-    "      reshape__place_93a6108ea6_0__partial[0, a0, a1, a2] = acc0",
-    "      reshape__place_93a6108ea6_0__partial[1, a0, a1, a2] = acc1",
-    "      reshape__place_93a6108ea6_0__partial[2, a0, a1, a2] = acc2"
-   ]},"inputs":["reshape__place_a611683c20_0","v_a","k_a","q_a"],"outputs":[["reshape__place_93a6108ea6_0__partial","f32",[3,4,16,8]]]}
+    "      reshape__place_d6f309ee52_0__partial[0, a0, a1, a2] = acc0",
+    "      reshape__place_d6f309ee52_0__partial[1, a0, a1, a2] = acc1",
+    "      reshape__place_d6f309ee52_0__partial[2, a0, a1, a2] = acc2"
+   ]},"inputs":["reshape__place_23870512e0_0","v_a","k_a","q_a"],"outputs":[["reshape__place_d6f309ee52_0__partial","f32",[3,4,16,8]]]}
   ]},"formed":true},
   {"loop_ir":{"inputs":["reshape__place_93a6108ea6_0__partial"],"outputs":["reshape__place_93a6108ea6_0","reshape__place_f6890d87e3_0","reshape__place_f6890d87e3_1"],"nodes":[
    {"id":"reshape__place_93a6108ea6_0__partial","op":"input","outputs":[["reshape__place_93a6108ea6_0__partial","f32",[3,4,16,8]]]},
@@ -1368,20 +1368,20 @@
     "    reshape__place_f6890d87e3_1[a0, a1] = acc0"
    ]},"inputs":["reshape__place_93a6108ea6_0__partial"],"outputs":[["reshape__place_93a6108ea6_0","f16",[16,8]],["reshape__place_f6890d87e3_0","f16",[16,8]],["reshape__place_f6890d87e3_1","f16",[16,8]]]}
   ]},"formed":true},
-  {"loop_ir":{"inputs":["reshape__place_a611683c20_0","linear_wt"],"outputs":["reshape__place_0d1eb0dcf2_0__partial"],"nodes":[
+  {"loop_ir":{"inputs":["reshape__place_23870512e0_0","linear_wt"],"outputs":["reshape__place_198833e89d_0__partial"],"nodes":[
    {"id":"linear_wt","op":"input","outputs":[["linear_wt","f16",[4096,4096]]]},
-   {"id":"reshape__place_a611683c20_0","op":"input","outputs":[["reshape__place_a611683c20_0","f16",[16,4096]]]},
-   {"id":"reshape__place_0d1eb0dcf2_0__partial","op":"loop","attrs":{"body":[
+   {"id":"reshape__place_23870512e0_0","op":"input","outputs":[["reshape__place_23870512e0_0","f16",[16,4096]]]},
+   {"id":"reshape__place_198833e89d_0__partial","op":"loop","attrs":{"body":[
     "for a0 in 0..4:",
     "  for a1 in 0..16:",
     "    for a2 in 0..4096:",
-    "      for a3 in 0..1024 window(parent=a3 in 0..4096, partition=true):",
-    "        in0 = load linear_wt[1024 * a0 + a3, a2]",
-    "        in1 = load reshape__place_a611683c20_0[a1, 1024 * a0 + a3]",
-    "        f32 v0 = in0 * in1",
+    "      for a3 in 1024 * a0..1024 * a0 + 1024 of 4096 window(parent=a3 in 0..4096, partition=true):",
+    "        in0 = load linear_wt[a3, a2]",
+    "        in1 = load reshape__place_23870512e0_0[a1, a3]",
+    "        f32 v0 = in1 * in0",
     "        acc0 <- add(acc0, v0) over a3",
-    "      reshape__place_0d1eb0dcf2_0__partial[a0, a1, a2] = acc0"
-   ]},"inputs":["reshape__place_a611683c20_0","linear_wt"],"outputs":[["reshape__place_0d1eb0dcf2_0__partial","f32",[4,16,4096]]]}
+    "      reshape__place_198833e89d_0__partial[a0, a1, a2] = acc0"
+   ]},"inputs":["reshape__place_23870512e0_0","linear_wt"],"outputs":[["reshape__place_198833e89d_0__partial","f32",[4,16,4096]]]}
   ]},"formed":true}
  ],
  "routing": [
@@ -1747,8 +1747,7 @@
   {"name":"pre16.k_linear_mean_reduce_3eb29d.m16.9d680185e1bc",
    "kernel":59,
    "pins":{"FAST_MATH":false},
-   "knobs":{"WORK":"w1x2","TILE":"mma_m8n8k4_f16_f32/f1x2/k8","REDUCE":"","STAGE":"d2/smem","LOOPIFY":"0","RASTER":""},
-   "measurements":{"emmy_us":26.313696056604385,"reference_us":26.194579899311066,"reference_backend":"same-input-greedy","tried":7}},
+   "knobs":{"WORK":"w1x2","TILE":"mma_m8n8k4_f16_f32/f1x2/k8","REDUCE":"","STAGE":"d2/smem","LOOPIFY":"0","RASTER":""}},
   {"name":"pre16.k_linear_mean_reduce_3eb29d.m16.b07d3ccb029c",
    "kernel":60,
    "pins":{"FAST_MATH":false},
@@ -1757,8 +1756,7 @@
   {"name":"pre16.k_linear_mean_reduce_3eb29d.m16.ea52dbdfd3e9",
    "kernel":61,
    "pins":{"FAST_MATH":false},
-   "knobs":{"WORK":"t256","TILE":"","REDUCE":"coop","STAGE":"","LOOPIFY":"0","RASTER":""},
-   "measurements":{"emmy_us":3.9533115923404694,"reference_us":3.9197378791868687,"reference_backend":"same-input-greedy","tried":1}},
+   "knobs":{"WORK":"t256","TILE":"","REDUCE":"coop","STAGE":"","LOOPIFY":"0","RASTER":""}},
   {"name":"pre16.k_linear_mean_reduce_3eb29d.m16.2e0efba2f4e7",
    "kernel":62,
    "pins":{"FAST_MATH":false},
@@ -1768,5 +1766,10 @@
    "kernel":63,
    "pins":{"FAST_MATH":false},
    "knobs":{"WORK":"w1x2","TILE":"mma_m8n8k4_f16_f32/f1x2/k8","REDUCE":"","STAGE":"d2/smem","LOOPIFY":"0","RASTER":""},
-   "measurements":{"emmy_us":44.17828470468521,"reference_us":44.324569404125214,"reference_backend":"same-input-greedy","tried":7}}
+   "measurements":{"emmy_us":44.17828470468521,"reference_us":44.324569404125214,"reference_backend":"same-input-greedy","tried":7}},
+  {"name":"pre16.k_linear_mean_reduce_3eb29d.m16.725632290d2b.c0",
+   "kernel":47,
+   "pins":{"FAST_MATH":false},
+   "knobs":{"FAST_EXP":"False","GUARD_REDUCTIONS":"True","INTERLEAVE_LOADS":"True","PAIR_LDMATRIX":"True","RASTER":"","TILE":"f2","VECTORIZE_LOADS":"True","VECTORIZE_STORES":"True","WORK":""},
+   "measurements":{"emmy_us":1.5762696275487542,"reference_us":2.047999994829297,"reference_backend":"same-input-greedy"}}
  ]}

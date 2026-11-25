@@ -108,8 +108,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   computed once at the shallowest scope that holds its operands, unread values dropped. A Kernel IR body takes these
   alone at construction (`optimize_body`) and keeps the loops, the order and the names its passes wrote, since no
   identity reads it. Like normalization, it answers to no knob, pin or evidence.
-- **Statement type** — The type a Loop IR statement belongs to: `Loop`, `Load`, `Accum`, … Forty-four are declared in
-  one list in the `emmy-ir` crate, fourteen shared and thirty of the Kernel IR; each is a Rust struct and a Python class
+- **Statement type** — The type a Loop IR statement belongs to: `Loop`, `Load`, `Accum`, … Forty-three are declared in
+  one list in the `emmy-ir` crate, thirteen shared and thirty of the Kernel IR; each is a Rust struct and a Python class
   of the same name. A statement is one instance of its type in a body.
 - **Expression class** — Which of the two kinds of scalar arithmetic an expression field admits: `Index`, integer
   arithmetic over integer operands (an index, an extent, a guard), or `Value`, every operation over any operand (the
@@ -136,15 +136,24 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Serial axis / lagged read** — The classic schedule's realization of a carried state: a `Placement.serial` axis
   is launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel reads its
   own output strictly behind the step it writes (`S[c − 1]` while writing `S[c]`). The state lives in the buffer,
-  so the step is any `Fold`; the schedule's fork lifts the carrying kernel's Loop IR into this form (`lift_serial`).
-- **Carried state** — A recurrence's state. In Loop IR, `Carry` defines the next value of one cell and names the
-  seed, a `Pre` read sees the previous step's value at any cell, and the loop that carries it sits outside the loops
-  over its cells; its steps are ordered and its step is any computation, so it has no op. In Tile IR it is a `Fold`
-  that **carries**: its ⊕ is the action `next` (the state becomes what the step computed — the free monoid of step
-  maps stored through its action on the seed, the one form every step has), its `cells` the `Carry` index, its
-  `init` the seed, and a **carrier read** — a slab over one `Pre` — is how the step reads the carrier at other cells.
-  A step affine in the state splits **across the sequence** (`REDUCE=g<n>k` on the carrying site): a probe reads
-  each part's affine map off two walks from known seeds, a prefix carries the state across the parts, and the walk
+  so the step is any `Fold`; the schedule's fork rewrites the carrying kernel's term into this form (`serial_form`).
+- **Range** — Where a loop's axis walks when that is not all of it: a start and an exclusive end over the coordinates
+  around the loop and the symbolic dims (`for a4 in 0..a0 + 2 of 62:`). The values lie inside `0..extent`, so the
+  extent stays the bound every index is analysed under. Loop IR's normal form moves a mask to a fold's neutral
+  element into the range of the reduce loop, and the simplifier then decides the comparisons the range implies. A
+  `Fold` keeps the range of the axis it binds. A kernel tier covers an axis from zero to a number of trips, so the
+  schedule and the kernel lowering read a range as the **masked form** of the kernel: the walk from zero with each
+  folded value selected against its seed past the end (`TileOp.masked`).
+- **Carried state** — A recurrence's state. In Loop IR it is a buffer of the kernel's own whose first coordinate is the
+  step: `Carry` (`S[step, cell] <- value seed …`) defines one cell at one step and names the seed, and a `Load` reads
+  it as it reads any buffer, one step back inside the loop that carries it (`S[step - 1, cell]`, the seed on the first
+  step) and the last step after it. The loop that carries it is the one its first coordinate names, outside the loops
+  over its cells; its steps are ordered and its step is any computation, so it has no op. In Tile IR the kernel's
+  term is one step and the loop that carries the state is the kernel's serial axis: the `Carry` rides among the
+  kernel's stores, and a slab over a load of the state is how the step reads it at any cell.
+  A step affine in the state splits **across the sequence** (`REDUCE=g<n>k`, at the state's route `map.1/scan`
+  where the step has a reduction of its own): a probe reads each part's affine map off two walks from known seeds, a
+  prefix carries the state across the parts, and the walk
   runs every part from its start. A part of one step reads its map off the step with no probe. The parts' maps can
   first be composed pairwise, each composition a matrix product kernel over half the maps (`g<n>k<p>`, `p`
   compositions).
@@ -195,8 +204,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Route** — The spelling a structural knob key addresses a node of the fold tree by: from the root, each departure
   names the node stood on and the 1-based stored operand taken (`map.1`), and the last segment names the kind of the
   node arrived at — `PLACE@map.1/twist.1/inner.2/map`, `TILE@map.1/twist.1/inner`. Kinds are the term's derived
-  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site. A carrying
-  fold reads as `scan`, and its route is where a row spells the storage of the carried state (`STAGE@…/scan`).
+  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site. A carried
+  state has a route too, though no node is the state: `map.1/scan`, where a row spells its storage
+  (`STAGE@map.1/scan`).
 - **Twist recipe** — A twisted monoid stated as data (`ir/pure/twist.py`): a componentwise base monoid with its
   per-element lift, conjugated by a bijection ψ (transport of structure — associativity is inherited), beside which
   the recipe stores what conjugation does not give stably: one pattern per channel (the per-element map a dependent
@@ -392,7 +402,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   addresses moved is re-spelled at the seams that mint its stored pieces, or most of them where a piece was re-keyed
   too), a row whose kernel was re-keyed — the stored body and the fresh one compute different exact identities — keeps
   its schedule and loses its measurement, a kernel no fresh kernel writes is dropped with its rows. A golden the restamp
-  leaves unchanged is current; `emmy golden check` and the suite ask exactly that.
+  leaves unchanged is current; `emmy golden check` and the suite ask exactly that. Given a PTX baseline
+  (`--ptx-baseline`, written by `emmy golden realize --ptx` before the change), the restamp decides each time by the
+  code: a row keeps its measurement exactly when its kernel compiles to the same bytes.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
   `run --bench` writes its rows there, and a golden file's rows are imported there before a compile picks. A row is
   evidence for the kernel whose exact identity it is keyed by. All are read by one rule.
@@ -411,31 +423,21 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Dataset DB** — A database with the tuning database's tables in a file of its own — the file
   every `emmy db` command names (`_data/dataset.db` in the examples), never the tuning database a compile reads —
-  filled by `emmy db import` from measurement freezes, the golden files and tuning databases, and exported by `emmy db
-  export` as the dataset the measurement-data readers (`emmy eval prior`, `emmy fit`) read. No compile reads either,
+  filled by `emmy db import` from the golden files and tuning databases, and exported by `emmy db export` as the dataset the measurement-data readers (`emmy eval prior`, `emmy fit`) read. No compile reads either,
   so what is imported into it can never change a deploy.
 - **Dataset** — The training data as a directory (`_data/schedule` and `_data/placement` in the examples): a
   `manifest.json` carrying each candidate pool's identity, labels, feature names and the export's provenance, beside
   one matrix file per pool. A dataset holds one space — the schedule rows of each golden kernel, or the arms of each
   structural fork — and its manifest names it. `emmy db export` writes it from the dataset DB; `emmy fit` and `emmy
   eval prior` read it and nothing else.
-- **Measurement freeze** — A fixed snapshot of collected measurements, written as a golden file per GPU: each
-  kernel's definition and its measured schedule rows, with the regime each was measured under and its median, and
-  no traced program. The tuning database is local to one machine and is rewritten as benches continue,
-  so a number computed over it cannot be checked by anyone else. A freeze is identical wherever
-  it is read, which is what makes two models' scores a fair comparison and a reported score something a reader can
-  reproduce.
-  The one kept with the repository (`search/freezes/`, a file per card) is what `emmy db import --repository` reads
-  beside the repository goldens; a tune writes its rows as one more file there, beside the card's, and the nightly
-  refresh folds those files into each card's, then compiles every row under its own schedule and drops the rows the
-  compiler no longer realizes (`emmy golden realize --drop`).
 - **Candidate file** — A few measured schedules that are not the best known one, for each group a hardware golden
   holds (one kernel, at one set of sizes, in one input regime): 3 where the kernel's schedule space is small, up to 10
   where it is large, spread across their latency. It is written in the golden file format and carries its hardware
   golden's traced programs, kernels and decisions, so it is checked against a fresh lowering, restamped and pruned as
   a golden is (`emmy candidates {check,restamp,realize}`). It is never a golden: a golden's row is the best known for
   its kernel, a candidate is not, and no compile reads a candidate file as evidence. One file per hardware golden,
-  under `search/candidates/records/`; `emmy candidates build` fills it from the measurement freeze.
+  under `search/candidates/records/`; `emmy candidates build` fills it from the tuning database the card's tunes
+  wrote.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the tune database's rows, the golden rows in scope imported among them, the fastest compatible
   row winning — then the prior's prediction, and last the rule's own first option. A structural

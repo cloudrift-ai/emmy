@@ -1,14 +1,13 @@
 """Every row of a golden file that carries a schedule, compiled under it with the file as the compile's golden
-evidence — the deploy contract asked of each row. It is the one check a measurement freeze admits: a freeze stores no
-traced program, so a restamp lowers nothing afresh and leaves the file as it is while the compiler moves under it. A
-row the compiler no longer realizes — the kernel it built is not the row's, or a knob the row spells is not the one
-the kernel carries (``pins.unreproducible_pin_flag``, the gate a bench holds a pinned row to) — is evidence no compile
-can take; ``emmy golden realize`` reports those rows, and with ``--drop`` writes the file back without them.
+evidence — the deploy contract asked of each row. A row the compiler no longer realizes — the kernel it built is not
+the row's, or a knob the row spells is not the one the kernel carries (``pins.unreproducible_pin_flag``, the gate a
+bench holds a pinned row to) — is evidence no compile can take; ``emmy golden realize`` reports those rows, and with
+``--drop`` writes the file back without them. A piece is rebuilt through the decisions the file records.
 
-A piece is rebuilt through the route a repository golden of the same card records for the same kernel
-(:func:`golden_routes`), and through the file's own only when none does. A golden's decisions are held to the fresh
-lowering; a freeze's are frozen with it and go stale, and a tune of one piece of a golden freezes the piece's rows
-with no decision at all — the golden keeps the ones that cut it."""
+With a PTX directory the compile of each row also writes the code it built (:func:`ptx_path`): its instructions
+without the comments, the kernel named alike in every file, so that a kernel whose identity or spelling moved and
+whose code did not compares equal. A row's time was measured on that code, which is what a restamp given such a
+baseline decides it by (``restamp.carried``)."""
 
 from __future__ import annotations
 
@@ -40,14 +39,23 @@ class Realization:
         return {"file": self.file, "gpu_name": self.gpu_name, "rows": self.rows, "failed": failed}
 
 
-def realized(document: GoldenFile, row: Row, route: tuple[GoldenFile, str] | None = None) -> str | None:
+def ptx_path(directory: Path, golden: Path | str, index: int) -> Path:
+    """Where the PTX of row ``index`` of the file ``golden`` stands under ``directory``: a folder per file, named by
+    the file's path under the working directory so that two cards' files of one name stay apart."""
+    path = Path(golden).resolve()
+    here = Path.cwd().resolve()
+    parts = path.relative_to(here).parts if path.is_relative_to(here) else (path.name,)
+    return directory / "__".join(parts).removesuffix(".json") / f"{index}.ptx"
+
+
+def realized(document: GoldenFile, row: Row, *, ptx: Path | None = None) -> str | None:
     """Why the compile does not realize ``row`` — ``None`` when it does. The row's kernel is the whole program (its
     formed body, or its tile re-derived through the file's recorded decisions), its regime and schedule are pinned
     and the file is the golden evidence: the lowering ``compile --golden PATH --kernel K --realization ROW`` runs,
-    at the file's card. ``route`` is the golden, and the kernel's ``ref`` in it, whose recorded decisions re-derive a
-    piece in place of the file's own."""
+    at the file's card. A row that realizes writes its kernel's code to ``ptx`` when given, under a name that does
+    not follow the kernel's identity."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+    from emmy.compiler.ir.cuda.ir import CudaOp, renamed  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.repository import evidence_scope  # noqa: PLC0415
@@ -56,9 +64,8 @@ def realized(document: GoldenFile, row: Row, route: tuple[GoldenFile, str] | Non
     from emmy.compiler.wire import kernel_identity  # noqa: PLC0415
 
     kernel = document.kernel(row.kernel)
-    source, stored = (document, kernel) if route is None else (route[0], route[0].kernel(route[1]))
     try:
-        graph = isolated_program(source, stored, row.bindings)
+        graph = isolated_program(document, kernel, row.bindings)
         ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
         with pinned_knobs({**golden_regime(document, [row]), "PLACE": "fuse", **(row.knobs or {})}), evidence_scope([document]):
             result = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=None)
@@ -69,63 +76,44 @@ def realized(document: GoldenFile, row: Row, route: tuple[GoldenFile, str] | Non
     if not mine:
         return "the compile builds " + (", ".join(op.kernel_name for op in built) if built else "no CUDA kernel") + " instead"
     # The gate a bench holds a pinned row to before it times it: every knob the row spells is the one the kernel carries.
-    return unreproducible_pin_flag(dict(tuning_knob_items(row.knobs or {})), [dict(op.knobs or {}) for op in mine])
+    reason = unreproducible_pin_flag(dict(tuning_knob_items(row.knobs or {})), [dict(op.knobs or {}) for op in mine])
+    if reason is None and ptx is not None:
+        ptx.parent.mkdir(parents=True, exist_ok=True)
+        ptx.write_text("\n".join(sorted({_code(renamed(op.kernel_source, op.kernel_name, "kernel")) for op in mine})))
+    return reason
 
 
-def golden_routes(document: GoldenFile) -> dict[str, tuple[Path, str]]:
-    """For each measured kernel of ``document`` that only a parent's program reaches, by its ``ref``: the repository
-    golden of the same card that stores the same kernel under a route, and the kernel's ``ref`` there. Empty, at no
-    cost, for a file that measured no such kernel."""
-    from emmy import gpu  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.repository import document_of, repository_golden_paths  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.restamp import _identity  # noqa: PLC0415
-
-    measured = {row.kernel for row in document.rows if row.knobs is not None}
-    derived = {_identity(kernel): kernel.ref for kernel in document.kernels if kernel.ref in measured and not kernel.formed}
-    derived.pop(None, None)
-    routes: dict[str, tuple[Path, str]] = {}
-    if not derived:
-        return routes
-    card = (gpu.canonical_name(document.gpu_name or ""), tuple(document.compute_cap))
-    with repository_golden_paths() as paths:
-        for path in paths:
-            golden = document_of(path)
-            if (gpu.canonical_name(golden.gpu_name or ""), tuple(golden.compute_cap)) != card:
-                continue
-            pieces = {child for route in golden.routing for child in route.children}
-            for kernel in golden.kernels:
-                if kernel.ref in pieces and (ref := derived.get(_identity(kernel))) is not None:
-                    routes.setdefault(ref, (path, kernel.ref))
-    return routes
+def _code(source: str) -> str:
+    """The instructions of the PTX text ``source``: every line that is neither blank nor a comment. The comments spell
+    the Kernel IR statement each instruction came from, names included, and a re-spelled body renames those without
+    moving an instruction."""
+    return "\n".join(line for line in source.splitlines() if line.strip() and not line.lstrip().startswith("//"))
 
 
 _DOCUMENTS: dict[str, GoldenFile] = {}  # the files this process has loaded, by path
 
 
-def _realize_task(task: tuple[str, int, tuple[Path, str] | None]) -> str | None:
-    from emmy.compiler.pipeline.search.golden.repository import document_of  # noqa: PLC0415
-
-    path, index, route = task
+def _realize_task(task: tuple[str, int, Path | None]) -> str | None:
+    path, index, ptx = task
     if path not in _DOCUMENTS:
         _DOCUMENTS[path] = GoldenFile.load(path)
     document = _DOCUMENTS[path]
-    return realized(document, document.rows[index], route and (document_of(route[0]), route[1]))
+    return realized(document, document.rows[index], ptx=ptx)
 
 
-def realize(paths: Iterable[Path], *, jobs: int | None = None, drop: bool = False) -> list[Realization]:
+def realize(paths: Iterable[Path], *, jobs: int | None = None, drop: bool = False, ptx: Path | None = None) -> list[Realization]:
     """The report of every file in ``paths``: each row with a schedule compiled under it, ``jobs`` rows side by side
     on spawned worker processes (``EMMY_WORKERS`` by default; ``1`` runs them in this process), each process loading
     a file once. With ``drop``, a file is written back without the rows the compile does not realize; its kernels and
-    decisions stay, and a freeze sheds the ones no row is left under at its next fold."""
+    decisions stay. With ``ptx``, every row that realizes writes its code under that directory (:func:`ptx_path`)."""
     jobs = config.workers() if jobs is None else jobs
     files: list[tuple[Realization, GoldenFile, list[int]]] = []
-    tasks: list[tuple[str, int, tuple[Path, str] | None]] = []
+    tasks: list[tuple[str, int, Path | None]] = []
     for path in paths:
         document = _DOCUMENTS[str(path)] = GoldenFile.load(path)
         indices = [index for index, row in enumerate(document.rows) if row.knobs is not None]
         files.append((Realization(str(path), document.gpu_name or "", len(indices)), document, indices))
-        routes = golden_routes(document)
-        tasks.extend((str(path), index, routes.get(document.rows[index].kernel)) for index in indices)
+        tasks.extend((str(path), index, ptx and ptx_path(ptx, path, index)) for index in indices)
     logger.info("Realizing %d rows of %d file(s), %d at a time ...", len(tasks), len(files), jobs)
     if jobs == 1 or not tasks:
         return list(_collect(files, map(_realize_task, tasks), drop))

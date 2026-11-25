@@ -113,14 +113,17 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
     TreeHalve,
     WarpShuffle,
+    WgmmaDescriptor,
 )
-from emmy.compiler.ir.stmt import Accum, StridedLoop
+from emmy.compiler.ir.stmt import Accum, Loop
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import (
+    F32_PRODUCTS,
     compile_with_kernels,
     direct_classic_leaf,
     from_pretrained_or_skip,
     requires_cuda,
+    requires_hopper,
     requires_sm,
     statements,
 )
@@ -263,6 +266,8 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
     not the cold policy."""
     if variant == "mask":
         _pin_mask_direct(monkeypatch)
+    for gate in F32_PRODUCTS:  # the scores and the values are f32 products held to 1e-4
+        monkeypatch.setenv(f"EMMY_{gate}", "0")
     torch.manual_seed(0)
     for cfg in _FLASH_VARIANTS[variant][2]:
         module, args, feed, ref = _flash_feed(variant, *cfg)
@@ -522,6 +527,34 @@ def test_chunk_tier_stages_a_symbolic_key_extent(transport):
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
+@requires_cuda
+@requires_hopper
+def test_wgmma_score_takes_a_symbolic_query_extent():
+    """A warp-group score fills its query slab once per 64-row tile, and a symbolic row count
+    leaves the last tile overhanging: the fill copies the last valid row into the tail and the
+    store guard discards those rows. One kernel, run below and above a tile and off its multiples.
+    The static overhang is the corpus case ``attention/sdpa-hd128-wgmma-score-overhanging-query-sm90``."""
+    torch.manual_seed(0)
+    k, v = (torch.randn(1, 2, 256, 128, dtype=torch.float16) for _ in range(2))
+    row = {
+        **_CHUNK_ROW,
+        "WORK": "w4x1",
+        "TILE@map.1/twist": "wgmma_m64n128k16_f16_f32/f1x16/k4",
+        "TILE@map.1/twist.1/inner": "wgmma_m64n64k16_f16_f32/f1x8/k4",
+        "STAGE@map.1/twist": "d2/smem-async",
+    }
+    dynamic = {"q": {2: torch.export.Dim("rows", min=4, max=4096)}, "k": {}, "v": {}}
+    with pinned_knobs(row):
+        backend, compiled, _graph, kernels = _trace(
+            _Sdpa(), (torch.randn(1, 2, 128, 128, dtype=torch.float16), k, v), dynamic_shapes=dynamic
+        )
+    assert statements(kernels, WgmmaDescriptor), "the score reads its operands through descriptors"
+    for rows in (31, 100, 700):
+        feed = {"q": torch.randn(1, 2, rows, 128, dtype=torch.float16).numpy(), "k": k.numpy(), "v": v.numpy()}
+        cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
+        assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2, f"rows={rows}"
+
+
 # --------------------------------------------------------------------------- #
 # Staged K/V (the ``STAGE@<kv>`` cp.async stream) — Moves 4/5 on the warp tier.
 # --------------------------------------------------------------------------- #
@@ -541,8 +574,9 @@ def test_chunk_tier_skips_the_chunks_a_causal_band_masks(stage):
         backend, compiled, graph, kernels = _stamp_window(_Sdpa(), (q, k, v), window=64)
     assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {list(kernels)}"
     # The chunk loop is bounded at both ends: it starts past zero and stops at a bound of its own.
-    loop = next(loop for loop in statements(kernels, StridedLoop) if "__ck" in loop.axis.name)
-    assert loop.end is not None and loop.start != Literal(0, "int"), loop
+    loop = next(loop for loop in statements(kernels, Loop) if "__ck" in loop.axis.name)
+    start, end, _ = loop.walk()
+    assert end != loop.axis.extent_expression() and start != Literal(0, "int"), loop
     out = _run_flash(backend, compiled, graph, (q, k, v))
     assert np.abs(out.astype(np.float32) - _banded_ref(q, k, v, 64)()).max() < 1e-2
 

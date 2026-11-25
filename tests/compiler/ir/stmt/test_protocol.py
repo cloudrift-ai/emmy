@@ -26,11 +26,9 @@ from emmy.compiler.ir.stmt import (
     Let,
     Load,
     Loop,
-    Pre,
     Select,
     SelectBranch,
     Statement,
-    StridedLoop,
     Subroutine,
     Write,
     ZeroPrologue,
@@ -65,14 +63,13 @@ _EXAMPLES = [
     Assign("z", apply("add", apply("multiply", 2.0, "x"), apply("negative", "y"), 0.5)),
     Accum("s", "x", "add"),
     Carry("c", "x", (Var("i"),), seed=0.0),
-    Pre("p", "c", (Var("i"),)),
     Init("s", 0.0, dtype=F32),
     Let("n", BinaryExpression("+", Var("i"), Literal(1, "int"))),
     Write("out", (Var("i"),), ("x",)),
     Select("m", (SelectBranch("x", _BELOW), SelectBranch("y", Literal(1, "int")))),
     ZeroPrologue(dst="out", words=16),
     Loop(_K, (Load(("x",), "a", (Var("k"),)), Accum("s", "x", "add"))),
-    StridedLoop(_K, Literal(0, "int"), Literal(2, "int"), (Load(("x",), "a", (Var("k"),)),), end=Var("n")),
+    Loop.strided(_K, Literal(0, "int"), Literal(2, "int"), (Load(("x",), "a", (Var("k"),)),), end=Var("n")),
     Cond(_BELOW, (Write("out", (), ("x",)),), (Write("out", (), ("y",)),)),
     Call(
         "r",
@@ -189,11 +186,12 @@ def test_a_statement_type_holds_its_elementwise_operation_as_op() -> None:
 
 def test_a_number_in_a_role_field_is_plain_data() -> None:
     """A bare number given for an expression is an integer literal when it is one; a literal seed is no buffer."""
-    loop = StridedLoop(_K, Var("t"), 4, (Load(("x",), "a", (Var("k"),)),))
+    loop = Loop.strided(_K, Var("t"), 4, (Load(("x",), "a", (Var("k"),)),))
     assert loop.step == Literal(4, "int") and str(loop).splitlines()[0] == "for k in t..8 step 4:"
-    assert loop.expressions() == (Var("t"), Literal(4, "int")) and loop.rewrite(lambda name: f"{name}_").step == Literal(4, "int")
+    assert loop.expressions() == (Var("t"), Literal(8, "int"), Literal(4, "int"))
+    assert loop.rewrite(lambda name: f"{name}_").step == Literal(4, "int")
     carry = Carry("state", "value", (Var("i"),), 0.5)
-    assert carry.external_reads() == () and carry.rename_buffers({"state": "other"}) is carry
+    assert carry.external_reads() == () and carry.rename_buffers({"0.5": "other"}) is carry
     assert carry.replace(seed="init").external_reads() == ("init",)
 
 

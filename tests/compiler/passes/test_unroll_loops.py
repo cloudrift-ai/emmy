@@ -8,7 +8,7 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.kernel.ir import KernelOp, MmaSyncPtx, Tile
-from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, StridedLoop, Write, parse_body
+from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, Write, parse_body
 
 _RULE = import_module("emmy.compiler.pipeline.passes.lowering.kernel.117_unroll_loops")
 
@@ -20,7 +20,7 @@ def _unrolled(body: str, lanes: int = 4) -> KernelOp:
 
 
 def _loops(op: KernelOp) -> list:
-    return [stmt for stmt in op.body.iter() if isinstance(stmt, (Loop, StridedLoop))]
+    return [stmt for stmt in op.body.iter() if isinstance(stmt, Loop)]
 
 
 def test_a_flagged_loop_becomes_one_copy_per_trip() -> None:
@@ -157,7 +157,7 @@ def test_a_long_loop_keeps_rolling_over_copies_of_its_body() -> None:
         "    MmaSyncPtx(c_frag=c, a_frag=a, b_frag=b, shape=(16, 8, 16))"
     )
     [loop] = _loops(_unrolled(body))
-    assert (str(loop.start), str(loop.step), loop.unroll, loop.unrolled) == ("0", "512", False, True)
+    assert (str(loop.walk()[0]), str(loop.step), loop.unroll, loop.unrolled) == ("0", "512", False, True)
     loads = [stmt for stmt in loop.body if not isinstance(stmt, MmaSyncPtx)]
     assert [str(stmt.src_index[0]) for stmt in loads] == ["k", *(f"k + {16 * n}" for n in range(1, 32))]
     assert {(stmt.c_frag, stmt.b_frag) for stmt in loop.body if isinstance(stmt, MmaSyncPtx)} == {("c", "b")}
@@ -165,7 +165,7 @@ def test_a_long_loop_keeps_rolling_over_copies_of_its_body() -> None:
 
 def test_a_loop_with_no_static_bound_on_its_trips_stays_a_loop_and_loses_the_flag() -> None:
     """An early stop is a bound only the kernel's values give: the loop stays, and asks for nothing."""
-    op = _unrolled("for j in 0..8 step 4 until j_end unroll=true:\n    f32 a = load A[i, j]\n    f32 O[i, j] = a")
+    op = _unrolled("for j in 0..j_end of 8 step 4 unroll=true:\n    f32 a = load A[i, j]\n    f32 O[i, j] = a")
     [loop] = _loops(op)
     assert not loop.unroll
 

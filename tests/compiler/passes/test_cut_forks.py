@@ -822,7 +822,7 @@ def test_import_files_each_row_under_the_kernel_it_decides(monkeypatch) -> None:
     rows = list(db.iter_perf_rows())
     identity = document.identities()
     assert {row.kernel for row in rows} == {identity[child] for child in route.children}
-    assert all((row.stats.median, row.captured, row.source) == (1.0, True, "golden:test") for row in rows)
+    assert all((row.us, row.source) == (1.0, "golden:test") for row in rows)
 
 
 def test_a_multi_output_kernels_entry_carries_the_identity_its_live_fork_carries() -> None:

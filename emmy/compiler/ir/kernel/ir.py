@@ -54,7 +54,6 @@ from emmy.compiler.ir.stmt import (
     Select,
     SelectBranch,
     Statement,
-    StridedLoop,
     Write,
     free_names,
 )
@@ -430,11 +429,6 @@ def wgmma_descriptor_bits(addr: int, lbo: int, sbo: int, mode: int) -> int:
     return ((addr >> 4) & 0x3FFF) | (((lbo >> 4) & 0x3FFF) << 16) | (((sbo >> 4) & 0x3FFF) << 32) | (mode << 62)
 
 
-# ``StridedLoop`` is shared infrastructure — defined in ``ir/stmt.py``
-# and re-exported here. Used at Tile IR for cooperative iteration and
-# at Kernel IR for cooperative smem loads.
-
-
 # ---------------------------------------------------------------------------
 # Top-level: KernelOp
 # ---------------------------------------------------------------------------
@@ -605,7 +599,6 @@ __all__ = [
     "LdmatrixLoad",
     "MmaSyncPtx",
     "RegStore",
-    "StridedLoop",
     "Statement",
     # Top-level
     "KernelOp",

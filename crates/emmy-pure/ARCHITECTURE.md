@@ -39,19 +39,33 @@ and a view are values: they compare by what they hold.
   singleton (`inject`).
 - `fold.rs` — `Fold`: its stored parts and formation in two halves that `Fold::new` runs in order:
   the canonical rewrites (a zero-axis term loses its shadowed operands, a bilinear term takes its A operand first)
-  and the checks, which refuse and never repair (the positional binding, the monoid arity, the carrier reads, the
-  observer, a lift that applies). Then the reads every pass asks: `exposes`, `bindings`, `applied`, `axis`,
-  `free_axes`, `carries`, `combine`, `canonical`.
+  and the checks, which refuse and never repair (the positional binding, the monoid arity, the observer, a lift
+  that applies). Then the reads every pass asks: `exposes`, `bindings`, `applied`, `axis`, `free_axes`, `combine`,
+  `canonical`. A reducing term may state the `range` its axis walks; the
+  coordinates the range reads join the lift's trailing params, so they are part of what the term is evaluated over.
+  A range may also read the value of an operand that is one value for the whole walk, spelled as the lift's param
+  for it (`applied_range` spells it as the operand result, as `applied` does the lift): the tree's pruning and the
+  lowering's demand walk count that read, so the operand stays bound and is placed ahead of the loop.
 - `readings.rs` — the derived readings: `exposing`, `based`, `roles`, the bilinear channels and the contraction they
   read as, `tiles_whole`, `chunked`, `per_state`, the reduction, slab and affine readings, `merge`, `step`.
 - `rewrite.rs` — `Fold::rewrite`: a term renamed, substituted and axis-mapped the way a statement is, the
   substitution hygienic about the axis each term binds and folded under a range context when it carries one.
 - `fuse.rs` — `Fold::fuse`: the one generic algorithm over the recipes. It finds the pivot among the term's operands,
-  matches the score cone and a channel's pattern by canonical form, and instantiates the recipe by renaming.
+  matches the score cone and a channel's pattern by canonical form, and instantiates the recipe by renaming. Two
+  folds fuse where they walk the same range of the axis, and the fused fold keeps it.
 - `tree.rs` — the tree-wide canonical forms (`Fold::normalized`): the pass-through dissolve, the per-state split, the
   unread-component prune and the cone sharing, to a fixpoint remembered on the result per stored set.
 - `lower.rs` — the one lowering to Loop IR (`Fold::lower`), whose result kernel identity digests, and the demand walk
-  under it (`read_components`).
+  under it (`read_components`). The free loops open outermost the coordinate the most terms are evaluated over, and a
+  term read along a block of a partition counts for the block's coordinate (`Fold::block_start`): it is evaluated at
+  `start + trip`, so the nest is ordered as it would be were the start written into every index.
+- `range.rs` — `Fold::scheduled`: the tree as the schedule addresses it and a kernel tier lowers it. A tier reads
+  a term's range itself, so every term keeps its range. A range starts at the greatest of its starts and ends at
+  the least of its ends. A block of a split (an axis whose window is a partition) leaves from the start some end
+  lies a fixed way past: the axis takes that distance as its trips, every read of it is `start + axis`, the term
+  keeps what its own bounds leave of the block as its range, and a read below the term clamps onto the last
+  position of a symbolic stream, whose last block may run past it. Any other term is the term it was.
+  `Fold::block_start` names the start a block leaves from, the one place that says which coordinate moves a block.
 
 ## Memos
 

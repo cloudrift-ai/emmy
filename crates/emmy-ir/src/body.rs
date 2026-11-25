@@ -476,7 +476,8 @@ impl Body {
             let mut out = Vec::new();
             self.walk(&mut |here| {
                 let names = match &**here.stmt() {
-                    Statement::Accum(_) | Statement::Carry(_) => here.stmt().defines(),
+                    Statement::Accum(a) => vec![a.name],
+                    Statement::Carry(c) => vec![c.name],
                     stmt => stmt.updates(),
                 };
                 for name in names {
@@ -523,7 +524,6 @@ impl Body {
         for stmt in self.stmts() {
             match &**stmt {
                 Statement::Loop(l) if !l.seed => out.extend(l.body.escaping_states()),
-                Statement::StridedLoop(l) if !l.seed => out.extend(l.body.escaping_states()),
                 Statement::Cond(c) => {
                     out.extend(c.body.escaping_states());
                     out.extend(c.else_body.escaping_states());
@@ -690,27 +690,28 @@ impl Body {
                 for child in stmt.nested() {
                     walk(&child, axis_names, dependencies);
                 }
-                match &**stmt {
-                    Statement::Loop(l) => {
-                        for child in l.body.stmts() {
-                            if let Statement::Accum(a) = &**child {
-                                let mut axes = read_dependencies(&a.value, dependencies);
+                if let Statement::Loop(l) = &**stmt {
+                    for child in l.body.stmts() {
+                        if let Statement::Accum(a) = &**child {
+                            let mut axes = read_dependencies(&a.value, dependencies);
+                            // A loop that steps folds one lane's share of the axis: a partial, the axis's until the
+                            // lanes combine. Any other fold is over its axis, and depends on where it walks instead:
+                            // the coordinates its range reads.
+                            if l.step.is_none() {
                                 axes.remove(&l.axis.name);
-                                dependencies.insert(a.name, axes);
+                                for bound in l.range.iter().flat_map(|(start, end)| [start, end]) {
+                                    axes.extend(
+                                        bound
+                                            .free_vars()
+                                            .into_iter()
+                                            .filter(|name| axis_names.contains(name)),
+                                    );
+                                }
                             }
+                            dependencies.insert(a.name, axes);
                         }
-                        continue;
                     }
-                    Statement::StridedLoop(l) => {
-                        for child in l.body.stmts() {
-                            if let Statement::Accum(a) = &**child {
-                                let axes = read_dependencies(&a.value, dependencies);
-                                dependencies.insert(a.name, axes);
-                            }
-                        }
-                        continue;
-                    }
-                    _ => {}
+                    continue;
                 }
                 // A combine merges each state with the same state of another thread, by the statements it carries:
                 // a state depends afterwards on what its own merge reads, not on every state of the combine.
@@ -878,7 +879,6 @@ impl Body {
 pub fn loop_parts(stmt: &Statement) -> Option<(bool, &Body)> {
     match stmt {
         Statement::Loop(l) => Some((l.is_reduce(), &l.body)),
-        Statement::StridedLoop(l) => Some((l.is_reduce(), &l.body)),
         _ => None,
     }
 }

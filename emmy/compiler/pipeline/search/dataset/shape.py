@@ -43,7 +43,7 @@ class ShapeKey:
     # (matmul / bare reduce / pointwise: ``S_loop_depth`` equals the axis count), else
     # ``"flash"`` / ``"softmax"`` / ``"rms_norm"`` / ``"fused"``, where a projection sweep
     # rides the reduction (``S_loop_depth < n_free + n_reduce + n_symbolic`` — the same
-    # stamp identity the freeze's plausibility gate uses). ``"fused"`` is the computed-A
+    # stamp identity the admission rule's plausibility gate uses). ``"fused"`` is the computed-A
     # contraction (the RMSNorm→linear / gate⊗up megakernel): a warp mma whose A cone carries
     # a statistic (rsqrt) prologue, so it stamps LIKE an ``rms_norm`` sweep but with a SECOND
     # reduce axis — the contraction — beside the statistic reduce (``S_ext_n_reduce_axis >= 2``).

@@ -316,11 +316,17 @@ in the enumeration where a pin is decided across sites rather than at one. Readi
 it unsatisfiable on exactly the kernels that need it most: attention spells `TILE` at its score contraction and at
 its chunked value channel, and no schedule carries one mma tile at both.
 
-The precision policy (`allow_f16_accumulate`, `allow_fp8`) filters the CATALOG: an f16-accumulate or FP8 atom is
-offered unpinned only where the compile allowed it. A hand pin naming such a tile is an authored, legal choice and
+The precision policy (one flag of the problem per atom gate, `space.ATOM_GATES`) filters the CATALOG: an
+f16-accumulate, FP8 or TF32 atom is offered unpinned only where the compile allowed it. The TF32 atoms are the cells of
+a product whose operands are all f32; an f32 operand beside a 16-bit one keeps the 16-bit cell that converts it. A
+product of f32 operands is offered the bf16 atoms too, every operand rounded to bf16 in the compute fill, and the gate
+of that offer speaks for a node, where the others speak for an atom. The priors' reading of tensor-core eligibility
+counts none of the cells of a product of f32 operands. A hand pin naming such a tile is an authored, legal choice and
 bypasses the policy; a row a descent follows (`with_row` — measured evidence) does not, so an FP16-accumulate row
 recorded or measured in the standard lane cannot deploy there. Likewise a transposed raster (`gn4`, `gn8`) is never the catalog's own offer and is taken only
-where a row names it.
+where a row names it. The split TF32 atom is taken the same way (`AtomKind.row_only`): it trades no precision, so no
+gate speaks for it and a followed row deploys it in either lane, and the priors cannot tell it from the TF32 atom, so
+no enumeration offers it.
 
 `ClassicScheduleCodec` is the concrete strict wire boundary. Its public encode and decode operations validate through
 one `ClassicScheduleContext`; private syntax-only parsing and encoding let graph reconstruction attach materialization
@@ -349,7 +355,7 @@ fresh piece re-enters the same rule. `030_cut` presents its restricted structura
 
 `STAGE` names where a site keeps a value it reads more than once: an operand reused along an axis, or the state a
 kernel carries across the steps of a loop. A carrying kernel therefore has one more `STAGE` site, the kernel site's
-own, keyed at the route of the carrying fold (`classic_state_keys`; bare when the row has no other `STAGE` site). It
+own, keyed at the state's route, `map.1/scan` (`classic_state_keys`; bare when the row has no other `STAGE` site). It
 takes three values. Empty keeps the state in a global buffer, one launch per step. `d1/smem` keeps it in shared
 memory and runs the steps inside one launch; the schedule offers it where the state reads prove CTA ownership, both
 buffers fit the card's shared memory, and the row runs a one-dimensional cooperative thread tile (`holds_state`).
@@ -361,11 +367,11 @@ matrix-loop schedule below; other schedules do not yet offer it.
 
 Register storage is a choice of the classic kernel site, not a schedule model of its own. It is offered for a static
 ordered loop with one matrix state, pointwise operations, and additive
-matrix contractions, read off the fold that carries the state (`Fold.carries`, its `cells` ending in the column
-and the warp-owned row). The row spells the register geometry as the `TILE` of the carrying fold's route
+matrix contractions, read off the kernel's step and its state's update (`TileOp.resident_state`: the state's cells
+end in the column and the warp-owned row). The row spells the register geometry as the `TILE` of the state's route
 (`classic_state_tile_keys`) and leaves every site of the step off, since the loop runs inside the CTA and the step
 is not scheduled apart. The structural reading proves that each warp's rows are independent through every
-contraction, that every carrier read takes the previous step at the warp's own rows, and that output matrices
+contraction, that every load of the state takes the previous step at the warp's own rows, and that output matrices
 share the same batch coordinates. Other recurrences retain the classic schedule, which realizes the carrying loop
 as one launch per step over a state buffer. A zero-axis root derived from a step keeps the time coordinate as a
 trailing lambda parameter whenever its body still reads it. Unit batch coordinates are omitted only from ownership
@@ -380,7 +386,10 @@ operations, and products share FP32 register results within a step. Operand conv
 to shorten their live ranges. All reads finish before the carried slot is updated.
 
 The catalog offers FP32 accumulation and FP16 partial accumulation under `F16_MMA_F32_ACC` (also enabled by
-`FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. For FP16 accumulation,
+`FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. Under `TF32_MMA` it also
+offers the TF32 atom, whose operands are the state's FP32 fragments as they are, moved between lanes
+(`AtomKind.resident_operands`); a row may name its split, which keeps the recurrence as close to the exact one as FP32
+arithmetic does. For FP16 accumulation,
 `TILE`'s K chunk is the promotion interval in atom steps: `k4` promotes and clears the partial accumulator every
 64 products on m16n8k16 or 16 on Volta m8n8k4, including a shorter final chunk. An explicit tile row can select
 the arithmetic directly. Register pressure and numerical error depend on the shape and inputs.

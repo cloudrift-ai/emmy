@@ -177,9 +177,12 @@ emmy golden restamp [PATH…]    # write that rewrite
 emmy golden realize PATH…      # compile every row under its own schedule; the rows the compiler no longer realizes
 ```
 
-A measurement freeze stores no program, so `check` finds nothing to restamp in it; `realize` is its check, and
-`--drop` writes a file back without the rows it names. The nightly refresh runs that over the freeze after folding
-the tunes' files.
+`emmy golden realize` asks the other question of a file: it compiles every row under its own schedule and names the
+rows the compiler no longer realizes, and `--drop` writes the file back without them.
+
+A change that re-spells kernels without changing their code need not cost the measurements. Write every row's PTX
+before the change (`emmy golden realize --ptx DIR PATH…`), then restamp with `emmy golden restamp --ptx-baseline DIR
+PATH…`: a row keeps its time exactly when its kernel still compiles to the same bytes.
 
 A restamp lowers every traced program again, gives each kernel the body the fresh lowering gives it, and takes every
 kernel-set decision again on the fresh parent. A kernel that kept its identity keeps its rows and their measurements.

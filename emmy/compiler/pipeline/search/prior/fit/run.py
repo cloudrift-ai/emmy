@@ -4,8 +4,9 @@ pure function.
 :func:`run_fit` owns the *shape* of a fit run and none of its *content*: the trainer arrives as one
 configured object, the dataset as pre-built
 :class:`GoldenGroup` lists, and every non-deterministic input (dates, repo commit, CLI args)
-pre-rendered inside ``header``. No I/O, no clock, no argparse: the same inputs produce the same
-``(metrics, fit)`` pair, so the harness is testable on synthetic groups with a stub trainer.
+pre-rendered inside ``header``. No I/O, no argparse, and no clock in what it returns (its two stages are timed
+into the open ``progress`` report, if any): the same inputs produce the same ``(metrics, fit)`` pair, so the
+harness is testable on synthetic groups with a stub trainer.
 
 It returns the FIT, not an artifact. Assembling one is shipping policy — which dynamic weight set a
 fit with no dynamic groups goes out with, what provenance it carries — and that belongs with the
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import logging
 
+from emmy.compiler.pipeline.search import progress
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.prior.fit.cv import build_metrics, run_folds
 
@@ -28,7 +30,8 @@ def run_fit(groups: list[GoldenGroup], skipped: list[tuple[str, str, str]], *, t
 
     The cross-validation block is the folds' own result, not a map keyed by fold axis: there is one axis
     (shape) and there has only ever been one, so the key was a wrapper a reader had to step through."""
-    full = trainer.fit(groups)
+    with progress.phase("full-train fit"):
+        full = trainer.fit(groups)
 
     # Each fold re-fits — silence the fit package's per-group rank logging for that stage
     # (the full-train fit above already reported it).
@@ -36,7 +39,8 @@ def run_fit(groups: list[GoldenGroup], skipped: list[tuple[str, str, str]], *, t
     level = pkg_logger.level
     pkg_logger.setLevel(logging.WARNING)
     try:
-        cv = run_folds(groups, trainer=trainer, k=folds) if folds else {}
+        with progress.phase("cross-validation"):
+            cv = run_folds(groups, trainer=trainer, k=folds) if folds else {}
     finally:
         pkg_logger.setLevel(level)
 

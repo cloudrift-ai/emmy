@@ -124,6 +124,37 @@ def test_a_carried_kernels_pool_offers_both_storages_and_a_golden_lands_on_its_o
     assert skipped == [] and [group.feats[i, column] for i in group.golden_ids] == [1.0]
 
 
+def test_candidates_label_a_pool_by_how_much_slower_than_its_golden_they_measured():
+    """The candidate file's rows on a golden pool's group label it: one measured more than ``POSITIVE_WITHIN``
+    slower than the golden is a negative, one faster is no positive but a stale golden the export reports, one within
+    the noise is neither. A verified row the golden beats by more than the noise is a negative too. All of them are
+    measured rows, which the trainer never draws."""
+    from emmy.compiler.pipeline.search.dataset import GoldenRow, KernelDef, regime_of
+    from emmy.compiler.pipeline.search.db import knobs_json
+    from emmy.compiler.pipeline.search.db.export import with_candidates
+    from tests.compiler.passes.test_shared_carry import _graph as carried_state_graph
+
+    kernel = KernelDef(loop_ir=carried_state_graph().to_wire(), formed=True)
+    regime = regime_of(False, {"FAST_MATH": True})
+    bare = GoldenPool(CARDS[(7, 0)], (7, 0), regime, kernel, {}, ())
+    rows = enumerate_pool(bare, pool_context(bare)).rows
+    first = {}
+    for i, row in enumerate(rows):
+        first.setdefault(tile_signature(row), (i, {str(k): str(v) for k, v in row.items()}))
+    (golden, knobs), (slow_golden, slow_knobs), *others = first.values()
+    (slower, a), (faster, b), (near, c) = others[:3]
+    pool = replace(bare, rows=(GoldenRow(knobs, 1.0, "golden:a"), GoldenRow(slow_knobs, 1.5, "golden:b")))
+    measured = (GoldenRow(a, 1.2, "candidate:c"), GoldenRow(b, 0.5, "candidate:c"), GoldenRow(c, 1.05, "candidate:c"))
+    key = (pool.gpu, kernel.exact_identity, knobs_json({}), regime)
+    [labeled], stale = with_candidates([pool], {key: measured, (*key[:3], ""): measured})
+    assert labeled.candidates == measured and stale == [(pool.gpu, pool.name, 0.5, 1.0)]
+    assert with_candidates([pool], {}) == ([pool], [])
+    [group], skipped = build_golden_groups([labeled])
+    assert skipped == [] and group.golden_ids == (golden,)
+    assert group.negative_ids == tuple(sorted((slow_golden, slower)))
+    assert group.measured_ids == tuple(sorted((golden, slow_golden, slower, faster, near)))
+
+
 def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp_path):
     """A golden that cut its kernel is, in the placement space, the parent's placement fork: the arms the cut
     pass offers unpinned — keep fused, one kernel; the cut, two — featurized from the kernels each leaves, the
@@ -311,7 +342,7 @@ def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
     out under their kernel's name rather than enumerated through a body that would make another kernel."""
     db = SearchDB()
     db.record_kernel(kernel_row("twisted", formed=False))
-    db.record_perf_row(perf_row("twisted", us=500.0, source="golden:case"))  # plausible: the freeze admits it
+    db.record_perf_row(perf_row("twisted", us=500.0, source="golden:case"))  # plausible: admitted
     groups, skipped = build_golden_groups(golden_pools(db, lambda row: StubKernel(F16_MATMUL_STAMPS))[0])
     assert groups == [] and skipped == [(GPU_5090, "k_twisted", "kernel formed from no loop op")]
 
@@ -413,3 +444,27 @@ def test_constants_follow_the_input_names_of_the_kernel_copy_the_db_keeps(tmp_pa
     [pool] = placement_pools(db, golden_pools(db)[0])
     assert set(pool.placement_constants) == {"add_c1", "other_wt"}
     assert set(pool.placement_constants) <= set(pool.kernel.program(pool.bindings).inputs)
+
+
+@pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
+def test_golden_pools_keep_an_independent_precision_regime_apart(monkeypatch, name):
+    """A row measured with one precision decision overridden is a pool of its own, in the regime its own decisions
+    spell: the ambient policy of the process that builds the pools is no row's context."""
+    from emmy.compiler.pipeline.search.dataset import regime_of
+    from emmy.compiler.pipeline.search.space import precision_pins
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    monkeypatch.setenv(f"EMMY_{name}", "0")
+    db = tuned_db(None, ("fused/norm-linear-f16-scalar-reduce.json",), source="golden:case", us=500.0)
+    original = list(db.iter_perf_rows())
+    for row in original:
+        db.record_perf_row(replace(row, precision={"FAST_MATH": False, name: True}))
+    rows = list(db.iter_perf_rows())
+    assert len(rows) == 2 * len(original) and {row.precision[name] for row in rows} == {False, True}
+    pools, dropped = golden_pools(db)
+    assert not dropped and len(pools) == len(rows)
+    for pool in pools:
+        ctx = pool_context(pool)
+        assert ctx.precision_pins() == precision_pins(pool.pins)
+        assert sum(row.precision == ctx.precision_pins() and row.cold_cache == ctx.cold_cache for row in rows) == len(original)
+        assert pool.regime == regime_of(ctx.cold_cache, ctx.precision_pins())

@@ -199,15 +199,17 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     """The statement module's interface is this list. A name added here is a decision, not a convenience."""
     import emmy.compiler.ir.stmt as stmt
 
-    statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
-    statement_types += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
+    statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Init", "Let", "Write", "Select", "SelectBranch"]
+    statement_types += ["ZeroPrologue", "Loop", "Cond"]
     containers = ["Body", "Identity", "OutputSpec"]
     functions = ["canonicalize_identity", "free_names", "exposed_defines"]
-    functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
+    functions += ["pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
     # The target's spelling of an index division, which an emitter runs on the body it renders.
     functions += ["reduce_strength"]
     # The input check of a code generator: the body says every type and every conversion, and asks for nothing.
     functions += ["check_types", "check_input"]
+    # The proof that bodies are one step taken again and again, which the roll of a recurrence asks of its copies.
+    functions += ["prove_steps"]
     # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
     steps = list(_STEPS)
     assembly = ["Call", "Subroutine"]
@@ -594,3 +596,34 @@ def test_search_dataset_does_not_import_search_db() -> None:
     assert not offenders, "search/dataset/*.py must not import search.db — the export reads the DB, the dataset never does:\n" + "\n".join(
         offenders
     )
+
+
+#: The modules that read a measurement off a golden-shaped file's row: the format and the one importer, a file's own
+#: upkeep (the restamp, the candidate build's own and its golden's rows), and the commands that list rows or replay
+#: them by name.
+_GOLDEN_MEASUREMENT_READERS = {
+    "emmy/commands/golden.py",
+    "emmy/commands/run.py",
+    "emmy/compiler/pipeline/search/candidates/__init__.py",
+    "emmy/compiler/pipeline/search/golden/evidence.py",
+    "emmy/compiler/pipeline/search/golden/format.py",
+    "emmy/compiler/pipeline/search/golden/restamp.py",
+}
+#: The compile path: the pick, its retry orchestration and the serving pack's key.
+_COMPILE_PATH = (
+    "emmy/compiler/pipeline/search/policy/greedy.py",
+    "emmy/compiler/pipeline/search/strategy/greedy.py",
+    "emmy/compiler/backend/pack.py",
+)
+
+
+def test_measured_evidence_is_read_from_a_db_instance() -> None:
+    """``SearchDB`` is the one representation of what was measured, and a golden-shaped file's rows become evidence
+    through the one importer (``golden.evidence``). A module that reads a row's measurement off a file joins rows on
+    identity, sizes and regime a second time, so the modules that do are pinned: a new one is a reader going around
+    the DB. The compile path reads no golden document and takes no scan of every row: it asks the instance per
+    kernel, so nothing holds the rows in a second index beside the tables."""
+    sources = {path.relative_to(_REPO_ROOT).as_posix(): path.read_text() for path in (_REPO_ROOT / "emmy").rglob("*.py")}
+    assert {path for path, source in sources.items() if re.search(r"\.measurements\b", source)} == _GOLDEN_MEASUREMENT_READERS
+    scans = re.compile(r"\b(?:GoldenFile|documents_for_card|iter_perf_rows|iter_routing|iter_kernels)\b")
+    assert not {path: found for path in _COMPILE_PATH if (found := sorted(set(scans.findall(sources[path]))))}

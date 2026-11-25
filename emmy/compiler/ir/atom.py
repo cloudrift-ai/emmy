@@ -4,7 +4,8 @@ An atom is the smallest cell a contraction tiles four
 ways (GRID / UNIT / REGISTER / ATOM). Two kinds, one interface (``shape`` + :attr:`lanes`):
 
 - :class:`AtomKind` — a tensor-core ``mma.sync`` cell: a fixed ``(m, n, k)`` shape, per-operand
-  dtypes (``a``/``b`` the f16/bf16 multiplicands, ``c`` the accumulator — f32, or f16 on the
+  dtypes (``a``/``b`` the multiplicands — halves, 8-bit floats, or f32 values read as TF32 — and ``c`` the
+  accumulator — f32, or f16 on the
   ``..._f16_f16`` variant that runs the full-rate HMMA pipe with a chunked f32 register promotion
   in the lowering), and ``lanes == 32`` (the warp that executes one mma cooperatively — its 32
   lanes hold the fixed PTX fragment layout). The Hopper ``wgmma`` cell is the same 16x8 warp
@@ -37,7 +38,7 @@ from emmy.emmy_ir import fragment_table
 
 # Canonical dtype token → the PTX instruction's dtype field, where they differ. The mma wrapper
 # names (``emmy_mma_m16n8k32_e4m3_f32``) and the atom-name convention both spell the PTX token.
-_PTX_DTYPE: dict[str, str] = {"f8e4m3": "e4m3", "f8e5m2": "e5m2", "f4e2m1x2": "e2m1"}
+_PTX_DTYPE: dict[str, str] = {"f8e4m3": "e4m3", "f8e5m2": "e5m2", "f4e2m1x2": "e2m1", "f32": "tf32"}
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,12 @@ class AtomKind:
     #: The atom's target has no ``cp.async``, so every staged operand — a copied one and the
     #: materialized peers of a compute fill alike — moves through the blocking vector copy.
     sync_copy_staging: bool = False
+    #: The multiplicand token of an atom that is more than one instruction over its operands' dtype: the split
+    #: TF32 cell is three products of one pair of f32 fragments. ``None`` for the dtype's own token.
+    ab_token: str | None = None
+    #: Whether a schedule takes the cell only where a row or a pin names it, never as the catalog's own offer: the
+    #: reading a transposed raster has. No precision gate speaks for such a cell.
+    row_only: bool = False
 
     def operand_dtype(self, role: str) -> DataType:
         """The element dtype of operand ``role`` (``"a"`` / ``"b"`` / ``"c"``)."""
@@ -112,6 +119,8 @@ class AtomKind:
         (``emmy_mma_m16n8k16_{f16,bf16}_*`` / ``emmy_mma_m16n8k32_e4m3_*``) — the PTX
         instruction's dtype field, so the fp8 dtypes spell their PTX form (``e4m3``, not
         ``f8e4m3``), matching the atom-name convention below."""
+        if self.ab_token is not None:
+            return self.ab_token
         name = self.operand_dtype("a").name
         return _PTX_DTYPE.get(name, name)
 
@@ -124,6 +133,14 @@ class AtomKind:
         The Volta m8n8k4 layout selects each four-column A slice from its logical 16-column C
         fragment with warp shuffles. Neither needs a shared-memory round trip."""
         return self.shape == (16, 8, 16) or self.fragment_layout == "m8n8k4"
+
+    @property
+    def resident_operands(self) -> bool:
+        """Whether a state held in accumulator fragments can be this atom's operands, so registers can keep a
+        recurrence's state for it: every atom with the handoff above, and the TF32 cells. A TF32 operand is one
+        accumulator's elements as they are, moved between lanes; its lanes do not line up with the accumulator's
+        the way two halves do, which is why the chunk tier's handoff is not its."""
+        return self.c_to_a_repack or self.operand_dtype("a") == F32
 
     @property
     def c_to_b_repack(self) -> bool:
@@ -266,6 +283,21 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
         (16, 8, 64),
         (("a", F4E2M1x2), ("b", F4E2M1x2), ("c", F32)),
         target_feature="has_block_scaled_f4_mma",
+    ),
+    # The TF32 cell: both multiplicands are f32 values, one to a 32-bit fragment register, which the instruction
+    # reads at ten bits of mantissa over f32's whole exponent range (``mma.sync.aligned.m16n8k8.row.col.f32.tf32.
+    # tf32.f32``, sm_80 and later). A register pair spans eight columns, so K is 8 where a pair of halves makes it
+    # 16. The product of two f32 operands otherwise has no tensor-core cell and runs on the scalar tier. It trades
+    # precision, so enumeration is gated (``TF32_MMA`` / ``FAST_MATH``). Appended last so no option-0 pick moves.
+    "mma_m16n8k8_tf32_f32": AtomKind("mma_m16n8k8_tf32_f32", (16, 8, 8), (("a", F32), ("b", F32), ("c", F32))),
+    # The split TF32 cell: the same fragments and the same instruction, three times a step. Each operand is its
+    # TF32 rounding and what the rounding left, itself at TF32; the cell sums hi*lo + lo*hi + hi*hi for one step
+    # from zero and adds that to the accumulator with a float add, since the instruction truncates as it
+    # accumulates (Ootomo and Yokota, 2022). Its sums are as close to the exact one as the scalar tier's, so it
+    # trades no precision a gate could speak for. It is three times the plain cell's instructions and has the plain
+    # cell's features, so the priors cannot rank it: a row or a pin names it, the catalog does not offer it.
+    "mma_m16n8k8_tf32x3_f32": AtomKind(
+        "mma_m16n8k8_tf32x3_f32", (16, 8, 8), (("a", F32), ("b", F32), ("c", F32)), ab_token="tf32x3", row_only=True
     ),
 }
 

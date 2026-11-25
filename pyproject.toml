@@ -75,9 +75,7 @@ include = ["emmy*"]
 
 [tool.setuptools.package-data]
 # Model-agnostic hardware goldens; model goldens are staged with their recipes below.
-# ``search/freezes/`` is deliberately NOT here: a measurement freeze is evaluation data for
-# `emmy fit` / `emmy eval prior`, which a wheel install never runs, and it is several MB per card.
-# ``search/candidates/records/`` neither: a candidate file is data no compile reads.
+# ``search/candidates/records/`` is deliberately NOT here: a candidate file is data no compile reads.
 "emmy.compiler.pipeline.search.golden" = ["records/*.json"]
 "emmy.compiler.pipeline.search.prior" = ["weights/*.json"]
 # Staged out of the top-level recipes/ by `scripts/prepare_dist.py --recipes`
@@ -122,6 +120,7 @@ emmy = "emmy.dynamo:emmy_backend"
 asyncio_mode = "auto"
 markers = [
     "perf: GPU performance comparison vs PyTorch (deselected by default; run with `pytest -m perf`)",
+    "goldens: a node that reads a repository golden other than the RTX 5090's; deselected by default, run nightly with `pytest -m goldens`",
     "sweep: an exhaustive run on the card (a math function over every f32 input, every corpus case through both code generators); deselected by default, run with `pytest -m sweep`",
 ]
 

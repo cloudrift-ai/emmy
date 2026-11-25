@@ -155,9 +155,6 @@ impl Placer<'_> {
         for name in stmt.external_reads() {
             out.extend(self.read_of(&name));
         }
-        if let Statement::Pre(p) = stmt {
-            out.extend(self.read_of(&p.carrier));
-        }
         out
     }
     fn settle(&mut self, names: &[Name], depth: usize, marks: &Marks) {
@@ -283,9 +280,6 @@ impl Placer<'_> {
             for name in stmt.external_writes() {
                 self.bump(&name, depth);
             }
-            if let Statement::Carry(c) = &**stmt {
-                self.bump(&c.name, depth);
-            }
             if is_protocol(stmt) {
                 self.bump(&Name::from(""), depth);
             }
@@ -301,9 +295,6 @@ impl Placer<'_> {
             nested.iter().flat_map(|child| child.iter_stmts()).collect();
         let mut writes: HashSet<Name> = members.iter().flat_map(|m| m.external_writes()).collect();
         for member in &members {
-            if let Statement::Carry(c) = &**member {
-                writes.insert(c.name);
-            }
             // Storage a member updates in place is written on the back edge, as a buffer is.
             writes.extend(member.updates());
             if is_protocol(member) {
@@ -319,7 +310,7 @@ impl Placer<'_> {
                 self.bump(name, depth + 1);
             }
         }
-        let scope = matches!(&**stmt, Statement::Loop(_) | Statement::StridedLoop(_));
+        let scope = matches!(&**stmt, Statement::Loop(_));
         self.binders.push(stmt.binds_axes().into_iter().collect());
         self.floor
             .push(if scope { self.floor[depth] } else { depth + 1 });
@@ -464,9 +455,6 @@ pub fn place_values_numbered(body: &Body, numbering: &Numbering) -> Result<Body>
     let mut updated: HashSet<Name> = HashSet::new();
     body.walk(&mut |here| {
         written.extend(here.stmt().external_writes());
-        if let Statement::Carry(c) = &**here.stmt() {
-            written.insert(c.name);
-        }
         updated.extend(here.stmt().updates());
     });
     written.extend(updated.iter().copied());
@@ -1057,7 +1045,7 @@ mod tests {
         o[a] = x
             ",
         );
-        assert_eq!(statement_types(&out), ["Load", "StridedLoop"]);
+        assert_eq!(statement_types(&out), ["Load", "Loop"]);
         assert_eq!(load_names(&out), ["x"]);
         assert_eq!(axis(&out.stmts()[1]), "a");
         assert_eq!(statement_types(&inner(&out.stmts()[1])), ["Write"]);
@@ -1077,7 +1065,7 @@ mod tests {
         );
         assert_eq!(
             statement_types(&out),
-            ["StridedLoop", "Assign", "Loop"],
+            ["Loop", "Assign", "Loop"],
             "{}",
             text(&out)
         );

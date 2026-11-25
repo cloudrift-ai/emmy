@@ -1,10 +1,16 @@
-"""Fuse the Loop subgraph into its regions, one splice each.
+"""Fuse the Loop subgraph into its regions: roll the recurrence a region holds, and splice the region into one kernel.
 
 A region is the set of ``LoopOp`` nodes one kernel computes, and the graph decides every region
 before any is merged (:func:`regions`): the partition is a function of the graph alone, so the
 kernel set is the same whatever order the producers are visited in. Fusion has only correctness
 boundaries. Neither tile lifting, nor scheduling, nor speed narrows it, and a region the splicer
 cannot build is a compiler bug it raises, never a smaller region.
+
+An unrolled recurrence is not spliced as it stands: the copies of its step would be inlined into one another, every
+state re-derived wherever the next step reads it. A roll is a splice with more asked of its nodes
+(``_recurrence.roll``), so the rule asks for it first: before it splices any region it rolls the recurrences the
+regions hold, each into one kernel that carries its state. Such a kernel is in no region, and the loops around it
+read what it stores through the slices the roll leaves.
 """
 
 from __future__ import annotations
@@ -12,6 +18,7 @@ from __future__ import annotations
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import LoopOp, observes_running_accumulator
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.loop.fusion._recurrence import roll
 from emmy.compiler.pipeline.passes.loop.fusion._region import (
     build_merged_region,
     carries_state,
@@ -212,9 +219,12 @@ def _joined(
 
 def rewrite(match: Match, producer: Node) -> Graph:
     graph = match.graph
-    region = regions(graph).get(producer.id)
+    partition = regions(graph)
+    region = partition.get(producer.id)
     if region is None or len(region) < 2:
         raise RuleSkipped("the producer is a region of its own")
+    if (rolled := roll(match, partition)) is not None:
+        return rolled
     live_outputs = live_outputs_of(graph, region)
     if not live_outputs:
         raise RuleSkipped("nothing reads the region")

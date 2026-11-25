@@ -6,7 +6,7 @@ from math import gcd
 
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Load, Statement, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._siblings import Siblings
 from emmy.compiler.target import vector_widths
 
@@ -100,7 +100,8 @@ def vectorize_loads(top: KernelOp, body: Body, aligned: dict[str, int] | None = 
     for s in body:
         nested = s.nested()
         if nested:
-            inner = {**aligned, s.axis.name: strided_alignment(s.start, s.step, aligned)} if isinstance(s, StridedLoop) else aligned
+            strided = isinstance(s, Loop) and s.step is not None
+            inner = {**aligned, s.axis.name: strided_alignment(s.walk()[0], s.step, aligned)} if strided else aligned
             descended.append(s.with_bodies(tuple(vectorize_loads(top, b, inner) for b in nested)))
         else:
             descended.append(s)

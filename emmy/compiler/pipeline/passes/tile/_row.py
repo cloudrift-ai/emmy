@@ -112,7 +112,7 @@ def row_candidates(op: LoopOp, tile: TileOp, shapes: Mapping) -> tuple[int, ...]
     # The batched-matvec unit row is only placement geometry. A size-one output
     # coordinate may still bind into A, which gives the contraction its own row.
     batched_unit = any(axis.name == "_um" for axis in tile.place.free) and any(
-        (view := node.as_contraction()) is not None and not view.left_axes and view.shared_axes for node in tile.views
+        (view := node.as_contraction()) is not None and not view.left_axes and tile.batch_axes(node) for node in tile.views
     )
     if unit and not batched_unit:
         return ()
@@ -323,7 +323,6 @@ def _renamable(region: Fold, names: set[str]) -> bool:
     return not any(
         site.node.observe is not None
         or site.node.axis in names
-        or set(site.node.cells) & names
         or set(site.node.lift.results) & names
         or {*site.node.lift.body.definitions, *site.node.lift.body.axis_names} & names
         for site in sites(region)
@@ -422,7 +421,6 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
         )
         if bound & names or any(
             site.node.observe is not None
-            or set(site.node.cells) & owned
             or set(site.node.lift.results) & owned
             or any(set(stmt.deps()) & owned for stmt in site.node.lift.body.iter() if not isinstance(stmt, Load))
             for site in sites(region)
@@ -566,7 +564,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
         grid = (unit, *grid)
     place = replace(formed.place, free=grid)
     # The loop op the piece was formed from rides as its ``source``, as a fused kernel's does: the body a
-    # kernel row stores and a freeze re-lowers is the one the lift was given.
+    # kernel row stores and an export lowers again is the one the lift was given.
     loop = LoopOp(body=body)
     return replace(
         piece, op=rewrite_twisted(formed.op, formed.axes), place=place, axes=formed.axes, output_specs=formed.output_specs, source=loop

@@ -159,36 +159,25 @@ macro_rules! with_statement_types {
                     axes: Names [] = Names::from([]),
                     base: Option<Name> [READS] = None,
                 }
-                /// The next value of one cell of a CARRIED STATE: `name[index] <- value`.
+                /// One cell of a CARRIED STATE at one step: `name[step, cell...] <- value`.
                 ///
                 /// A recurrence's state, which a fold is not: its steps run in order, its step is any computation, and it holds
                 /// `seed` before the first. So it has no op — an op would declare an algebra (a reorderable sum) the state does
-                /// not have — and nothing else to declare either: the loop that carries it is the nearest enclosing `Loop` whose
-                /// axis `index` does not read (`protocol::shared::carried_cells`), and its shape is those of
-                /// the loops over its cells, each entry of `index` a bare axis. The loop over the steps therefore sits OUTSIDE
-                /// the loops over the cells, which is what lets a step read OTHER cells of its own state (a delta rule's `k @ S`)
-                /// through `Pre`; a scalar `Accum` lives inside the cell loops and cannot. One statement defines a state;
-                /// a cell it skips keeps its value.
+                /// not have. `name` is a buffer of the kernel's own, which this statement declares: neither an input nor an
+                /// output. Its first coordinate is the step, the axis of the loop that carries the state, and the rest are the
+                /// cell: an axis of a loop inside that one, or `0` where a dimension holds one cell. A `Load` reads the state
+                /// as it reads any buffer. Inside the carrying loop it reads one step back, `name[step - 1, cell...]`, at any
+                /// cell: the seed on the first step, and what the last step that defined the cell left, since a cell a step
+                /// skips keeps its value. So no read of a step sees what that step defines, the reads and the definition of
+                /// one step are order-free, and the loop over the steps sits OUTSIDE the loops over the cells, which is what
+                /// lets a step read OTHER cells of its own state (a delta rule's `k @ S`); a scalar `Accum` lives inside the
+                /// cell loops and cannot. After the loop a load reads the last step. One statement defines a state.
                 shared Carry {} {
-                    name: Name [DEFINES],
+                    name: Name [BUFFER_WRITE | LOCAL_BUFFER],
                     value: Name [READS],
-                    index: Exprs [EXPRESSION] : Index,
+                    index: Exprs [EXPRESSION | READS] : Index,
                     seed: NumOr<Name> [BUFFER_READ],
                     dtype: Option<DType> [] = None,
-                }
-                /// A read of one cell of a carried state: `name = carrier[index]`.
-                ///
-                /// Inside the `Loop` that carries it, the value the PREVIOUS step left (the seed on the first step) — no read of
-                /// a step sees what that step defines; after that loop closes, the last step's. `index` is any coordinate
-                /// expression, so a step may read a cell other than the one it defines — under a reduce over it, a contraction
-                /// over the state. See :class:`Carry`.
-                ///
-                /// A read like a `Load`, so a term may hold one: a carrier read is a slab over one `Pre` (`Fold.carrier_read`),
-                /// the way a gmem read is a slab over one `Load`.
-                shared Pre {PURE} {
-                    name: Name [DEFINES],
-                    carrier: Name [READS],
-                    index: Exprs [EXPRESSION | READS] : Index,
                 }
                 /// Explicit accumulator / carried-state seed at this scope: `<dtype> <name> = <identity>;` — a scope-local
                 /// declaration.
@@ -294,34 +283,26 @@ macro_rules! with_statement_types {
                 /// The loop carries NO algebra — the fold's ⊕ lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node's
                 /// stored `combine`, and the dissolved fold `Accum`\ s in the body are the loop-level spelling; a loop folds iff
                 /// its body carries one.
+                ///
+                /// `range` is where the axis walks when that is not `0..extent`: a start and an exclusive end
+                /// (`axis::Range`), each over the coordinates around the loop, the symbolic dims and the values in
+                /// scope ahead of the loop. The axis then takes the values `start..end`, which lie inside `0..extent`:
+                /// the extent stays the bound every index is analysed under, and the range says how many trips the
+                /// loop takes. A reduce loop with a range folds the values of that range alone, where a select of the
+                /// fold's neutral element would mask the rest.
+                ///
+                /// `step` is how far the axis moves each trip when that is not one: `for (axis = start; axis < end;
+                /// axis += step)`. A kernel loop takes one where the threads of a block stride through an axis
+                /// (`start` a thread's lane, `step` the lanes) or a trip covers a block of positions; a Loop IR body
+                /// states none.
                 shared Loop {} {
                     axis: AxisRef [AXIS],
                     body: Body [BODY],
                     unroll: bool [] = false,
                     seed: bool [] = true,
                     unrolled: bool [] = false,
-                }
-                /// Strided iteration: `for (axis = start; axis < axis.extent; axis += step)`.
-                ///
-                /// Cooperative variant of `Loop` — used at Tile IR to express "threads of the CUDA block stride through this
-                /// axis" (typical `start = Var('t'), step = BLOCK_SIZE`). The body uses the original axis Var directly; the
-                /// strided iteration shape is encoded by the loop construct itself rather than via affine indexing in the body.
-                ///
-                /// `end` overrides the `<` bound with an arbitrary `Expression` over in-scope names (default: the axis extent) —
-                /// a data-independent early stop such as the causal flash stream's triangular kv bound. The axis extent stays the
-                /// analysis-visible range; `end` must never exceed it.
-                ///
-                /// Reduction detection mirrors `Loop`: a `StridedLoop` is a reduce-loop iff its body contains an `Accum`.
-                /// `unroll` and `unrolled` are `Loop`'s.
-                shared StridedLoop {} {
-                    axis: AxisRef [AXIS],
-                    start: Expression [EXPRESSION] : Index,
-                    step: Expression [EXPRESSION] : Index,
-                    body: Body [BODY],
-                    unroll: bool [] = false,
-                    end: Option<Expression> [EXPRESSION | READS] : Index = None,
-                    seed: bool [] = true,
-                    unrolled: bool [] = false,
+                    range: Option<(Expression, Expression)> [EXPRESSION | READS] : Index = None,
+                    step: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// Conditional block — `if (cond) { body } [else { else_body }]`.
                 ///
@@ -1440,7 +1421,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "eed8f32e87a0b1055192dd4e04c657b0bd527f33dd8d6808dac1840a43b78c6e",
+            "4f52279d3e826f876fdec25be772a34b74286d86fc03da5d4fdfc34dd5b706d6",
             "{listing}"
         );
     }

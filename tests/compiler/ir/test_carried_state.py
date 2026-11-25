@@ -3,7 +3,7 @@
 A scalar ``Accum`` lives inside the loops over the cells, so a step sees only its own cell. A delta
 rule's step contracts over the previous state (``k @ S``), which needs the loop over the steps
 OUTSIDE the cells and the state kept across them. ``Carry`` spells that: the statement defines
-the next value of one cell, a ``Pre`` read sees what the previous step left at any cell, and the
+the next value of one cell, a load one step back sees what the previous step left at any cell, and the
 loop that carries it is read off the body.
 """
 
@@ -16,6 +16,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ir import loaded_buffers
@@ -37,15 +38,15 @@ def _step(out_index: str, seed: float | str = 0.0, u_index: str = "c, i, j", ste
                 for j in 0..{N}:
                     for k in 0..{N}:
                         w = load W[i, k]
-                        other = pre S[k, j]
+                        other = load S[c - 1, k, j]
                         p = multiply(w, other)
                         mixed <- add(mixed, p)
                     u = load U[{u_index}]
-                    own = pre S[i, j]
+                    own = load S[c - 1, i, j]
                     kept = multiply(own, decay)
                     moved = add(kept, mixed)
                     next = add(moved, u)
-                    S[i, j] <- next seed {seed}
+                    S[c, i, j] <- next seed {seed}
                     out[{out_index}] = {stored}
         """
     )
@@ -140,14 +141,14 @@ def test_a_carrying_loop_under_an_outer_loop_keeps_that_coordinate_in_its_port()
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
-    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2] and tile.register_program is None
+    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2, N, N]
     (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
     assert tuple(dim.as_static() for dim in state.shape) == (STEPS, 2, N, N)
     serial = serial_form(tile, node.id)
     assert serial.inputs == tile.inputs and serial.outputs == tile.outputs
     (spec,) = (spec for spec in serial.output_specs if spec.write.output == state.name)
-    (carrying,) = (site.node for site in tile.sites if site.node.carries)
-    assert len(spec.write.index) == len(state.shape) and [axis.name for axis in serial.place.serial] == [carrying.axis]
+    assert len(spec.write.index) == len(state.shape)
+    assert [axis.extent for axis in serial.place.serial] == [axis.extent for axis in tile.place.serial]
 
     arrays = _inputs(batch=2)
     for closed in (LoopOp(body=tile.loop_body), LoopOp(body=serial.loop_body)):
@@ -166,7 +167,7 @@ def _unit_seeded_graph() -> Graph:
     for name, shape in inputs:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
     names = [name for name, _ in inputs]
-    step = LoopOp(body=parse_body(str(_step("c, i, j", "S0")).replace("S[", "S[0, ")))
+    step = LoopOp(body=parse_body(str(_step("c, i, j", "S0")).replace("S[c - 1, ", "S[c - 1, 0, ").replace("S[c, ", "S[c, 0, ")))
     graph.add_node(step, names, Tensor("out", (STEPS, N, N), "f32"), node_id="out")
     graph.inputs, graph.outputs = names, ["out"]
     return graph
@@ -210,26 +211,54 @@ def test_a_state_the_term_stores_every_step_needs_no_port() -> None:
     np.testing.assert_allclose(np.asarray(got), _reference(arrays, stored="next"), rtol=1e-5, atol=1e-6)
 
 
+def test_a_store_under_a_size_one_axis_is_still_the_states_own() -> None:
+    """A size-one dim of the output is a ``0`` in the store, or an extent-one axis where the lift bound it back.
+    Either way it holds one position and is no coordinate of the state, so the store still holds every step of the
+    state and the kernel keeps no second buffer for it."""
+    from emmy.compiler.pipeline.passes.tile._fromloop import stored_states
+
+    def stored(unit: str, head: str = "") -> set[str]:
+        (loop,) = parse_body(
+            f"""
+            for c in 0..{STEPS}:
+                {head}
+                for i in 0..{N}:
+                    for j in 0..{N}:
+                        own = load S[c - 1, i, j]
+                        next = multiply(own, 2.0)
+                        S[c, i, j] <- next seed 0
+                        out[c, {unit}, i, j] = next
+            """
+        )
+        return set(stored_states(loop, ()))
+
+    assert stored("0") == {"S"}
+    assert stored("_row", "for _row in 0..1:") == {"S"}
+    assert stored("b", "for b in 0..2:") == set(), "a coordinate of two positions the state does not have"
+
+
 def test_the_lift_carries_the_state_in_the_term() -> None:
-    """The term carries the state: the kernel root folds the action ``next`` over the steps, its
-    cells the two free coordinates the block is indexed by, its seed the loop's; the step's ``W @ S``
-    stays a contraction, its B a read of the carrier one step back. The node gains the state's port
-    for the classic realization, and the closed program spells the carrying loop outside the cells."""
+    """The kernel's term is one step and the loop that carries the state its serial axis: the state is a store of
+    the kernel into a buffer of its own, over the two free coordinates the block is indexed by, with the loop's
+    seed; the step's ``W @ S`` stays a contraction, its B a slab over the state one step back. The node gains the
+    state's port for the classic realization, and the closed program spells the carrying loop outside the cells."""
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph())
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
-    assert tile.carries and not tile.place.serial and not tile.place.free
-    (root,) = (site.node for site in tile.sites if site.node.carries)  # under the projection passing its streamed value on
-    assert root.init == (0.0,) and len(root.cells) == 2
-    assert tile.axis_of(root.axis).extent.as_static() == STEPS and all(tile.axis_of(cell).extent.as_static() == N for cell in root.cells)
+    assert tile.carries and [axis.extent.as_static() for axis in tile.place.serial] == [STEPS]
+    carry = tile.states[0].write
+    assert carry.seed == 0.0 and [tile.axis_of(cell).extent.as_static() for cell in carry.cells] == [N, N]
+    assert {axis.name for axis in tile.place.free} == set(carry.cells)
     (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
     assert tuple(dim.as_static() for dim in state.shape) == (STEPS, N, N) and lifted.outputs == ["out"]
-    assert not [load for load in loaded_buffers(root) if load.input == state.name], "the term reads no buffer of its own"
-    (mix,) = (edge for edge in root.operands if edge.axis is not None)
-    assert mix.as_contraction() is not None and any(edge.as_carrier_read() is not None for edge in mix.operands)
+    assert not [load for load in loaded_buffers(tile.op) if load.input == state.name], "the term reads no buffer of the node"
+    (mix,) = (site.node for site in tile.sites if site.node.axis is not None)
+    assert mix.as_contraction() is not None and any(
+        slab is not None and slab.load.input == carry.name for slab in map(Fold.as_slab, mix.operands)
+    )
     (carrying,) = (loop for loop in tile.loop_body if isinstance(loop, Loop))
-    assert list(carrying.carries) == list(root.base.results)
+    assert list(carrying.carries) == [carry.name]
 
     arrays = _inputs()
     closed = LoopOp(body=tile.loop_body)
@@ -285,11 +314,11 @@ def _fold_then_read() -> LoopOp:
             for c in 0..3:
                 for i in 0..4:
                     u = load U[c, i]
-                    own = pre S[i]
+                    own = load S[c - 1, i]
                     next = add(own, u)
-                    S[i] <- next seed 0
+                    S[c, i] <- next seed 0
             for r in 0..4:
-                last = pre S[r]
+                last = load S[2, r]
                 out[r] = last
             """
         )
@@ -311,15 +340,15 @@ def test_a_carried_state_round_trips_the_wire() -> None:
     assert decode(encode(body)) == body
 
 
-_DEFINE = "S[i] <- u seed 0"
+_DEFINE = "S[c, i] <- u seed 0"
 
 
 @pytest.mark.parametrize(
     ("stmts", "message"),
     [
-        ((_DEFINE,), "no loop carries its cells"),  # every enclosing loop is a cell loop
-        ((_DEFINE, "bad = exp(S)", "bad_out[c, i] = bad"), "read one cell with Pre"),
-        ((_DEFINE, "bad = pre S[i, 0]"), "no state with 2 cell axes"),
+        ((_DEFINE,), "no loop carries it"),  # no loop over the step it names stands around it
+        ((_DEFINE, "bad = exp(S)", "bad_out[c, i] = bad"), "'S' not defined"),  # a state is a buffer: a load reads a cell
+        ((_DEFINE, "bad = load S[c - 1, i, 0]", "bad_out[c, i] = bad"), "is read at a step and 1 cell axes"),
         ((_DEFINE, _DEFINE), "one statement defines a carried state"),
     ],
 )

@@ -51,7 +51,8 @@ pub fn interface(params: Params) -> Interface {
     }
 }
 
-/// Assemble `ptx` for `target` at `-O0` and at the default level; nothing where ptxas is not installed.
+/// Assemble `ptx` for `target` at `-O0` and at the default level; nothing where ptxas is not installed or does not
+/// take the target.
 pub fn assemble(ptx: &str, target: &str) {
     static FILES: AtomicU32 = AtomicU32::new(0);
     if Command::new("ptxas").arg("--version").output().is_err() {
@@ -71,6 +72,11 @@ pub fn assemble(ptx: &str, target: &str) {
             .arg(format!("{stem}.cubin"))
             .output()
             .unwrap();
+        // CUDA 13's ptxas no longer takes the Volta targets: such a kernel is assembled where an older one is.
+        if String::from_utf8_lossy(&output.stderr).contains("is not defined for option 'gpu-name'")
+        {
+            break;
+        }
         assert!(
             output.status.success(),
             "ptxas {level} refused:\n{}\n{ptx}",

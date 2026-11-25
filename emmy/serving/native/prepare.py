@@ -301,11 +301,14 @@ def attend_module(heads, kv_heads, head_dim, rows, grouped=False):
             group, window = heads // kv_heads, keys.shape[0]
             folded = q.view(kv_heads, rows * group, head_dim).float()
             k3, v3 = keys.float().transpose(0, 1), values.float().transpose(0, 1)
-            # A folded row is one of its row's ``group`` query heads, so its row is the folded index over ``group``,
-            # and the key stands at or before it where ``group`` times the key less the folded index does: a
-            # comparison of the score's coordinates and the position, as the per-head spelling's, with no quotient.
+            # A folded row is one of its row's ``group`` query heads, so its own row is the folded index over
+            # ``group``: the rows' indices repeated per head, a reshape of static sizes that writes the quotient with
+            # a literal divisor. The key is then compared with the row one for one, as the per-head spelling
+            # compares it, and the mask reads as a range of the keys. The reshape leaves the window alone: one
+            # through the window would read the key through a quotient by a symbolic size.
             index = torch.arange(window)
-            keep = index.unsqueeze(0) * group - index[: rows * group].unsqueeze(1) <= position * group
+            row = index[:rows].unsqueeze(1).expand(rows, group).reshape(rows * group)
+            keep = index.unsqueeze(0) - row.unsqueeze(1) <= position
             scores = torch.matmul(folded, k3.transpose(1, 2)) * head_dim**-0.5 + torch.where(keep, 0.0, MASK_FILL)
             return torch.matmul(torch.softmax(scores, dim=-1), v3).to(q.dtype)
 
@@ -704,7 +707,7 @@ class _Step:
         A program ``priced`` for a :class:`WindowRange` runs only while the window lies in it: each range's program
         takes its own scope (``prefix`` and the range's name), and its traced twin the range's name."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
-        from emmy.compiler.backend.paging import TABLES
+        from emmy.compiler.backend.paging import TABLES, _groups
         from emmy.compiler.backend.plan_cache import binding_neutral_key
         from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
         from emmy.compiler.pipeline.search.policy.greedy import evidence_reads
@@ -752,6 +755,14 @@ class _Step:
         renames = dict(zip([n for n in plan.inputs if n not in pager], inputs, strict=True))
         renames.update(zip(plan.outputs, outputs, strict=True))
         renames.update({part: renames[n] + part[len(n) :] for n, parts in held.items() for part in parts})
+        # Buffers of one page list decide from their first one's slot state (``paging._groups``), so every program of
+        # the export pages them together, led by the same one: any other grouping decides from state never written.
+        shapes = {b.name: b.resolve_shape({}) for b in plan.buffers if b.name.endswith(("__table", "__slot_page")) and b.name in pager}
+        for names in _groups({n: (shapes[f"{n}__table"], shapes[f"{n}__slot_page"]) for n in held}):
+            group = tuple(renames[n] for n in names)
+            for name in group:
+                if (other := self.shared.setdefault(("page list", name), group)) != group:
+                    raise ValueError(f"{prefix} pages {name} in the page list {group}, another program in {other}")
         if weights is not None:
             renames.update({b.name: f"{weights}.{b.name}" for b in plan.buffers if b.role == "constant" and b.name not in renames})
         existing = {b.name: b for b in self.plan.buffers}

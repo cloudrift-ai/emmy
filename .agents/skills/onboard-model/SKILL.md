@@ -166,10 +166,8 @@ classify each loss:
   emmy run --golden <working.json> --kernel <kernel name> --bench --tune 100
   ```
 
-  The clean rows land under the identity the layer compile reads, and the tune writes them once more as a file
-  beside the card's under `search/freezes/`, which comes back with the working golden and is committed with it. A
-  kernel times differently alone than in its layer (warm weights), so re-bench the whole target afterwards and
-  record only what wins there. `--ab` stays the tool for one specific schedule, such as a sibling's;
+  The clean rows land in the card's tune DB, under the identity the layer compile reads. A kernel times differently
+  alone than in its layer (warm weights), so re-bench the whole target afterwards and record only what wins there. `--ab` stays the tool for one specific schedule, such as a sibling's;
 - an **eligibility or optimization lockout**, a pin that refuses or fails to lower, or a pin that runs wrong gets a
   bounded fix when one is tractable, and otherwise becomes a realization-corpus case (below);
 - a **code generation quality** loss is reported, not recorded;
@@ -200,6 +198,17 @@ timings, the exact GPU identity and compute capability, and the immutable model 
 validation and lower every entry again from the committed file. Keep it even when a target misses the bar or serving
 fails later. A partial inventory never goes under `golden/`: keep it and its diagnostics outside the repository, and
 never create an empty golden. If the model has no recipe directory, create an `onboarding`/`untested` shell first.
+
+**Promote into the hardware golden.** The priors train on the hardware goldens alone; a recipe golden is evidence for
+compiles of that model, never training data. When the card has a hardware golden
+(`emmy/compiler/pipeline/search/golden/records/<gpu-slug>_<compute-cap>.json`), copy the recipe golden's measured rows
+into it so the prior learns them: open it with `GoldenFile.edit(path)`, add each target's traced program, then each
+kernel with `add_kernel`, each decision with `add_routing` and each measured row with `upsert_row`, using the
+references `add_kernel` returns. Where the hardware golden already records the same kernel at the same sizes, keep the
+faster priced route, and record the loser again on the card rather than editing it. Then `emmy golden check` the
+hardware golden, run `emmy candidates restamp` and `emmy candidates build` for its candidate file, and refit both priors
+(AGENTS.md finalization step 22). A card without a hardware golden leaves the rows out of the prior; say so in the
+report.
 
 ## 3. Create and validate a conservative baseline
 
@@ -363,8 +372,8 @@ Also check:
   a vLLM or SGLang recipe;
 - the experiment snapshot has the shared `recipe.yaml` and `RESULTS.md` plus this platform's LFS archive with its
   records inside, and other platforms' archives and sections are unchanged;
-- the prior reproduction gate passes on the recipe's golden, or the recipe is tagged `prior-pending` (AGENTS.md
-  finalization step 22);
+- when the card has a hardware golden, the recipe's measured rows are promoted into it, its candidate file is rebuilt,
+  both priors are refit, and the prior reproduction gate passes (AGENTS.md finalization step 22);
 - every new corpus case reproduces its named stage, `pytest tests/compiler/realization` is green,
   `make test-corpus-regen` is a no-op, and every `_xfail_*` note has an `evidence:` paragraph;
 - nothing staged is a dated run directory, loose benchmark output, or onboarding summary, and no tracked artifact holds

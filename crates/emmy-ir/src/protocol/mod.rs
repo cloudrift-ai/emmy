@@ -2,8 +2,7 @@
 //! (`deps`, `defines`, the buffers, the expressions, the axes, the child bodies) and their rebuilding halves
 //! (`with_bodies`, `map_expressions`, `rename_buffers`, and `rewrite` behind `rename` and `substitute`). The few
 //! members no role gives are stated here by statement type: an `Accum`'s reduced axes follow a substitution that
-//! splits an axis, a `Let` and a `Call` read buffers their fields do not name, a `StridedLoop` with an `end` binds one
-//! more name than its axis.
+//! splits an axis, a `Let` and a `Call` read buffers their fields do not name.
 
 pub mod checks;
 pub mod shared;
@@ -832,11 +831,6 @@ impl Statement {
                 for source in axis.sources() {
                     self.0.push(source.name);
                 }
-                if let Some(window) = &axis.window {
-                    for e in [&window.base, &window.bound].into_iter().flatten() {
-                        e.collect_free_vars(&mut self.0);
-                    }
-                }
             }
             fn body(&mut self, _roles: Roles, body: &Body) {
                 for stmt in body.stmts() {
@@ -952,14 +946,12 @@ mod tests {
         "y = exp(x)",
         "s <- add(s, x)",
         "c[i] <- x seed 0",
-        "p = pre c[i]",
         "init f32 s = 0",
         "let n = i + 1",
         "out[i] = x",
         "m = select:\n  x when i < 2\n  y when 1",
         "zero out words=16",
-        "for k in 0..8:\n  x = load a[k]\n  s <- add(s, x)",
-        "for k in 0..8 step 2 until n:\n  x = load a[k]",
+        "for k in 0..n of 8 step 2:\n  x = load a[k]\n  s <- add(s, x)",
         "if i < 2:\n  out[] = x\nelse:\n  out[] = y",
         "sub row_sum(row in 0..4) -> s:\n  for k in 0..8:\n    x = load a[row, k]\n    s <- add(s, x)\nr = call row_sum[a](i)",
         "Smem(name=s, extents=(16, 16))",
@@ -1114,7 +1106,7 @@ mod tests {
         // A literal seed is no buffer.
         let carry = statement("state[i] <- value seed 0.5");
         assert!(carry.external_reads().is_empty());
-        let renamed = Statement::rename_buffers(&carry, &mapping(&[("state", "other")]));
+        let renamed = Statement::rename_buffers(&carry, &mapping(&[("0.5", "other")]));
         assert!(Arc::ptr_eq(&renamed, &carry));
         let Statement::Carry(fields) = &*carry else {
             panic!("not a carry");
@@ -1134,7 +1126,7 @@ mod tests {
         let select = statement("picked = select:\n  x when i < 2\n  y when i >= 2");
         assert_eq!(strs(&select.deps()), ["x", "i", "y"]);
         let carry = statement("state[i] <- value seed 0");
-        assert_eq!(strs(&carry.deps()), ["value"]);
+        assert_eq!(strs(&carry.deps()), ["value", "i"]);
     }
 
     #[test]

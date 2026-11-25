@@ -49,9 +49,9 @@ its output's storage order, so the group is the axis the chunk tier folds as its
 one read of their key-value head's cache, and a split across the window combines the slices' partial states. A verify
 step folds its rows beside the group: the rotary program hands its query out per key-value head, `[kv_heads, rows,
 group, head_dim]`, the scores are `[kv_heads, rows * group, window]`, and an unfold program puts the output back in
-the rows' order for the layer's `post`. The mask compares the group's size times the key with the folded row, which
-is the row's own comparison with no quotient in it. Every row then shares the one read of the cache; with an axis of
-their own the rows went to the grid and each read the cache again, 487 against 205 µs for three rows and one at
+the rows' order for the layer's `post`. The mask compares the key with the folded row's own row, the folded index
+over the group's size, a quotient with a literal divisor. Every row then shares the one read of the cache; with an
+axis of their own the rows went to the grid and each read the cache again, 487 against 205 µs for three rows and one at
 131,072 cached tokens on the RTX 5090. A prefill chunk attends per query head, the chunk's rows the fold's
 rows, and each query head reads its key-value head's cache. The value expectation reads the FP32 probabilities as the
 softmax computes them and accumulates in FP32; only the output is rounded to the model dtype. Rounding the probabilities
@@ -59,10 +59,10 @@ to the model dtype first, as attention in the model dtype does, put a divide and
 value product, which is not the expectation the softmax twist recognizes, so the text attention could never fold chunk
 by chunk on tensor cores the way the tower's does; a tensor-core schedule rounds the unnormalized weights to its
 multiplicand dtype itself, as FlashAttention does. The causal mask compares the key against the row and the position,
-both indices the window's own coordinate, so it reaches the compiler's chunk tier as a predicate over the score's
-coordinates and one uniform value, the additive mask that tier takes; an FP8 cache's values convert in the fold's
-fragment loads. Rotary constants come from the checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs to the
-model dtype. The final norm is a program of its own, ahead of the head. The existing standalone exporter
+both indices the window's own coordinate, so the compiler reads it as the range of the keys a row folds, a bound
+over the score's coordinates and one loaded value, which every kernel tier walks; an FP8 cache's values convert in
+the fold's fragment loads. Rotary constants come from the checkpoint's own module in FP32. Rotation also uses FP32
+intermediates and rounds only the query/key outputs to the model dtype. The final norm is a program of its own, ahead of the head. The existing standalone exporter
 bundles all binaries and weight bytes, each constant read from its source as the pack writes it, so the exporting
 process never holds the trunk; a constant decode and prefill share is one file, which the runtime reads once and lends
 to prefill, and it reads a pack's files one at a time as it uploads them. Generation metadata lives
@@ -148,8 +148,10 @@ both programs as they load (runtime `ARCHITECTURE.md`, "Cached generation"). The
 off the device, once, and the device holds the resident experts and the slots once; the trunk, the KV cache and the
 Gated DeltaNet state stay where they are. A prefill chunk lists more experts than the slots hold, and reads the misses
 past them in place over the link. The budget is fixed at preparation: a reused pack keeps the slots and resident experts
-it was prepared with. Each launch reading a paged buffer takes its own inspector and paging run, 14 launches per buffer,
-so a paged layer adds 28 launches per step with 16-bit experts and 56 with FP8 ones, decode and prefill chunk alike.
+it was prepared with. A layer's expert buffers share one page list, and its two expert launches read one selection,
+so the layer takes one paging run for both: an inspector per launch, 12 launches of decisions and state update, then
+a page table update and a copy per buffer (3 each). A paged layer adds 20 launches per step with 16-bit experts and 26
+with FP8 ones, decode and prefill chunk alike, where a run per launch added 38 and 50.
 
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
@@ -481,8 +483,8 @@ The chunk's fixed-slot expert program had no row then, so that export prefilled 
 below records one). The prefill attention piece that read the paged cache was recorded with asynchronous copies, since
 no TMA descriptor may read a page. The pager's own kernels are the
 only ones the strict export compiles without a row: they are compiled at `paging.HINTS` whatever the geometry, where
-the card's hardware golden holds their rows, and at 256 pages their decision kernel builds a single schedule (one
-CTA), so no row could change it.
+the card's hardware golden holds their rows. At 256 pages the decision kernel that counted misses pairwise built a
+single one-CTA schedule, so no row could change it; a running count replaced it.
 
 On the dev box, served over HTTP with the pager warm across requests, as the plugin's server is, native decoded the
 same four raw prompts at 46 ms a token against the plugin's 51 ms on the same box (`vllm bench serve`, one request at

@@ -15,11 +15,12 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Assign, parse_body
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import carries_partition, head
+from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -29,9 +30,9 @@ from tests.compiler.ir.test_carried_state import N, _graph, _inputs, _reference,
 STEPS = 8
 
 
-def _run(graph) -> dict[str, np.ndarray]:
+def _run(graph, batch: int | None = None) -> dict[str, np.ndarray]:
     """Every kernel of ``graph`` as Loop IR, in order, over the fixture's inputs."""
-    arrays = _inputs(steps=STEPS)
+    arrays = _inputs(batch=batch, steps=STEPS)
     for node_id in graph.topological_order():
         node = graph.nodes[node_id]
         if isinstance(node.op, TileOp):
@@ -40,6 +41,12 @@ def _run(graph) -> dict[str, np.ndarray]:
             result = execute_loop_op_cpp(loop, arrays, shapes)
             arrays.update(zip(loop.outputs, result if isinstance(result, tuple) else (result,), strict=True))
     return arrays
+
+
+def _affine(tile: TileOp):
+    """The affine reading of ``tile``'s step in the one state it carries."""
+    carry = tile.states[0].write
+    return tile.op.affine(carry.name, carry.cells, carry.value)
 
 
 def _cut(graph, pins: dict) -> object:
@@ -95,7 +102,7 @@ def test_the_walk_is_offered_its_split_and_declines_it_by_default() -> None:
     graph.nodes["out"].op = LoopOp(body=squared)
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
-    assert head(node.op.op).affine() is None and split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node) is None
+    assert _affine(node.op) is None and split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node) is None
 
 
 def test_a_coefficient_that_varies_with_the_kept_cell_offers_no_split() -> None:
@@ -116,19 +123,20 @@ def test_a_coefficient_that_varies_with_the_kept_cell_offers_no_split() -> None:
     graph.inputs, graph.outputs = ["D", "W", "U", "D2"], ["out"]
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
-    assert head(node.op.op).affine() is None and split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node) is None
+    assert _affine(node.op) is None and split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node) is None
 
 
-def test_a_walk_under_an_outer_loop_offers_no_split() -> None:
-    """The realizer rebuilds the carrying nest alone, so a walk under a free loop outside it keeps
-    the sequence, whatever its step count divides into."""
-    from emmy.compiler.pipeline import Match  # noqa: PLC0415
+def test_a_walk_under_an_outer_loop_splits_with_that_coordinate_a_cell() -> None:
+    """A free loop outside the carrying one runs one recurrence per trip, so its coordinate is a cell of the state
+    like any other: the walk splits, and its parts reproduce every row's sequential walk."""
     from tests.compiler.ir.test_carried_state import _batched_graph  # noqa: PLC0415
 
-    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_batched_graph(steps=STEPS))
-    (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
-    assert head(node.op.op).affine() is not None and node.op.place.free
-    assert split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node) is None
+    graph = _cut(_batched_graph(steps=STEPS), {"REDUCE": "g2k"})
+    tiles = {node.id: node.op for node in graph.nodes.values() if isinstance(node.op, TileOp)}
+    assert sorted(tiles) == ["out", "out__probe", "out__probe_seed", "out__start"]
+
+    arrays = _run(graph, batch=2)
+    np.testing.assert_allclose(arrays["out"], _reference(arrays), rtol=1e-4, atol=1e-5)
 
 
 @pytest.mark.parametrize("parts", [2, 4])
@@ -139,7 +147,7 @@ def test_the_split_parts_match_the_sequential_walk(parts: int) -> None:
     tiles = {node.id: node.op for node in graph.nodes.values() if isinstance(node.op, TileOp)}
     assert sorted(tiles) == ["out", "out__probe", "out__probe_seed", "out__start"]
     walk = tiles["out"]
-    assert walk.carries and carries_partition(walk) and walk.axis_of(head(walk.op).axis).extent.as_static() == STEPS // parts
+    assert walk.carries and carries_partition(walk) and walk.place.serial[0].extent.as_static() == STEPS // parts
     assert tiles["out__probe"].carries and tiles["out__start"].carries and not tiles["out__probe_seed"].carries
 
     arrays = _run(graph)
@@ -147,6 +155,21 @@ def test_the_split_parts_match_the_sequential_walk(parts: int) -> None:
 
 
 SCAN = "REDUCE@map.1/scan"  # the carrying site: a bare pin would reach the product pieces too
+
+
+def test_a_piece_of_a_split_walk_keeps_every_cell_a_grid_axis() -> None:
+    """A split rebuilds its pieces from the walk's body and lifts them. The delta rule's contraction reads the
+    state's row and not its column, and a body that opens the contraction's loop outside the column's lifts to a
+    piece with the column a loop inside the kernel, where a stored row of the piece then tiles another axis. The
+    walk's body opens its cells in grid order, so the piece that stores the output has every coordinate of the
+    store for a grid axis."""
+    from tests.compiler.passes import test_resident_state as delta  # noqa: PLC0415
+
+    graph = _cut(delta._graph(32), {SCAN: f"g{delta._STEPS}k"})
+    walk = next(node.op for node in graph.nodes.values() if node.id == "out")
+    (store,) = walk.output_specs
+    free = {axis.name for axis in walk.place.free}
+    assert not walk.carries and all(isinstance(entry, Var) and entry.name in free for entry in store.write.index)
 
 
 @pytest.mark.parametrize("pin", ["g2k1", "g4k1", "g4k2", "g8k1", "g8k3"])
@@ -170,7 +193,7 @@ def test_the_parts_maps_compose_pairwise_and_match_the_sequential_walk(pin: str)
     walked = {*(["out", "out__probe"] if parts < STEPS else []), *([f"out__start{pairs}"] if left > 1 else [])}
     assert carrying == walked
     if left > 1:
-        assert tiles[f"out__start{pairs}"].axis_of(head(tiles[f"out__start{pairs}"].op).axis).extent.as_static() == left
+        assert tiles[f"out__start{pairs}"].place.serial[0].extent.as_static() == left
 
     arrays = _run(graph)
     np.testing.assert_allclose(arrays["out"], _reference(arrays), rtol=1e-4, atol=1e-5)
@@ -275,7 +298,7 @@ def test_a_store_of_another_value_without_the_step_offers_no_split() -> None:
     graph.nodes["out"].outputs = (replace(graph.nodes["out"].outputs[0], shape=graph.nodes["out"].outputs[0].shape[1:]),)
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
-    assert head(node.op.op).affine() is not None
+    assert _affine(node.op) is not None
     assert split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node) is None
 
 
@@ -353,7 +376,8 @@ def test_the_row_substitution_composes_to_its_last_state_on_the_gpu(pin: str) ->
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
 
     graph, _, (module, _, _) = graph_from_code(_INVERSE.format(n=8))
-    with pinned_knobs({SCAN: pin}):
+    # The atoms are the prior's to pick, and the numbers are held to f32: fast math off.
+    with pinned_knobs({SCAN: pin, "FAST_MATH": False}):
         graph = Pipeline.build(CUDA_PASSES).run(graph)
     assert sum(node.id.endswith("__probe") for node in graph.nodes.values()) == (pin == "g2k")
     a = (np.random.default_rng(0).standard_normal((2, 8, 8)) * 0.1).astype(np.float32)

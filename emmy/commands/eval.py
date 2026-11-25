@@ -23,6 +23,7 @@ from emmy.commands.table import GREEN as _GREEN
 from emmy.commands.table import RED as _RED
 from emmy.commands.table import YELLOW as _YELLOW
 from emmy.commands.table import Col, col_widths, knob_columns, render_table
+from emmy.compiler.pipeline.search import progress
 from emmy.compiler.pipeline.search.prior import report as report_mod
 from emmy.compiler.pipeline.search.prior.reproduce import knob_eq
 
@@ -107,8 +108,8 @@ def _load_prior(space: str, path: str | None = None):
 def _measured_report(args, halves, dataset, source: str):
     """``eval prior --pools measured`` — the report over the dataset's measured pools: every benched row of the DB
     the export read, grouped by ``db/export.measured_groups`` (one op, one card, one regime). The header names the
-    sources the rows came from: two reports are comparable only when computed over the same rows, and a freeze's
-    digest in the source name is what says so.
+    sources the rows came from: two reports are comparable only when computed over the same rows, and a source's
+    digest in its name is what says so.
 
     ``--kernel`` matches the op LABEL, since a pool's own op identity is a digest with nothing readable in it. The
     label is a function of the ``S_*`` stamps every row of one pool shares — read off the pool's first row — so a
@@ -171,11 +172,21 @@ def handle_eval_prior(args) -> None:
     from emmy.compiler.pipeline.search.dataset import Dataset  # noqa: PLC0415
 
     resolve_offline_arg(args)
-    try:
-        dataset = Dataset.load(args.dataset)
-    except (OSError, ValueError) as exc:
-        logger.error("%s", exc)
-        sys.exit(2)
+    with progress.recording("emmy eval prior") as timing:
+        try:
+            with progress.phase("load dataset"):
+                dataset = Dataset.load(args.dataset)
+        except (OSError, ValueError) as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
+        result = _eval_prior(args, dataset)
+    timing.log()
+    if args.json_out:
+        storage.write_json(Path(args.json_out), {**result, "timing": timing.to_json()}, indent=2)
+        logger.info("wrote %s", args.json_out)
+
+
+def _eval_prior(args, dataset) -> dict:
     space = dataset.provenance.get("space", "schedule")
     current = _load_prior(space)
     halves = [("offline", current)]
@@ -185,7 +196,8 @@ def handle_eval_prior(args) -> None:
             logger.error("--compare-to requires golden pools and a rank improvement between 0 and 1")
             sys.exit(2)
         halves = [("current", current), ("candidate", _load_prior(space, args.compare_to))]
-    report = (_golden_report if golden else _measured_report)(args, halves, dataset, str(args.dataset))
+    with progress.phase("score pools"):
+        report = (_golden_report if golden else _measured_report)(args, halves, dataset, str(args.dataset))
     _emit_report(report)
     result = report.to_json()
     if args.compare_to:
@@ -201,9 +213,7 @@ def handle_eval_prior(args) -> None:
         else:
             verdicts = _emit_golden_deploy_check(args, [pool for group in dataset.golden for pool in group.pools])
         result["pools"] = [_pool_entry(v) for v in verdicts]
-    if args.json_out:
-        storage.write_json(Path(args.json_out), result, indent=2)
-        logger.info("wrote %s", args.json_out)
+    return result
 
 
 def _pick_us(verdict) -> float | None:

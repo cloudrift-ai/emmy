@@ -62,11 +62,12 @@ NIGHTLY_ENVIRONMENT = {
     "PRIOR_RESULT": "success",
     "SCHEDULE_PRIOR": "candidate rejected: median rank rose in 1 of 3 cells",
     "PLACEMENT_PRIOR": "Updated the weights on main; candidate qualifies: 2 of 3 cells improved by at least 5%, none regressed",
-    "FREEZE_RESULT": "success",
-    "MEASUREMENT_FREEZE": "Measurement freeze: 18,104 of 18,664 rows realize. Not realized: NVIDIA GeForce RTX 5090 225 of 5,887",
     "DISCOVER_RESULT": "success",
     "GAPS_RESULT": "success",
+    "GOLDENS_RESULT": "success",
     "FILL_RESULT": "success",
+    "CANDIDATES_RESULT": "success",
+    "CANDIDATES_REALIZED": "2704 of 2704 rows realize",
     "GOLDEN_FILL": "rtx5090_sm120.json on NVIDIA GeForce RTX 5090: 62 of 62 missing measurements filled, 0 failed; committed to main",
     "COMPILER_GAPS": "Goldens: 7 of 9 rows timed beside torch.compile are slower. Realization gaps: 0 expected-failure case(s)",
 }
@@ -77,11 +78,9 @@ _FILL_FIELD = {
     "inline": False,
 }
 
-_FREEZE_FIELD = {
-    "name": "Measurement freeze",
-    "value": "Measurement freeze: 18,104 of 18,664 rows realize. Not realized: NVIDIA GeForce RTX 5090 225 of 5,887",
-    "inline": False,
-}
+_GOLDENS_FIELD = {"name": "Other cards' goldens", "value": "Held.", "inline": False}
+
+_CANDIDATES_FIELD = {"name": "Candidate files", "value": "2704 of 2704 rows realize", "inline": False}
 
 _GAPS_FIELD = {
     "name": "Compiler gaps",
@@ -115,9 +114,10 @@ def test_nightly_success_payload_reports_every_job_and_groups_modified_models():
             "value": "Updated the weights on main; candidate qualifies: 2 of 3 cells improved by at least 5%, none regressed",
             "inline": False,
         },
-        _FREEZE_FIELD,
         _GAPS_FIELD,
         _FILL_FIELD,
+        _GOLDENS_FIELD,
+        _CANDIDATES_FIELD,
         {"name": "Maintained", "value": "• `org/maintained` · heat **70**", "inline": False},
         {"name": "Best effort", "value": "• `org/best-effort` · heat **40**", "inline": False},
         {"name": "Onboarding", "value": "• `org/new` · heat **95**", "inline": False},
@@ -152,21 +152,12 @@ def test_nightly_failure_payload_names_the_failed_job_and_keeps_the_other_result
         {"name": "CPU test durations", "value": "Updated on main.", "inline": False},
         {"name": "Schedule prior", "value": "candidate rejected: median rank rose in 1 of 3 cells", "inline": False},
         {"name": "Placement prior", "value": "Failed; open the run for the failing step and logs.", "inline": False},
-        _FREEZE_FIELD,
         _GAPS_FIELD,
         _FILL_FIELD,
+        _GOLDENS_FIELD,
+        _CANDIDATES_FIELD,
         {"name": "Modified models", "value": "Failed; open the run for the failing step and logs.", "inline": False},
     ]
-
-
-def test_nightly_payload_describes_a_freeze_job_that_reported_nothing():
-    environment = {**NIGHTLY_ENVIRONMENT, "FREEZE_RESULT": "failure", "MEASUREMENT_FREEZE": "", "MODIFIED_MODELS": "[]"}
-
-    embed = discord_notification.build_payload(environment)["embeds"][0]
-
-    assert embed["title"] == "Nightly refresh failed"
-    failed = {"name": "Measurement freeze", "value": "Failed; open the run for the failing step and logs.", "inline": False}
-    assert failed in embed["fields"]
 
 
 def test_nightly_payload_reports_a_failed_gap_listing():

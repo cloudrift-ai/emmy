@@ -2,6 +2,7 @@
 //! taken as typed and flat: a value without a dtype, an operand of another type than its reader, or an index of
 //! several coordinates is refused by the statement's name, and so is a statement or an operation with no rule yet.
 
+pub(crate) mod bf16;
 mod coop;
 mod fragment;
 mod hopper;
@@ -20,9 +21,7 @@ use emmy_ir::elementwise::Operation;
 use emmy_ir::expr::{Expr, Expression, SimplifyCtx};
 use emmy_ir::normalize::{inner_ctx, launch_ctx};
 use emmy_ir::protocol::shared::carried_cells;
-use emmy_ir::statement::{
-    Accum, Assign, Cond, Grid, Init, Let, Loop, Select, Statement, StridedLoop,
-};
+use emmy_ir::statement::{Accum, Assign, Cond, Grid, Init, Let, Loop, Select, Statement};
 use emmy_ir::text::statement_text;
 use emmy_ir::{Error, Name, Result};
 
@@ -323,7 +322,8 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
     }
     let params = lowerer.parameters(kernel)?;
     lowerer.body(kernel.body, &SimplifyCtx::empty())?;
-    let code = lowerer.b.finish()?;
+    let mut code = lowerer.b.finish()?;
+    code.items = bf16::legalize(code.items, &mut code.registers, target.sm);
     Ok(Module {
         version: lowerer.version,
         target: target.text(lowerer.arch_specific),
@@ -617,9 +617,9 @@ impl Lowerer {
     ) -> Result<()> {
         match &**stmt {
             Statement::Grid(grid) => self.grid(stmt, grid, ctx),
-            Statement::Loop(node) => self.loop_(node, ctx),
-            Statement::StridedLoop(node) => self.strided_loop(stmt, node, ctx),
+            Statement::Loop(node) => self.loop_(stmt, node, ctx),
             Statement::Cond(cond) => self.cond(cond, rest, ctx),
+            Statement::Load(load) if self.carries(load.input) => self.carried_read(load),
             Statement::Load(load) => self.load(load, ctx),
             Statement::Write(write) => self.write(write, ctx),
             Statement::Assign(assign) => self.assign(assign, rest, ctx),
@@ -628,7 +628,6 @@ impl Lowerer {
             Statement::Accum(accum) => self.accum(accum, ctx),
             Statement::Init(init) => self.init_(init),
             Statement::Carry(carry) => self.carry(carry),
-            Statement::Pre(pre) => self.pre(pre),
             Statement::ZeroPrologue(zero) => self.zero_prologue(zero, ctx),
             Statement::Smem(smem) => self.smem(smem),
             Statement::CpAsyncCopy(copy) => self.cp_async(copy, ctx),
@@ -691,33 +690,15 @@ impl Lowerer {
         done
     }
 
-    /// A loop is the strided loop from zero by one.
-    fn loop_(&mut self, node: &Loop, ctx: &SimplifyCtx) -> Result<()> {
-        let strided = Statement::StridedLoop(StridedLoop {
-            axis: node.axis.clone(),
-            start: Expression::int(0),
-            step: Expression::int(1),
-            body: node.body.clone(),
-            unroll: node.unroll,
-            end: None,
-            seed: node.seed,
-            unrolled: node.unrolled,
-        });
-        let Statement::StridedLoop(as_strided) = &strided else {
-            unreachable!("a strided loop was just built")
-        };
-        self.strided_loop(&strided, as_strided, ctx)
-    }
-
-    /// Whether a strided loop runs no more than one trip in any thread: from the lowest start the ranges allow, one
+    /// Whether a loop runs no more than one trip in any thread: from the lowest start the ranges allow, one
     /// constant step already reaches the highest end. A cooperative copy over fewer elements than the block has
     /// threads is such a loop.
-    fn at_most_once(&self, node: &StridedLoop, ctx: &SimplifyCtx) -> bool {
-        let last = node.end.as_ref().unwrap_or(&node.axis.extent.expression);
+    fn at_most_once(&self, node: &Loop, ctx: &SimplifyCtx) -> bool {
+        let walk = node.walk();
         match (
-            node.step.int_literal(),
-            node.start.range(ctx),
-            last.range(ctx),
+            node.stride().int_literal(),
+            walk.start.range(ctx),
+            walk.end.range(ctx),
         ) {
             (Some(step), Some(start), Some(end)) if step > 0 => {
                 end.hi - start.lo <= i128::from(step)
@@ -726,19 +707,14 @@ impl Lowerer {
         }
     }
 
-    /// A strided loop of at most one trip is the condition that its start is below its end, the axis its start:
-    /// ptxas would otherwise unroll a loop whose start differs between threads four times, with a remainder.
-    fn single_trip(
-        &mut self,
-        node: &StridedLoop,
-        inner: &SimplifyCtx,
-        ctx: &SimplifyCtx,
-    ) -> Result<()> {
-        let last = node.end.as_ref().unwrap_or(&node.axis.extent.expression);
-        let runs = Expression::binary(Operation::Less, node.start.clone(), last.clone());
+    /// A loop of at most one trip is the condition that its start is below its end, the axis its start: ptxas
+    /// would otherwise unroll a loop whose start differs between threads four times, with a remainder.
+    fn single_trip(&mut self, node: &Loop, inner: &SimplifyCtx, ctx: &SimplifyCtx) -> Result<()> {
+        let walk = node.walk();
+        let runs = Expression::binary(Operation::Less, walk.start.clone(), walk.end.clone());
         let pred = self.pred(&runs, ctx)?;
         let passes = self.truth_by_thread(&runs);
-        let start = self.int(&node.start, ctx)?;
+        let start = self.int(&walk.start, ctx)?;
         let around = self.threads.clone();
         self.threads.enter(passes.as_deref(), true, false);
         let open = self.b.open_if(pred);
@@ -751,34 +727,32 @@ impl Lowerer {
         self.b.close_if(open)
     }
 
-    /// A strided loop with a constant start and step over a static extent runs the same trips in every thread, so
-    /// it is a counter from zero to a constant with the axis computed from it; any other steps the axis itself.
-    fn strided_loop(
-        &mut self,
-        stmt: &Statement,
-        node: &StridedLoop,
-        ctx: &SimplifyCtx,
-    ) -> Result<()> {
+    /// A loop walks its range by its step: `0..extent` by one when it states neither. With a constant start and step
+    /// and the whole of a static extent to walk it runs the same trips in every thread, so it is a counter from zero
+    /// to a constant with the axis computed from it; any other steps the axis itself.
+    fn loop_(&mut self, stmt: &Statement, node: &Loop, ctx: &SimplifyCtx) -> Result<()> {
         if node.unroll {
             return Err(self.refuse("a loop asks to be unrolled, which a kernel pass does"));
         }
         if node.seed {
             self.seed(&node.body)?;
         }
-        let carried: Vec<Name> = carried_cells(&node.body)
+        let carried: Vec<Name> = carried_cells(&node.axis.name, &node.body)
             .into_iter()
             .map(|(name, _)| name)
             .collect();
         self.declare_carried(&carried, &node.body, ctx)?;
         let inner = inner_ctx(ctx, stmt);
         let mut uneven = false;
+        let (walk, stride) = (node.walk(), node.stride());
+        // Whether the loop stops where its axis does, and not ahead of it.
+        let whole = walk.end == node.axis.extent.expression;
         let uniform = match (
-            node.start.int_literal(),
-            node.step.int_literal(),
+            walk.start.int_literal(),
+            stride.int_literal(),
             node.axis.extent.as_static(),
-            &node.end,
         ) {
-            (Some(start), Some(step), Some(extent), None) if step > 0 => {
+            (Some(start), Some(step), Some(extent)) if step > 0 && whole => {
                 Some((start, step, extent))
             }
             _ => None,
@@ -805,14 +779,12 @@ impl Lowerer {
                 open
             }
             None => {
-                let start = self.int(&node.start, ctx)?;
-                let step = self.int(&node.step, ctx)?;
-                let last = node.end.as_ref().unwrap_or(&node.axis.extent.expression);
-                let end = self.int(last, ctx)?;
-                uneven = self.differs_by_thread(&[&node.start, &node.step, last]);
+                let start = self.int(&walk.start, ctx)?;
+                let step = self.int(&stride, ctx)?;
+                let end = self.int(&walk.end, ctx)?;
+                uneven = self.differs_by_thread(&[&walk.start, &stride, &walk.end]);
                 let multiple = int::gcd(self.multiple(&start.op), self.multiple(&step.op));
-                let counts =
-                    node.end.is_none() && (start.op.int(), step.op.int()) == (Some(0), Some(1));
+                let counts = whole && (start.op.int(), step.op.int()) == (Some(0), Some(1));
                 let (start, step, end) = (
                     self.as_int(&start, VTy::I32),
                     self.as_int(&step, VTy::I32),

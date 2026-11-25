@@ -96,8 +96,9 @@ fn registers(
         .collect()
 }
 
-/// The elements one register of `role` holds at `dtype`: a float or two packed halves for an accumulator, two
-/// 16-bit or four 8-bit elements for an operand, the four scales of a lane's K blocks.
+/// The elements one register of `role` holds at `dtype`: a float or two packed halves for an accumulator, one
+/// 32-bit, two 16-bit or four 8-bit elements for an operand, the four scales of a lane's K blocks. An operand's K
+/// follows: eight columns to the register pair, so 8, 16 or 32.
 fn per_register(role: Role, dtype: DType) -> usize {
     let bytes = matches!(
         dtype,
@@ -107,6 +108,7 @@ fn per_register(role: Role, dtype: DType) -> usize {
         Role::C if dtype == DType::F16 => 2,
         Role::C => 1,
         Role::A | Role::B if bytes => 4,
+        Role::A | Role::B if dtype == DType::F32 => 1,
         Role::A | Role::B => 2,
         Role::ScaleA | Role::ScaleB => 4,
     }
@@ -419,6 +421,9 @@ mod tests {
         covers("m16n8k16", "a", BF16, (16, 16), 1);
         covers("m16n8k16", "b", F16, (16, 8), 1);
         covers("m16n8k16", "a", F8E4M3, (16, 32), 1);
+        // One 32-bit element to a register is the TF32 product's operand: `m16n8k8`.
+        covers("m16n8k16", "a", F32, (16, 8), 1);
+        covers("m16n8k16", "b", F32, (8, 8), 1);
         covers("m16n8k16", "b", F8E5M2, (32, 8), 1);
         covers("m16n8k16", "a", F4E2M1x2, (16, 32), 1);
         covers("wgmma", "c", F32, (16, 8), 1);
@@ -454,6 +459,8 @@ mod tests {
         assert_eq!(count("m16n8k16", "c", F32).unwrap(), (4, 1));
         assert_eq!(count("m16n8k16", "c", F16).unwrap(), (2, 2));
         assert_eq!(count("m16n8k16", "a", F8E4M3).unwrap(), (4, 4));
+        assert_eq!(count("m16n8k16", "a", F32).unwrap(), (4, 1));
+        assert_eq!(count("m16n8k16", "b", F32).unwrap(), (2, 1));
         assert_eq!(count("m16n8k16", "a", F4E2M1x2).unwrap(), (4, 4));
         assert_eq!(count("m16n8k16", "b", F4E2M1x2).unwrap(), (2, 4));
         assert_eq!(count("m16n8k16", "sfa", F4E2M1x2).unwrap(), (1, 4));

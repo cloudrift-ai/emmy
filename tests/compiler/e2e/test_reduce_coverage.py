@@ -25,7 +25,7 @@ import pytest
 import torch
 
 from emmy.compiler.ir.kernel.ir import Cond, TreeHalve
-from emmy.compiler.ir.stmt import Assign, Loop, StridedLoop
+from emmy.compiler.ir.stmt import Assign, Loop
 from emmy.compiler.trace.torch import trace_module
 from tests.compiler.helpers import recording_kernels, requires_cuda, statements, text
 
@@ -146,7 +146,7 @@ def test_a_short_lane_loop_unrolls_and_one_warp_folds_the_warp_partials(monkeypa
     (kernel,) = kernels_of(compiled).values()
     # Eight copies of each lane loop's body, the eighth under the row's bound: 3840 cells leave half the lanes seven.
     assert text(kernel).count("__u7 = ") >= 2 and any(str(guard.cond) == "a1_co + 3584 < 3840" for guard in statements(kernel, Cond))
-    assert not statements(kernel, Loop, StridedLoop), "no lane loop is left to unroll"
+    assert not statements(kernel, Loop), "no lane loop is left to unroll"
     # Warp 0 folds the warp partials with its butterfly (a tree with a lane) behind a single barrier.
     folds = statements(kernel, TreeHalve)
     assert folds and all(fold.lane is not None for fold in folds)

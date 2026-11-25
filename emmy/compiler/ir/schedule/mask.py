@@ -1,21 +1,31 @@
-"""The additive coordinate mask the chunk tier lands, read off a score's prefix however the program spelled it.
+"""A softmax carrier's additive coordinate mask, read as the range of the keys a row folds.
 
-The SDPA decomposition spells a causal or banded mask as a coordinate ``Select`` whose predicate compares the key and
-the row; a program that masks with ``where(key - row <= position, 0, fill)`` lowers to a comparison and a ``where``
-over values that alias the coordinates (``Let v = a1``), and the uniform values it reads. Both are the same mask:
-``select_masks`` spells the second as the first, so the tier's gate and its emission read one form. A key split's
-piece reads the absolute key through its partition (``Let v = ks * b + a2``): an alias is any ``Let`` over the
-coordinates and the uniform values, folded into the predicate as the expression it binds.
+A program that masks its scores with ``where(key - row <= position, 0, fill)`` lowers to a comparison and a ``where``
+added to the score, over values that alias the coordinates (``Let v = a1``) and the values one cell holds (a position
+loaded from memory). A fill that low marks a key the row does not fold, which is what a range says, so the form the
+schedule and every tier take states it as one: :func:`keys_ranged` reads each such mask off a carrier's lift and
+writes the bound it states of the key axis on the carrier's range (``TileOp.scheduled``). A tier then reads one
+thing, the range, whichever way the program said which keys a row attends.
+
+``select_masks`` is the reading's first half: it spells a ``where`` over a comparison of coordinates as a coordinate
+``Select``, the aliases folded into the predicate. A key split's piece reads the absolute key through its partition
+(``Let v = ks * b + a2``): an alias is any ``Let`` over the coordinates and the uniform values, folded into the
+predicate as the expression it binds.
 """
 
 from __future__ import annotations
 
-from emmy.compiler.ir.expression import Expression, Literal, Var, apply
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var, affine_form, affine_sum, affine_terms, apply
+from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Assign, Let, Select, SelectBranch, Statement
+from emmy.compiler.ir.stmt import Assign, Body, Let, Select, SelectBranch, Statement
 
 #: Each ordered comparison and the comparison that is its negation.
 _NEGATED = {"less": "greater_equal", "less_equal": "greater", "greater": "less_equal", "greater_equal": "less"}
+
+#: The highest fill that marks a key as one a row does not fold. The exponent of any score with it is zero in
+#: FP32 unless the scores themselves span ten thousand, which no softmax input does.
+_OUTSIDE = -1e4
 
 
 def cell_uniform(axes, node: Fold, coord_axes: frozenset[str] | set[str]) -> frozenset[str]:
@@ -156,3 +166,98 @@ def _integral(expression: Expression) -> Expression | None:
         return expression.rebuild(integer)
     except ValueError:
         return None
+
+
+def keys_ranged(root: Fold, axes) -> Fold:
+    """``root`` with every softmax carrier of its tree read by :func:`_keys_range`; ``root`` itself, and every
+    shared term as it stood, where no carrier's score adds a mask the reading takes."""
+    done: dict[int, Fold] = {}
+
+    def walk(term: Fold) -> Fold:
+        if id(term) not in done:
+            operands = tuple(walk(edge) for edge in term.operands)
+            same = all(new is old for new, old in zip(operands, term.operands, strict=True))
+            new = term if same else term.replace(operands=operands)
+            done[id(term)] = _keys_range(new, axes) if new.twist is not None else new
+        return done[id(term)]
+
+    return walk(root)
+
+
+def _keys_range(carrier: Fold, axes) -> Fold:
+    """``carrier`` with each additive coordinate mask of its score read as a bound of the range its key axis walks:
+    the mask's statements leave the lift, the value it adds to a key the row folds stays, and the bound joins the
+    range the carrier already walks. A mask is read where its fill is at most :data:`_OUTSIDE` and its predicate
+    bounds the key by the coordinates around the carrier and the values one walk holds; any other stays in the lift."""
+    key = carrier.axis
+    coords = frozenset(axis.name for axis in axes)
+    # In the lift's own names: a param bound to an operand that does not ride the key axis is one value for the
+    # whole walk, and a leaf's statements are read under the names the lift gives its results.
+    still = {param for param, edge, _ in carrier.bindings if key not in edge.free_axes}
+    leaves: list[Statement] = []
+    for edge in {id(edge): edge for _, edge, _ in carrier.bindings}.values():
+        if edge.axis is None and key not in edge.free_axes:
+            named = {edge.exposes[component]: param for param, bound, component in carrier.bindings if bound is edge}
+            leaves += [stmt.rewrite(lambda name, named=named: named.get(name, name)) for stmt in edge.applied.body]
+    uniform = still | {name for axis in axes for name in axis.extent.expression.free_vars()}
+    aliases = coordinate_aliases((*carrier.lift.body, *leaves), coords, uniform)
+    stmts = select_masks(carrier.lift.body, aliases, uniform, coords)
+    if stmts is None:
+        return carrier
+    literals = {stmt.name: stmt.value for stmt in stmts if isinstance(stmt, Let) and isinstance(stmt.value, Literal)}
+    starts: list[Expression] = []
+    ends: list[Expression] = []
+    kept: list[Statement] = list(stmts)
+    for mask in [stmt for stmt in stmts if isinstance(stmt, Select)]:
+        inside, outside = mask.branches
+        fill = literals.get(outside.value)
+        readers = [stmt for stmt in kept if stmt is not mask and mask.name in stmt.deps()]
+        bound = _key_bound(inside.select, key)
+        if fill is None or fill.value > _OUTSIDE or bound is None or len(readers) != 1 or not isinstance(readers[0], Assign):
+            continue
+        (reader,) = readers
+        terms = reader.value.chain("add")
+        if Var(mask.name) not in terms:
+            continue
+        # Inside the range the mask adds its other branch: a zero adds nothing, any other value stays a term.
+        added = literals.get(inside.value)
+        zero = added is not None and added.value == 0
+        rest = [term for term in terms if term != Var(mask.name)] + ([] if zero else [Var(inside.value)])
+        total = rest[0]
+        for term in rest[1:]:
+            total = apply("add", total, term)
+        kept = [reader.replace(value=total) if stmt is reader else stmt for stmt in kept if stmt is not mask]
+        (starts if bound[0] else ends).append(bound[1])
+    if not starts and not ends:
+        return carrier
+    lift = carrier.lift
+    body = Body(tuple(kept)).backward_cone(tuple(lift.results)).members
+    extent = next(axis for axis in axes if axis.name == key).extent_expression()
+    start, end = carrier.range if carrier.range is not None else (Literal(0, "int"), extent)
+    for bound in starts:
+        start = bound if start == Literal(0, "int") else apply("maximum", start, bound)
+    for bound in ends:
+        end = apply("minimum", end, bound)
+    closed = Lambda.closing(lift.params[: 1 + len(carrier.bindings)], Body(tuple(body)), lift.results)
+    return carrier.replace(lift=closed, range=(start, end))
+
+
+def _key_bound(inside: Expression, key: str) -> tuple[bool, Expression] | None:
+    """The bound the comparison ``inside`` states of ``key``: ``(True, start)`` for the least value the key takes,
+    ``(False, end)`` for one past the most. ``None`` when it does not compare the key itself, one for one, with what
+    the walk holds still: a key it scales has no bound an index expression spells without knowing a sign."""
+    op = inside.operation
+    if op is None or op.name not in _NEGATED:
+        return None
+    left, right = inside.operands
+    form = affine_form(BinaryExpression("-", left, right), frozenset({key}))
+    if form is None or abs(form[1].get(key, 0)) != 1:
+        return None
+    rest, scale = form
+    # ``key + rest`` or ``rest - key``, compared with zero: the key against ``-rest`` or ``rest``.
+    against = affine_sum(*affine_terms(BinaryExpression("-", Literal(0, "int"), rest) if scale[key] > 0 else rest))
+    below = (op.name in ("less", "less_equal")) == (scale[key] > 0)
+    strict = op.name in ("less", "greater")
+    if below:  # the key is below ``against``, or at most it
+        return False, against if strict else BinaryExpression("+", against, Literal(1, "int"))
+    return True, BinaryExpression("+", against, Literal(1, "int")) if strict else against

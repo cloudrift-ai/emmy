@@ -1,5 +1,118 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## Every serving twin recorded, and the pack exports strictly (2026-11-25)
+
+One rented RTX 5090 (2 h 39 min), on main at f0be9d75b, with fast math off as the recipe serves. Before the run, on
+the dev box with the 5090 as the target, the strict serving audit refused 12 twins, not the 4 the paging card found:
+
+- the four cut roots with no row: `gdn4-sparse-linear@fp8` (the 4-row layer tail), `gdn64-sparse-linear@fp8` (its
+  conv1d root), `post64-sparse-full@fp8` and `prologue4-native`;
+- the 1-, 4- and 64-row attention twins at both windows, whose rows #1467 demoted when it re-keyed the products;
+- the 3-row attention at both windows: #1451 changed how the verify step's mask is built, so serving traces a kernel
+  the golden did not hold. `emmy golden check` passed anyway, since it lowers the stored programs and never traces
+  again; a fresh `emmy trace --serving-twins` differs from the golden in this one program only.
+
+The record, in order: the demoted rows re-measured on their own kernels (two pairs share a name, so each is picked
+by the schedule knobs that tell it from its twin); the fresh 3-row program merged in and recorded; each cut root
+benched with no pin (the prior's route lands in the tune DB), recorded, its pieces over 4 us tuned, and recorded
+again; the attention seeds re-timed last, once their split pieces had rows. Seeds timed before that fall back to the
+unsplit kernel (418 us for the 1-row at 4,096 cached tokens, against 10.4 us split).
+
+| program | before | after |
+| --- | --- | --- |
+| 4-row layer tail (one launch of one block, the hang) | hours | 72 us, about 20 pieces |
+| 3-row attention at 4,096 / 131,072 cached tokens | 168 us / 5.26 ms, unsplit | 16.8 / 180 us, 16- / 64-part split |
+| 1-row attention at 4,096 / 131,072 | 9.6 / 98.8 us (rows demoted) | 10.4 / 106 us |
+| 4-row prologue | no row | 7.9 us |
+
+On the card: `emmy golden check` current (433 kernels), `emmy eval golden` deploys all 71 twins from the golden rows
+alone, and the strict export (drafter on, the recipe's flags) writes the pack in 45 minutes. Served from that pack,
+two random 256-token prompts with 256 new tokens each, one at a time: first token 9.87 s, 25.5 ms per output token.
+The bar is 0.58 s and 13.2 ms; this run only shows the pack serves and nothing hangs.
+
+Left open: one demoted row of the 64-row recurrence kernel (`WORK=t256`, `REDUCE=coop-t/v2`) is no longer offered
+after #1469 and stays unmeasured; its twin row under the same name is measured.
+
+## The paging programs in one run per launch, dev box only (2026-11-20)
+
+Milestone 11 of the native parity plan. The one-row step spent 7.45 ms in the pager's table programs: 160 paging runs
+(40 layers, four paged buffers each: gate-up and down codes and their scales), each 14 launches, and in each run a
+decision kernel on one thread block that counted every miss's rank by comparing all pairs of pages. At 256 pages that
+kernel was about 34 us of the run's 46.5 us on the RTX 5090; the 5090 golden's row for it reads 7.1 us at the
+65-page size the programs are compiled at.
+
+The change (#1454): the four buffers of one expert launch share one page list, so the launch takes one inspector,
+one decision and one state update, then a page table update and a copy per buffer; and a miss's rank is a running
+count (a scan) instead of the pairwise count. Measured on the RTX 4080 (sm_89) with a surrogate at Qwen3.6's
+geometry (256 pages, 8 slots, 120 resident, 8 random picks a step, 200 steps, kernel times from nsys):
+
+| one launch reading four paged stacks | paging kernels a step | launches |
+| --- | --- | --- |
+| before: four runs | about 122 us | 4 x 14 |
+| after: one run | about 33 us | 13 + 4 x 2 |
+
+The page copies are unchanged (about 2.5 us each here). At 40 layers the estimate is about 1.3 ms of paging a
+one-row step on this card, against the gate's 2 ms. The 5090 number is not measured: the old run cost 1.5x the 4080's
+there, mostly the pairwise kernel that is gone, so the estimate there is 1.3-2.0 ms.
+
+What did not work, from the plan's first lever: no schedule the compiler offers makes the pairwise count parallel.
+Its kernel holds sweeps over pages and over slots, so it has no grid axis; the one cut offered splits off the
+per-page miss flag and leaves the rank loop in place (16.0 us against 15.0 on the 4080), and the 512-thread leaf
+lowers to 948 us. The scan is offered parallel schedules: the 32-thread one takes 3.3 us at 256 pages against 7.0 us
+for the serial one the prior picks. Only a measured row on the card would pick it; the estimates above use the
+serial one.
+
+On the RTX 5090 (2026-11-21, one rented card): the hardware golden's old decision and update programs are replaced by
+the current three, and all 14 kernels are tuned and recorded at the programs' hint sizes (65 pages, 33 slots). The scan
+takes the parallel schedule there: 1.24 us against 4.7 us serial. The largest decision kernel left is the victim
+ranking over slots, 5.6 us at 33 slots. A kernel of the decision program reads the page count only through its
+output's size, which a stored kernel could not lift alone; the lift now binds output sizes too, and every repository
+golden stays current.
+
+The gate is still not measured. What the card showed:
+
+- **No strict pack, on main either.** A strict export refuses at `k_1be59c38438d` (a `type_as` in the 64-row chunk's
+  Gated DeltaNet program): its cut decision has no routing row. Main's tree refuses at the same kernel. The serving
+  audit says 67 twins deploy from the golden rows alone and 4 do not: `gdn4-sparse-linear@fp8`,
+  `gdn64-sparse-linear@fp8`, `post64-sparse-full@fp8` and `prologue4-native`, each a cut decision with no row.
+- **A drafter-off pack stalled the card.** Both trees exported a drafter-off pack without strict evidence (18 minutes
+  each). The first `emmy generate` on this branch's pack never returned a token, and the GPU stayed at 100% use and
+  112 W with no process and 2 MiB allocated, through a container restart. Main's pack, run after it, stalled the same
+  way, but behind a card that was already wedged, so which tree hangs is not known. The card was given back.
+- **Main's pack hangs the same way, and the cause is the 4-row chunk** (a second card, the same day). Main's
+  drafter-off pack, served first under nsys, ran 16 launches of its first step and never finished the 17th: the
+  4-row chunk's `gdn0.add_70`, the first Gated DeltaNet layer's whole tail (state update, output projection, norm and
+  the shared expert) in one launch of one block of 256 threads. That is the uncovered `gdn4-sparse-linear` twin:
+  with no row for its cut, the export falls back to the unsplit kernel, once in each of the 30 such layers. It does
+  not deadlock; it runs for hours, and the GPU stays busy after the process is gone until it ends. Both trees' packs
+  hold it, and neither the one-row step nor the 64-row chunk holds a launch like it. A prompt of exactly 64 tokens
+  is one 64-row chunk (with carried state a chunk holds prompt tokens only), so it never reaches the 4-row chunk.
+- **The gate, measured (a third card, the same day).** Each tree's drafter-off pack served three greedy prompts of
+  exactly 64 tokens and 128 new tokens under `nsys --cuda-graph-trace=node`; the tokens are the same on all three.
+  Kernel time per one-row step, the median of 381 steps:
+
+  | | main | this branch |
+  |---|---|---|
+  | decisions | 4.81 ms | 1.04 ms |
+  | state update | 1.48 ms | 0.55 ms |
+  | page table updates | (in the update) | 1.01 ms |
+  | paging programs | 6.29 ms | 2.60 ms |
+  | page copies | 6.10 ms | 6.44 ms |
+  | the step, first launch to last | 19.3 ms | 15.5 ms |
+
+  2.60 ms misses the 2 ms gate. Each layer runs the paging chain twice, once ahead of each expert launch: the
+  gate-up launch's run moves the layer's experts for all four stacks, and the down launch's run, from the same
+  selection, finds them in place and moves nothing. The second run is half the paging programs and 0.36 ms of copies
+  that move nothing. The page copies are the expert reads themselves, about 6 ms a step in both trees.
+- **One run a layer.** A group's run now marks the pages of every later launch of the group whose inspectors read
+  nothing written since, and those launches take no run. A fourth card (2026-11-22) measured it with the same chain:
+  tokens the same as main's on all three prompts, and per one-row step (median of 381) decisions 0.55 ms, state
+  update 0.27 ms, page table updates 0.54 ms: **1.36 ms of paging programs, under the 2 ms gate.** The other compute
+  matches the third card (6.45 ms against 6.36). The page copies took 10.9 ms against 6.25: this host moves 25.6 GB/s
+  from pinned host memory to the card (an i9-13900KF desktop board), and the same tokens move the same pages, so the
+  copies follow the link, not the change. The third host's bandwidth was not recorded.
+- On the RTX 4080 the parallel scan alone is correct and fast at 65, 257 and 1,000 entries.
+
 ## The FP8 cache staged into shared memory (2026-11-07)
 
 Native attention's FP8 key-value cache now copies into shared memory before the tensor-core fold reads it (#1366, on

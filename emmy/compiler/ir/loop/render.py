@@ -26,7 +26,7 @@ from emmy.compiler.ir.expression import (
     TernaryExpression,
     Var,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Init, Let, Load, Loop, Pre, Select, Statement, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Init, Let, Load, Loop, Select, Statement, Write
 from emmy.emmy_ir import DTYPES as _DTYPE_NAMES
 
 _FLOAT_DTYPES = frozenset({"f32", "f16", "f16x2", "f8e4m3", "f8e5m2"})
@@ -88,9 +88,10 @@ class RenderCtx:
     """Per-render state. ``intrinsics`` / ``builtins`` map an abstract function or builtin name to its spelling.
     ``shapes`` maps every buffer to its declared shape, for the statements that hold one index per dimension.
     ``ssa_dtypes`` records the dtype each name was declared at as ``render_body`` walks: the source dtype a
-    conversion reads."""
+    conversion reads. ``states`` names the carried states the loops met so far declared."""
 
     shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    states: set[str] = field(default_factory=set)
     indent: int = 1
     intrinsics: dict[str, str] = field(default_factory=dict)
     builtins: dict[str, str] = field(default_factory=dict)
@@ -351,6 +352,11 @@ def _declared(stmt: Statement, dtype) -> str:
 @render_stmt.register
 def _(stmt: Load, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
+    if stmt.input in ctx.states:
+        # A carried state: the slot the previous step left (the last step, after the loop), at the cell past the step.
+        dtype = ctx.ssa_dtypes[stmt.input]
+        ctx.ssa_dtypes[stmt.name] = dtype
+        return [f"{pad}{type_name(dtype)} {stmt.name} = {stmt.input}[{render_index(stmt.input, stmt.index[1:], ctx)}];"]
     src_dt = _declared(stmt, stmt.dtype)
     out: list[str] = []
     for k, nm in enumerate(stmt.names):
@@ -435,15 +441,8 @@ def _(stmt: Accum, ctx: RenderCtx) -> list[str]:
 
 @render_stmt.register
 def _(stmt: Carry, ctx: RenderCtx) -> list[str]:
-    # The carrying ``Loop`` declared this slot beside the one reads see, and commits it after every step.
-    return [f"{_pad(ctx.indent)}{stmt.name}{NEXT_STEP}[{render_index(stmt.name, stmt.index, ctx)}] = {stmt.value};"]
-
-
-@render_stmt.register
-def _(stmt: Pre, ctx: RenderCtx) -> list[str]:
-    dtype = ctx.ssa_dtypes.get(stmt.carrier, "f32")
-    ctx.ssa_dtypes[stmt.name] = dtype
-    return [f"{_pad(ctx.indent)}{type_name(dtype)} {stmt.name} = {stmt.carrier}[{render_index(stmt.carrier, stmt.index, ctx)}];"]
+    # The carrying ``Loop`` declared this slot beside the one loads see, and commits it after every step.
+    return [f"{_pad(ctx.indent)}{stmt.name}{NEXT_STEP}[{render_index(stmt.name, stmt.cell, ctx)}] = {stmt.value};"]
 
 
 @render_stmt.register
@@ -487,7 +486,7 @@ def _(stmt: Select, ctx: RenderCtx) -> list[str]:
 def _(node: Loop, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
     out: list[str] = []
-    # A carried state is two slots of its cell shape: the one the previous step left, which every read sees, and the
+    # A carried state is two slots of its cell shape: the one the previous step left, which every load sees, and the
     # one this step defines, committed when the step ends.
     for name, shape in node.carries.items():
         carry = next(c for c in node.body.carries if c.name == name)
@@ -501,9 +500,14 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
             ctx.shapes[slot] = extents
             out.append(f"{pad}std::vector<{type_name(carry.dtype)}> {slot}({seed});")
         ctx.ssa_dtypes[name] = (carry.dtype or F32).name
+        ctx.states.add(name)
     out.extend(_seeds(node, ctx))
     var = node.axis.name
-    out.append(f"{pad}for (int {var} = 0; {var} < {_extent_c(node, ctx)}; {var}++) {{")
+    # A loop that walks a range takes the values from its start to its end, and one that steps every ``step``-th of
+    # them; any other walks its whole extent by one.
+    start, end = ("0", _extent_c(node, ctx)) if node.range is None else (f"({render_expression(bound, ctx)})" for bound in node.range)
+    step = "++" if node.step is None else f" += {render_expression(node.step, ctx)}"
+    out.append(f"{pad}for (int {var} = {start}; {var} < {end}; {var}{step}) {{")
     inner = ctx.child()
     out.extend(render_body(node.body, inner))
     out.extend(f"{_pad(inner.indent)}{name} = {name}{NEXT_STEP};" for name in node.carries)
@@ -511,7 +515,7 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
     return out
 
 
-def _seeds(node: Loop | StridedLoop, ctx: RenderCtx) -> list[str]:
+def _seeds(node: Loop, ctx: RenderCtx) -> list[str]:
     """``<dtype> <acc> = identity;`` for each distinct ``Accum`` fold in the loop's immediate body: the seed rides on
     the fold, derived from ``op.identity``. A nested fold re-declares per enclosing iteration."""
     out: list[str] = []
@@ -528,20 +532,7 @@ def _seeds(node: Loop | StridedLoop, ctx: RenderCtx) -> list[str]:
     return out
 
 
-@render_stmt.register
-def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
-    """``for (int axis = start; axis < bound; axis += step)``, the bound the loop's own end where it has one."""
-    out = _seeds(stmt, ctx)
-    var = stmt.axis.name
-    bound = _extent_c(stmt, ctx) if stmt.end is None else f"({render_expression(stmt.end, ctx)})"
-    start, step = render_expression(stmt.start, ctx), render_expression(stmt.step, ctx)
-    out.append(f"{_pad(ctx.indent)}for (int {var} = {start}; {var} < {bound}; {var} += {step}) {{")
-    out.extend(render_body(stmt.body, ctx.child()))
-    out.append(f"{_pad(ctx.indent)}}}")
-    return out
-
-
-def _extent_c(node: Loop | StridedLoop, ctx: RenderCtx) -> str:
+def _extent_c(node: Loop, ctx: RenderCtx) -> str:
     """A loop's extent as a C expression: the int of a static one, the name of a symbolic one, parenthesized where
     it is a composite (``(seq_len+31)//32``), whose ``//`` the expression renderer spells."""
     ext = node.axis.extent

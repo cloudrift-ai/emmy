@@ -236,7 +236,7 @@ class Splicer(BodyBuilder):
     # COMPOSITIONS of σs, so bindings multiply per stage instead of deduplicating (DeepSeek-V4's
     # 20-iteration Sinkhorn chain drove 4.5M distinct bindings from 2,287 input statements and
     # never finished). Such a merge cannot be constructed at any budget; the first binding past
-    # the bound raises, and the answer is the roller (``loop/fusion/005_roll_recurrence``), never
+    # the bound raises, and the answer is the roller (``loop/fusion/_recurrence``), never
     # a smaller region — a termination bound, not a fusion-quality gate: placement still owns
     # every cut on a merge that CAN be built.
     # Whole layers legitimately take over a hundred bindings per source statement: the tracer
@@ -418,12 +418,18 @@ class Splicer(BodyBuilder):
         self.insert(Assign(d.bound_as, Var(v_bound)), d.demand_scope)
 
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
-        """Queue the value under a shared iteration scope for independent reductions of equal extent."""
+        """Queue the value under a shared iteration scope for independent reductions of equal extent that walk
+        the same range, the range read at the coordinates the reader binds."""
         orig_axis = self.loops[d.origin].reduce_axes[stmt.name]
-        key = (d.demand_scope, orig_axis.extent.expression, self.program.reduction_depth[d.origin][stmt.name])
+        walked = self.loops[d.origin].reduce_ranges.get(stmt.name)
+        if walked is not None:
+            walked = tuple(d.sigma.apply(bound) for bound in walked)
+        key = (d.demand_scope, orig_axis.extent.expression, self.program.reduction_depth[d.origin][stmt.name], walked)
         reduce_axis = self._reduce_axes.get(key)
         if reduce_axis is None:
             reduce_axis = self._reduce_axes[key] = Axis(name=self.fresh(orig_axis.name), extent=orig_axis.extent)
+            if walked is not None:
+                self.walk(reduce_axis, walked)
         fresh_name = reduce_axis.name
         inner_sigma = d.sigma.extend(orig_axis.name, Var(fresh_name))
         inner_scope = Scope(enclosing=d.demand_scope.enclosing + (reduce_axis,))

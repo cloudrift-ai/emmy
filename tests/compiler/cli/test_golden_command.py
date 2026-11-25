@@ -6,7 +6,6 @@ compiles every row that has a schedule under it and names the rows the compiler 
 
 from __future__ import annotations
 
-import contextlib
 import json
 import shutil
 from argparse import Namespace
@@ -110,9 +109,9 @@ def _realize(path, json_out=None, drop=False) -> int:
 
 
 def test_realize_names_the_rows_the_compiler_no_longer_realizes_and_drops_them_on_request(golden, tmp_path, caplog):
-    """A freeze stores no program, so a restamp cannot see its rows go stale: realize compiles each row under its own
-    schedule with the file as the evidence, and a row whose schedule the lowering refuses is reported with the reason.
-    ``--drop`` writes the file back without that row, and what is left realizes."""
+    """Realize compiles each row under its own schedule with the file as the evidence, and a row whose schedule the
+    lowering refuses is reported with the reason. ``--drop`` writes the file back without that row, and what is left
+    realizes."""
     report = tmp_path / "report.json"
     assert _realize(golden, report) == 0
     assert json.loads(report.read_text()) == [{"file": str(golden), "gpu_name": "NVIDIA GeForce RTX 4080", "rows": 9, "failed": []}]
@@ -131,29 +130,8 @@ def test_realize_names_the_rows_the_compiler_no_longer_realizes_and_drops_them_o
     assert len(json.loads(report.read_text())[0]["failed"]) == 1 and "do not realize and were dropped" in caplog.text
     kept = GoldenFile.load(golden)
     assert [row.name for row in kept.rows] == [row.name for row in document.rows if row.name != "matmul.square.512"]
-    assert len(kept.kernels) == len(document.kernels)  # the kernel stays: a freeze sheds it at its next fold
+    assert len(kept.kernels) == len(document.kernels)  # the kernel stays
     assert _realize(golden, report) == 0
-
-
-def test_realize_rebuilds_a_piece_through_the_route_a_repository_golden_records(tmp_path, monkeypatch):
-    """A tune of one piece of a golden freezes the piece's rows without the decisions that cut it. The piece is rebuilt
-    through the route a repository golden of the card records, and is unrealized once no golden records one."""
-    from emmy.compiler.pipeline.search.golden import repository  # noqa: PLC0415
-
-    source = _RECORDS_DIR / "v100_sm70.json"
-    golden = GoldenFile.load(source)
-    row = next(row for row in golden.rows if row.name == "pre16.k_linear_mean_reduce_3eb29d.m16.0e09e2698d6f")
-    piece = golden.kernel(row.kernel)
-    assert not piece.formed and golden.path_to(piece.ref)
-    freeze, report = tmp_path / "freeze.json", tmp_path / "report.json"
-    replace(golden, programs=[], kernels=[piece], routing=[], rows=[replace(row, latency=None)]).dump(freeze)
-
-    monkeypatch.setattr(repository, "repository_golden_paths", lambda: contextlib.nullcontext([source]))
-    assert _realize(freeze, report) == 0
-    monkeypatch.setattr(repository, "repository_golden_paths", lambda: contextlib.nullcontext([]))
-    assert _realize(freeze, report) == 1
-    (failed,) = json.loads(report.read_text())[0]["failed"]
-    assert "no recorded route" in failed["reason"]
 
 
 def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
@@ -174,6 +152,35 @@ def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
     with caplog.at_level("INFO"):
         handle_golden_restamp(Namespace(paths=[str(golden)]))
     assert "already the fresh lowering" in caplog.text
+
+
+def test_a_row_keeps_its_time_exactly_when_its_code_is_the_baselines(golden, tmp_path, caplog, monkeypatch):
+    """A row's time was measured on its kernel's PTX. ``realize --ptx`` writes that code per row, the same bytes on
+    every run and under a name that does not follow the kernel's identity; a restamp given that baseline keeps the
+    time of a row the restamp demoted (its kernel re-keyed) when the code is the baseline's, and takes the time of a
+    row whose code is not."""
+    import emmy.compiler.pipeline.search.golden as package
+    from emmy.compiler.pipeline.search.golden.restamp import Report
+
+    baseline, again = tmp_path / "ptx", tmp_path / "again"
+    for out in (baseline, again):
+        handle_golden_realize(Namespace(paths=[str(golden)], jobs=1, json_out=None, drop=False, ptx=str(out)))
+    written = sorted(path.relative_to(baseline) for path in baseline.rglob("*.ptx"))
+    assert [path.as_posix() for path in written] == [f"golden/{index}.ptx" for index in range(9)]
+    assert all((baseline / path).read_bytes() == (again / path).read_bytes() for path in written)
+    assert ".entry kernel(" in (baseline / written[0]).read_text()
+
+    document = GoldenFile.load(golden)
+    demoted = replace(document, rows=[replace(row, measurements=None) for row in document.rows])
+    report = Report(kernels=8, sources=list(range(9)), stored_as={kernel.ref: kernel.ref for kernel in document.kernels})
+    monkeypatch.setattr(package, "restamp", lambda _document: (demoted, report))
+    with (baseline / "golden" / "3.ptx").open("a") as changed:
+        changed.write("// another instruction\n")
+    with caplog.at_level("INFO"):
+        handle_golden_restamp(Namespace(paths=[str(golden)], ptx_baseline=str(baseline), jobs=1))
+    fresh = GoldenFile.load(golden)
+    assert [row.measurements for row in fresh.rows] == [None if index == 3 else row.measurements for index, row in enumerate(document.rows)]
+    assert f"the code changed under {document.rows[3].name}" in caplog.text and "8 rows keep a measurement, 1 lost" in caplog.text
 
 
 def test_restamp_takes_a_decision_again_on_the_re_keyed_parent(tmp_path, caplog):
@@ -329,6 +336,8 @@ def test_list_reads_each_measured_row_beside_torch_compile(golden, capsys):
     assert next(entry for entry in entries if entry["row"] == second.name)["tried"] == 12
     assert [entry["row"] for entry in listed(behind=True)] == [first.name]
     assert listed(gpu="H100") == []
+    kernel = GoldenFile.load(golden).kernels[second.kernel].name
+    assert {entry["row"] for entry in listed(kernel=kernel)} == {row.name for row in document.rows if row.kernel == second.kernel}
 
 
 def test_list_missing_names_each_proposal_and_each_target_with_no_torch_compile_time(golden, capsys):

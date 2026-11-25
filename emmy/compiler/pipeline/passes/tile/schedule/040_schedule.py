@@ -27,8 +27,7 @@ from __future__ import annotations
 
 from emmy.compiler.dim import paged_declarations
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule.base import Schedule
-from emmy.compiler.ir.schedule.choices import Stage
+from emmy.compiler.ir.schedule.choices import Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (
     ClassicProblem,
     ClassicScheduleCodec,
@@ -36,7 +35,7 @@ from emmy.compiler.ir.schedule.classic import (
     materialize_classic,
 )
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
+from emmy.compiler.ir.tile.ops import merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork, exact_schedule_leaf, iter_leaves
 
@@ -106,6 +105,26 @@ def _shared_state_fits(tile: TileOp, ctx) -> bool:
     return shared_state_bytes(shape, tile.outputs[port].dtype) <= ctx.max_dynamic_smem
 
 
+def _resident_tiles(tile: TileOp, ctx) -> tuple[Tile, ...]:
+    """The fragment geometries registers may hold ``tile``'s state in on this card: per atom whose operands the
+    state's accumulator fragments can be (a 16-bit one, or a TF32 one, which reads the f32 state as it is), the
+    geometry the state's columns give. Offered on the state's shape alone
+    (:attr:`TileOp.resident_state`); a step the fragments cannot evaluate declines the row where it is lowered."""
+    from emmy.compiler.dtype import BF16, F16, F32  # noqa: PLC0415
+    from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for  # noqa: PLC0415
+
+    if tile.resident_state is None:
+        return ()
+    columns = tile.axis_of(tile.resident_state.col).extent.as_static()
+    names = dict.fromkeys(name for dtype in (F16, BF16, F32) for acc in (F32, dtype) for name in atoms_for(dtype, acc=acc, ctx=ctx))
+    return tuple(
+        Tile.parse(f"{atom.name}/f1x{columns // atom.atom_n}/k{period}", Work.parse("w1x1"))
+        for atom in (ATOM_REGISTRY[name] for name in names)
+        if atom.resident_operands and columns % atom.atom_n == 0
+        for period in (2, 4, 8)
+    )
+
+
 def classic_forks(
     tile: TileOp,
     knobs: dict,
@@ -124,21 +143,23 @@ def classic_forks(
     the reading a row published across peer kernels takes — instead of refusing a value that names
     a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin. ``node`` is the
     kernel's graph node id, which names the buffer a carried state's serial form keeps it in."""
-    from emmy.compiler.ir.schedule.register import materialize_register  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import precision_policy  # noqa: PLC0415
 
-    row = pin_row(tile.name, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
+    row = pin_row(tile.name, split_consumed=tile.split_taken, published=published)
     catalog = () if published else ("catalog",)  # a pool without the published pins is another pool
     # A kernel that carries a state has a ``STAGE`` site for it. Direct is the serial form: a buffer in global
     # memory, one launch per step. ``d1/smem`` runs the steps of that form inside one launch; ``d1/reg`` keeps the
-    # state in registers, and the carrying kernel itself is what the lowering then reads.
-    carrying, state_stages = tile, ()
+    # state in register fragments, and the carrying kernel itself is what the lowering then reads.
+    state_stages, state_tiles = (), ()
     if tile.carries:
-        tile = serial_form(carrying, node)
+        state_tiles = _resident_tiles(tile, ctx)
+        tile = serial_form(tile, node)
         if _shared_state_fits(tile, ctx):
             state_stages += (Stage(transport="smem"),)
-        if carrying.register_program is not None:
+        if state_tiles:
             state_stages += (Stage(transport="reg"),)
+    # A block of a partition walks from zero, and each range is stated of the axis as a tier walks it.
+    tile = tile.scheduled()
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band). A finalize that cannot take that row keeps its own
@@ -158,12 +179,12 @@ def classic_forks(
         tile,
         ctx,
         row=row,
-        allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
-        allow_fp8=precision_pin(FP8_MMA) is True,
+        **precision_policy(),
         validate_pins=ctx.validate_pins and not kernel_set,
         tolerate_kernel_pins=peer,
         paged=paged or {},
         state_stages=state_stages,
+        state_tiles=state_tiles,
         _strict_row_keys=named,
     )
     context = ClassicScheduleContext(tile, ctx, problem)
@@ -181,11 +202,7 @@ def classic_forks(
         context,
         codec=codec,
         inherited_knobs=knobs,
-        materialize=lambda schedule, row: (
-            materialize_register(carrying, Schedule(schedule.kernel, {}, {}), row)
-            if schedule.kernel.state.transport == "reg"
-            else materialize_classic(tile, knobs=row, target=ctx, schedule=schedule)
-        ),
+        materialize=lambda schedule, row: materialize_classic(tile, knobs=row, target=ctx, schedule=schedule),
         pool_id=pool_id,
         sample=getattr(ctx, "pool_sample", None),
     )
