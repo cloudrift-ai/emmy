@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from functools import cached_property
+from typing import NamedTuple
 
 from frozendict import frozendict
 
@@ -50,7 +51,7 @@ from emmy.compiler.ir.schedule.views import (
     NodeId,
     contraction_facts,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, OutputSpec, Statement, Write
+from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Loop, OutputSpec, Statement, Write
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, chain_members, kernel_roots, refused_roots
@@ -70,8 +71,6 @@ def observed_result_names(op) -> frozenset[str]:
             continue
         if node.observe is not None:
             names.update(node.observe.results)
-        if node.carries:  # a carried state's per-step outputs stream the same way
-            names.update(node.exposes[len(node.base.results) :])
         stack.extend(node.operands)
         stack.extend(s for s in node.lift.body if isinstance(s, Fold))
     return frozenset(names)
@@ -226,7 +225,7 @@ def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | No
     tail: list[OutputSpec] = []
     while inner:
         last = inner[-1]
-        if isinstance(last, Write):
+        if isinstance(last, (Write, Carry)):
             tail.insert(0, OutputSpec(write=inner.pop(), sweep=path))
             continue
         if guarded_store(last) is not None:
@@ -259,7 +258,7 @@ def extract_output_specs(stmts) -> tuple[tuple[Statement, ...], tuple[OutputSpec
     stores: list[OutputSpec] = []
     while rest:
         last = rest[-1]
-        if isinstance(last, Write):
+        if isinstance(last, (Write, Carry)):  # a carried state's update is the kernel's store into its own buffer
             stores.insert(0, OutputSpec(write=rest.pop()))
             continue
         if guarded_store(last) is not None:
@@ -295,6 +294,22 @@ def _reads_move_with(edge: Fold, coord: str, ctx: SimplifyCtx) -> bool:
     the kernel's extents — a merged weight's reshape residue ``((m·1024 + n) / 128 % 8) · 128 + …``
     folds ``m`` away, a grouped address ``m·H·D + …`` does not."""
     return any(coord in index.simplify(ctx).free_vars() for index in _index_reads(edge) if coord in index.free_vars())
+
+
+class ResidentState(NamedTuple):
+    """The one state a kernel keeps between steps, as register fragments hold it (:attr:`TileOp.resident_state`)."""
+
+    #: The step: the kernel's term.
+    fold: Fold
+    #: The state's update, and the axis of the steps.
+    carry: Carry
+    time: str
+    #: The cells a block holds one position of, ahead of the state's matrix.
+    batch: tuple[str, ...]
+    col: str
+    row: str
+    #: The kernel's outputs: every store but the state's own.
+    outputs: tuple[OutputSpec, ...]
 
 
 def loaded_buffers(term):
@@ -472,39 +487,48 @@ class TileOp(Op):
         return self.split_consumed or carries_partition(self)
 
     @cached_property
+    def states(self) -> tuple[OutputSpec, ...]:
+        """The stores of this kernel into a carried state of its own, one per state: the term is one step, the state
+        a buffer the kernel keeps for itself, and a slab of the term reads it one step back."""
+        return tuple(spec for spec in self.output_specs if isinstance(spec.write, Carry))
+
+    @cached_property
     def carries(self) -> bool:
-        """Whether this kernel carries a state: a fold of its tree folds the action ``next``
-        (:attr:`Fold.carries`), so its steps run in order inside one loop and the kernel stays one
-        kernel — the classic schedule realizes the loop as one launch per step over a state buffer,
+        """Whether this kernel carries a state (:attr:`states`), so its steps run in order along its serial axis and
+        the kernel stays one kernel — the classic schedule realizes the steps as one launch each over a state buffer,
         the register schedule as a loop inside each CTA."""
-        return any(site.node.carries for site in self.sites)
+        return bool(self.states)
 
     @cached_property
     def state_routes(self) -> tuple[str, ...]:
-        """The route of every fold whose carried state this kernel keeps between steps: the carrying folds of the
-        kernel itself, or, for its serial form (:attr:`Placement.serial`), of the carrying kernel that form was
-        lifted from. A state is a value its fold reads again at every step, so each route is a ``STAGE`` site."""
+        """The route each carried state this kernel keeps between steps is addressed by, its own or, for its serial
+        form (:attr:`Placement.serial`), those of the carrying kernel that form was lifted from. A state is a value
+        the kernel reads again at every step, so each route is a ``STAGE`` site. No node of the term is the state, so
+        the route is a spelling: ``map.<n>/scan`` for the ``n``-th state, which is what every stored row names."""
         carrying = self._carrying
-        return tuple(site.path for site in carrying.sites if site.node.carries) if carrying is not None else ()
+        count = len(carrying.states) if carrying is not None else 0
+        return tuple(f"map.{position + 1}/scan" for position in range(count))
 
     @cached_property
-    def resident_state(self) -> tuple | None:
-        """``(fold, batch cells, column cell, row cell)`` of the one state this kernel keeps between steps, where
-        register fragments can hold it, else ``None``. One warp owns sixteen positions of the state's last cell and
-        every position of the one before it, so: one state of static shape under no free axis, a row count the
-        fragment's sixteen rows divide and column counts its eight divide, and every output a matrix over the
-        state's rows. What the step computes is the lowering's to accept or decline."""
+    def resident_state(self) -> ResidentState | None:
+        """The one state this kernel keeps between steps, where register fragments can hold it, else ``None``. One
+        warp owns sixteen positions of the state's last cell and every position of the one before it, so: one state
+        of static shape under no free axis of more than one position but its own cells, a row count the fragment's
+        sixteen rows divide and column counts its eight divide, and every output a matrix over the state's rows.
+        What the step computes is the lowering's to accept or decline."""
         carrying = self._carrying
-        folds = [site.node for site in carrying.sites if site.node.carries] if carrying is not None else []
-        if len(folds) != 1 or carrying.place.free or any(not axis.extent.is_static for axis in carrying.axes):
+        states = carrying.states if carrying is not None else ()
+        if len(states) != 1 or any(not axis.extent.is_static for axis in (*carrying.axes, *carrying.place.free)):
             return None
-        (fold,) = folds
-        if len(fold.base.results) != 1 or len(fold.cells) < 2:
+        carry, (time,) = states[0].write, carrying.place.serial
+        cells = carry.cells
+        if len(cells) < 2 or any(axis.extent.as_static() != 1 for axis in carrying.place.free if axis.name not in cells):
             return None
-        *batch, col, row = fold.cells
-        extent = {axis.name: axis.extent.as_static() for axis in carrying.axes}
-        matrices = [spec.write.index[-2:] for spec in carrying.output_specs]
-        if any(len(spec.write.values) != 1 for spec in carrying.output_specs) or any(
+        *batch, col, row = cells
+        extent = {axis.name: axis.extent.as_static() for axis in (*carrying.axes, *carrying.place.free)}
+        outputs = tuple(spec for spec in carrying.output_specs if spec is not states[0])
+        matrices = [spec.write.index[-2:] for spec in outputs]
+        if any(len(spec.write.values) != 1 for spec in outputs) or any(
             len(index) != 2 or not all(isinstance(e, Var) for e in index) for index in matrices
         ):
             return None
@@ -512,7 +536,7 @@ class TileOp(Op):
             return None
         if any(extent[name] % 8 for name in (col, *(c.name for c, _ in matrices))):
             return None
-        return fold, tuple(batch), col, row
+        return ResidentState(carrying.op, carry, time.name, tuple(batch), col, row, outputs)
 
     @cached_property
     def _carrying(self) -> TileOp | None:
@@ -814,9 +838,11 @@ class TileOp(Op):
             return None
         # A grid axis only the stores read — a pointwise cell indexed by its coordinate, nothing
         # evaluated over it — is the kernel's to bind: the term opens every coordinate it declares
-        # and those loops wrap outside, in grid order.
-        glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
+        # and those loops wrap outside, in grid order. Under a serial axis every grid axis is bound here: the
+        # steps enclose the state's cells, each a loop of its own, so a kernel a split of the sequence lifts from
+        # this body has every cell for a grid axis as this one does.
         serial = tuple(self.place.serial)
+        glue = tuple(axis for axis in self.place.free if serial or axis.name not in self.op.free_axes)
         with binding_extents(self.extents):
             body = self.op.lower(frozenset(axis.name for axis in (*glue, *serial)), self.output_specs, self.axes)
         # A serial axis is time: it encloses every cell, so a lagged read of this kernel's own

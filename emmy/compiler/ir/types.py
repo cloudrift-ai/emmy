@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from emmy.compiler.dtype import BOOL, F16, F32, I32, INTEGER_NAMES, DataType
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.ir.expression import CastExpression, Expression, Literal, TernaryExpression, Var, promoted_dtype
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Init, Let, Load, Pre, Select, SelectBranch, Statement, Write, dtype_promote
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Init, Let, Load, Select, SelectBranch, Statement, Write, dtype_promote
 
 #: The operations an integer dtype computes natively. Any other operation over integers computes in f32.
 INTEGER_OPS = frozenset(
@@ -77,6 +77,7 @@ def stamp_types(body: Body, buf_dtypes: dict[str, DataType], known: dict[str, Da
 
     ``known`` types the names the body reads and something else defines.
     """
+    buf_dtypes = _with_states(body, buf_dtypes)
     while True:
         ctx = _StampCtx(buf_dtypes=buf_dtypes, ssa_dtypes=dict(known or {}))
         _seed_explicit_dtypes(body, ctx)
@@ -84,6 +85,12 @@ def stamp_types(body: Body, buf_dtypes: dict[str, DataType], known: dict[str, Da
         if stamped == body:
             return body
         body = stamped
+
+
+def _with_states(body: Body, buf_dtypes: dict[str, DataType]) -> dict[str, DataType]:
+    """``buf_dtypes`` with the carried states of ``body``: a state is a buffer of the body's own, at the dtype its
+    ``Carry`` declares, f32 where it declares none."""
+    return {**buf_dtypes, **{carry.name: carry.dtype or F32 for carry in body.carries}}
 
 
 def value_dtypes(body: Body) -> dict[str, DataType]:
@@ -226,6 +233,7 @@ def explicit_conversions(
     """``body`` typed in full (the module doc). ``buf_dtypes`` holds every buffer's element dtype, f32 where absent;
     ``native_f16`` the operations the target computes at f16; ``known`` types the names the body reads and something
     else defines."""
+    buf_dtypes = _with_states(body, buf_dtypes)
     body = stamp_types(body, buf_dtypes, known)
     seed = _StampCtx(buf_dtypes=buf_dtypes, ssa_dtypes=dict(known or {}))
     _seed_explicit_dtypes(body, seed)
@@ -238,10 +246,8 @@ def explicit_conversions(
         taken.update(s.deps())
         if isinstance(s, Let) and s.dtype is None:
             seed.ssa_dtypes[s.name] = I32  # an index
-        if isinstance(s, (Accum, Carry)) or (isinstance(s, Load) and s.carried):
+        if isinstance(s, Accum) or (isinstance(s, Load) and s.carried):
             states.update(s.defines())
-        if isinstance(s, Carry):
-            seed.ssa_dtypes[s.name] = s.dtype or F32
     return _Conversions(buf_dtypes, native_f16, seed.ssa_dtypes, states, taken, defined).body(body, {})
 
 
@@ -352,11 +358,7 @@ class _Conversions:
             out.append(s.replace(value=self.operand(f"{s.name}__v", s.value, dtype, conversions, out), dtype=dtype))
         elif isinstance(s, Carry):
             dtype = s.dtype or F32
-            self.types[s.name] = dtype
             out.append(s.replace(value=self.at(s.value, dtype, conversions, out), dtype=dtype))
-        elif isinstance(s, Pre):
-            self.types[s.name] = self.dtype(s.carrier)
-            out.append(s)
         elif isinstance(s, Select):
             dtype = dtype_get(dtype_promote("add", [self.dtype(b.value).name for b in s.branches]))
             out.append(s.replace(branches=tuple(SelectBranch(self.at(b.value, dtype, conversions, out), b.select) for b in s.branches)))

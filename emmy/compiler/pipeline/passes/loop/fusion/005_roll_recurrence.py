@@ -32,7 +32,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Pre, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of
 
@@ -282,14 +282,14 @@ def _spelling(body: Body) -> tuple[str, tuple[str, ...]]:
 
 
 def _rolled(step: Body, steps: int, seed: float | str, every: bool) -> Body:
-    """The step under a loop that carries its state: the state read becomes a ``Pre`` read, its
-    store the state's definition, and every kept buffer gains the step as its leading axis. A state
+    """The step under a loop that carries its state: the state read becomes a load of the state one step
+    back, its store the state's definition, and every kept buffer gains the step as its leading axis. A state
     read at its last step alone (``every`` false) gains none: each step stores over the last one's,
     so the buffer holds the state the loop ended with."""
 
     def roll(stmt: Statement) -> Statement | tuple[Statement, ...]:
         if isinstance(stmt, Load) and stmt.input == _STATE:
-            return Pre(name=stmt.names[0], carrier=_STATE, index=stmt.index)
+            return stmt.replace(index=(Var("step") - Literal(1, "int"), *stmt.index))
         if not isinstance(stmt, Write):
             return stmt
         kept = stmt.replace(index=(Var("step"), *stmt.index))
@@ -297,7 +297,7 @@ def _rolled(step: Body, steps: int, seed: float | str, every: bool) -> Body:
             return kept
         if len(stmt.values) != 1 or not all(isinstance(e, Var) or e == Literal(0, "int") for e in stmt.index):
             raise RuleSkipped("the state is not stored one value per cell")
-        return (Carry(name=_STATE, value=stmt.values[0], index=stmt.index, seed=seed), kept if every else stmt)
+        return (Carry(name=_STATE, value=stmt.values[0], index=kept.index, seed=seed), kept if every else stmt)
 
     return Body((Loop(axis=Axis("step", steps), body=step.map(roll)),))
 

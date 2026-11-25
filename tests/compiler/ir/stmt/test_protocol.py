@@ -26,7 +26,6 @@ from emmy.compiler.ir.stmt import (
     Let,
     Load,
     Loop,
-    Pre,
     Select,
     SelectBranch,
     Statement,
@@ -64,7 +63,6 @@ _EXAMPLES = [
     Assign("z", apply("add", apply("multiply", 2.0, "x"), apply("negative", "y"), 0.5)),
     Accum("s", "x", "add"),
     Carry("c", "x", (Var("i"),), seed=0.0),
-    Pre("p", "c", (Var("i"),)),
     Init("s", 0.0, dtype=F32),
     Let("n", BinaryExpression("+", Var("i"), Literal(1, "int"))),
     Write("out", (Var("i"),), ("x",)),
@@ -193,7 +191,7 @@ def test_a_number_in_a_role_field_is_plain_data() -> None:
     assert loop.expressions() == (Var("t"), Literal(8, "int"), Literal(4, "int"))
     assert loop.rewrite(lambda name: f"{name}_").step == Literal(4, "int")
     carry = Carry("state", "value", (Var("i"),), 0.5)
-    assert carry.external_reads() == () and carry.rename_buffers({"state": "other"}) is carry
+    assert carry.external_reads() == () and carry.rename_buffers({"0.5": "other"}) is carry
     assert carry.replace(seed="init").external_reads() == ("init",)
 
 

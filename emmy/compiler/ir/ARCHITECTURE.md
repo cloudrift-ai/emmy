@@ -460,20 +460,22 @@ stored `combine`). Commutativity
 is unused — split/reorder legality is a future cooperative-tier concern, recorded
 structurally when it returns.
 
-A recurrence's state is NOT a fold, and has its own two statements. A fold's meaning is its op: ⊕ is a monoid, so
+A recurrence's state is NOT a fold, and has a statement of its own. A fold's meaning is its op: ⊕ is a monoid, so
 its steps may run in any order, its seed is the op's identity, and the carrier is one scalar inside the loops over
 the cells. A carried state is the opposite on each count: its steps run in order, its step is any computation, its
 seed is named, and it has cells — a delta rule's step reads OTHER cells of its own state (`k @ S`), which needs the
-loop over the steps OUTSIDE the cells and the state kept across them. `Carry` (`S[i, j] <- next`, with its `seed`)
-defines the NEXT value of one cell, and `Pre` (`v = pre S[k, j]`) reads what the PREVIOUS step left at any cell: the
-seed on the first step, the last step's value once the loop has closed. No read of a step sees what that step
-defines, so the reads and the definition of one step are order-free. Nothing is declared: the state is carried by the
-nearest enclosing loop whose axis the `Carry` index does not read (`carried_cells`), which is therefore a reduce loop
-the free-axis order never sorts under the cells, and its shape is the loops over its cells. The Loop IR rendering
-keeps two slots of the cell shape and commits the second after each step; how many slots survive and where they are
-stored is a schedule's question, not the statement's. The Tile lift keeps the state in the term: a `Fold` whose ⊕ is
-the action `next`, with the `Carry` index as its `cells` and a `Pre` as a carrier-read slab (`ir/tile/ARCHITECTURE.md`).
-The classic schedule realizes the loop as a serial launch axis over a state buffer, or, where the row's `STAGE` keeps
+loop over the steps OUTSIDE the cells and the state kept across them. The state is a buffer of the kernel's own,
+neither an input nor an output, and the step is its first coordinate. `Carry` (`S[c, i, j] <- next`, with its
+`seed`) defines one cell at one step, and a `Load` reads the state as it reads any buffer. Inside the loop that
+carries it a load reads one step back (`v = load S[c - 1, k, j]`), at any cell: the seed on the first step, and what
+the last step that defined the cell left. After the loop a load reads the last step. No read of a step sees what that
+step defines, so the loads and the definition of one step are order-free. The state is carried by the loop its first
+coordinate names (`carried_cells`), which is therefore a reduce loop the free-axis order never sorts under the
+cells, and its shape is the loops over its cells. The Loop IR rendering keeps two slots of the cell shape and
+commits the second after each step; how many slots survive and where they are stored is a schedule's question, not
+the statement's. The Tile lift takes the loop that carries a state as the kernel's serial axis: the term is one
+step, the `Carry` one of the kernel's stores, and a load of the state a slab (`ir/tile/ARCHITECTURE.md`).
+The classic schedule realizes the steps as launches in order over a state buffer, or, where the row's `STAGE` keeps
 the state in shared memory or registers, inside a CTA as a loop.
 
 **A loop may walk a range.** A `Loop` states where its axis walks when that is not all of it: a start and an exclusive
@@ -645,8 +647,7 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
 | `Assign`                     | The one scalar definition: `name = value`, `value` one operation over names and literals (`exp(x)`, `2 * x - y`: an affine region is one node), with an optional `dtype`. |
 | `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expression.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
-| `Carry`                      | The next value of one cell of a carried state: `name[index...] <- value`, holding `seed` before the first step. No op: a state folds nothing. Without a seed, the definition of a value the kernel keeps for itself, one cell per coordinate of the loops around it. |
-| `Pre`                        | Read of one cell of a carried state: `name = pre carrier[index...]`, the previous step's value inside the loop that carries it. Of a value defined without a seed, the cell at `index`, read once the definition's loops have closed. |
+| `Carry`                      | One cell of a carried state at one step: `name[step, cell...] <- value`, holding `seed` before the first step. `name` is a buffer of the kernel's own, which a `Load` reads: one step back inside the loop that carries it, the last step after it. No op: a state folds nothing. |
 | `Init`                       | Explicit `<dtype> name = identity;` seed at this scope (`name` + scalar `identity` + `dtype`). Used for a carried state's seed (one per component), emitted above the streaming `Loop`. Scope-bound (never hoisted); shadows a deeper same-named `Accum` init. |
 | `Let`                        | Pure binding of one `Expression` to a name: a scalar literal (the twisted carrier's injected `1`), a precomputed integer index, a `FlatIndex` offset. Scoped like an `Assign`; legal inside a stored `Lambda`. |
 | `Write`                      | Write an SSA value to output at `index`.                                                                          |
@@ -874,7 +875,7 @@ from that CSE form. Subroutine boundaries never limit fusion.
   come from names, and a body with no two candidates in one scope is not numbered again). Placement numbers the group
   alike (it takes the numbering that found the groups stable), so it merges the cones the members compute: the twin
   pivots and denominators of two online softmaxes over one row become one pair. A member then goes when nothing reads
-  it in its own scope but its update (a carried state, read through `pre` the step before wherever it sits, always
+  it in its own scope but its update (a carried state, loaded one step back wherever the load sits, always
   goes), its reads after the loop reading the group's first member. Two seeded reductions of one value, each read only
   after the loop, are the simplest case.
 - `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
@@ -888,8 +889,9 @@ from that CSE form. Subroutine boundaries never limit fusion.
   motion can produce, keep their source order and a read binds the one before it (or the first, where none precedes:
   a scope is order-free); an accumulator is read where it stands — ahead of its update the step before, behind it the
   updated value — so the online softmax's rescale reads the old maximum beside the new one; a carried state orders
-  nothing within its step, since a `Pre` reads the step before wherever it sits, while the loop that carries the state
-  produces it. A scope whose bindings and reads wait on each other has no reading, and normalization refuses it.
+  nothing within its step, since a load of it reads the step before wherever it sits, while the loop that carries the
+  state produces it and a load beside that loop follows it. A scope whose bindings and reads wait on each other has no
+  reading, and normalization refuses it.
 - The driver repeats whole rounds until one leaves the body alone, takes the least by text of forms the rounds
   alternate between (the crate's `ARCHITECTURE.md` says which bodies do that), and refuses a body that does neither
   in eight.

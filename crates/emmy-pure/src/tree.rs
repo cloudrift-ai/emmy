@@ -169,11 +169,7 @@ fn prune_unread(root: &Fold, stored: &HashSet<Name>) -> Result<Fold> {
             let empty = HashSet::new();
             let want = kept.get(&edge.address()).unwrap_or(&empty);
             same = same && new.ptr_eq(edge);
-            if edge.twist().is_some()
-                || edge.observe().is_some()
-                || edge.carries()
-                || want.len() == slots.len()
-            {
+            if edge.twist().is_some() || edge.observe().is_some() || want.len() == slots.len() {
                 operands.push(new);
                 params.extend(slots.iter().copied());
                 continue;

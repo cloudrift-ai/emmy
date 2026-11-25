@@ -153,7 +153,7 @@ def classic_stage_key(sites, edge: EdgeSite) -> str:
 
 def classic_state_keys(sites) -> tuple[str, ...]:
     """The canonical key of each carried state's storage, by the rule every ``STAGE`` site follows: bare when it
-    is the kernel's one ``STAGE`` site, else the route of the fold that carries it."""
+    is the kernel's one ``STAGE`` site, else the state's route (:attr:`TileOp.state_routes`)."""
     routes = sites.state_routes
     if len(routes) == 1 and not sites.stage_edges:
         return ("STAGE",)
@@ -165,7 +165,7 @@ def classic_state_keys(sites) -> tuple[str, ...]:
 
 def classic_state_tile_keys(sites) -> tuple[str, ...]:
     """The key of the fragment geometry of a state registers can hold (:attr:`TileOp.resident_state`): ``TILE`` at
-    the route of the fold that carries it, bare when the step has no ``TILE`` site of its own."""
+    the state's route, bare when the step has no ``TILE`` site of its own."""
     if sites.resident_state is None:
         return ()
     return ("TILE",) if not sites.family_sites["TILE"] else (f"TILE@{sites.state_routes[0]}",)

@@ -39,9 +39,9 @@ and a view are values: they compare by what they hold.
   singleton (`inject`).
 - `fold.rs` — `Fold`: its stored parts and formation in two halves that `Fold::new` runs in order:
   the canonical rewrites (a zero-axis term loses its shadowed operands, a bilinear term takes its A operand first)
-  and the checks, which refuse and never repair (the positional binding, the monoid arity, the carrier reads, the
-  observer, a lift that applies). Then the reads every pass asks: `exposes`, `bindings`, `applied`, `axis`,
-  `free_axes`, `carries`, `combine`, `canonical`. A reducing term may state the `range` its axis walks; the
+  and the checks, which refuse and never repair (the positional binding, the monoid arity, the observer, a lift
+  that applies). Then the reads every pass asks: `exposes`, `bindings`, `applied`, `axis`, `free_axes`, `combine`,
+  `canonical`. A reducing term may state the `range` its axis walks; the
   coordinates the range reads join the lift's trailing params, so they are part of what the term is evaluated over.
   A range may also read the value of an operand that is one value for the whole walk, spelled as the lift's param
   for it (`applied_range` spells it as the operand result, as `applied` does the lift): the tree's pruning and the

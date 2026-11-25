@@ -1732,6 +1732,22 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     set. A load-vectorizer change that widens a packed weight's byte loads in a serial loop sped the fused
     down-and-sum from 16.4 to 14.3 us at one row and from 63.5 to 51.2 at eight; no kernel set recorded here uses that
     kernel and the change moves code of other models' goldens, so it was left out.
+- **The 4K first token after the decode round: no slip (2026-11-24).** Round 3's A B B A read the 4K first token
+  about 20 ms slower on its branch (1.205-1.227 s against 1.189-1.200). Checked on the commit before it merged
+  (`c2ccebf41`) against its merge (`6828dd995`): three boots a side in two waves (before, round 3, round 3; then
+  round 3, before, before), one server working at a time, 12 timed prompts per boot and length after a first one
+  dropped. Median and range of the 30 runs per side, and the medians of the three boots:
+
+  | First token | Before | Round 3 | Boots, before | Boots, round 3 |
+  | --- | ---: | ---: | --- | --- |
+  | 1K | 0.637 s (0.620-0.678) | 0.625 s (0.608-0.674) | 0.629-0.663 | 0.625-0.629 |
+  | 4K | 1.206 s (1.199-1.228) | 1.207 s (1.191-1.244) | 1.203-1.213 | 1.203-1.239 |
+  | 8K | 2.222 s (2.211-2.294) | 2.215 s (2.204-2.279) | 2.215-2.266 | 2.212-2.218 |
+
+  Most calls of five runs span 10-20 ms, but a boot's median moves by up to 35 ms against other boots of the same tree,
+  and sometimes between two calls on one boot (round 3's first boot read 4K at 1.242 s, then 1.214). Each side had
+  one such boot: 4K on round 3's first, 8K on the earlier commit's first, 1K on its third. Round 3's 20 ms was one,
+  so it is noise and the round left prefill unchanged. A first-token claim between trees needs three boots a side.
 - **A tune that measures a kernel set's pieces before the set is compared (2026-11-24).** The item the 2026-11-21
   round left for the search, main `10494ea1c`. A change to the tune only: a compile picks as before, so no golden,
   corpus case or prior result moves.
