@@ -98,10 +98,12 @@ cones, the edges between them and the seams `030_cut` offers do not depend on ho
 schedule's fork realizes that kernel over a state buffer (`serial_form`): the state a buffer the node owns and
 keeps every step of, a load of the state a load of that buffer one launch back (the seed at the first), and the
 `Carry` a store of its value at this step. The step's own algebra is untouched, so a contraction over the previous
-state is a contraction whose B slab is that buffer. A serial
-kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
-to completion before the next kernel's first, so pieces could not interleave step by step. Where the state lives
-is the row's `STAGE` at the state's route (`map.1/scan`), a site of the same schedule. Register storage realizes the ordered axis
+state is a contraction whose B slab is that buffer. The runner
+launches one kernel's steps to completion before the next kernel's first, so two pieces that read the state could
+not interleave step by step: `030_cut` cuts out of such a kernel only a cone that reads no state, which a kernel
+ahead of the loop computes for every step (below). Where the state lives
+is the row's `STAGE` at the state's route (`map.1/scan`), a site of the same schedule. Register storage realizes the
+ordered axis
 inside a CTA when every state read stays within its warp's rows. Shared storage does when the complete state
 belongs to one CTA per independent batch and fits the card's shared-memory limit; kernel lowering realizes it,
 keeping the scheduled reduction order and requested snapshots while moving the ordered axis into the CTA. Global
@@ -843,10 +845,13 @@ that canonical input:
   workspace at the address it computes, so each weight is read once. A channel that reads a coordinate only as
   `i // d` where another reads it plainly (GQA's k beside q) is computed by its own piece, once per group of `d`.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
-  an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
-  until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
-  materializes the cone feeding that
+  are not. A kernel that carries a state offers the seams whose cone reads no state: such a cone is the same at
+  whichever step reads it, so its kernel computes every step's cells ahead, the step among the workspace's
+  coordinates where the cone reads it, and the kernel that keeps the state reads them back. A cone that reads the
+  state runs inside the step and is no seam. Closure reads the complete lowered statement stream through `Body`'s
+  scope-aware dependence analysis: an axis bound by one loop does not scope its siblings, and dead-but-still-emitted
+  statements retain their free axes until a lowering pass removes them. A contraction's operand edges are seams of
+  the same class: cutting one materializes the cone feeding that
   operand into its own kernel and the contraction reads it back as an ordinary load. Every channel that computes
   one contraction — the same cone, weight and reduction once its free operand indices are abstracted — is one seam
   with one workspace in the contraction's own coordinates, each channel reading it at its own address; the

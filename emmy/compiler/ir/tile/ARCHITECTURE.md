@@ -55,8 +55,9 @@ size-one dim, which the normal form pins to `0` in every index over the state, h
 coordinate from the state's update and from every read of it, so a state's cell is its axes alone, and the step's
 affine reading and the split across the sequence count a read's coordinates against them.
 
-A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@map.1/scan=g<n>k[<p>]`, bare
-where the step has no reduction of its own; offered by `030_cut` through `_split.realize_carry_split`). It needs
+A kernel that carries a state takes the cuts of any kernel at the seams whose cone reads no state (`030_cut`), and
+a state has one kernel-set decision of its own, the **split across the sequence** (`REDUCE@map.1/scan=g<n>k[<p>]`,
+bare where the step has no reduction of its own; offered by `030_cut` through `_split.realize_carry_split`). It needs
 the step AFFINE in the state and column-wise (`Fold.affine`, asked of the step with the state's name, cells and
 next value: every load of the state keeps the cell's own coordinate at every position but one), because then a
 part's steps compose as an affine map `S ← A·S + b`. A step that is not affine (one that multiplies two reads of

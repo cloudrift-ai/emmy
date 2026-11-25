@@ -50,7 +50,7 @@ from emmy.compiler.ir.pure.fold import (
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Carry, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import (
     UnbindableProjection,
@@ -293,7 +293,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         for edge in site.node.operands
         if isinstance(edge, Fold) and edge.as_slab() is None and edge.axis is None
     }
-    outer = tuple(axis.name for axis in (*tile.place.free, *(axis for store in tile.output_specs for axis in store.sweep)))
+    held = (*tile.place.serial, *tile.place.free)
+    outer = tuple(axis.name for axis in (*held, *(axis for store in tile.output_specs for axis in store.sweep)))
     occurrence_axes: dict[int, list[tuple]] = {}
     for site in all_sites[1:]:
         occurrence_axes.setdefault(id(site.node), []).append((*outer, *site.scope))
@@ -303,12 +304,17 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     narrowed = _narrowed_reads(tile)
     taken = _kept_components(tile)
     stored = _stored_values(tile)
+    states = {spec.write.name for spec in tile.states}
     out: list[CutSite] = []
     seen: set[int] = set()
     for site in family_sites("PLACE", all_sites):
         node = site.node
         scopes = occurrence_axes.get(id(node), ())
         if not isinstance(node, Fold) or id(node) in seen or not scopes:
+            continue
+        if states & _buffer_reads(node):
+            # The cone reads a carried state: it runs inside the step, after the step before it. Its own kernel
+            # would run every step before the first of this one.
             continue
         if not all(_closed_at(node, scope) for scope in scopes):
             continue
@@ -1853,14 +1859,15 @@ def _buffer_reads(node: Fold) -> set[str]:
     return out
 
 
-def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = ()) -> list[str]:
-    """A piece's graph inputs: its workspaces, then every buffer of ``root``'s the piece reads.
+def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = (), stores: tuple = ()) -> list[str]:
+    """A piece's graph inputs: its workspaces, then every buffer of ``root``'s the piece reads — and the buffer a
+    state among its ``stores`` starts from.
 
     The read set is the STORED tree's (:func:`_buffer_reads`), walked through the operand edges a
     body cannot reach. A walk that stopped at the stored body named fewer inputs than the kernel
     went on to read; the workspace producers then had no consumer edge, were pruned as orphans,
     and the launch asked for a buffer nothing had allocated."""
-    reads = _buffer_reads(fold)
+    reads = _buffer_reads(fold) | {store.write.seed for store in stores if isinstance(store.write, Carry)}
     return [*first, *(name for name in root.inputs if name in reads)]
 
 
@@ -2421,7 +2428,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         fragment,
         output_root(root, consumer_outputs),
         consumer,
-        _piece_inputs(root, consumer.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
+        _piece_inputs(root, consumer.op, tuple(buffer for buffer in all_buffers if buffer in reads), consumer.output_specs),
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, spelled, tile)
