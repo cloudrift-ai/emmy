@@ -141,8 +141,11 @@ line.
 
 `numbering/values.rs` is the value numbering (`value_numbers`); `digest.rs` the scope-tree hash, the use-keyed buffer
 roles and the digest; `congruence.rs` the congruent carried states (`congruent_states`), numbered with every grouped
-state keyed by its group until the groups hold. Statements are keyed by their position in the body they sit in (a
-`StmtRef`), so a body that holds one statement object twice numbers it twice and nothing is copied first; digest
+state keyed by its group until the groups hold; `advance.rs` the proof that bodies are one step taken again and
+again (`prove`), over the numbering with coordinate integers apart (`value_numbers_apart`), which no kernel identity
+reads; the digest over that numbering with those integers left out (`digest_apart`, `identity_apart`) is the key a
+body shares with the same computation at other offsets. Statements are keyed by their position in the body they sit
+in (a `StmtRef`), so a body that holds one statement object twice numbers it twice and nothing is copied first; digest
 material is a `Key` tree hashed with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total
 order. A value carries its parameters to every statement that reads it, so a `Param` is shared, not copied, and keeps a
 fingerprint; inside a key it hashes, compares and orders as the key it holds. The operands of a commutative operation that share a number take the order whose layout key is least under a

@@ -98,10 +98,12 @@ cones, the edges between them and the seams `030_cut` offers do not depend on ho
 schedule's fork realizes that kernel over a state buffer (`serial_form`): the state a buffer the node owns and
 keeps every step of, a load of the state a load of that buffer one launch back (the seed at the first), and the
 `Carry` a store of its value at this step. The step's own algebra is untouched, so a contraction over the previous
-state is a contraction whose B slab is that buffer. A serial
-kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
-to completion before the next kernel's first, so pieces could not interleave step by step. Where the state lives
-is the row's `STAGE` at the state's route (`map.1/scan`), a site of the same schedule. Register storage realizes the ordered axis
+state is a contraction whose B slab is that buffer. The runner
+launches one kernel's steps to completion before the next kernel's first, so two pieces that read the state could
+not interleave step by step: `030_cut` cuts out of such a kernel only a cone that reads no state, which a kernel
+ahead of the loop computes for every step (below). Where the state lives
+is the row's `STAGE` at the state's route (`map.1/scan`), a site of the same schedule. Register storage realizes the
+ordered axis
 inside a CTA when every state read stays within its warp's rows. Shared storage does when the complete state
 belongs to one CTA per independent batch and fits the card's shared-memory limit; kernel lowering realizes it,
 keeping the scheduled reduction order and requested snapshots while moving the ordered axis into the CTA. Global
@@ -806,30 +808,49 @@ chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-d
 `O(j)`. No cut repairs that — a cut materializes within one target, and chunk `j+1`'s target recomputes what chunk
 `j`'s stored.
 
-`loop/fusion/005_roll_recurrence` rolls it BEFORE fusion inlines it, while the structure is still plain. The states
-are a chain of nodes of one shape — the same body once its integer literals are taken out (load
-anchors, mask bounds, static loop extents) — each depending on the last. A step is what lies between two of
-them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
-reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
-shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a
-Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Each step is spliced into one body by the
-fusion rule's own splicer under step-independent buffer names, the literals'
-deltas are read off the first two, and the first step advanced `j` times must spell step `j`'s body for every `j`. A
-chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one it
-writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
+The merge rule rolls it where it would have inlined it (`loop/fusion/_recurrence`, entered from
+`010_merge_loop_ops`): before it splices any region it rolls the recurrences the regions hold, the largest first,
+and the regions it splices are those of the graph the rolls leave, since a kernel that carries a state is in no
+region. A roll is a splice with more asked of its nodes, in three parts kept apart: the ways to read part of a
+region as a recurrence, the proof of one, and the kernel written. The readings are held to the proof largest first,
+by the nodes their steps hold, and the first that is proved is written: a short recurrence that shares a state with
+a long one, a softmax's own division ahead of a Sinkhorn's row step, would otherwise be taken first and leave the
+long one a step short.
+
+**The readings.** The copies of a step are nodes of one region, what fusion would splice into one kernel, so a region
+is where they are looked for. The states are a chain of its nodes that store one tensor type and have one body once
+the integers of its coordinates are left out (load anchors, mask bounds, static loop extents: `Body.identity_apart`),
+each depending on the last. A step is what lies between two of them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first
+step is what the first state needs beyond what every step reads, and its state is the seed: the one buffer of the
+state's shape whose ancestry, taken out, leaves a first step shaped like every later one — the zeros the loop was
+seeded with, or the tensor it started from (a softmax before a Sinkhorn), which the carrier reads before its first
+step (`Carry.seed`). A reading may take every second state, where the states alternate two bodies (a row step, then
+a column step).
+
+**The proof.** Each step is spliced into one body by the fusion rule's own splicer under step-independent buffer
+names, and the steps must be one step taken again and again (`prove`). The proof is the crate's (`numbering::prove`,
+`ir/ARCHITECTURE.md`): the steps number alike with the integers of their coordinate expressions and static extents
+apart, statement by statement and scope by scope, and every such integer moves by one amount per step. It pairs
+statements by what they compute and where they nest, never by where they stand. Steps that read other buffers are
+other computations, the layers of a model each with its weights, and are no chain at all. A chain that is not one
+step advanced is left alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel.
+
+A chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one
+it writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
 straight-line code that fusion inlines once, and rolling it would only store every state. This is a structural
-distinction, not a size or speed threshold. A reduction whose extent grows with the step runs at its
-widest in the rolled body and folds its identity past the step's own bound — the mask the tracer itself spells a
-partial reduction with. Only then does one kernel replace the chain. It carries the state (`Carry`,
-`ir/ARCHITECTURE.md`) and stores what each step kept — the state and any other buffer read outside that step — with
-the step as its leading axis. A state nothing reads but the next step (a triangular inverse's row substitutions, a
-Sinkhorn iteration) is stored for no one until the last: its store has the state's shape and no step axis, each step
-stores over the last one's, and the one reader reads the whole of it. Ordinary fusion then inlines one slice of those
-stores per replaced buffer into its reader. A chain whose states alternate two
-bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
-alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion
-splices whole, up to the splicer's construction bound. A kernel that carries a state is a fusion region of its own
-(`carries_state`): the splice inlines a store into its readers, and a state is stored once per step.
+distinction, not a size or speed threshold.
+
+**The kernel.** One kernel replaces the chain. It carries the state (`Carry`, `ir/ARCHITECTURE.md`) and stores what
+each step kept — the state and any other buffer read outside that step — with the step as its leading axis. A
+reduction whose extent grows with the step runs at its widest in the rolled body and folds its identity past the
+step's own bound — the mask the tracer itself spells a partial reduction with. A state nothing reads but the next step
+(a triangular inverse's row substitutions, a Sinkhorn iteration) is stored for no one until the last: its store has
+the state's shape and no step axis, each step stores over the last one's, and the one reader reads the whole of it.
+Ordinary fusion then inlines one slice of those stores per replaced buffer into its reader.
+
+What the roll leaves unrolled, fusion splices whole, up to the splicer's construction bound. A kernel that carries a
+state is a fusion region of its own (`carries_state`): the splice inlines a store into its readers, and a state is
+stored once per step.
 
 ## Kernel boundaries after maximal fusion
 
@@ -843,10 +864,13 @@ that canonical input:
   workspace at the address it computes, so each weight is read once. A channel that reads a coordinate only as
   `i // d` where another reads it plainly (GQA's k beside q) is computed by its own piece, once per group of `d`.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
-  an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
-  until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
-  materializes the cone feeding that
+  are not. A kernel that carries a state offers the seams whose cone reads no state: such a cone is the same at
+  whichever step reads it, so its kernel computes every step's cells ahead, the step among the workspace's
+  coordinates where the cone reads it, and the kernel that keeps the state reads them back. A cone that reads the
+  state runs inside the step and is no seam. Closure reads the complete lowered statement stream through `Body`'s
+  scope-aware dependence analysis: an axis bound by one loop does not scope its siblings, and dead-but-still-emitted
+  statements retain their free axes until a lowering pass removes them. A contraction's operand edges are seams of
+  the same class: cutting one materializes the cone feeding that
   operand into its own kernel and the contraction reads it back as an ordinary load. Every channel that computes
   one contraction — the same cone, weight and reduction once its free operand indices are abstracted — is one seam
   with one workspace in the contraction's own coordinates, each channel reading it at its own address; the
