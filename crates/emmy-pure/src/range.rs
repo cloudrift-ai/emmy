@@ -13,7 +13,7 @@ use std::sync::Arc;
 use emmy_ir::axis::{Axis, Dim};
 use emmy_ir::body::Body;
 use emmy_ir::elementwise::Operation;
-use emmy_ir::expr::{Expr, ExprClass, Expression, SimplifyCtx};
+use emmy_ir::expr::{Expr, ExprClass, Expression, Interval, SimplifyCtx};
 use emmy_ir::normalize::ties::unranked;
 use emmy_ir::normalize::{affine_sum, affine_terms};
 use emmy_ir::statement::Statement;
@@ -226,8 +226,20 @@ impl Fold {
                 window: slot.window.clone(),
             });
         }
+        // A read below folds under the block's own length: a chunk index such as `(length * block + axis) / chunk`
+        // is one value along a block that lies inside a chunk, so what is computed per chunk is computed once.
         let reads = TermRewrite {
             sigma: HashMap::from([(axis, walk.read())]),
+            folding: Some(table.iter().fold(SimplifyCtx::empty(), |ctx, known| {
+                match known.extent.expression.int_literal() {
+                    Some(extent) => ctx.extend(
+                        known.name.as_str(),
+                        Interval::new(0, i128::from(extent) - 1),
+                        None,
+                    ),
+                    None => ctx,
+                }
+            })),
             ..TermRewrite::default()
         };
         // An operand that does not read the axis is the term it was, and one reached twice is rewritten once:

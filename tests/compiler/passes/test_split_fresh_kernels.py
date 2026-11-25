@@ -458,6 +458,21 @@ def test_a_fold_over_a_whole_row_statistic_refuses_the_split(code, splits, monke
             split_forks(None, root)
 
 
+def test_a_split_piece_computes_a_per_chunk_statistic_once_a_block(monkeypatch) -> None:
+    """A block that lies inside one chunk reads the chunk by the block's coordinate alone in the form a tier takes,
+    so the tier computes the chunk's statistic once a block. Read at ``(length * block + k) / chunk`` it moved with
+    every position, and the piece computed the statistic again for each."""
+    from emmy.commands.trace import graph_from_code
+
+    monkeypatch.setenv("EMMY_REDUCE", "g8k")
+    code = (
+        "x = torch.randn(4, 4, 512, dtype=torch.float16); w = torch.randn(2048, 8, dtype=torch.float16); "
+        "(x * (x.square().mean(-1, keepdim=True) + 1e-6).rsqrt()).reshape(4, 2048) @ w"
+    )
+    partial, _merge = _tile_pieces(graph_from_code(code)[0])
+    assert "load x[a1, a0 / 2, a4]" in partial.scheduled().pretty_body()
+
+
 @pytest.mark.parametrize("stat_axis", ["k", "r"])
 def test_a_contraction_statistic_must_not_share_the_sliced_axis(stat_axis, monkeypatch) -> None:
     """A cut piece can reuse one axis name for two lexical binders. Its statistic must stay whole."""
