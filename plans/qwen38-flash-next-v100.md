@@ -1748,6 +1748,31 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   and sometimes between two calls on one boot (round 3's first boot read 4K at 1.242 s, then 1.214). Each side had
   one such boot: 4K on round 3's first, 8K on the earlier commit's first, 1K on its third. Round 3's 20 ms was one,
   so it is noise and the round left prefill unchanged. A first-token claim between trees needs three boots a side.
+- **A split piece computes a per-chunk value once a block again (2026-11-25).** `main` could not boot this model:
+  two programs failed a strict compile. Since #1451 a piece of a cross-CTA split keeps the fold's reads and walks a
+  range, and the rebase that gives a tier its form folded nothing, so a chunk index `(length * block + k) / chunk`
+  kept `k` and the norm over a chunk was computed for every staged element. The restamp of #1467 then left five such
+  rows unmeasured. The rebase now folds a read under the bounds of the axis table, and a term the fold leaves without
+  the coordinate no longer declares it. No identity moves.
+
+  | Split piece of (cold) | Before #1451 | On `main` | Fixed |
+  | --- | ---: | ---: | ---: |
+  | post4096 | 318 us | 55,003 us | 334 us |
+  | pre4096 | 579 us | 1,093 us | 669 us |
+  | Symbolic pre program, 512 tokens | 114 us | 182 us | 123 us |
+  | pre8 | 20.5 us | not measured | 21.5 us |
+  | post8 | 11.3 us | 12.3 us | 12.3 us |
+
+  - Still slower: the pre pieces. The statistic is ahead of the staging loop, but its divide and reciprocal square
+    root repeat at every fill step. A cone is split at the contraction seam when it is built, before a block exists.
+  - The decode rows the program tune proposed are not recorded. pre8's gain was the unmeasured piece. The 4- and
+    8-row slot programs are faster cold (72.2 to 66.4 us, 123.9 to 116.0 us) and slower in serving, both boots: 158.2
+    against 159.4 tok/s at four requests and 245.1 against 247.2 at eight.
+  - Serving on the fixed tree, two boots: 15.2 ms per token at one request, 95.3 tok/s at two, 159.4 at four, 247.2 at
+    eight; first token 0.62 s at 1K and 1.20-1.24 s at 4K. That is the decode round. Torch peaks by the probe are
+    equal to its in all four phases, GSM8K is 126 of 128, and the six greedy texts are equal across four boots.
+  - A row a restamp leaves unmeasured shows nowhere until a strict compile or a boot. Strict-compile every program
+    of a recipe golden, GPU-free, after any restamp.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
