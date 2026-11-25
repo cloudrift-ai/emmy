@@ -936,7 +936,8 @@ def _program(
         decodes in-graph as the plugin's does. The inputs are
         constants of the step when the device holds every expert; below that budget they are paged one expert per
         page (``config.gen_expert_slots``): the budget's first experts resident on the device, the rest in
-        host memory, and a token's picks of device slots holding the most recently routed of those; ``paged`` off
+        host memory, and as many device slots as one decode launch lists picks, a verify step's rows' with a drafter,
+        holding the most recently routed of those; ``paged`` off
         keeps them on the device whatever the budget. One row runs the plugin's own one-row fixed-slot program."""
         gate, stacked = routed
         k = gate.top_k
@@ -947,7 +948,9 @@ def _program(
         if fmt not in (None, "f8e4m3", "f8e5m2"):
             raise ValueError(f"native generation runs 16-bit or FP8 routed experts, not {fmt}")
         coded = {n: (fmt, tuple(tensors[f"{n}_scale"].shape), "f32") for n in ("w_gate_up", "w_down")} if fmt else {}
-        paging = config.gen_expert_slots(gate.num_experts, k) if paged else None
+        # The slots hold every pick one decode launch lists: a verify step's rows' with a drafter, one row's without.
+        listed = k * (drafter.drafts + 1 if drafter is not None else 1)
+        paging = config.gen_expert_slots(gate.num_experts, listed) if paged else None
         paged = paging is not None
         names = ["w_gate_up", "w_down", *(f"{name}_scale" for name in coded)]
         inputs = [f"{home}.{name}" for name in names]

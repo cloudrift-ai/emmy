@@ -313,11 +313,15 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
 
 
 @pytest.mark.parametrize(
-    ("layer_types", "dtype", "prefill_size"),
-    [(["full_attention"] * 2, torch.bfloat16, 3), (["linear_attention", "full_attention"], torch.float16, 4)],
-    ids=["attention", "gdn"],
+    ("layer_types", "dtype", "prefill_size", "experts_gpu"),
+    [
+        (["full_attention"] * 2, torch.bfloat16, 3, None),
+        (["linear_attention", "full_attention"], torch.float16, 4, None),
+        (["full_attention"] * 2, torch.bfloat16, 3, 7),
+    ],
+    ids=["attention", "gdn", "paged-experts"],
 )
-def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_types, dtype, prefill_size):
+def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_types, dtype, prefill_size, experts_gpu):
     """Speculative decoding's gate on a tiny Qwen3.5 and a one-layer multi-token-prediction head drafting two tokens:
     at temperature zero the verify steps generate transformers' greedy tokens, the same pack's with the drafter left
     unloaded, captured or not, through chunked prefill, which writes the drafter's cache too. The eight-token prompt and
@@ -330,7 +334,8 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_typ
     tokens' rows. At positive temperature every step decodes one token. With a Gated DeltaNet layer, a verify step
     keeps the state after each of its rows and the next step continues from the one after its last accepted row; its
     programs (one row, the 4-row chunk, the 3-row verify) are twins of the lane's hybrid, so they compile from the lane
-    golden's cuts."""
+    golden's cuts. With MoE layers paged at seven of eight experts, the slots hold a verify step's six picks; that
+    model never repeats a token, so no draft stands, and every step is still a verify step over three rows."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
@@ -341,7 +346,11 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_typ
     monkeypatch.setenv("EMMY_GEN_M1_TIER", "0")
     monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "4")
     context, new = 48, 24
-    model = qwen3_5_model(max_position_embeddings=context, layer_types=layer_types).to(dtype)
+    if experts_gpu is None:
+        model = qwen3_5_model(max_position_embeddings=context, layer_types=layer_types).to(dtype)
+    else:
+        monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(experts_gpu))
+        model = qwen3_5_moe_model(max_position_embeddings=context, layer_types=layer_types).to(dtype)
     model.config._attn_implementation = "eager"
     model.save_pretrained(tmp_path / "checkpoint")
     add_mtp_head(tmp_path / "checkpoint", repeats=True)
@@ -384,7 +393,7 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_typ
             assert plain == greedy and set(steps) == {1}
             for capture in (True, False):
                 drafted, steps = asyncio.run(run(prompt, True, capture))
-                assert drafted == greedy and steps[-1] == 3 and len(steps) < new
+                assert drafted == greedy and (experts_gpu is not None or (steps[-1] == 3 and len(steps) < new))
             sampled = [asyncio.run(run(prompt, draft, True, temperature=0.8)) for draft in (False, True)]
             assert sampled[0] == sampled[1] and set(sampled[1][1]) == {1}
 
