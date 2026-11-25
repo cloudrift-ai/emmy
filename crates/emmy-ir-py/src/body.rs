@@ -633,6 +633,14 @@ impl PyBody {
             emmy_ir::identity::canonicalize_identity(&self.body, cluster, colors.as_ref()).py()?;
         Ok((identity.key, str_tuple(py, &identity.arguments)?))
     }
+
+    /// The key this body shares with the same computation at other offsets, bounds and static extents: its exact
+    /// identity with the integer of every affine coordinate expression and every static loop extent left out.
+    /// Bodies with one such key are candidates for the copies of one step, which `prove_steps` decides. It is no
+    /// kernel's identity: nothing is keyed by it and nothing stores it.
+    fn identity_apart(&self) -> PyResult<String> {
+        emmy_ir::identity::identity_apart(&self.body).py()
+    }
 }
 
 /// A dependence cone over one scope level: the members, in body order, and the names read from outside them.
@@ -985,13 +993,74 @@ pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> PyResult<String>
     Ok(promoted.text().to_string())
 }
 
+/// The proof that bodies are one step taken again and again (`emmy_ir::numbering::Proved`), and that step at any
+/// place in the walk.
+#[pyclass(frozen, module = "emmy.compiler.ir.stmt", name = "Advance")]
+pub struct PyAdvance {
+    proved: emmy_ir::numbering::Proved,
+}
+
+#[pymethods]
+impl PyAdvance {
+    /// How many of the bodies, from the first, are the step: at least two.
+    #[getter]
+    fn steps(&self) -> usize {
+        self.proved.steps
+    }
+
+    /// Why the body after those is no such step, where there is one.
+    #[getter]
+    fn stopped(&self) -> Option<String> {
+        self.proved.stopped.clone()
+    }
+
+    /// Every integer that moves: its value in the first body and its move per step.
+    #[getter]
+    fn moving(&self) -> Vec<(i64, i64)> {
+        self.proved.moving()
+    }
+
+    /// The step at `by`: a step number, or the name of the axis of the loop that walks the steps, which then
+    /// takes `steps` of them.
+    #[pyo3(signature = (by, steps = 1))]
+    fn at<'py>(
+        &self,
+        py: Python<'py>,
+        by: &Bound<'py, PyAny>,
+        steps: usize,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let by = match by.extract::<i64>() {
+            Ok(step) => emmy_ir::numbering::By::Step(step),
+            Err(_) => emmy_ir::numbering::By::Axis(by.extract::<String>()?.as_str().into()),
+        };
+        let body = self.proved.at(&by, steps).map_err(PyValueError::new_err)?;
+        PyBody::wrap(py, &body)
+    }
+}
+
+/// The proof that `bodies` are one step taken again and again, as far as they are (`emmy_ir::numbering::prove`).
+/// A `ValueError` says why the second body is not the first a step later.
+#[pyfunction]
+pub fn prove_steps(bodies: Vec<Bound<'_, PyAny>>) -> PyResult<PyAdvance> {
+    let bodies: Vec<Body> = bodies
+        .iter()
+        .map(PyBody::from_iterable)
+        .collect::<PyResult<_>>()?;
+    match emmy_ir::numbering::prove(&bodies) {
+        Ok(proved) => Ok(PyAdvance { proved }),
+        Err(why) => Err(PyValueError::new_err(why)),
+    }
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBody>()?;
     m.add_class::<PyCone>()?;
     m.add_class::<PySubroutine>()?;
+    m.add_class::<PyAdvance>()?;
     m.add_function(wrap_pyfunction!(parse_body, m)?)?;
     m.add_function(wrap_pyfunction!(pretty_body, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_body, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_steps, m)?)?;
     m.add_function(wrap_pyfunction!(optimize_body, m)?)?;
     m.add_function(wrap_pyfunction!(check_types, m)?)?;
     m.add_function(wrap_pyfunction!(check_input, m)?)?;

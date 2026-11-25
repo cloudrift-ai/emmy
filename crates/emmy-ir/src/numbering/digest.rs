@@ -3,7 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{Chains, Key, Number, Numbering, Tag, hash_parts, params_key, value_numbers};
+use super::values::numbered;
+use super::{Chains, Key, Number, Numbering, Param, Tag, hash_parts, offset_of, params_key};
 use crate::body::{Body, StmtRef};
 use crate::order::ordering_constraints;
 use crate::{Name, locked};
@@ -96,6 +97,86 @@ fn member_tree(
             ])
         }
     }
+}
+
+/// The scope tree of `body` under a numbering with its integers apart (`value_numbers_apart`), as [`scope_tree`]
+/// builds it: each block by its header, its parameters, its children and the members it follows for an effect, each
+/// leaf by its number and its parameters, each scope's members sorted. An integer taken apart is keyed as `integer`
+/// keys it, and `sites` takes every one in the order of the sorted tree. Two members that key alike keep the order
+/// they are written in.
+pub fn scope_tree_apart(
+    numbering: &Numbering,
+    body: &Body,
+    integer: &dyn Fn(i64, i64) -> Key,
+    effects: &mut Effects,
+    sites: &mut Vec<i64>,
+) -> Number {
+    let order = effects
+        .entry(body_key(body))
+        .or_insert_with(|| effect_order(body))
+        .clone();
+    let mut members: Vec<(Number, Vec<i64>)> = Vec::with_capacity(body.len());
+    for (index, sources) in order.iter().enumerate() {
+        let mut preceding: Vec<Key> = sources
+            .iter()
+            .map(|source| Key::Num(members[*source].0))
+            .collect();
+        preceding.sort();
+        let here = body.at(index);
+        let ordinal = numbering.ordinal(&here);
+        let mut own = Vec::new();
+        let keyed = |params: &[Param], own: &mut Vec<i64>| {
+            Key::Tuple(
+                params
+                    .iter()
+                    .map(|param| match offset_of(param) {
+                        Some((value, site)) => {
+                            own.push(site);
+                            integer(site, value)
+                        }
+                        None => Key::Param(param.clone()),
+                    })
+                    .collect(),
+            )
+        };
+        let number = match &numbering.blocks[ordinal] {
+            Some((header, params)) => {
+                let params = keyed(params, &mut own);
+                let children: Vec<Key> = here
+                    .stmt()
+                    .nested()
+                    .iter()
+                    .map(|child| {
+                        Key::Num(scope_tree_apart(
+                            numbering, child, integer, effects, &mut own,
+                        ))
+                    })
+                    .collect();
+                hash_parts([
+                    Key::tag(Tag::Block),
+                    header.clone(),
+                    params,
+                    Key::Tuple(children),
+                    Key::Tuple(preceding),
+                ])
+            }
+            None => {
+                let (number, params) = match &numbering.numbers[ordinal] {
+                    Some((number, params)) => (Key::Num(*number), keyed(params, &mut own)),
+                    None => (Key::None, Key::Tuple(Vec::new())),
+                };
+                hash_parts([Key::tag(Tag::Stmt), number, params, Key::Tuple(preceding)])
+            }
+        };
+        members.push((number, own));
+    }
+    members.sort_by_key(|member| member.0);
+    let mut numbers = Vec::with_capacity(members.len());
+    for (number, own) in members {
+        numbers.push(Key::Num(number));
+        sites.extend(own);
+    }
+    hash_parts(numbers)
 }
 
 /// Every resource's forward cone at statement grain: the sorted numbers of every statement that reads, directly or
@@ -192,16 +273,17 @@ fn partition(cells: &Cells) -> Vec<Vec<Name>> {
 }
 
 /// Number until the open resources' cells stop splitting: each is colored by its type and by everything downstream
-/// of it. `cell` is updated in place.
+/// of it. `cell` is updated in place. `apart` numbers with the coordinate integers apart.
 fn cells(
     body: &Body,
     colors: Colors,
     rank: &HashMap<Name, usize>,
     cell: &mut Cells,
     chains: Chains,
+    apart: bool,
 ) -> Numbering {
     let number = |cell: &Cells| {
-        value_numbers(
+        numbered(
             body,
             &|name| {
                 Keyed {
@@ -213,6 +295,7 @@ fn cells(
                 .key(name)
             },
             chains,
+            apart,
         )
     };
     let mut numbering = number(cell);
@@ -244,7 +327,14 @@ fn cells(
 /// Every buffer's and carried state's role at a glance: the rank of its cell of use among the cells.
 pub fn roles(body: &Body, colors: Colors) -> HashMap<Name, usize> {
     let mut cell: Cells = HashMap::new();
-    cells(body, colors, &HashMap::new(), &mut cell, Chains::Flat);
+    cells(
+        body,
+        colors,
+        &HashMap::new(),
+        &mut cell,
+        Chains::Flat,
+        false,
+    );
     let mut values: Vec<&Key> = cell.values().collect();
     values.sort();
     values.dedup();
@@ -255,10 +345,28 @@ pub fn roles(body: &Body, colors: Colors) -> HashMap<Name, usize> {
 
 /// The body's identity and its external buffers in role order.
 pub fn digest(body: &Body, colors: Colors, chains: Chains) -> (Number, Vec<Name>) {
+    ranked(body, colors, chains, false)
+}
+
+/// [`digest`] with the integer of every affine coordinate expression and every static loop extent left out
+/// ([`value_numbers_apart`]): what the body shares with the same computation at other offsets, bounds and extents.
+/// Bodies that share it are candidates for the copies of one step, which [`prove`](super::prove) decides.
+pub fn digest_apart(body: &Body, colors: Colors, chains: Chains) -> (Number, Vec<Name>) {
+    ranked(body, colors, chains, true)
+}
+
+fn ranked(body: &Body, colors: Colors, chains: Chains, apart: bool) -> (Number, Vec<Name>) {
     let mut rank: HashMap<Name, usize> = HashMap::new();
     let mut cell: Cells = HashMap::new();
     let mut effects: Effects = HashMap::new();
-    let numbering = cells(body, colors, &rank, &mut cell, chains);
+    let hashed = |numbering: &Numbering, effects: &mut Effects| {
+        if apart {
+            scope_tree_apart(numbering, body, &|_, _| Key::None, effects, &mut Vec::new())
+        } else {
+            scope_tree(numbering, body, effects)
+        }
+    };
+    let numbering = cells(body, colors, &rank, &mut cell, chains, apart);
     let names: Vec<Name> = numbering
         .buffers
         .iter()
@@ -296,12 +404,8 @@ pub fn digest(body: &Body, colors: Colors, chains: Chains) -> (Number, Vec<Name>
                         cell: &cell,
                         pick: Some(name),
                     };
-                    let tree = scope_tree(
-                        &value_numbers(body, &|n| keyed.key(n), chains),
-                        body,
-                        &mut effects,
-                    );
-                    (*name, tree)
+                    let numbering = numbered(body, &|n| keyed.key(n), chains, apart);
+                    (*name, hashed(&numbering, &mut effects))
                 })
                 .collect();
             group.sort_by(|a, b| certificate[a].cmp(&certificate[b]).then_with(|| a.cmp(b)));
@@ -319,7 +423,7 @@ pub fn digest(body: &Body, colors: Colors, chains: Chains) -> (Number, Vec<Name>
             }
         }
         if rank.len() < names.len() {
-            cells(body, colors, &rank, &mut cell, chains);
+            cells(body, colors, &rank, &mut cell, chains, apart);
         }
     }
     let keyed = Keyed {
@@ -328,8 +432,8 @@ pub fn digest(body: &Body, colors: Colors, chains: Chains) -> (Number, Vec<Name>
         cell: &cell,
         pick: None,
     };
-    let final_numbering = value_numbers(body, &|n| keyed.key(n), chains);
-    let tree = scope_tree(&final_numbering, body, &mut effects);
+    let final_numbering = numbered(body, &|n| keyed.key(n), chains, apart);
+    let tree = hashed(&final_numbering, &mut effects);
     let mut buffers = final_numbering.buffers.clone();
     buffers.sort_by_key(|name| rank[name]);
     (tree, buffers)
