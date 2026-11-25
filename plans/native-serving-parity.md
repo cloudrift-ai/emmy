@@ -668,6 +668,11 @@ What the session changes for the milestones:
     the 27B's width-3 program. Gate: every page list a verify launch names fits the slots, and the captured
     verify step spends <= 2 ms in paging programs and in-place expert reads together (11's bound held at the
     verify width); the TPOT cell itself is decided at 16. Needs 1, 11.
+    **2026-11-25, #1478, one card: gate met.** With a drafter, every decode launch keeps `k x (drafts + 1)` = 24
+    slots, 104 pages resident. The strict export needs no new row. Verify step under nsys: 42.6 → 22.7 ms. Expert
+    programs 19.2 → 3.0 ms (no in-place reads left), page copies 11.5 → 7.0 ms, paging programs 1.51 ms. Tokens the
+    same as main's. At 256 tokens: TPOT 16.17 → 8.99 ms (the bar's 13.2), first token 5.34 → 2.94 s. The GDN
+    programs are 5.3 ms of the verify step and are not the bottleneck.
 
 13. **The paged gate-up piece takes a tensor-core tile.** Once its weight is paged the 64-row expert program's
     gate-up piece is offered no tensor-core tile. This is a compiler change, not a wider offer: at one expert a page
