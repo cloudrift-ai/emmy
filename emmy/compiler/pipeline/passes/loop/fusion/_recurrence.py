@@ -53,10 +53,12 @@ _PERIODS = (1, 2)
 class Kinds:
     """What the roll reads of a graph that stands still, worked out once for every reading it is asked for.
 
-    ``of`` is, per loop of a region, what a state of a recurrence shares with the states after it: the region, the
-    shape and the type of what it stores, and its body once the integers of its coordinates and static extents are
-    left out (``Body.identity_apart``). The copies of a step are nodes of one region: what fusion would splice into
-    one kernel. ``alike`` is the loops of each kind and ``order`` the loops of ``of``, both in topological order.
+    ``of`` is, per loop of a region of two or more, what a state of a recurrence shares with the states after it:
+    the region, the shape and the type of what it stores, and its body once the integers of its coordinates and
+    static extents are left out (``Body.identity_apart``). The copies of a step are nodes of one region: what
+    fusion would splice into one kernel. A loop alone in its region starts no chain, and it is the kernel a
+    region was spliced into, whose body is the costly one to key. ``alike`` is the loops of each kind and
+    ``order`` the loops of ``of``, both in topological order.
     ``ancestors`` is, per node, itself and every node it descends from, and ``reads`` each buffer it reads with the
     node that stores it."""
 
@@ -84,6 +86,8 @@ class Kinds:
 def kinds(graph: Graph, partition: dict[str, frozenset[str]]) -> Kinds:
     of = {}
     for node_id, region in partition.items():
+        if len(region) < 2:
+            continue
         node = graph.nodes[node_id]
         of[node_id] = (region, node.outputs[0].shape, node.outputs[0].dtype, node.op.body.identity_apart())
     ancestors: dict[str, frozenset[str]] = {}
