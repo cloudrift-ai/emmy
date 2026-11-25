@@ -654,6 +654,11 @@ What the session changes for the milestones:
     twice (one run per expert launch, the second moving nothing). Now one run covers both launches.
     **Fourth card, 2026-11-22: gate met.** Paging programs 1.36 ms per one-row step, tokens the same as main's.
     The page copies (10.9 ms on this host's 25.6 GB/s link) are expert reads over the link, 12's question.
+    **2026-11-25, #1476: the pack exports strictly.** The follow-up above is done, and it was 12 twins, not 4: the
+    four cut roots, the attention rows #1467 demoted, and the 3-row attention, which #1451 re-traced (a golden check
+    never re-traces, so only a fresh serving trace shows it). All 71 twins deploy from the golden rows; the 4-row
+    tail is 72 us; the 3-row attention takes a split (5.26 ms → 180 us at 131,072 cached tokens). The strict pack
+    serves a 256-token prompt: first token 9.87 s, TPOT 25.5 ms (16 owns the bar).
 
 12. **Qwen3.6: slots sized to the verify step's picks.** A verify step's three rows route past the 8 slots, so
     the drafter buys almost nothing (a 44-52 ms drafted step against a 19.6-19.8 ms one-row step). The pager's
@@ -1018,6 +1023,10 @@ Perf ideas:
 
 Open items:
 
+- (2026-11-25) The 27B's verify-step attention may hold the program #1451 replaced, as Qwen3.6's did: `emmy golden
+  check` cannot see it. Compare a fresh `emmy trace --serving-twins` with the golden's programs before its next gate.
+- (2026-11-25) `emmy compile --help` still names `dolfstp`; with no stamp pass the string is read as one unknown
+  pass name and nothing past tracing runs. `dolftp` is the spelling that stops after the cut.
 - (2026-10-17) Needs a V100 record run: Qwen3.8 FP8's GDN rows (gdn16 `13e5d6`, gdn64 `353a47`) were restamped
   but not re-recorded or tuned after #1171.
 - (2026-10-22) Needs a record run on each card, after #1230's restamp: Qwen3.8 FP8 dropped 11 decisions on A100,
