@@ -1020,12 +1020,6 @@ impl PyAdvance {
         self.proved.moving()
     }
 
-    /// How many integers the first body's coordinate expressions and static extents hold.
-    #[getter]
-    fn integers(&self) -> usize {
-        self.proved.integers()
-    }
-
     /// The step at `by`: a step number, or the name of the axis of the loop that walks the steps, which then
     /// takes `steps` of them.
     #[pyo3(signature = (by, steps = 1))]

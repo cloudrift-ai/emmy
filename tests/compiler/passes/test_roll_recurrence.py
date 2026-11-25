@@ -272,11 +272,10 @@ def test_the_proof_gives_how_far_each_integer_moves_and_names_what_differs() -> 
     assert proved.moving == [(0, 4)] and proved.steps == 3
     assert LoopOp(body=proved.at(2)).body.structural_key(structural=False) == steps[2].structural_key(structural=False)
     assert "4 * `step`" in str(LoopOp(body=proved.at("step", 3)).body)
-    with pytest.raises(roll.Unproven, match="step 2 .* an integer of step 2 is 9, where 0 moving 4 a step gives 8"):
+    with pytest.raises(RuleSkipped, match="step 2 .* an integer of step 2 is 9, where 0 moving 4 a step gives 8"):
         roll.prove(steps[0], steps[1], LoopOp(body=parse_body(_read_at(9))).body)
-    with pytest.raises(RuleSkipped, match=r"step 1 reads \['h'\] where step 0 reads \['g'\]") as other:
+    with pytest.raises(RuleSkipped, match=r"step 1 reads \['h'\] where step 0 reads \['g'\]"):
         roll.prove(steps[0], LoopOp(body=parse_body(_read_at(4, "h"))).body)
-    assert not isinstance(other.value, roll.Unproven), "other buffers are other computations, not a step unproved"
 
 
 _GATED_DELTA_RULE = """

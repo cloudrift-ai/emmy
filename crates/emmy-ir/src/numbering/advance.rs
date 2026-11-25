@@ -194,11 +194,6 @@ impl Proved {
             .collect()
     }
 
-    /// How many integers the first body's coordinate expressions and static extents hold.
-    pub fn integers(&self) -> usize {
-        self.moves.len()
-    }
-
     /// The step at `by`: the first body with every integer moved to that step, or to the step the axis `by` names.
     /// A reduction whose extent grows with the step takes, under an axis, its widest extent over `steps` steps and
     /// walks the range of the step it is in; a loop that stores cannot grow so.

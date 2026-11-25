@@ -176,11 +176,6 @@ def _spliced(graph: Graph, region: set[str], state: str, stored: str) -> tuple[B
     return LoopOp(body=Body(merged.body).rename_buffers(names)).body, live, tuple(constants)
 
 
-class Unproven(RuleSkipped):
-    """Programs that pass for the copies of one step — as many nodes each, reading the same buffers beside their
-    state — and are not proved to be one: the difference :func:`prove` names."""
-
-
 def prove(*programs: Body):
     """The proof that ``programs`` are one step taken again and again, and that step at any place in the walk
     (the proof's ``at``): each program is the first with every integer of its coordinate expressions and static
@@ -188,7 +183,7 @@ def prove(*programs: Body):
 
     The crate's proof (``prove_steps``) pairs the statements of two programs by what they compute and where they
     nest, never by where they stand, and holds for the programs that are the first one's statements with other
-    integers. Raises :class:`Unproven` with the first difference."""
+    integers. Raises ``RuleSkipped`` with the first difference."""
     reads = [frozenset(load.input for load in body.loads) for body in programs]
     for index, read in enumerate(reads):
         if read != reads[0]:
@@ -197,9 +192,9 @@ def prove(*programs: Body):
     try:
         proved = prove_steps(list(programs))
     except ValueError as why:
-        raise Unproven(f"step 1 is not step 0 a step later: {why}") from None
+        raise RuleSkipped(f"step 1 is not step 0 a step later: {why}") from None
     if proved.steps < len(programs):
-        raise Unproven(f"step {proved.steps} is not step 0 {proved.steps} steps later: {proved.stopped}")
+        raise RuleSkipped(f"step {proved.steps} is not step 0 {proved.steps} steps later: {proved.stopped}")
     return proved
 
 
