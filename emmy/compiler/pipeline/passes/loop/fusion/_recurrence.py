@@ -29,9 +29,8 @@ written.
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
@@ -57,12 +56,29 @@ class Kinds:
     ``of`` is, per loop of a region, what a state of a recurrence shares with the states after it: the region, the
     shape and the type of what it stores, and its body once the integers of its coordinates and static extents are
     left out (``Body.identity_apart``). The copies of a step are nodes of one region: what fusion would splice into
-    one kernel. ``ancestors`` is, per node, itself and every node it descends from; ``order`` the loops of ``of`` in
-    topological order."""
+    one kernel. ``alike`` is the loops of each kind and ``order`` the loops of ``of``, both in topological order.
+    ``ancestors`` is, per node, itself and every node it descends from, and ``reads`` each buffer it reads with the
+    node that stores it."""
 
     of: dict[str, tuple]
-    ancestors: dict[str, frozenset[str]]
+    alike: dict[tuple, list[str]]
     order: list[str]
+    ancestors: dict[str, frozenset[str]]
+    reads: dict[str, tuple[tuple[str, str], ...]]
+    _between: dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]] = field(default_factory=dict)
+
+    def external(self, region: frozenset[str]) -> frozenset[str]:
+        """The buffers the nodes of ``region`` read that none of them stores."""
+        return frozenset(name for node_id in region for name, producer in self.reads[node_id] if producer not in region)
+
+    def step(self, before: str, after: str) -> tuple[frozenset[str], frozenset[str]]:
+        """The nodes between two states and the buffers they read from outside (:meth:`external`). The chains that
+        start at the states of one kind share their pairs, so each pair is worked out once."""
+        found = self._between.get((before, after))
+        if found is None:
+            region = self.ancestors[after] - self.ancestors[before]
+            found = self._between[before, after] = (region, self.external(region))
+        return found
 
 
 def kinds(graph: Graph, partition: dict[str, frozenset[str]]) -> Kinds:
@@ -71,18 +87,25 @@ def kinds(graph: Graph, partition: dict[str, frozenset[str]]) -> Kinds:
         node = graph.nodes[node_id]
         of[node_id] = (region, node.outputs[0].shape, node.outputs[0].dtype, node.op.body.identity_apart())
     ancestors: dict[str, frozenset[str]] = {}
+    reads: dict[str, tuple[tuple[str, str], ...]] = {}
     order = graph.topological_order()
     for node_id in order:
-        producers = (graph.producer(name) for name in graph.nodes[node_id].inputs)
-        ancestors[node_id] = frozenset({node_id}).union(*(ancestors[producer.id] for producer in producers if producer is not None))
-    return Kinds(of, ancestors, [node_id for node_id in order if node_id in of])
+        producers = [(name, graph.producer(name)) for name in graph.nodes[node_id].inputs]
+        producers = [(name, producer) for name, producer in producers if producer is not None]
+        reads[node_id] = tuple((name, producer.id) for name, producer in producers)
+        ancestors[node_id] = frozenset({node_id}).union(*(ancestors[producer.id] for _, producer in producers))
+    order = [node_id for node_id in order if node_id in of]
+    alike: dict[tuple, list[str]] = {}
+    for node_id in order:
+        alike.setdefault(of[node_id], []).append(node_id)
+    return Kinds(of, alike, order, ancestors, reads)
 
 
 def _chain(graph: Graph, first: Node, kind: Kinds) -> list[Node]:
     """``first`` and every later state: what descends from it and is of its kind (:class:`Kinds`)."""
-    own = kind.of[first.id]
-    later = (node_id for node_id in kind.order if node_id != first.id and first.id in kind.ancestors[node_id])
-    return [first, *(graph.nodes[node_id] for node_id in later if kind.of[node_id] == own)]
+    of_its_kind = kind.alike[kind.of[first.id]]
+    later = of_its_kind[of_its_kind.index(first.id) + 1 :]
+    return [first, *(graph.nodes[node_id] for node_id in later if first.id in kind.ancestors[node_id])]
 
 
 def _is_zero(graph: Graph, name: str) -> bool:
@@ -95,30 +118,27 @@ def _is_zero(graph: Graph, name: str) -> bool:
     return layout and all(_is_zero(graph, source) for source in producer.inputs)
 
 
-def _external(graph: Graph, region: set[str]) -> set[str]:
-    return {name for node_id in region for name in graph.nodes[node_id].inputs if graph.producer(name).id not in region}
-
-
-def _steps(graph: Graph, chain: list[Node], ancestors: dict[str, frozenset[str]]) -> tuple[list[set[str]], list[str], int]:
+def _steps(graph: Graph, chain: list[Node], kind: Kinds) -> tuple[list[frozenset[str]], list[str], int]:
     """``(one region per step, the state each step reads, how many states the recurrence spans)``.
 
     The first step has no state node before it: its state is the seed, the one buffer of the state's
     shape it reads beyond what every step reads — the tensor the loop started from, or the zeros it
     was seeded with. It is the buffer whose ancestry, taken out, leaves a first step shaped like
     every later one: as many nodes, reading the same things beside its state."""
-    regions = [set(ancestors[after.id] - ancestors[before.id]) for before, after in zip(chain, chain[1:], strict=False)]
+    ancestors = kind.ancestors
+    between = [kind.step(before.id, after.id) for before, after in zip(chain, chain[1:], strict=False)]
     states = [node.id for node in chain[:-1]]
-    shared = _external(graph, regions[0]) - {states[0]}
-    alike = (len(regions[0]), frozenset(shared))
+    shared = between[0][1] - {states[0]}
+    alike = (len(between[0][0]), shared)
     # The chain is every later node of the first state's body shape; a later division of the same
     # shape that closes the block is one too, with a region of everything before it. The recurrence
     # is the prefix whose steps are alike, and it ends where they stop being.
     steps = 0
-    for region, state in zip(regions, states, strict=True):
-        if (len(region), frozenset(_external(graph, region) - {state})) != alike:
+    for (region, read), state in zip(between, states, strict=True):
+        if (len(region), read - {state}) != alike:
             break
         steps += 1
-    regions, states = regions[:steps], states[:steps]
+    regions, states = [region for region, _ in between[:steps]], states[:steps]
     beyond: set[str] = set()
     for name in shared:
         beyond |= ancestors[graph.producer(name).id]
@@ -130,7 +150,7 @@ def _steps(graph: Graph, chain: list[Node], ancestors: dict[str, frozenset[str]]
             continue
         seed = node_id
         region = first - ancestors[node_id]
-        if (len(region), frozenset(_external(graph, region) - {seed})) == alike:
+        if (len(region), kind.external(region) - {seed}) == alike:
             seeds.append((seed, region))
     if len(seeds) != 1:
         raise RuleSkipped(f"{len(seeds)} buffers of the state's shape leave a first step like the others")
@@ -240,9 +260,8 @@ def roll(match: Match, partition: dict[str, frozenset[str]]) -> Graph | None:
     step short."""
     graph = match.graph
     kind = kinds(graph, partition)
-    alike = Counter(kind.of.values())
     # A chain is two states of one kind: most loops have no such second.
-    firsts = [graph.nodes[node_id] for node_id in kind.order if alike[kind.of[node_id]] > 1]
+    firsts = [graph.nodes[node_id] for node_id in kind.order if len(kind.alike[kind.of[node_id]]) > 1]
     readings = [recurrence for first in firsts for recurrence in found(graph, first, kind)]
     for recurrence in sorted(readings, key=lambda reading: -sum(map(len, reading.steps))):
         try:
@@ -258,7 +277,7 @@ class Recurrence:
     each step starts from, the first one's the seed."""
 
     chain: list[Node]
-    steps: list[set[str]]
+    steps: list[frozenset[str]]
     states: list[str]
 
 
@@ -273,7 +292,7 @@ def found(graph: Graph, first: Node, kind: Kinds) -> Iterator[Recurrence]:
         if len(states) < 2:
             break
         try:
-            steps, read, count = _steps(graph, states, kind.ancestors)
+            steps, read, count = _steps(graph, states, kind)
         except RuleSkipped:
             continue
         yield Recurrence(states[:count], steps, read)
