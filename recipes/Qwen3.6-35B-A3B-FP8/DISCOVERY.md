@@ -1,5 +1,38 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## Every serving twin recorded, and the pack exports strictly (2026-11-25)
+
+One rented RTX 5090 (2 h 39 min), on main at f0be9d75b, with fast math off as the recipe serves. Before the run, on
+the dev box with the 5090 as the target, the strict serving audit refused 12 twins, not the 4 the paging card found:
+
+- the four cut roots with no row: `gdn4-sparse-linear@fp8` (the 4-row layer tail), `gdn64-sparse-linear@fp8` (its
+  conv1d root), `post64-sparse-full@fp8` and `prologue4-native`;
+- the 1-, 4- and 64-row attention twins at both windows, whose rows #1467 demoted when it re-keyed the products;
+- the 3-row attention at both windows: #1451 changed how the verify step's mask is built, so serving traces a kernel
+  the golden did not hold. `emmy golden check` passed anyway, since it lowers the stored programs and never traces
+  again; a fresh `emmy trace --serving-twins` differs from the golden in this one program only.
+
+The record, in order: the demoted rows re-measured on their own kernels (two pairs share a name, so each is picked
+by the schedule knobs that tell it from its twin); the fresh 3-row program merged in and recorded; each cut root
+benched with no pin (the prior's route lands in the tune DB), recorded, its pieces over 4 us tuned, and recorded
+again; the attention seeds re-timed last, once their split pieces had rows. Seeds timed before that fall back to the
+unsplit kernel (418 us for the 1-row at 4,096 cached tokens, against 10.4 us split).
+
+| program | before | after |
+| --- | --- | --- |
+| 4-row layer tail (one launch of one block, the hang) | hours | 72 us, about 20 pieces |
+| 3-row attention at 4,096 / 131,072 cached tokens | 168 us / 5.26 ms, unsplit | 16.8 / 180 us, 16- / 64-part split |
+| 1-row attention at 4,096 / 131,072 | 9.6 / 98.8 us (rows demoted) | 10.4 / 106 us |
+| 4-row prologue | no row | 7.9 us |
+
+On the card: `emmy golden check` current (433 kernels), `emmy eval golden` deploys all 71 twins from the golden rows
+alone, and the strict export (drafter on, the recipe's flags) writes the pack in 45 minutes. Served from that pack,
+two random 256-token prompts with 256 new tokens each, one at a time: first token 9.87 s, 25.5 ms per output token.
+The bar is 0.58 s and 13.2 ms; this run only shows the pack serves and nothing hangs.
+
+Left open: one demoted row of the 64-row recurrence kernel (`WORK=t256`, `REDUCE=coop-t/v2`) is no longer offered
+after #1469 and stays unmeasured; its twin row under the same name is measured.
+
 ## The paging programs in one run per launch, dev box only (2026-11-20)
 
 Milestone 11 of the native parity plan. The one-row step spent 7.45 ms in the pager's table programs: 160 paging runs
