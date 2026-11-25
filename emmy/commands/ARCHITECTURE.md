@@ -472,9 +472,9 @@ A program of several kernels, or of one kernel that met a kernel-set fork of sev
 prior's first schedule prices its set wrong. A round compiles the program as a deploy would, tunes each kernel of
 that kernel set alone (N rows; a kernel the tune DB already holds N rows of is skipped), then takes each arm a fork
 of that compile offered and did not take — the placement prior's best eight a fork — on the fork's kernel alone,
-tunes the kernels that leaves, and stores every decision whose pieces hold rows as a routing row. The compile that
-follows picks each of those forks from measured arms; a round on its kernel set follows while that set changes, four
-at most. Each kernel alone is a program of one kernel with a bench session of its own, so its rows are checked
+tunes the kernels that leaves (ten rows each at most), and stores every decision whose pieces hold rows as a routing
+row. The compile that follows picks each of those forks from measured arms; a round on its kernel set follows while
+that set changes, four at most. Each kernel alone is a program of one kernel with a bench session of its own, so its rows are checked
 against its own greedy outputs and recorded as any tune's are, and the session of the whole program reports the
 kernel set and its price after each round (`[tune]` lines) and adds no row to its table. An arm is explored one
 decision off the compiled kernel set: a kernel set two unmeasured decisions away is reached only when the first is

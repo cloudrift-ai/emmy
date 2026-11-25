@@ -1757,6 +1757,12 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     explores arms one decision off the compiled kernel set, and prices another root arm by the kernel set the priors
     give below it, with none of that set's own arms explored; such an arm loses to a set the rounds already refined.
     A search that crosses it has to refine an arm before comparing it, which this round did not build.
+  - Used on Flash-Next's decode programs, one `--tune 20` a program from an empty tune DB, then each program benched
+    whole, cold, beside the recipe golden's own pick. Three programs came out faster: pre8 62.5 us against 71.7 (5
+    kernels against 4), the four-row slot program 69.6 against 78.8 and the eight-row one 123.9 against 131.1 (2
+    kernels against 3 each). Post8 ended at 151.6 us, above the 139.3 us the golden holds; the one- and two-row slot
+    programs, the QK norm and rope program and the embedding program did not move. One run a side, and no row
+    recorded yet: the three go into the recipe golden in a round of their own, with the serving comparison.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
