@@ -243,36 +243,86 @@ async fn handle(app: App, request: Result<Json<Request>, JsonRejection>, chat: b
         Some(Output::Error(e)) => return e.into_response(),
         _ => return ApiError::unavailable().into_response(),
     };
-    let id = format!("cmpl-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
-    let created = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let model = app.model;
+    let completion = Completion {
+        id: format!("cmpl-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+        created: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        model: app.model,
+        chat,
+        prompt_tokens,
+    };
     if stream {
-        // Receiver ownership is the cancellation signal: dropping the body closes the channel.
-        let initial = if chat {
-            json!({"role":"assistant","content":""})
-        } else {
-            json!("")
-        };
-        let first = chunk(&id, &model, created, chat, initial, Value::Null);
-        let events = tokio_stream::iter(if chat { vec![first] } else { vec![] }).chain(tokio_stream::wrappers::ReceiverStream::new(receiver)
-            .flat_map(move |item| {
-                let values = match item {
-                    Output::Text(text) => vec![chunk(&id, &model, created, chat, if chat {json!({"content":text})} else {json!(text)}, Value::Null)],
-                    Output::Finished { completion_tokens, reason } => {
-                        let mut values = vec![chunk(&id, &model, created, chat, if chat {json!({})} else {json!("")}, json!(reason))];
-                        if include_usage { values.push(json!({"id":id,"object":if chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"choices":[],"usage":usage(prompt_tokens,completion_tokens)})); }
-                        values.push(Value::String("[DONE]".into())); values
-                    }
-                    Output::Error(e) => vec![e.value(), Value::String("[DONE]".into())],
-                    Output::Started(_) => vec![],
-                };
-                tokio_stream::iter(values)
-            })).map(|value| Ok::<_, Infallible>(Event::default().data(if value == "[DONE]" {"[DONE]".into()} else {value.to_string()})));
-        Sse::new(events).into_response()
+        completion.stream(receiver, include_usage)
     } else {
+        completion.collect(receiver).await
+    }
+}
+
+struct Completion {
+    id: String,
+    model: String,
+    created: u64,
+    chat: bool,
+    prompt_tokens: usize,
+}
+
+impl Completion {
+    fn stream(self, receiver: mpsc::Receiver<Output>, include_usage: bool) -> Response {
+        // Receiver ownership is the cancellation signal: dropping the body closes the channel.
+        let initial = if self.chat {
+            vec![self.chunk(json!({"role":"assistant","content":""}), Value::Null)]
+        } else {
+            vec![]
+        };
+        let events = tokio_stream::iter(initial)
+            .chain(
+                tokio_stream::wrappers::ReceiverStream::new(receiver)
+                    .flat_map(move |item| tokio_stream::iter(self.events(item, include_usage))),
+            )
+            .map(|value| {
+                Ok::<_, Infallible>(Event::default().data(if value == "[DONE]" {
+                    "[DONE]".into()
+                } else {
+                    value.to_string()
+                }))
+            });
+        Sse::new(events).into_response()
+    }
+
+    fn events(&self, item: Output, include_usage: bool) -> Vec<Value> {
+        match item {
+            Output::Text(text) => vec![self.chunk(
+                if self.chat {
+                    json!({"content":text})
+                } else {
+                    json!(text)
+                },
+                Value::Null,
+            )],
+            Output::Finished {
+                completion_tokens,
+                reason,
+            } => {
+                let mut values =
+                    vec![self.chunk(if self.chat { json!({}) } else { json!("") }, json!(reason))];
+                if include_usage {
+                    values.push(json!({
+                        "id":self.id, "object":if self.chat {"chat.completion.chunk"} else {"text_completion"},
+                        "created":self.created, "model":self.model, "choices":[],
+                        "usage":usage(self.prompt_tokens, completion_tokens),
+                    }));
+                }
+                values.push(Value::String("[DONE]".into()));
+                values
+            }
+            Output::Error(e) => vec![e.value(), Value::String("[DONE]".into())],
+            Output::Started(_) => vec![],
+        }
+    }
+
+    async fn collect(self, mut receiver: mpsc::Receiver<Output>) -> Response {
         let mut text = String::new();
         while let Some(item) = receiver.recv().await {
             match item {
@@ -281,12 +331,16 @@ async fn handle(app: App, request: Result<Json<Request>, JsonRejection>, chat: b
                     completion_tokens,
                     reason,
                 } => {
-                    let choice = if chat {
+                    let choice = if self.chat {
                         json!({"index":0,"message":{"role":"assistant","content":text},"finish_reason":reason})
                     } else {
                         json!({"index":0,"text":text,"logprobs":null,"finish_reason":reason})
                     };
-                    return Json(json!({"id":id,"object":if chat {"chat.completion"} else {"text_completion"},"created":created,"model":model,"choices":[choice],"usage":usage(prompt_tokens,completion_tokens)})).into_response();
+                    return Json(json!({
+                        "id":self.id, "object":if self.chat {"chat.completion"} else {"text_completion"},
+                        "created":self.created, "model":self.model, "choices":[choice],
+                        "usage":usage(self.prompt_tokens, completion_tokens),
+                    })).into_response();
                 }
                 Output::Error(e) => return e.into_response(),
                 Output::Started(_) => (),
@@ -294,15 +348,20 @@ async fn handle(app: App, request: Result<Json<Request>, JsonRejection>, chat: b
         }
         ApiError::unavailable().into_response()
     }
+
+    fn chunk(&self, text: Value, reason: Value) -> Value {
+        let choice = if self.chat {
+            json!({"index":0,"delta":text,"finish_reason":reason})
+        } else {
+            json!({"index":0,"text":text,"logprobs":null,"finish_reason":reason})
+        };
+        json!({
+            "id":self.id, "object":if self.chat {"chat.completion.chunk"} else {"text_completion"},
+            "created":self.created, "model":self.model, "choices":[choice],
+        })
+    }
 }
+
 fn usage(prompt: usize, completion: usize) -> Value {
     json!({"prompt_tokens":prompt,"completion_tokens":completion,"total_tokens":prompt+completion})
-}
-fn chunk(id: &str, model: &str, created: u64, chat: bool, text: Value, reason: Value) -> Value {
-    let choice = if chat {
-        json!({"index":0,"delta":text,"finish_reason":reason})
-    } else {
-        json!({"index":0,"text":text,"logprobs":null,"finish_reason":reason})
-    };
-    json!({"id":id,"object":if chat {"chat.completion.chunk"} else {"text_completion"},"created":created,"model":model,"choices":[choice]})
 }

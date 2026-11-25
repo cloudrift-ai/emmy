@@ -32,6 +32,9 @@ worker validates the prepared prompt's context budget, starts generation, and dr
 
 ## API contract
 
+The handler validates and admits requests, submits worker jobs, and waits for prompt preparation. A completion owns
+the response metadata and formats either SSE events or collected JSON; the streaming body owns the output receiver.
+
 The API exposes `/health`, `/v1/models`, `/v1/completions`, and `/v1/chat/completions`. Completions accept one text
 prompt; chat accepts system, user, and assistant messages, their content text or OpenAI parts, text and, for a pack that
 answers images, one image ("Images", below). Requests select the exact served model ID. Streaming uses SSE with a final
