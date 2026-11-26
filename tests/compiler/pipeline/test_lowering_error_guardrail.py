@@ -567,7 +567,7 @@ def _elect_composed_route(monkeypatch) -> None:
     import emmy.compiler.pipeline.search.policy.greedy as greedy_mod
 
     monkeypatch.setattr(greedy_mod, "_load_prior_safe", lambda: _BiggestBNFirstPrior())
-    monkeypatch.setattr(greedy_mod, "_kernel_set_pick", lambda fp, *_: next((o for o in fp.flat() if o.structural), fp.flat()[0]))
+    monkeypatch.setattr(greedy_mod, "kernel_set_ranking", lambda fp, *_: sorted(fp.flat(), key=lambda o: not o.structural))
 
 
 def _kernels(terminal: Graph) -> dict[str, tuple[str, int]]:
