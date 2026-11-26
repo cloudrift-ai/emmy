@@ -13,9 +13,9 @@ use std::sync::Arc;
 use emmy_ir::axis::{Axis, Dim};
 use emmy_ir::body::Body;
 use emmy_ir::elementwise::Operation;
-use emmy_ir::expr::{Expr, ExprClass, Expression, Interval, SimplifyCtx};
+use emmy_ir::expr::{Expr, ExprClass, Expression, SimplifyCtx};
 use emmy_ir::normalize::ties::unranked;
-use emmy_ir::normalize::{affine_sum, affine_terms};
+use emmy_ir::normalize::{affine_sum, affine_terms, extend_simplify_ctx};
 use emmy_ir::statement::Statement;
 use emmy_ir::{Error, Name, Result};
 
@@ -231,14 +231,7 @@ impl Fold {
         let reads = TermRewrite {
             sigma: HashMap::from([(axis, walk.read())]),
             folding: Some(table.iter().fold(SimplifyCtx::empty(), |ctx, known| {
-                match known.extent.expression.int_literal() {
-                    Some(extent) => ctx.extend(
-                        known.name.as_str(),
-                        Interval::new(0, i128::from(extent) - 1),
-                        None,
-                    ),
-                    None => ctx,
-                }
+                extend_simplify_ctx(&ctx, known)
             })),
             ..TermRewrite::default()
         };
