@@ -18,7 +18,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.pipeline import Pipeline
-from tests.compiler.helpers import inject_constants
+from tests.compiler.helpers import inject_constants, requires_cuda
 
 #: ``O[i, j] = sum(X[i, k] * Y[k, j] for k <= i)``: the sum walks the keys at or before the row.
 TO_THE_ROW = """
@@ -247,3 +247,62 @@ def test_the_lowered_kernel_computes_what_the_body_means(text: str, inputs: dict
         np.testing.assert_allclose(want, np.tril(data["X"]) @ data["Y"], rtol=1e-4, atol=1e-4)
     if text is FROM_THE_ROW:
         np.testing.assert_allclose(want, np.triu(data["X"]) @ data["Y"], rtol=1e-4, atol=1e-4)
+
+
+#: A recurrence over six steps whose sum walks a range of the step alone: ``S[t] = W[:, :t + 2] @ S[t - 1][:t + 2]``.
+OVER_THE_STEP = """
+for a0 in 0..6:
+  for a1 in 0..8:
+    for a2 in 0..64:
+      for a3 in 0..a0 + 2 of 8:
+        in0 = load w[a1, a3]
+        v0 = load acc0[a0 - 1, a3, a2]
+        v1 = in0 * v0
+        acc1 <- add(acc1, v1) over a3
+      O[a0, a1, a2] = acc1
+      acc0[a0, a1, a2] <- acc1 seed s
+"""
+
+_STEP_INPUTS = {"w": (8, 8), "s": (8, 64)}
+_COLUMN_BAND = {"PLACE": "fuse", "TILE": "", "WORK": "t32", "REDUCE": "coop-t/v2", "FAST_MATH": False}
+
+
+def _column_band(text: str, inputs: dict, shape: tuple, ctx):
+    """``text`` compiled for ``ctx`` under a transposed band of two columns, and why the band was not taken."""
+    from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import CUDA_PASSES  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs, unreproducible_pin_flag  # noqa: PLC0415
+
+    with pinned_knobs(_COLUMN_BAND):
+        compiled = Pipeline.build(CUDA_PASSES).run(_graph(text, inputs, shape), ctx=ctx, db=None)
+    built = [dict(node.op.knobs or {}) for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    return compiled, unreproducible_pin_flag({"REDUCE": _COLUMN_BAND["REDUCE"]}, built)
+
+
+def test_a_range_over_the_step_alone_keeps_the_columns_of_a_transposed_band() -> None:
+    """A lane of a transposed band folds the columns it owns in one loop, so it takes one column where the range
+    reads an output axis: each column would walk its own. A rolled recurrence's range reads the step, a serial
+    axis, and is one range for every cell, so the band keeps its columns there."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+
+    ctx = Context.from_target((12, 0))
+    assert _column_band(OVER_THE_STEP, _STEP_INPUTS, (6, 8, 64), ctx)[1] is None
+    over_the_row = TO_THE_ROW.replace("0..8", "0..64").replace("of 8", "of 64")
+    assert "coop-t/v2" in _column_band(over_the_row, {"X": (64, 64), "Y": (64, 64)}, (64, 64), ctx)[1]
+
+
+@requires_cuda
+def test_a_transposed_band_of_two_columns_computes_a_sum_over_a_range_of_the_step() -> None:
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+
+    feed = _data(_STEP_INPUTS)
+    feed["w"] *= 0.3
+    compiled, unrealized = _column_band(OVER_THE_STEP, _STEP_INPUTS, (6, 8, 64), Context.probe())
+    assert unrealized is None
+    got = CudaBackend().run(compiled, input_data=dict(feed))[0].outputs["O"]
+    state, want = feed["s"].astype(np.float64), []
+    for step in range(6):
+        state = feed["w"][:, : step + 2].astype(np.float64) @ state[: step + 2]
+        want.append(state)
+    np.testing.assert_allclose(got, np.stack(want), rtol=1e-4, atol=1e-5)

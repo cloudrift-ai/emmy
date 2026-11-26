@@ -742,9 +742,10 @@ nothing: the reduce loop the term lowers to states the range, and the kernel's o
 PTX compiler. A cooperative reduce reads it the same way: each lane takes every `coop`-th position from its own
 start past the range's start to the range's end, an ILP copy past the end is masked as a ragged tail always was
 (`_register_copies`), and a prefix scan covers the range in lane groups. A transposed band walks the range at the
-cell each lane owns, and takes one column on a fold that walks one. A tile folds a rectangle of every position, so
-no tile is offered on a term that walks a range beside the chunk tier's carrier (`TileOp.contracts`,
-`_chunk_refusal`), and a register-held recurrence refuses a product that walks one.
+cell each lane owns, and takes one column on a fold whose range reads an output axis; a range over the serial axes
+alone, a rolled recurrence's step, is one range for every cell and keeps the columns. A tile folds a rectangle of
+every position, so no tile is offered on a term that walks a range beside the chunk tier's carrier
+(`TileOp.contracts`, `_chunk_refusal`), and a register-held recurrence refuses a product that walks one.
 
 The score's own PREFIX — the carrier's lift cut to its score role — reads no coordinate. Its LEAVES are read once
 ahead of the chunk loop, so an operand that feeds one needs no gmem address at all, and only the pivot source and the
