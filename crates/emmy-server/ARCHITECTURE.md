@@ -27,8 +27,13 @@ Preparation bundles `tokenizer.json` and the checkpoint's actual `chat_template.
 exists. Checkpoint tests compare rendered text and token IDs against Transformers for multilingual input, whitespace,
 special tokens, and multi-turn assistant history. Incremental decoding retains incomplete Unicode bytes. Final decode
 flushes incomplete output consistently with the checkpoint decoder, including genuine replacement characters.
+The text module owns each response's incremental decoder, token count, EOS and stop handling, and final flush. The
+worker validates the prepared prompt's context budget, starts generation, and drives GPU steps and bounded output.
 
 ## API contract
+
+The handler validates and admits requests, submits worker jobs, and waits for prompt preparation. A completion owns
+the response metadata and formats either SSE events or collected JSON; the streaming body owns the output receiver.
 
 The API exposes `/health`, `/v1/models`, `/v1/completions`, and `/v1/chat/completions`. Completions accept one text
 prompt; chat accepts system, user, and assistant messages, their content text or OpenAI parts, text and, for a pack that

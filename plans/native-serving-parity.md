@@ -654,6 +654,11 @@ What the session changes for the milestones:
     twice (one run per expert launch, the second moving nothing). Now one run covers both launches.
     **Fourth card, 2026-11-22: gate met.** Paging programs 1.36 ms per one-row step, tokens the same as main's.
     The page copies (10.9 ms on this host's 25.6 GB/s link) are expert reads over the link, 12's question.
+    **2026-11-25, #1476: the pack exports strictly.** The follow-up above is done, and it was 12 twins, not 4: the
+    four cut roots, the attention rows #1467 demoted, and the 3-row attention, which #1451 re-traced (a golden check
+    never re-traces, so only a fresh serving trace shows it). All 71 twins deploy from the golden rows; the 4-row
+    tail is 72 us; the 3-row attention takes a split (5.26 ms → 180 us at 131,072 cached tokens). The strict pack
+    serves a 256-token prompt: first token 9.87 s, TPOT 25.5 ms (16 owns the bar).
 
 12. **Qwen3.6: slots sized to the verify step's picks.** A verify step's three rows route past the 8 slots, so
     the drafter buys almost nothing (a 44-52 ms drafted step against a 19.6-19.8 ms one-row step). The pager's
@@ -663,6 +668,11 @@ What the session changes for the milestones:
     the 27B's width-3 program. Gate: every page list a verify launch names fits the slots, and the captured
     verify step spends <= 2 ms in paging programs and in-place expert reads together (11's bound held at the
     verify width); the TPOT cell itself is decided at 16. Needs 1, 11.
+    **2026-11-25, #1478, one card: gate met.** With a drafter, every decode launch keeps `k x (drafts + 1)` = 24
+    slots, 104 pages resident. The strict export needs no new row. Verify step under nsys: 42.6 → 22.7 ms. Expert
+    programs 19.2 → 3.0 ms (no in-place reads left), page copies 11.5 → 7.0 ms, paging programs 1.51 ms. Tokens the
+    same as main's. At 256 tokens: TPOT 16.17 → 8.99 ms (the bar's 13.2), first token 5.34 → 2.94 s. The GDN
+    programs are 5.3 ms of the verify step and are not the bottleneck.
 
 13. **The paged gate-up piece takes a tensor-core tile.** Once its weight is paged the 64-row expert program's
     gate-up piece is offered no tensor-core tile. This is a compiler change, not a wider offer: at one expert a page
@@ -1018,6 +1028,10 @@ Perf ideas:
 
 Open items:
 
+- (2026-11-25) The 27B's verify-step attention may hold the program #1451 replaced, as Qwen3.6's did: `emmy golden
+  check` cannot see it. Compare a fresh `emmy trace --serving-twins` with the golden's programs before its next gate.
+- (2026-11-25) `emmy compile --help` still names `dolfstp`; with no stamp pass the string is read as one unknown
+  pass name and nothing past tracing runs. `dolftp` is the spelling that stops after the cut.
 - (2026-10-17) Needs a V100 record run: Qwen3.8 FP8's GDN rows (gdn16 `13e5d6`, gdn64 `353a47`) were restamped
   but not re-recorded or tuned after #1171.
 - (2026-10-22) Needs a record run on each card, after #1230's restamp: Qwen3.8 FP8 dropped 11 decisions on A100,

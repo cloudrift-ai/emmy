@@ -1,5 +1,81 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## The expert slots hold a verify step's picks (2026-11-25)
+
+Milestone 12 of the native parity plan. One RTX 5090 rented for about an hour, on a host whose pinned-memory-to-card
+link copies 48.3 GB/s. Main at b968a0ce9 and the branch of #1478 were both exported strictly on the card, drafter on,
+with the recipe's flags and fast math off. Neither export needed a new row: the slot count sizes only the plan's
+paging, so no kernel and no twin changed.
+
+With a drafter, a decode launch lists 3 rows x 8 picks. Main's pager kept 8 of the 128 device pages a layer as slots,
+so a verify step's picks past the 8th were read in place over the link. The branch keeps 24 slots and 104 resident:
+the same device memory, and every page list a verify launch names fits.
+
+Each pack served random 256-token prompts with 256 new tokens, one at a time, greedy, through vLLM 0.25.1's client:
+10 prompts for the cells, then 3 under nsys per step kind. The step splits are nsys medians, in ms; tracing makes
+the steps slower than they run in the cells.
+
+| | main, verify | branch, verify | main, one row | branch, one row |
+| --- | --- | --- | --- | --- |
+| Gated DeltaNet programs | 5.28 | 5.28 | 2.83 | 2.79 |
+| attention and rotary | 0.20 | 0.20 | 0.14 | 0.13 |
+| routers | 1.82 | 1.82 | 0.48 | 0.47 |
+| expert programs | 19.20 | 3.00 | 1.15 | 1.14 |
+| paging programs | 1.41 | 1.51 | 1.40 | 1.50 |
+| page copies | 11.50 | 7.04 | 6.66 | 3.20 |
+| the rest | 3.57 | 3.57 | 1.72 | 1.71 |
+| the step, start to end | 42.63 | 22.67 | 14.61 | 11.15 |
+
+The one-row columns are the same packs booted with the drafter off. The trace cannot tell an in-place read from
+compute inside an expert program. On the branch, the verify step's expert programs take 3.00 ms, 2.6 times the
+one-row step's 1.14 ms for three rows' picks, so no in-place read is left; on main they took 19.2 ms. The gate,
+paging programs and in-place expert reads together at most 2 ms of the verify step, is met: 1.51 ms. The one-row
+step gains as well, since 24 slots evict less often across steps: its page copies halve.
+
+| 256-token prompt, 10 requests | main | branch |
+| --- | --- | --- |
+| time per output token | 16.17 ms | 8.99 ms |
+| first token | 5.34 s | 2.94 s |
+| one row a step (drafter off), time per output token | 14.80 ms | 12.16 ms |
+
+The tokens of all 10 prompts are the same on both trees. The first token moves too because the prefill programs
+take the same slot count. The bar's time per output token is 13.2 ms; milestone 16 decides that cell. Not run: `emmy
+eval golden`, which needs the 5090. This change leaves the golden and the twins unchanged, and the strict export
+passed on the card.
+
+## Every serving twin recorded, and the pack exports strictly (2026-11-25)
+
+One rented RTX 5090 (2 h 39 min), on main at f0be9d75b, with fast math off as the recipe serves. Before the run, on
+the dev box with the 5090 as the target, the strict serving audit refused 12 twins, not the 4 the paging card found:
+
+- the four cut roots with no row: `gdn4-sparse-linear@fp8` (the 4-row layer tail), `gdn64-sparse-linear@fp8` (its
+  conv1d root), `post64-sparse-full@fp8` and `prologue4-native`;
+- the 1-, 4- and 64-row attention twins at both windows, whose rows #1467 demoted when it re-keyed the products;
+- the 3-row attention at both windows: #1451 changed how the verify step's mask is built, so serving traces a kernel
+  the golden did not hold. `emmy golden check` passed anyway, since it lowers the stored programs and never traces
+  again; a fresh `emmy trace --serving-twins` differs from the golden in this one program only.
+
+The record, in order: the demoted rows re-measured on their own kernels (two pairs share a name, so each is picked
+by the schedule knobs that tell it from its twin); the fresh 3-row program merged in and recorded; each cut root
+benched with no pin (the prior's route lands in the tune DB), recorded, its pieces over 4 us tuned, and recorded
+again; the attention seeds re-timed last, once their split pieces had rows. Seeds timed before that fall back to the
+unsplit kernel (418 us for the 1-row at 4,096 cached tokens, against 10.4 us split).
+
+| program | before | after |
+| --- | --- | --- |
+| 4-row layer tail (one launch of one block, the hang) | hours | 72 us, about 20 pieces |
+| 3-row attention at 4,096 / 131,072 cached tokens | 168 us / 5.26 ms, unsplit | 16.8 / 180 us, 16- / 64-part split |
+| 1-row attention at 4,096 / 131,072 | 9.6 / 98.8 us (rows demoted) | 10.4 / 106 us |
+| 4-row prologue | no row | 7.9 us |
+
+On the card: `emmy golden check` current (433 kernels), `emmy eval golden` deploys all 71 twins from the golden rows
+alone, and the strict export (drafter on, the recipe's flags) writes the pack in 45 minutes. Served from that pack,
+two random 256-token prompts with 256 new tokens each, one at a time: first token 9.87 s, 25.5 ms per output token.
+The bar is 0.58 s and 13.2 ms; this run only shows the pack serves and nothing hangs.
+
+Left open: one demoted row of the 64-row recurrence kernel (`WORK=t256`, `REDUCE=coop-t/v2`) is no longer offered
+after #1469 and stays unmeasured; its twin row under the same name is measured.
+
 ## The paging programs in one run per launch, dev box only (2026-11-20)
 
 Milestone 11 of the native parity plan. The one-row step spent 7.45 ms in the pager's table programs: 160 paging runs
