@@ -498,6 +498,45 @@ class GoldenFile(Wire):
         self.kernels.append(kernel)
         return kernel
 
+    def drop_program(self, traced: int) -> None:
+        """Remove traced program ``traced`` and what only it reaches: its targets, every kernel the file's decisions
+        reach from them, the decisions on those kernels and their rows. A kernel that another kernel of the file
+        reaches too stays with its rows, as a piece when the program was its own. A latency that timed a kernel now
+        gone goes with it, and the programs after ``traced`` move up one."""
+        pieces: dict[int, list[int]] = {}
+        for route in self.routing:
+            pieces.setdefault(route.parent, []).extend(route.children)
+
+        def reached(roots: Iterable[int]) -> set[int]:
+            out, pending = set(), list(roots)
+            while pending:
+                ref = pending.pop()
+                if ref not in out:
+                    out.add(ref)
+                    pending.extend(pieces.get(ref, ()))
+            return out
+
+        mine = reached(kernel.ref for kernel in self.kernels if kernel.traced == traced)
+        gone = mine - reached(kernel.ref for kernel in self.kernels if kernel.ref not in mine or kernel.traced not in (None, traced))
+
+        def placed(kernel: Kernel) -> Kernel:
+            if kernel.traced is None or kernel.traced < traced:
+                return kernel
+            provenance = {"traced": kernel.traced - 1} if kernel.traced > traced else {"traced": None, "origins": (), "bindings": {}}
+            moved = replace(kernel, **provenance)
+            return moved.keyed(kernel.__dict__["exact_identity"]) if "exact_identity" in kernel.__dict__ else moved
+
+        self.kernels[:] = [placed(kernel) for kernel in self.kernels if kernel.ref not in gone]
+        self.routing[:] = [route for route in self.routing if route.parent not in gone]
+        kept = []
+        for row in self.rows:
+            if row.kernel in gone:
+                continue
+            timed = {card: latency for card, latency in (row.latency or {}).items() if gone.isdisjoint(latency.kernels)}
+            kept.append(row if len(timed) == len(row.latency or {}) else replace(row, latency=timed or None))
+        self.rows[:] = kept
+        del self.programs[traced]
+
     def add_routing(self, route: RoutingRow) -> None:
         """Store one decision on one parent, the kernels named by their ``ref``; a later record of the same decision
         replaces what it minted."""
