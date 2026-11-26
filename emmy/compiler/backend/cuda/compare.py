@@ -192,6 +192,45 @@ def _chunk_position(graph, static) -> int | None:
     return static(graph.nodes["keys"].output.shape)[0] - static(graph.nodes["q"].output.shape)[0]
 
 
+def _range_end_inputs(graph, sizes: dict[str, int]) -> dict[str, int]:
+    """The inputs a kernel reads as where a range ends (a causal step's ``position``: a row folds the keys up to its
+    own), each with the value at which the kernel's last row walks its axis to the end, in the last block where a
+    split walks the axis in blocks. It is the value :func:`_chunk_position` gives a whole step, read off the kernel:
+    a piece of a cut holds the range and not the cache its program sizes the window by, and benched as a program of
+    its own at a random value it folds a few keys, so its time says nothing of the window. ``sizes`` are the symbolic
+    sizes at the bench's bindings."""
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
+
+    def terms(term):
+        yield term
+        for edge in term.operands:
+            yield from terms(edge)
+
+    values: dict[str, int] = {}
+    for node in graph.nodes.values():
+        tile = kernel_tile(node.op)
+        if tile is None or tile.op is None:
+            continue
+        tile = tile.scheduled()
+        tree = list(terms(tile.op))
+        loaded = {name: load.input for term in tree for load in term.applied.body if isinstance(load, Load) for name in load.names}
+        for term in tree:
+            end = term.applied_range[1] if term.applied_range is not None else None
+            for name in end.free_vars() & loaded.keys() if end is not None else ():
+                source = graph.nodes.get(loaded[name])
+                last = sizes | {axis.name: int(axis.extent.expression.eval(sizes)) - 1 for axis in tile.axes}
+                if source is None or not isinstance(source.op, InputOp) or not end.free_vars() <= last.keys() | {name}:
+                    continue
+                # The end of the last row's walk at three values of the input. Where the input moves it one for one,
+                # the distance from the end at zero to the end no value passes is the value that reaches it.
+                at = [int(end.eval({**last, name: value})) for value in (0, 1, 1 << 40)]
+                if at[1] - at[0] == 1:
+                    values[source.id] = max(values.get(source.id, 0), at[2] - at[0])
+    return values
+
+
 async def bench_lowered_vs_torch(
     frontend,
     lowered,
@@ -287,7 +326,9 @@ async def bench_lowered_vs_torch(
 
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
-    position = _chunk_position(lowered, _static)
+    placed = _range_end_inputs(lowered, sym_env)
+    if (position := _chunk_position(lowered, _static)) is not None:
+        placed["position"] = position
     scale_leaves = scale_input_leaves({nid: node.output.dtype for nid, node in lowered.nodes.items() if isinstance(node.op, InputOp)})
     scatter_rows = _scatter_index_inputs(([frontend] if frontend is not None else []) + [lowered])
     for nid, node in lowered.nodes.items():
@@ -299,8 +340,8 @@ async def bench_lowered_vs_torch(
                 arr = _distinct_rows(rng, shape[0], min(_static(scatter_rows[nid])))
             else:
                 arr = draw(rng, shape, node.output.dtype, name=name)
-            if nid == "position" and position is not None:
-                arr = np.full(arr.shape, position)
+            if nid in placed:
+                arr = np.full(arr.shape, placed[nid])
             # Keep the ndarray shape (no flatten) — a symbolic graph's launch
             # reads the runtime seq_len off the input array's shape.
             input_data[nid] = arr
