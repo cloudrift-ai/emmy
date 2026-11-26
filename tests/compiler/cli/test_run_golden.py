@@ -399,6 +399,27 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
     assert seen["knobs"] is None and seen["pins"] is None
 
 
+def test_record_latency_of_a_named_piece_row_is_the_greedy_picks(monkeypatch):
+    """A piece's row benches under the decisions that mint its kernel, its schedule replayed on every kernel of the
+    target: no deploy builds that kernel set, so its time is not the target's. The greedy pick's whole time is."""
+    seen = {}
+    _live_lane(monkeypatch, False)
+    piece = SimpleNamespace(
+        status="ok",
+        bench=BenchmarkResult(time_ms=2.5928),
+        flags=[],
+        sample=PinnedRow(
+            name="mm.k_feb4e08efa86", knobs={"WORK": "t64"}, pins={"FAST_MATH": False}, route={"PLACE@k_171ea40cee11/map.1/inner": "cut"}
+        ),
+    )
+    args = SimpleNamespace(golden="working.json", realization="mm.k_feb4e08efa86")
+    with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
+        run_mod._record_golden_latency(args, {"Emmy": 309.6, "torch.compile": 328.5}, [piece])
+
+    assert seen["emmy_us"] == pytest.approx(309.6) and seen["tcompile_us"] == 328.5
+    assert seen["knobs"] is None
+
+
 def _timed_row(knobs, us, fast_math=False):
     bench = BenchmarkResult(time_ms=us / 1000)
     return SimpleNamespace(status="ok", bench=bench, flags=[], sample=PinnedRow(name="mm", knobs=knobs, pins={"FAST_MATH": fast_math}))
@@ -419,7 +440,9 @@ def test_record_latency_of_two_measured_schedules_lands_on_the_faster(monkeypatc
     _live_lane(monkeypatch, False)
     args = SimpleNamespace(golden="working.json", realization="mm")
     with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
-        run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [_timed_row({"WORK": "w4x4"}, 12.0), _timed_row({"WORK": "w4x2"}, 10.0)])
+        run_mod._record_golden_latency(
+            args, {"torch.compile": 9.0}, [_timed_row({"WORK": "w4x4"}, 12.0), _timed_row({"WORK": "w4x2"}, 10.0)]
+        )
 
     assert seen["emmy_us"] == pytest.approx(10.0) and seen["knobs"] == {"WORK": "w4x2"} and seen["tcompile_us"] == 9.0
 
