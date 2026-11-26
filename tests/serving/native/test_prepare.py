@@ -233,6 +233,16 @@ def test_a_chunk_runs_every_rows_experts_in_one_program():
     torch.testing.assert_close(combined, torch.stack([residual[r] + scores[r] @ expected[r] for r in range(3)]))
 
 
+def test_a_wide_native_chunk_keeps_its_quarters_above_the_plugins_chunk():
+    """Each quarter of native's chunk that stays wider than the plugin's is a tail width; without a plugin chunk
+    (zero, or the runner's -1 default) the chunk stands alone."""
+    from emmy.serving.release import native_prefill_widths
+
+    assert native_prefill_widths(1024, 64) == (1024, 256)
+    assert native_prefill_widths(256, 64) == (256,)
+    assert native_prefill_widths(2, -1) == native_prefill_widths(2, 0) == (2,)
+
+
 def test_a_wide_chunk_runs_its_experts_in_blocks_of_one_expert():
     """A chunk whose picks outnumber the blocks they fill runs its experts in blocks, each reading one expert's
     weights once, and gives each pick the fixed-slot program's partial, eager and through the traced graphs: picks
@@ -257,9 +267,9 @@ def test_a_wide_chunk_runs_its_experts_in_blocks_of_one_expert():
     x = torch.randn(rows, 64)
     with torch.no_grad():
         expected = build_moe_slots_wrapper(expert)(x, sel, *weights)
-    owner, reads, place = (torch.from_numpy(t) for t in _eager_and_traced(group_module(experts, rows, k, block, blocks), (sel,)))
-    grouped = grouped_module(expert, block, blocks)
-    examples = (x, reads, owner, *weights)
+    owner, place = (torch.from_numpy(t) for t in _eager_and_traced(group_module(experts, rows, k, block, blocks), (sel,)))
+    grouped = grouped_module(expert, rows, k, block, blocks)
+    examples = (x, place, owner, *weights)
     with torch.no_grad():
         outputs = grouped(*examples)
         torch.testing.assert_close(outputs.index_select(0, place.reshape(-1)).view(rows, k, -1), expected)

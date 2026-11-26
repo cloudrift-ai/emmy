@@ -27,9 +27,9 @@ def native_prefill_widths(widest: int, plugin: int) -> tuple[int, ...]:
     """Native generation's own chunk widths above the plugin's chunk ``plugin``, widest first: ``widest`` and each
     quarter of it that stays wider than the plugin's. A model with carried state runs a prompt's tail in chunks the
     prompt fills, so each narrower width takes at most three chunks of what the wider ones leave. Without a plugin
-    chunk, ``widest`` alone."""
+    chunk (zero or less), ``widest`` alone."""
     widths = [widest]
-    while plugin and widths[-1] // 4 > plugin:
+    while plugin > 0 and widths[-1] // 4 > plugin:
         widths.append(widths[-1] // 4)
     return tuple(widths)
 

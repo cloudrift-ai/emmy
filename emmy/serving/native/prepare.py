@@ -478,10 +478,10 @@ def expert_blocks(experts, rows, k):
 
 
 def group_module(experts, rows, k, block, blocks):
-    """The blocks of :func:`expert_blocks` a chunk's ``[rows, k]`` picks fill: each block's expert (``[blocks]``),
-    the row each of its ``block`` places reads (``[blocks * block]``) and the place each pick landed in
-    (``[rows, k]``). An expert's picks fill its blocks in row order, its blocks follow the lower experts'; a place no
-    pick lands in reads row zero, and a block past the last one runs expert zero, which nothing reads back."""
+    """The blocks of :func:`expert_blocks` a chunk's ``[rows, k]`` picks fill: each block's expert (``[blocks]``) and
+    the place of its ``blocks * block`` each pick landed in (``[rows, k]``). An expert's picks fill its blocks in row
+    order, its blocks follow the lower experts'; a block past the last one runs expert zero, which nothing reads
+    back."""
     import torch
 
     picks = rows * k
@@ -499,17 +499,18 @@ def group_module(experts, rows, k, block, blocks):
             place = (first[expert] + rank // block) * block + rank % block
             owner = (filled.cumsum(0).unsqueeze(0) <= torch.arange(blocks).unsqueeze(1)).long().sum(dim=1)
             owner = torch.where(owner < experts, owner, 0)
-            reads = torch.zeros(blocks * block, dtype=torch.int64).index_copy(0, place, ids // k)
-            return owner, reads, place.view(rows, k)
+            return owner, place.view(rows, k)
 
     return Group()
 
 
-def grouped_module(expert, block, blocks):
-    """The routed experts of a chunk in blocks (:func:`group_module`): each block's rows gathered and the expert form's
-    grouped product (``blocks``) over them, one ``[blocks * block, hidden]`` output a place. The combine reads each
-    pick's output from its place: in one program the compiler would read it back through the gathers, and each pick
-    would read its expert's weights again."""
+def grouped_module(expert, rows, k, block, blocks):
+    """The routed experts of a chunk in blocks (:func:`group_module`): each place's row, scattered from the places the
+    picks landed in (a place no pick lands in reads row zero), the rows gathered, and the expert form's grouped
+    product (``blocks``) over them, one ``[blocks * block, hidden]`` output a place. The combine reads each pick's
+    output from its place: in one program the compiler would read it back through the gathers, and each pick would
+    read its expert's weights again. The scatter stays inside the program: the compiler writes a scatter in place over
+    its base, so a scatter that wrote a step buffer would leave the places no pick lands in unwritten."""
     import torch
 
     class Grouped(torch.nn.Module):
@@ -518,7 +519,9 @@ def grouped_module(expert, block, blocks):
             self.expert = expert
             self._emmy_output_float32 = getattr(expert, "_emmy_output_float32", False)
 
-        def forward(self, x, reads, owner, w_gate_up, w_down):
+        def forward(self, x, place, owner, w_gate_up, w_down):
+            row = torch.arange(rows * k) // k
+            reads = torch.zeros(blocks * block, dtype=torch.int64).index_copy(0, place.reshape(-1), row)
             out = self.expert.blocks(x.index_select(0, reads).view(blocks, block, -1), owner, w_gate_up, w_down)
             return out.reshape(blocks * block, -1)
 
@@ -1063,12 +1066,11 @@ def _program(
             # Each block's experts over its places, which the combine reads each pick's partial from.
             block, blocks = grouping
             produced = (blocks * block, h)
-            owner, reads = step.buffer(f"{label}.owner", (blocks,), I64), step.buffer(f"{label}.reads", (blocks * block,), I64)
-            places = [step.buffer(f"{label}.place", picks, I64)]
+            owner, places = step.buffer(f"{label}.owner", (blocks,), I64), [step.buffer(f"{label}.place", picks, I64)]
             group = group_module(gate.num_experts, n, k, block, blocks)
-            step.compiled(prefix("group"), group, (index(picks),), [sel], [owner, reads, *places], cache, rows=n)
-            wrapper, routing = grouped_module(expert, block, blocks), [reads, owner]
-            examples = (torch.zeros(n, h, dtype=td), index(blocks * block), index(blocks), *values)
+            step.compiled(prefix("group"), group, (index(picks),), [sel], [owner, *places], cache, rows=n)
+            wrapper, routing = grouped_module(expert, n, k, block, blocks), [*places, owner]
+            examples = (torch.zeros(n, h, dtype=td), index(picks), index(blocks), *values)
         partials = step.buffer(f"{label}.partials", produced)
         step.compiled(
             prefix("experts"),
