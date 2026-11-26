@@ -309,6 +309,18 @@ impl Placer<'_> {
             for name in sorted {
                 self.bump(name, depth + 1);
             }
+            // A state the block updates is read on the back edge too: a read ahead of its update reads the pass
+            // before, so the state lives in the block, whichever scope around it updates the state as well (a
+            // cooperative fold's combine after its loop).
+            for child in &nested {
+                for member in child.stmts() {
+                    for (name, kind) in site_kinds(member) {
+                        if kind != Site::Binding {
+                            self.defined.insert(name, depth + 1);
+                        }
+                    }
+                }
+            }
         }
         let scope = matches!(&**stmt, Statement::Loop(_));
         self.binders.push(stmt.binds_axes().into_iter().collect());
@@ -572,6 +584,27 @@ mod tests {
             2,
             "{}",
             text(&out)
+        );
+    }
+
+    /// A value that reads an accumulator alone, ahead of its update, stays in the loop that folds it where the scope
+    /// around the loop updates the accumulator too, as a cooperative fold's combine does after its loop. Placed at
+    /// that outer update's scope it stood ahead of the loop, read once what the loop folds every pass, and left the
+    /// scope with no order: the loop binds the accumulator and reads the value.
+    #[test]
+    fn a_read_of_an_accumulator_stays_in_its_loop_under_an_outer_update() {
+        unchanged(
+            "
+      for r in 0..4:
+        for k in 0..16:
+          v = load X[r, k]
+          wide = exp(peak)
+          g = maximum(v, wide)
+          W[r, k] = g
+          peak <- maximum(peak, v) over k
+        peak <- maximum(peak, 0.0) over r
+        O[r] = peak
+            ",
         );
     }
 
