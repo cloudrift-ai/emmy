@@ -704,6 +704,8 @@ What the session changes for the milestones:
     15 must hide, and it is not width-free, since each chunk reads it again. Open: the strict export refuses the
     1,024-row attention's cut fork (`k_d548a0221877`) though both its twins compile strictly from the golden; the
     long-window twin's cut arm hangs and is recorded uncut. The numbers above come from a non-strict export.
+    The recipe's serving config keeps native's 64-row chunk until the strict export passes at 1,024 rows
+    (`SERVE_NATIVE_PREFILL=1024`); the golden already holds the wide twins.
 
 15. **Qwen3.6: the chunk's copies overlap its compute.** Prefill knows each layer's picks after its router, one
     layer ahead of the expert launches; a second stream listing the next layer's pages (the two-slot form the
