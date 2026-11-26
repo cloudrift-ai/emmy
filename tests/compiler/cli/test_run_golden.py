@@ -399,20 +399,44 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
     assert seen["knobs"] is None and seen["pins"] is None
 
 
-def test_record_latency_of_two_measured_schedules_lands_on_the_faster():
+def _timed_row(knobs, us, fast_math=False):
+    bench = BenchmarkResult(time_ms=us / 1000)
+    return SimpleNamespace(status="ok", bench=bench, flags=[], sample=PinnedRow(name="mm", knobs=knobs, pins={"FAST_MATH": fast_math}))
+
+
+def _live_lane(monkeypatch, fast_math: bool) -> None:
+    from emmy.compiler.pipeline.search.space import precision_pins
+
+    for key in precision_pins({}):
+        monkeypatch.delenv(f"EMMY_{key}", raising=False)
+    monkeypatch.setenv("EMMY_FAST_MATH", "1" if fast_math else "0")
+
+
+def test_record_latency_of_two_measured_schedules_lands_on_the_faster(monkeypatch):
     """Two measured schedules of one target in one regime: the evidence pick deploys the faster, so its row takes
     the target's latency."""
     seen = {}
-
-    def row(knobs, us):
-        bench = BenchmarkResult(time_ms=us / 1000)
-        return SimpleNamespace(status="ok", bench=bench, flags=[], sample=PinnedRow(name="mm", knobs=knobs, pins={"FAST_MATH": False}))
-
+    _live_lane(monkeypatch, False)
     args = SimpleNamespace(golden="working.json", realization="mm")
     with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
-        run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [row({"WORK": "w4x4"}, 12.0), row({"WORK": "w4x2"}, 10.0)])
+        run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [_timed_row({"WORK": "w4x4"}, 12.0), _timed_row({"WORK": "w4x2"}, 10.0)])
 
     assert seen["emmy_us"] == pytest.approx(10.0) and seen["knobs"] == {"WORK": "w4x2"} and seen["tcompile_us"] == 9.0
+
+
+@pytest.mark.parametrize("fast_math", [False, True])
+def test_record_latency_lands_on_the_live_regimes_row(monkeypatch, fast_math):
+    """A name recorded in both precision lanes benches a row of each, but the run deploys the live lane: its row takes
+    the latency even where the other lane's row ran faster, and a run in the other lane records that one."""
+    seen = {}
+    _live_lane(monkeypatch, fast_math)
+    args = SimpleNamespace(golden="working.json", realization="mm")
+    rows = [_timed_row({"WORK": "w4x4"}, 12.0, fast_math=False), _timed_row({"WORK": "w4x2"}, 8.0, fast_math=True)]
+    with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
+        run_mod._record_golden_latency(args, {"torch.compile": 9.0}, rows)
+
+    assert seen["pins"] == {"FAST_MATH": fast_math}
+    assert seen["emmy_us"] == pytest.approx(8.0 if fast_math else 12.0)
 
 
 def test_record_greedy_is_a_golden_bench_flag(run_cli):
