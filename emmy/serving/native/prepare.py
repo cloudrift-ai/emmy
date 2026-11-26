@@ -1086,7 +1086,12 @@ def _program(
             rows=n,
         )
         output = step.buffer(out, (width, h))
-        examples = (torch.zeros(n, h, dtype=td), torch.zeros(n, k, dtype=td), torch.zeros(produced, dtype=td), *map(index, [picks] * len(places)))
+        examples = (
+            torch.zeros(n, h, dtype=td),
+            torch.zeros(n, k, dtype=td),
+            torch.zeros(produced, dtype=td),
+            *map(index, [picks] * len(places)),
+        )
         combine = combine_module(grouped=bool(places))
         step.compiled(prefix("combine"), combine, examples, [mixed, scores, partials, *places], [output], cache, rows=n)
         return output
