@@ -69,11 +69,11 @@ straight-line vectorizer, not its loop vectorizer, which packs the lanes into ve
 
 - Buffers keep their storage dtype (f32, f16, bf16 as a `uint16` carrier, and one byte for `f8e4m3`, `f4e2m1x2` and
   `u8`); every value is widened to f32 on load and narrowed on store. A byte loads as its unsigned value, which the
-  graph's own decode turns into numbers. An `Assign` with a 16-bit `dtype` rounds its result to that dtype. An
-  `Affine` runs as its binary `Assign`s, as in Kernel IR, so each step rounds the same way.
+  graph's own decode turns into numbers. An `Assign` with a 16-bit `dtype` rounds its result to that dtype; a value
+  is one tree, evaluated node by node, and rounds once at its definition.
 - Only the accumulating instruction carries `reassoc nsz`, so the vectorizer can split a sum into lanes while every
   other operation keeps IEEE rounding. It and a product feeding it carry `contract`, so they fuse into one FMA, as
-  nvcc fuses them.
+  the PTX compiler fuses an f32 product with its sum.
 - `exp` is a Cephes polynomial and `from_f8e4m3` integer arithmetic, so they vectorize; `erf`, `tanh`, `sin`,
   `cos`, `log1p` call libm.
 - A lookup into the e2m1 pair table an NVFP4 weight decodes through — a constant the loader builds from

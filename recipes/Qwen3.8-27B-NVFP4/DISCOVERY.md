@@ -1,5 +1,95 @@
 # Qwen3.8-27B-NVFP4 discovery
 
+## Measured serving performance (2026-10-23, one-kernel GDN recurrence)
+
+In the width-1 GDN program one kernel now reads the recurrence state: it computes the correction, writes the new state
+and computes the recurrence output, where three kernels did that before. A small piece computes the normalized query
+and key once, and the joint piece reads them. `golden/rtx5090_sm120.json` holds that route, tuned, and the width-16
+and width-64 routes re-recorded on the new kernel trees (fast-math lane). Per target, greedy under `--strict-evidence`
+with the golden alone:
+
+| Target | Kernels | Sum of kernels µs | Main (#1226) µs |
+|---|---:|---:|---:|
+| gdn1 | 11 | 92.4 | 98.0 |
+| gdn16 conv parent | 12 | 149.2 | 148.1 |
+| gdn16 recurrence | 15 | 79.4 | 96.9 |
+| gdn64 conv parent | 12 | 160.6 | 162.0 |
+| gdn64 recurrence | 15 | 122.8 | 120.8 |
+
+The three state readers of gdn1 took 9.85 µs per layer; the joint piece takes 2.97 µs and the query and key piece
+0.92 µs. The strict serving audit deploys 9 of 9 fast-math twins; the standard lane, which serving does not use,
+deploys 0 of 9, as on main.
+
+Serving uses the setup of 2026-10-21: one RTX 5090, one request, a BF16 trunk, decode bucket 16, prefill chunk 64, M1
+tier 0, fast math, no prefix cache, vLLM 0.23.0 (torch 2.11.0, Transformers 5.14.1), `--strict-evidence`, an empty
+tune DB. The strict boot took 1037 s with an empty cubin cache (906 s on 2026-10-21). Prompts tokenize to the same ids.
+
+| Formatted prompt tokens | Output tokens | Emmy decode tok/s | Emmy TTFT s | 2026-10-21 decode tok/s | 2026-10-21 TTFT s |
+|---:|---:|---:|---:|---:|---:|
+| 25 | 8 | 58.5 (55.3–61.7) | 0.15 (warm) | 57.2 (57.2–63.9) | 0.16 (warm) |
+| 227 | 38 | 59.2 (59.2–61.0) | 0.22 (0.22–0.24) | 57.2 (57.2–60.0) | 0.22 (0.22–0.37) |
+| 1027 | 195 | 58.7 (58.7–58.7) | 0.64 (0.64–0.64) | 57.2 (57.2–57.4) | 0.64 (0.64–0.65) |
+
+One boot, two probe rounds; the first value is the second round, ranges are min–max over both. Decode is 2–3% faster;
+the first token comes as soon as on 2026-10-21. All answers are correct; the long one gives the same branches and
+difference (74) in 195 tokens.
+
+## Measured serving performance (2026-10-21, shared GDN recurrence output)
+
+The cut pass now treats the GDN recurrence output as one value read flat, by blocks of sixteen and by packed pairs,
+so its three readers share one workspace. `golden/rtx5090_sm120.json` was re-recorded for the width-1, width-16 and
+width-64 GDN programs (fast-math lane). Per program, greedy under `--strict-evidence` with the golden alone:
+
+| Program | Kernels | Sum of kernels µs | Main (#1210) µs |
+|---|---:|---:|---:|
+| gdn1 | 12 | 98.0 | 106.6 |
+| gdn16 | 15 | 96.5 | 205.0 |
+| gdn64 | 15 | 121.2 | 262.2 |
+
+Part of the width-16 and width-64 gain is tuning, not the shared output: one piece with the same identity on main runs
+45.3 µs there and 2.6 µs tuned. The strict serving audit deploys 9 of 9 fast-math twins, as on main; the standard
+lane, which serving does not use, deploys 0 of 9 (main: 1).
+
+Serving uses the setup of 2026-10-20: one RTX 5090, one request, a BF16 trunk, decode bucket 16, prefill chunk 64, M1
+tier 0, fast math, no prefix cache, vLLM 0.23.0 (torch 2.11.0, Transformers 5.14.1), `--strict-evidence`, an empty
+tune DB. The strict boot took 906 s with an empty cubin cache (846 s on 2026-10-20). Prompts tokenize to the same ids.
+
+| Formatted prompt tokens | Output tokens | Emmy decode tok/s | Emmy TTFT s | 2026-10-20 decode tok/s | 2026-10-20 TTFT s |
+|---:|---:|---:|---:|---:|---:|
+| 25 | 8 | 57.2 (57.2–63.9) | 0.16 (warm) | 55.9 (55.9–58.7) | 0.17 (warm) |
+| 227 | 39 | 57.2 (57.2–60.0) | 0.22 (0.22–0.37) | 55.9 (55.9–58.8) | 0.25 (0.25–0.28) |
+| 1027 | 219 | 57.2 (57.2–57.4) | 0.64 (0.64–0.65) | 56.1 (56.1–56.5) | 0.74 (0.74–0.75) |
+
+One boot, two probe rounds; the first value is the second round, ranges are min–max over both. Decode is about 2%
+faster and the first token comes 10–14% sooner on the medium and long prompts. All answers are correct. The medium
+and long answers are worded differently from 2026-10-20: the long one now walks through the counts before giving the
+same branches and difference (74), in 219 tokens instead of 82.
+
+## Measured serving performance (2026-10-20)
+
+The tuned `golden/rtx5090_sm120.json` deploys all nine serving programs of the fast-math lane under strict evidence
+(`emmy eval golden --serving-config recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env`: 9 of 9 fast-math twins; the
+standard lane, which serving does not use, deploys 1 of 9). Setup as on 2026-10-16: one RTX 5090, one request, a BF16
+trunk, decode bucket 16, prefill chunk 64, M1 tier 0, fast math, no prefix cache, vLLM 0.23.0 (torch 2.11.0,
+Transformers 5.14.1). Emmy boots with `--strict-evidence` and an empty tune DB; the strict boot took 846 s. Stock
+vLLM runs the same flags with compiled CUDA graphs. Both sides tokenize the probe prompts to the same ids.
+
+| Formatted prompt tokens | Output tokens Emmy / stock | Emmy decode tok/s | Emmy TTFT s | Stock decode tok/s | Stock TTFT s |
+|---:|---:|---:|---:|---:|---:|
+| 25 | 8 / 8 | 55.9 (55.9–58.7) | 0.17 (warm) | 63.2 (60.2–63.3) | 0.08 (warm) |
+| 227 | 36 / 36 | 55.9 (55.9–58.8) | 0.25 (0.25–0.28) | 63.3 (63.3–63.3) | 0.30 (0.30–0.43) |
+| 1027 | 82 / 196 | 56.1 (56.1–56.5) | 0.74 (0.74–0.75) | 63.2 (63.2–63.2) | 1.24 (1.24–1.24) |
+
+One boot per side, two probe rounds; the first value is the second round, ranges are min–max over both. All answers
+are correct; the short and medium answers are identical on both sides, and the long one gives the same branches and
+difference (74) in fewer words on Emmy. Decode is 12% below stock; time to first token is lower than stock's on the
+medium and long prompts.
+
+GSM8K (`scripts/run_lmeval_gate.py`: 200 questions, 5-shot, seed 0, raw completions, the protocol of
+`experiments/gemma-4-12B/gsm8k_rtx5090`), strict match: Emmy 0.450, stock 0.470, standard error 0.035 each; flexible
+extract: Emmy 0.535, stock 0.530. The two sides agree within one standard error. Both absolute scores are low for this
+model, likely because the protocol sends raw completions to a chat model.
+
 ## Measured serving performance (2026-10-16)
 
 This compares main 7ef17a58 with PR #1171 at 7025e8b4 on one RTX 5090. The setup is the 2026-10-13 one: each

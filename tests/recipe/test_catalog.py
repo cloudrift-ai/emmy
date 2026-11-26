@@ -4,6 +4,7 @@ import pytest
 import yaml
 
 from emmy.recipe.catalog import CATALOG_SCHEMA_VERSION, create_recipe_stub, recipe_inventory, recipe_inventory_document
+from emmy.recipe.types import MAX_FULL_CONTEXT_LATENCY_S
 
 GPU = "NVIDIA H200 141GB"
 
@@ -44,12 +45,20 @@ def test_recipe_inventory_filters_tags_and_reports_deployments(tmp_path):
             "task": "generate",
             "runnable": True,
             "deployments": [
-                {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 8192, "input_modalities": ["text"]},
+                {
+                    "gpu": GPU,
+                    "gpu_count": 1,
+                    "gpu_memory_utilization": 0.9,
+                    "context_length": 8192,
+                    "full_context_latency_s": None,
+                    "input_modalities": ["text"],
+                },
                 {
                     "gpu": "NVIDIA B200",
                     "gpu_count": 2,
                     "gpu_memory_utilization": 0.9,
                     "context_length": 16384,
+                    "full_context_latency_s": None,
                     "input_modalities": ["text"],
                 },
             ],
@@ -112,6 +121,41 @@ def test_recipe_inventory_rejects_image_input_disabled_in_a_variant(tmp_path):
         recipe_inventory(root)
 
 
+def test_recipe_inventory_exports_the_measured_full_context_latency_per_deployment(tmp_path):
+    """The reference Relay reads for its non-streaming timeout is measured on one deployment entry; the bound is legal."""
+    root = tmp_path / "recipes"
+    path = _write_recipe(root, "ready", "org/ready", ["maintained"])
+    config = yaml.safe_load(path.read_text())
+    config["matrices"][1]["engine.llm.full_context_latency_s"] = MAX_FULL_CONTEXT_LATENCY_S
+    path.write_text(yaml.safe_dump(config))
+
+    assert [d["full_context_latency_s"] for d in recipe_inventory(root)[0]["deployments"]] == [None, MAX_FULL_CONTEXT_LATENCY_S]
+
+
+@pytest.mark.parametrize("value", [0, 35.5, "35", True])
+def test_recipe_inventory_rejects_a_full_context_latency_that_is_not_whole_seconds(tmp_path, value):
+    root = tmp_path / "recipes"
+    path = _write_recipe(root, "ready", "org/ready", ["maintained"])
+    config = yaml.safe_load(path.read_text())
+    config["engine"]["llm"]["full_context_latency_s"] = value
+    path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ValueError, match="org/ready.*full_context_latency_s"):
+        recipe_inventory(root)
+
+
+def test_recipe_inventory_rejects_a_full_context_latency_over_what_a_deployed_request_may_take(tmp_path):
+    """A context whose full-context request outlasts Relay's wait is lowered at onboarding, never published."""
+    root = tmp_path / "recipes"
+    path = _write_recipe(root, "ready", "org/ready", ["maintained"])
+    config = yaml.safe_load(path.read_text())
+    config["engine"]["llm"]["full_context_latency_s"] = MAX_FULL_CONTEXT_LATENCY_S + 1
+    path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ValueError, match="org/ready.*full_context_latency_s 291 exceeds.*lower engine.llm.context_length"):
+        recipe_inventory(root)
+
+
 def test_recipe_inventory_document_is_versioned(tmp_path):
     root = tmp_path / "recipes"
     _write_recipe(root, "ready", "org/ready", ["maintained"])
@@ -137,9 +181,10 @@ def test_recipe_inventory_keeps_entries_that_differ_only_by_memory_fraction(tmp_
     }
     recipe.write_text(yaml.safe_dump(config, sort_keys=False))
 
+    unmeasured = {"full_context_latency_s": None, "input_modalities": ["text"]}
     assert recipe_inventory(root)[0]["deployments"] == [
-        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 131072, "input_modalities": ["text"]},
-        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.3, "context_length": 32768, "input_modalities": ["text"]},
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 131072, **unmeasured},
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.3, "context_length": 32768, **unmeasured},
     ]
 
 
@@ -157,7 +202,7 @@ V100 = "NVIDIA Tesla V100 SXM3 32GB"
 def test_bundled_recipes_list_their_shared_gpu_entry(recipes_dir, name, shared_entry):
     """A bundled recipe that may share its GPU exposes the reduced-fraction entry after its whole-GPU one."""
     record = next(record for record in recipe_inventory(recipes_dir) if record["name"] == name)
-    shared = {**shared_entry, "input_modalities": ["text"]}
+    shared = {**shared_entry, "full_context_latency_s": None, "input_modalities": ["text"]}
     whole = [d for d in record["deployments"] if d["gpu"] == shared["gpu"] and d["gpu_memory_utilization"] > 0.8]
     assert whole and record["deployments"][-1] == shared
     assert record["deployments"].index(whole[0]) < record["deployments"].index(shared)

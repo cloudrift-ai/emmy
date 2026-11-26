@@ -37,7 +37,8 @@ disappears; `linear`, `rms_norm`, `scaled_dot_product_attention`, `einsum` and `
 `split` and `split_with_sizes` share one handler driven by the FX output metadata. A write
 through a static unit-step slice or select arrives as `slice_scatter` / `select_scatter`, a two-source `IndexMapOp`
 whose region reads the source and whose remainder reads the base; functional `copy` is a broadcast and cast of its
-source, and `fill` a fill constructor. Other scatters (`index_put`, `scatter`, strided or diagonal views) fail. A
+source, and `fill` a fill constructor. `index_copy`, `index_fill`, a one-index `index_put` and a plain `scatter` are
+a `ScatterOp`; other scatters (several indices, accumulation, strided or diagonal views) fail. A
 graph has no write-back, so `trace_module` refuses a module that writes an input, parameter or buffer, read again or
 not. `trace_module_functional` traces one for a caller that writes the results back: each input's new value becomes a
 graph output after the module's own, and the second return value maps those outputs to their inputs. A write to a
@@ -71,7 +72,9 @@ chunk counts, nonconstant dimensions, a dynamic chunked extent, and invalid tupl
 present) as a 4th `SdpaOp` input — HF passes its precomputed `(1, 1, S, S)`
 causal mask this way (an additive `0` / `-inf` bias) rather than via the
 `is_causal` flag. The decomposition (`frontend/decomposition/010_sdpa.py`)
-broadcasts that mask to the scores shape and adds it before the softmax.
+broadcasts that mask to the scores shape and adds it before the softmax. `is_causal` and a stamped sliding window
+are no mask at all: the softmax's two reductions and the product with V walk a range of the key axis, the keys at or
+before the query's row and, under a window, the last `W` of them (`ReduceOp.range`).
 Dropping it silently turns masked attention into full bidirectional
 attention — invisible to uniform input but wrong on any varying sequence.
 The `scale=` kwarg is captured onto `SdpaOp.scale` (`None` = torch's `1/sqrt(head_dim)` default) and honored
@@ -85,7 +88,12 @@ The recurrent matrix is FP32 and history uses the projected activation dtype. Ze
 batch rows are independent. History is cloned before the installed Hugging Face forward can update it in place,
 so callers retain both inputs. Static prefill and decode programs share this explicit state contract. Transformers
 5.16 moved the convolution history into the cache, which now prepends it and returns the concatenation; the wrapper's
-cache speaks both protocols, because serving images keep their own Transformers.
+cache speaks both protocols, because serving images keep their own Transformers. With `rows=True` the wrapper runs
+the single-token rule row by row and returns the state and history after every row, which a speculative verify step
+keeps per row. On a routed-expert block the
+wrapper returns `(h, xn, state, history)`, with the gated shared expert folded into `h`, and the routed experts run
+outside it as in the attention split. Its FP32-residual form, which native generation traces, keeps `h` in FP32 and
+returns `xn` in the model dtype, as the attention split's `post` does.
 
 HuggingFace `CausalLM` models build their causal attention mask
 dynamically at forward time (`arange` → `cumsum` → `triu` → `eq` …),
@@ -189,7 +197,8 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   routers and 3-tuple ones (Glm4Moe's `Glm4MoeTopkRouter`) alike. A DeepSeek/GLM always-on `shared_experts`
   module (a plain dense MLP over the same normed `xn`) folds INTO `post_attn`'s returned `h`, so the combine
   stays `h + Σ w_e · expert_e(xn)` with no runner change; Qwen-MoE's GATED shared expert (`shared_expert_gate`)
-  and Gemma 4-norm MoE blocks are rejected until a model needs them (`tests/serving/test_moe_split.py`).
+  folds in too, as `sigmoid(shared_expert_gate(xn)) * shared_expert(xn)`; Gemma 4-norm MoE blocks are rejected until
+  a model needs them (`tests/serving/test_moe_split.py`).
   `split_gate_up=True` selects a third form, `expert(x, w_gate, w_up, w_down)` — the EXL3 shape. There each
   coded linear carries its own input-side channel vector, so the merged gate_up weight has no single
   input-side channel vector and the merged spelling would only add a concat the chunk split undoes.
@@ -228,14 +237,16 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   (`tests/serving/test_deepseek_v4_split.py` proves the carve against the eager layer for sliding, HCA and CSA
   layers with both hash and top-k routers).
 
-  A Qwen4Exp block (it carries `attn_hyper_connection` / `mlp_hyper_connection`) takes the same seam with the same
-  signature, built by `_build_gated_residual_split`, because the fork owns its token mixers, Gated DeltaNet and sparse
-  attention. The gated residual keeps `hc_count` streams already flattened: `pre` returns the attention-site mixed
-  input, and `post` recomputes the injection weights from the carrier, injects the mixer output, runs the MLP-site
-  gated residual (its mixed input is `xn`), injects the gated shared expert (`sigmoid(shared_expert_gate(xn)) *
-  shared_expert(xn)`) and returns the MLP-site injection weights as `mix`. The n-gram PLE on layer 2 is added to the
-  carrier ahead of `pre` and belongs to neither half (`tests/serving/test_qwen4_exp_split.py` proves the carve for the
-  Gated DeltaNet, PLE and sparse-attention layers).
+  A Qwen4Exp block (it carries `attn_hyper_connection` / `mlp_hyper_connection`) takes the same seam, built by
+  `_build_gated_residual_split`, because the fork owns its token mixers, Gated DeltaNet and sparse attention. The
+  gated residual keeps `hc_count` streams already flattened: `pre` returns the attention-site mixed input, and `post`
+  recomputes the injection weights from the carrier, injects the mixer output, runs the MLP-site gated residual (its
+  mixed input is `xn`) and returns the MLP-site injection weights as `mix` and, as a fourth output, the gated shared
+  expert (`sigmoid(shared_expert_gate(xn)) * shared_expert(xn)`). The runner adds that to the routed combine before
+  the placement, so under tensor parallelism the shared expert is sliced like a routed one and one all-reduce sums
+  both (`slice_routed_experts`). The n-gram PLE on layer 2 is added to the carrier ahead of `pre` and belongs to
+  neither half (`tests/serving/test_qwen4_exp_split.py` proves the carve for the Gated DeltaNet, PLE and
+  sparse-attention layers).
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the shard-streamed serving load of a
   quantized MoE checkpoint. The twin builds from config on the meta device (weights never read at trace; the
@@ -256,10 +267,12 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   and the serving-twin capture agree. `hosted_by_engine=True`, which the serving runner passes, leaves unread what the
   1Cat fork runs in Emmy's place: a hyper-connection layer's attention sublayer and its n-gram PLE (Qwen3.8-Flash-Next's
   table is about 51 GB). Those parameters stay meta. The default reads them, because `emmy run --layer N` reuses this
-  loader for its eager reference. The twin's config must resolve to Transformers' OWN class for the architecture:
-  a hosting process can re-register the model type onto its own minimal config class (vLLM's config parser does,
-  process-wide), which drops every field the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a
-  same-named native class exists, the loader reloads the config with it.
+  loader for its eager reference. `experts=False` reads no routed expert, so they stay meta and the store holds none,
+  and `trunk=False` reads nothing else: native preparation loads its twin with the first and streams the experts one
+  layer at a time with the second, each layer through its own `layer_range`. The twin's config must resolve to
+  Transformers' OWN class for the architecture: a hosting process can re-register the model type onto its own minimal
+  config class (vLLM's config parser does, process-wide), which drops every field the real `__init__` derives —
+  DeepSeek V4 loses `layer_types` — so when a same-named native class exists, the loader reloads the config with it.
 
   Checkpoint keys are translated to the twin's own parameter names before any of that, by three composed translations.
   Nothing raises when a name fails to match: the load is `strict=False, assign=True`, so an unmatched parameter keeps
@@ -341,8 +354,9 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   `SdpaOp.sliding_window` (+ `is_causal`) from `config.sliding_window` × `layer_types` — single-layer via the
   `layer_type` kwarg, whole-model by walking the graph's SDPA nodes in execution order (a count mismatch stamps
   nothing). Semantics: the stamped SDPA's mask keeps AT MOST the causal band `kv ∈ [m − W + 1, m]` (an explicit mask
-  operand may keep less, e.g. padding — it stays applied), which is what lets the lowering skip key blocks wholly
-  outside the band and both reference backends (`SdpaOp.forward`, `backend/torch_ref.py`) compute the band.
+  operand may keep less, e.g. padding — it stays applied). The decomposition states the band as the range of the key
+  axis, which is what lets the lowering skip key blocks wholly outside it, and both reference backends
+  (`SdpaOp.forward`, `backend/torch_ref.py`) compute the band.
   `commands/compile.py` calls it after every model/layer `trace_module`.
 
 `torch.py` converts only FX nodes observable through the exported value output, by reverse reachability; once every

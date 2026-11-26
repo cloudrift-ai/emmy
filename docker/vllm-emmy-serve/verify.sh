@@ -1,7 +1,7 @@
 #!/bin/bash
 # Verify a baked per-model serving image on the target GPU: cold-start fully offline (HF_HUB_OFFLINE is
 # baked in; no HF_TOKEN passed) — proving zero downloads — then issue one completion and
-# assert the cubin set did not grow: an empty diff = 100% cache hit (zero nvcc compiles).
+# assert the cubin set did not grow: an empty diff = 100% cache hit (zero ptxas runs).
 #
 #   MODEL=google/gemma-4-12B-it IMAGE=cloudriftai/vllm-emmy-<slug>:TAG [GPU_DEVICE=1] ./verify.sh
 set -euo pipefail
@@ -54,7 +54,8 @@ check_baked() {
     fi
 }
 check_baked SERVE_REVISION "${SERVE_REVISION:-}"
-check_baked EMMY_GEN_EMBED_HOST "${SERVE_EMBED_HOST:-}"
+check_baked EMMY_GEN_EMBED_GPU "${SERVE_EMBED_GPU:-}"
+check_baked EMMY_GEN_VISION_GPU "${SERVE_VISION_GPU:-}"
 check_baked EMMY_GEN_PREFILL_CAPACITY "${SERVE_PREFILL_CAPACITY:-}"
 check_baked EMMY_GEN_PREFILL_BUCKET "${SERVE_PREFILL_BUCKET:-}"
 check_baked EMMY_GEN_M1_TIER "${SERVE_M1_TIER:-}"

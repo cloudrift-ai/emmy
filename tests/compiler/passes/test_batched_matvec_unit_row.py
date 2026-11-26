@@ -5,70 +5,77 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.kernel.ir import MmaSyncPtx
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
+from emmy.compiler.pipeline import LOWERING_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda, requires_sm
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction, projection, slab
+
+#: The card the structural tests compile for; a test that runs its kernel compiles for the card it runs on.
+_CARD = Context.from_target((12, 0))
 
 
 def _graph(dtype: str) -> Graph:
-    b, m, n, k = (Var(name) for name in ("b", "m", "n", "k"))
-    cell = (
-        Loop(
-            Axis("k", 64),
-            (
-                Load("av", "a", (b, m, k)),
-                Load("bv", "w", (b, m, k, n)),
-                Assign("product", "multiply", ("av", "bv")),
-                Accum("sum", "product", axes=("k",)),
-            ),
-        ),
-        Write("out", (b, m, n), "sum"),
+    body = parse_body(
+        """
+        for b in 0..2:
+            for m in 0..4:
+                for n in 0..32:
+                    for k in 0..64:
+                        av = load a[b, m, k]
+                        bv = load w[b, m, k, n]
+                        product = multiply(av, bv)
+                        sum <- add(sum, product) over k
+                    out[b, m, n] = sum
+        """
     )
-    body = Body((Loop(Axis("b", 2), (Loop(Axis("m", 4), (Loop(Axis("n", 32), cell),)),)),))
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (2, 4, 64), dtype), node_id="a")
     graph.add_node(InputOp(), [], Tensor("w", (2, 4, 64, 32), dtype), node_id="w")
-    graph.add_node(LoopOp(body=body, name="k_batched_matvec"), ["a", "w"], Tensor("out", (2, 4, 32), "f32"), node_id="out")
+    graph.add_node(LoopOp(body=body), ["a", "w"], Tensor("out", (2, 4, 32), "f32"), node_id="out")
     graph.inputs, graph.outputs = ["a", "w"], ["out"]
     return graph
 
 
-def _compiled(dtype: str, reduce: str = ""):
+def _products(kernels) -> set[tuple]:
+    """The tensor-core products of ``kernels``: each one's shape, operand type and accumulator type."""
+    return {(tuple(mma.shape), mma.ab_dtype, mma.c_dtype) for mma in statements(kernels, MmaSyncPtx)}
+
+
+def _compiled(dtype: str, reduce: str = "", *, kernels: bool = False, ctx: Context = _CARD):
+    """The batched matvec compiled under its tensor-core pins, for ``ctx``'s card; with ``kernels``, beside its Kernel
+    IR."""
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": reduce, "STAGE": ""}):
-        return Pipeline.build(CUDA_PASSES).run(_graph(dtype), ctx=Context.from_target((12, 0)))
+        compiled = compile_with_kernels(_graph(dtype), ctx=ctx)
+    return compiled if kernels else compiled[0]
 
 
 def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False) -> Graph:
-    n, k = Var("n"), Var("k")
-    index = (BinaryExpr("/", n, Literal(128, "int")), BinaryExpr("%", n, Literal(128, "int"))) if reshape_output else (n,)
+    index = "n / 128, n % 128" if reshape_output else "n"
     output_shape = (n_size // 128, 128) if reshape_output else (n_size,)
-    cell = (
-        Loop(
-            Axis("k", k_size),
-            (
-                Load("av", "a", (k,)),
-                Load("bv", "w", (k, n)),
-                Assign("product", "multiply", ("av", "bv")),
-                Accum("sum", "product", axes=("k",)),
-            ),
-        ),
-        Write("out", index, "sum"),
+    body = parse_body(
+        f"""
+        for n in 0..{n_size}:
+            for k in 0..{k_size}:
+                av = load a[k]
+                bv = load w[k, n]
+                product = multiply(av, bv)
+                sum <- add(sum, product) over k
+            out[{index}] = sum
+        """
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (k_size,), dtype), node_id="a")
     graph.add_node(InputOp(), [], Tensor("w", (k_size, n_size), dtype), node_id="w")
     graph.add_node(
-        LoopOp(body=Body((Loop(Axis("n", n_size), cell),)), name="k_rank_one_projection"),
+        LoopOp(body=body),
         ["a", "w"],
         Tensor("out", output_shape, "f32"),
         node_id="out",
@@ -77,16 +84,20 @@ def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_o
     return graph
 
 
-def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False):
+def _rank_one_compiled(
+    dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False, kernels: bool = False, ctx: Context = _CARD
+):
+    """The rank-one projection compiled under its tensor-core pins, for ``ctx``'s card; with ``kernels``, beside its
+    Kernel IR."""
+    graph = _rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output)
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        return Pipeline.build(CUDA_PASSES).run(
-            _rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output), ctx=Context.from_target((12, 0))
-        )
+        compiled = compile_with_kernels(graph, ctx=ctx)
+    return compiled if kernels else compiled[0]
 
 
 def _computed_grouped_graph(mirrored: bool) -> Graph:
-    vector = projection((slab("av", "a", "b", "k"),), (Assign("ac", "relu", ("av",), dtype=F16),), ("ac",))
-    matrix = projection((slab("wv", "w", "b", "g", "n", "k"),), (Assign("wc", "relu", ("wv",), dtype=F16),), ("wc",))
+    vector = projection((slab("av", "a", "b", "k"),), parse_body("f16 ac = relu(av)"), ("ac",))
+    matrix = projection((slab("wv", "w", "b", "g", "n", "k"),), parse_body("f16 wc = relu(wv)"), ("wc",))
     root = contraction("k", matrix if mirrored else vector, (vector if mirrored else matrix, "sum"))
     inputs = {"a": Tensor("a", (2, 32), "f16"), "w": Tensor("w", (2, 3, 128, 32), "f16")}
     output = Tensor("out", (2, 3, 128), "f32")
@@ -96,7 +107,7 @@ def _computed_grouped_graph(mirrored: bool) -> Graph:
         place=Placement(free=(Axis("b", 2), Axis("g", 3), Axis("n", 128))),
         inputs=inputs,
         outputs={"out": output},
-        output_specs=(OutputSpec(Write("out", (Var("b"), Var("g"), Var("n")), "sum")),),
+        output_specs=(OutputSpec(parse_body("out[b, g, n] = sum")[0]),),
     )
     assert tile.op is root
     graph = Graph()
@@ -132,18 +143,16 @@ def test_computed_grouped_matvec_tiles_either_operand_orientation(mirrored, tile
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 @pytest.mark.parametrize(("k_size", "n_size"), [(64, 32), (5120, 2048), (5120, 6144), (5120, 10240)])
 def test_rank_one_projection_emits_mma(dtype: str, k_size: int, n_size: int) -> None:
-    compiled = _rank_one_compiled(dtype, k_size, n_size)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1
-    assert f"emmy_mma_m16n8k16_{dtype}_f32(" in sources[0]
+    _, kernels = _rank_one_compiled(dtype, k_size, n_size, kernels=True)
+    assert len(kernels) == 1
+    assert _products(kernels) == {((16, 8, 16), dtype, "f32")}
 
 
 @pytest.mark.parametrize("n_size", [256, 2048, 6144])
 def test_rank_one_reshaped_projection_emits_mma(n_size: int) -> None:
-    compiled = _rank_one_compiled("bf16", 5120, n_size, reshape_output=True)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1
-    assert "emmy_mma_m16n8k16_bf16_f32(" in sources[0]
+    _, kernels = _rank_one_compiled("bf16", 5120, n_size, reshape_output=True, kernels=True)
+    assert len(kernels) == 1
+    assert _products(kernels) == {((16, 8, 16), "bf16", "f32")}
 
 
 @requires_cuda
@@ -163,17 +172,18 @@ def test_rank_one_projection_matches_independent_reference(dtype: str, n_size: i
     else:
         a, w = a.astype(np.float16), w.astype(np.float16)
         a_ref, w_ref = a.astype(np.float32), w.astype(np.float32)
-    result, _ = CudaBackend().run(_rank_one_compiled(dtype, n_size=n_size, reshape_output=reshape_output), input_data={"a": a, "w": w})
+    result, _ = CudaBackend().run(
+        _rank_one_compiled(dtype, n_size=n_size, reshape_output=reshape_output, ctx=Context.probe()), input_data={"a": a, "w": w}
+    )
     expected = (a_ref @ w_ref).reshape((n_size // 128, 128) if reshape_output else (n_size,))
     np.testing.assert_allclose(result.outputs["out"], expected, rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 def test_batched_matvec_emits_mma(dtype: str) -> None:
-    compiled = _compiled(dtype)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1
-    assert f"emmy_mma_m16n8k16_{dtype}_f32(" in sources[0]
+    _, kernels = _compiled(dtype, kernels=True)
+    assert len(kernels) == 1
+    assert _products(kernels) == {((16, 8, 16), dtype, "f32")}
 
 
 @requires_cuda
@@ -193,29 +203,27 @@ def test_batched_matvec_matches_independent_reference(dtype: str, reduce: str) -
     else:
         a, w = a.astype(np.float16), w.astype(np.float16)
         a_ref, w_ref = a.astype(np.float32), w.astype(np.float32)
-    result, _ = CudaBackend().run(_compiled(dtype, reduce), input_data={"a": a, "w": w})
+    result, _ = CudaBackend().run(_compiled(dtype, reduce, ctx=Context.probe()), input_data={"a": a, "w": w})
     expected = np.einsum("bmk,bmkn->bmn", a_ref, w_ref)
     np.testing.assert_allclose(result.outputs["out"].reshape(expected.shape), expected, rtol=1e-3, atol=1e-3)
 
 
 def _row_scaled_fp8_graph() -> Graph:
-    m, n, k = (Var(name) for name in ("m", "n", "k"))
-    cell = (
-        Loop(
-            Axis("k", 32),
-            (
-                Load("scale_value", "scale", (m, k)),
-                Load("bits_value", "bits", (k, n)),
-                Assign("weight", "from_f8e4m3", ("bits_value",)),
-                Assign("scaled", "multiply", ("weight", "scale_value")),
-                Load("activation", "a", (m, k)),
-                Assign("product", "multiply", ("activation", "scaled")),
-                Accum("sum", "product", axes=("k",)),
-            ),
-        ),
-        Write("out", (m, n), "sum"),
+    body = parse_body(
+        """
+        for m in 0..2:
+            for n in 0..16:
+                for k in 0..32:
+                    scale_value = load scale[m, k]
+                    bits_value = load bits[k, n]
+                    weight = from_f8e4m3(bits_value)
+                    scaled = multiply(weight, scale_value)
+                    activation = load a[m, k]
+                    product = multiply(activation, scaled)
+                    sum <- add(sum, product) over k
+                out[m, n] = sum
+        """
     )
-    body = Body((Loop(Axis("m", 2), (Loop(Axis("n", 16), cell),)),))
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (2, 32), "f16"), node_id="a")
     graph.add_node(InputOp(), [], Tensor("scale", (2, 32), "f16"), node_id="scale")
@@ -236,34 +244,27 @@ def test_row_scaled_fp8_b_matches_independent_reference() -> None:
     bits = rng.integers(0, 256, (32, 16), dtype=np.uint8)
     bits[(bits == 0x7F) | (bits == 0xFF)] = 0
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_row_scaled_fp8_graph(), ctx=Context.from_target((12, 0)))
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1
+        compiled, kernels = compile_with_kernels(_row_scaled_fp8_graph(), ctx=Context.probe())
+    assert len(kernels) == 1
     result, _ = CudaBackend().run(compiled, input_data={"a": a, "scale": scale, "bits": bits})
     expected = np.einsum("mk,mk,kn->mn", a.astype(np.float32), scale.astype(np.float32), decode_f8(bits, "f8e4m3"))
     np.testing.assert_allclose(result.outputs["out"].reshape(expected.shape), expected, rtol=2e-3, atol=2e-3)
 
 
 def _grouped_weight_graph() -> Graph:
-    from emmy.compiler.ir.expr import BinaryExpr, Literal
-
-    h, m, n, k = (Var(name) for name in ("h", "m", "n", "k"))
-    group = BinaryExpr("//", h, Literal(3, "int"))
-    row = BinaryExpr("*", m, Literal(6 * 16, "int"))
-    flat = BinaryExpr("+", BinaryExpr("+", row, BinaryExpr("*", group, Literal(16, "int"))), n)
-    cell = (
-        Loop(
-            Axis("k", 32),
-            (
-                Load("activation", "a", (h, m, k)),
-                Load("weight", "w", (k, flat)),
-                Assign("product", "multiply", ("activation", "weight")),
-                Accum("sum", "product", axes=("k",)),
-            ),
-        ),
-        Write("out", (h, m, n), "sum"),
+    body = parse_body(
+        """
+        for h in 0..6:
+            for m in 0..2:
+                for n in 0..16:
+                    for k in 0..32:
+                        activation = load a[h, m, k]
+                        weight = load w[k, m * 96 + h // 3 * 16 + n]
+                        product = multiply(activation, weight)
+                        sum <- add(sum, product) over k
+                    out[h, m, n] = sum
+        """
     )
-    body = Body((Loop(Axis("h", 6), (Loop(Axis("m", 2), (Loop(Axis("n", 16), cell),)),)),))
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (6, 2, 32), "f16"), node_id="a")
     graph.add_node(InputOp(), [], Tensor("w", (32, 2 * 6 * 16), "f16"), node_id="w")
@@ -280,9 +281,8 @@ def test_grouped_weight_row_batch_matches_independent_reference() -> None:
     a = rng.standard_normal((6, 2, 32)).astype(np.float16)
     w = rng.standard_normal((32, 2 * 6 * 16)).astype(np.float16)
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_grouped_weight_graph(), ctx=Context.from_target((12, 0)))
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1 and "mma.sync" in sources[0]
+        compiled, kernels = compile_with_kernels(_grouped_weight_graph(), ctx=Context.probe())
+    assert len(kernels) == 1 and statements(kernels, MmaSyncPtx)
     result, _ = CudaBackend().run(compiled, input_data={"a": a, "w": w})
     expected = np.empty((6, 2, 16), dtype=np.float32)
     for head in range(6):

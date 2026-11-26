@@ -29,10 +29,10 @@ from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.ir.kernel.ir import FragmentApply, MmaSyncPtx
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Load, Loop, Write
+from emmy.compiler.ir.stmt import Body, Loop, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import OutputSpec, Placement
 from emmy.compiler.ir.tile.ir import TileOp
@@ -41,9 +41,16 @@ from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run
+from tests.compiler.helpers import compile_with_kernels, statements, text
 from tests.compiler.terms import contraction
 
 _CTX = Context.from_target((12, 0))
+
+
+def _folds_on_the_chunk_tier(kernel) -> bool:
+    """Whether ``kernel`` folds a chunked stream with the ``m16n8k16`` product: products under a chunk loop."""
+    products = [mma for mma in statements(kernel, MmaSyncPtx) if tuple(mma.shape) == (16, 8, 16)]
+    return bool(products) and any("__ck" in loop.axis.name for loop in statements(kernel, Loop))
 
 
 def _matmul(m: int = 128, k: int = 512, n: int = 128, *, out_dtype=F16) -> Graph:
@@ -92,7 +99,7 @@ def _stamps(out) -> dict[str, dict]:
 
 def _tile_pieces(graph=None) -> list[TileOp]:
     loop, _ = _resolve(
-        ["frontend/decomposition", "frontend/optimization", "loop/lowering", "loop/fusion", "loop/stamp"],
+        ["frontend/decomposition", "frontend/optimization", "loop/lowering", "loop/fusion"],
         graph,
     )
     tiled, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut", "tile/schedule"]), ctx=_CTX).resolve(
@@ -138,11 +145,8 @@ def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) ->
     """A split must not turn a channel tile into a padded tile across four heads."""
     axes = {name: Axis(name, extent) for name, extent in (("head", 4), ("row", 64), ("channel", 256))}
     k = Axis("k", 512)
-    root = contraction(
-        k,
-        Load("a", "a", (Var("row"), Var("k"))),
-        (Load("b", "b", (Var("head"), Var("channel"), Var("k"))), "acc"),
-    )
+    a, b = parse_body("a = load a[row, k]\nb = load b[head, channel, k]")
+    root = contraction(k, a, (b, "acc"))
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (64, 512), F16), node_id="a")
     graph.add_node(InputOp(), [], Tensor("b", (4, 256, 512), F16), node_id="b")
@@ -151,7 +155,7 @@ def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) ->
             op=root,
             place=Placement(free=tuple(axes[name] for name in free_order)),
             axes=(*axes.values(), k),
-            output_specs=(OutputSpec(Write("out", (Var("head"), Var("row"), Var("channel")), "acc")),),
+            output_specs=(OutputSpec(*parse_body("out[head, row, channel] = acc")),),
         ),
         ["a", "b"],
         Tensor("out", (4, 64, 256), F32),
@@ -207,7 +211,7 @@ def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
     out, _ = _resolve(CUDA_PASSES, graph)
     finalize = out.nodes["biased"]
     assert finalize.inputs == ["biased__partial", "bias"]
-    assert finalize.op.arg_order == ("biased__partial", "bias", "biased")
+    assert sorted(finalize.op.arg_order) == ["bias", "biased", "biased__partial"]
 
 
 def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
@@ -385,8 +389,6 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     from types import SimpleNamespace
 
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Assign, Load, Write
     from emmy.compiler.ir.tile import OutputSpec, Placement
     from emmy.compiler.ir.tile.ops import head
     from emmy.compiler.pipeline.passes.tile._split import _projection_refusal, split_forks
@@ -398,22 +400,15 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     # ``j`` a sweep at all, since a kernel whose every fold reads the sweep binds it to the grid
     # instead (``promoted_sweep``) and then has no sweep-resident fold to refuse.
     i, j, k, r = Axis("i", Dim(4)), Axis("j", Dim(8)), Axis("k", Dim(16)), Axis("r", Dim(4))
-    product = (Assign(name="acc__v", op="multiply", args=("v", "in0")),)
+    product = parse_body("acc__v = multiply(v, in0)")
     fold = reduction(k, (slab("v", "x", "k", "j"), slab("in0", "c", "j")), product, ("acc",))
-    stat = reduction(r, (slab("s", "s", "i", "r"),), (Assign(name="stat__v", op="copy", args=("s",)),), ("stat",))
-    wrapper = projection(
-        (fold, stat),
-        (
-            Load(name="in0", input="c", index=(Var("j"),)),
-            Assign(name="scaled", op="multiply", args=("acc", "in0")),
-            Assign(name="y", op="multiply", args=("scaled", "stat")),
-        ),
-    )
+    stat = reduction(r, (slab("s", "s", "i", "r"),), parse_body("stat__v = copy(s)"), ("stat",))
+    wrapper = projection((fold, stat), parse_body("in0 = load c[j]\nscaled = multiply(acc, in0)\ny = multiply(scaled, stat)"))
     tile = TileOp(
         op=wrapper,
         place=Placement(free=(i,)),
         axes=(i, j, k, r),
-        output_specs=(OutputSpec(write=Write(output="o", index=(Var("i"), Var("j")), value="y"), sweep=(j,)),),
+        output_specs=(OutputSpec(*parse_body("o[i, j] = y"), sweep=(j,)),),
     )
     node = head(tile.op)
     assert node is not None and node.axis is not None
@@ -468,7 +463,6 @@ def test_a_contraction_statistic_must_not_share_the_sliced_axis(stat_axis, monke
     """A cut piece can reuse one axis name for two lexical binders. Its statistic must stay whole."""
     from types import SimpleNamespace
 
-    from emmy.compiler.ir.stmt import Assign
     from emmy.compiler.pipeline.passes.tile._split import split_forks
     from tests.compiler.terms import projection, reduction, slab
 
@@ -476,12 +470,12 @@ def test_a_contraction_statistic_must_not_share_the_sliced_axis(stat_axis, monke
     stat = reduction(
         stat_axis,
         (slab("s", "x", "m", stat_axis),),
-        (Assign(name="stat__v", op="multiply", args=("s", "s")),),
+        parse_body("stat__v = multiply(s, s)"),
         ("stat",),
     )
     normalized = projection(
         (slab("xv", "x", "m", "k"), stat),
-        (Assign(name="scaled", op="divide", args=("xv", "stat")),),
+        parse_body("scaled = divide(xv, stat)"),
     )
     fold = contraction(k, normalized, (slab("wv", "w", "k", "n"), "acc"))
     assert fold.as_contraction() is not None
@@ -504,7 +498,6 @@ def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
     chunk tier must write its per-row states whole, broadcast into a fragment, beside the
     expectation's own fragment. Before, that write fell the partial to scalar tiles."""
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     q, kv = "torch.randn(1, 16, 1, 64, dtype=torch.float16)", "torch.randn(1, 2, 256, 64, dtype=torch.float16)"
@@ -518,16 +511,80 @@ def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
         "TILE@twist": "mma_m16n8k16_f16_f32/f1x8/k2",
         "TILE@twist.1/inner": "mma_m16n8k16_f16_f32/f1x4/k4",
         "STAGE@twist": "d2/smem-async",
-        "STAGE@twist.1/inner": "d2/smem-async",
+        "STAGE@twist.1/inner": "",
         "WORK": "w1x1",
     }
     with pinned_knobs(pins):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph_from_code(code)[0], ctx=_CTX)
-    sources = {nid: node.op.kernel_source for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
-    partial = next(src for nid, src in sources.items() if nid.endswith("__partial"))
-    assert len(sources) == 2, sorted(sources)
-    assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
-    states = re.findall(r"float (acc\d+)__r0_0 = ", partial)
-    assert len(states) == 2, "the pivot and denominator each keep a per-row register"
-    for state in states:
-        assert f"? ({state}__r0_0) : ({state}__r0_1)" in partial, f"{state} reaches the workspace whole"
+        _, kernels = compile_with_kernels(graph_from_code(code)[0], ctx=_CTX)
+    partial = next(kernel for nid, kernel in kernels.items() if nid.endswith("__partial"))
+    assert len(kernels) == 2, sorted(kernels)
+    assert _folds_on_the_chunk_tier(partial), "the partial folds its key slice on the chunk tier"
+    # A per-row state reaches the workspace as a fragment its two row registers are broadcast into.
+    whole = {
+        arg.names for apply in statements(partial, FragmentApply) if apply.op.name == "copy" for arg in apply.args if arg.kind == "row"
+    }
+    states = {top.removesuffix("__r0_0") for top, _ in whole}
+    assert len(states) == 2 and all(re.fullmatch(r"acc\d+", state) for state in states), (
+        "the pivot and denominator each keep a per-row register"
+    )
+    assert whole == {(f"{state}__r0_0", f"{state}__r0_1") for state in states}, "each state reaches the workspace whole"
+
+
+def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None:
+    """A key split's piece reads the absolute key through its partition coordinate; the chunk tier reads that
+    coordinate as uniform over the CTA, like the batch axes, so the sliced causal mask lands as the coordinate mask the
+    tier evaluates per element — before, the partition in the predicate refused every causal split off the tier."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    q, kv = "torch.randn(1, 16, 128, 64, dtype=torch.float16)", "torch.randn(1, 2, 512, 64, dtype=torch.float16)"
+    code = (
+        f"q={q}; k={kv}; v={kv}; F.scaled_dot_product_attention(q.reshape(1, 2, 8, 128, 64), k.reshape(1, 2, 1, 512, 64), "
+        "v.reshape(1, 2, 1, 512, 64), is_causal=True).reshape(1, 16, 128, 64)"
+    )
+    pins = {
+        "PLACE": "fuse",
+        "REDUCE@map.1/twist": "g2k",
+        "TILE@twist": "mma_m16n8k16_f16_f32/f1x16/k4",
+        "TILE@twist.1/inner": "mma_m16n8k16_f16_f32/f1x8/k4",
+        "STAGE@twist": "",
+        "STAGE@twist.1/inner": "",
+        "WORK": "w4x1",
+    }
+    with pinned_knobs(pins):
+        _, kernels = compile_with_kernels(graph_from_code(code)[0], ctx=_CTX)
+    partial = next(kernel for nid, kernel in kernels.items() if nid.endswith("__partial"))
+    assert len(kernels) == 2, sorted(kernels)
+    assert _folds_on_the_chunk_tier(partial), "the partial folds its key slice on the chunk tier"
+    # The mask is a predicate over each element's coordinates: its key is the chunk's column past the slice's base.
+    masks = [text(Body([apply])) for apply in statements(partial, FragmentApply) if any(arg.kind == "coord" for arg in apply.args)]
+    # 128 queries fold no key past the first 128 of the 512, so the key axis is 128 long and a partition holds 64.
+    absolute = all(re.search(r"__frow - 64 \* _a\d+_ks < __fcol", mask) and re.search(r"col_base=a\d+__ck", mask) for mask in masks)
+    assert masks and absolute, "the mask compares the slice's absolute key, 64 keys per partition"
+
+
+@pytest.mark.parametrize(
+    ("operation", "args", "expected"),
+    [
+        ("divide", ("state", "count"), True),
+        ("divide", ("count", "state"), False),
+        ("divide", ("state", "state"), False),
+        ("multiply", ("state", "count"), True),
+        ("multiply", ("count", "state"), True),
+        ("multiply", ("state", "state"), False),
+        ("add", ("state", "count"), False),
+    ],
+)
+def test_projection_distributes(operation, args, expected):
+    from emmy.compiler.pipeline.passes.tile._split import projection_distributes
+
+    body = list(parse_body(f"scaled = {operation}({', '.join(args)})\nout[] = scaled"))
+    assert projection_distributes(body, ("state",)) is expected
+
+
+@pytest.mark.parametrize("count,expected", [("1024.0", True), ("size", True), ("state", False)])
+def test_projection_distributes_with_a_state_independent_binding(count, expected):
+    from emmy.compiler.pipeline.passes.tile._split import projection_distributes
+
+    body = list(parse_body(f"let f32 count = {count}\nscaled = divide(state, count)\nout[] = scaled"))
+    assert projection_distributes(body, ("state",)) is expected

@@ -1,4 +1,5 @@
-"""Keep an independently owned carried state in two padded shared buffers across ordered steps."""
+"""Realize a carried state the schedule keeps in shared memory (``STAGE=d1/smem`` at the carrying fold): two
+padded shared buffers across the ordered steps, which run inside one launch."""
 
 from __future__ import annotations
 
@@ -7,106 +8,39 @@ from dataclasses import replace
 from importlib import import_module
 from math import prod
 
-from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpression, Builtin, Literal, SimplifyCtx, TernaryExpression, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Cond, Let, Load, Loop, Pre, Select, StridedLoop, Write
-from emmy.compiler.ir.stmt.base import dtype_promote
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt import (
+    Assign,
+    Body,
+    Cond,
+    Let,
+    Load,
+    Loop,
+    Select,
+    Write,
+    dtype_promote,
+    free_names,
+)
+from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.types import value_dtypes
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import DeferredFork
-from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
-from emmy.compiler.pipeline.search.space import SHARED_CARRY
+from emmy.compiler.pipeline.passes.tile._fromloop import carried_program, conjuncts, seed_index, shared_state
 
 PATTERN = [Pattern("root", KernelOp)]
 _resolve = import_module("emmy.compiler.pipeline.passes.lowering.kernel.045_merge_select_loads")._resolve
-_stamp = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types")
 _materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
 
 
-def _conjuncts(expr):
-    return _conjuncts(expr.left) | _conjuncts(expr.right) if isinstance(expr, BinaryExpr) and expr.op == "&&" else frozenset((expr,))
-
-
-def _owned(body, carry):
-    """The leading cells every live state read addresses in its own independent batch.
-
-    Coordinate selects can clamp a discarded branch to another batch. Each use contributes
-    its predicate separately; a coordinate is owned only when every consuming path proves it.
-    """
-    demand = {}
-
-    def need(name, predicates):
-        demand.setdefault(name, set()).update(predicates)
-
-    for stmt in reversed(tuple(body.iter())):
-        wanted = demand.get(getattr(stmt, "name", ""), {frozenset()})
-        if isinstance(stmt, Select):
-            remaining = wanted
-            for i, branch in enumerate(stmt.branches):
-                if i == len(stmt.branches) - 1:
-                    need(branch.value, remaining)
-                else:
-                    need(branch.value, {path | _conjuncts(branch.select) for path in remaining})
-                    remaining = {path | {BinaryExpr("==", branch.select, Literal(0, "int"))} for path in remaining}
-        elif isinstance(stmt, (Affine, Assign, Accum)):
-            for name in stmt.deps():
-                if name != stmt.name:
-                    need(name, wanted)
-        elif isinstance(stmt, (Carry, Write)):
-            need(stmt.value, {frozenset()})
-    reads = tuple(stmt for stmt in body.iter() if isinstance(stmt, Pre))
-    owned = []
-    for dim, cell in enumerate(carry.index):
-        if not isinstance(cell, Var):
-            continue
-        for read in reads:
-            if read.carrier != carry.name:
-                return ()
-            coordinate = read.index[dim]
-            for path in demand.get(read.name, {frozenset()}):
-                value = coordinate
-                while isinstance(value, TernaryExpr) and _conjuncts(value.cond) <= path:
-                    value = value.if_true
-                if value != cell:
-                    return tuple(owned)
-        owned.append(cell.name)
-    return tuple(owned)
-
-
-def _program(op):
-    """Recover the carried loop whose materialization produced this serial kernel."""
-    source = op.source
-    while source is not None:
-        body = getattr(source, "loop_body", None)
-        if body is not None:
-            loops = [s for s in body.iter() if isinstance(s, Loop) and s.carries]
-            if loops:
-                if len(loops) != 1:
-                    return None
-                loop = loops[0]
-                carries = tuple(s for s in loop.body.iter() if isinstance(s, Carry))
-                if len(carries) != 1 or any(
-                    not isinstance(s, (Loop, Let, Load, Pre, Affine, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
-                ):
-                    return None
-                carry = carries[0]
-                if any(s.atomic for s in loop.body.iter() if isinstance(s, Write)):
-                    return None
-                if any(
-                    tuple(e for e, n in zip(s.index, source.outputs[s.output].shape, strict=True) if n != 1)
-                    != (Var(loop.axis.name), *(e for e in carry.index if isinstance(e, Var)))
-                    for s in loop.body.iter()
-                    if isinstance(s, Write)
-                ):
-                    return None
-                return loop, carry, _owned(loop.body, carry)
-        source = source.source
-    return None
+def _lead(axes: tuple, split: int, batch: tuple[str, ...]) -> int | None:
+    """How many leading grid axes hold the state's ``batch``: the batch itself, beside a size-one axis that holds no
+    cell (the row the lift binds). ``None`` where the batch does not stand first."""
+    counts = (n for n in range(split + 1) if tuple(a.name for a in axes[:n] if a.extent != 1 or a.name in batch) == batch)
+    return next(counts, None)
 
 
 def _resident(op, program, retained=frozenset()):
@@ -121,26 +55,34 @@ def _resident(op, program, retained=frozenset()):
     while threads < tile.block_threads and split:
         split -= 1
         threads *= tile.axes[split].extent.as_static()
-    if threads != tile.block_threads or tuple(a.name for a in tile.axes[: len(batch)]) != batch:
+    lead = _lead(tile.axes, split, batch)
+    if threads != tile.block_threads or lead is None:
         return None
-    grid = tile.axes[len(batch) : split]
+    grid = tile.axes[lead:split]
     if not grid:
         return None
-    ports = [name for name in op.outputs if name not in {s.output for s in program[0].body.iter() if isinstance(s, Write)}]
-    if len(ports) != 1:
+    state = shared_state(op, program)
+    if state is None:
         return None
-    port = ports[0]
+    port, shape = state
+    written = {s.output for s in loop.body.iter() if isinstance(s, Write)}
     tensor = op.outputs[port]
-    dimensions = tuple(tensor.shape[1 + len(batch) :])
-    if not dimensions or any(not n.is_static for n in dimensions):
-        return None
-    shape = tuple(n.as_static() for n in dimensions)
+    kept = tuple(dim for dim, n in enumerate(tensor.shape) if n != 1)  # the dims a size-one coordinate pins to 0 hold no cell
     shared = "_carry"
     parity = Var(loop.axis.name) % Literal(2, "int")
-    before = BinaryExpr(">", Var(loop.axis.name), Literal(0, "int"))
+    before = BinaryExpression("<", Literal(0, "int"), Var(loop.axis.name))  # the first-step predicate, in normal form
     stores = [s for s in tile.body.iter() if isinstance(s, Write) and s.output == port]
     if not stores or any(s.atomic or not s.is_scalar for s in stores):
         return None
+
+    # A store that does not read the step keeps the state the loop ends with: it is stored once, after the last step.
+    snapshots = tuple(s for s in loop.body.iter() if isinstance(s, Write))
+    final = tuple(s for s in snapshots if Var(loop.axis.name) not in s.index)
+    if any(not _stores_state(op, loop, carry, s, tensor.dtype) for s in final):
+        return None
+
+    def cells_of(index):
+        return tuple(index[dim] for dim in kept[1 + len(batch) :])
 
     def rewrite(body):
         defs = {s.name: s for s in body if isinstance(s, Load)}
@@ -156,62 +98,84 @@ def _resident(op, program, retained=frozenset()):
                     if promoted == tensor.dtype:
                         if uses[seed.name] == 1:
                             discarded.add(seed.name)
-                        stmt = Assign(stmt.name, "copy", (held.name,), dtype=promoted)
+                        stmt = Assign(stmt.name, Var(held.name), dtype=promoted)
             if isinstance(stmt, Load) and stmt.input == port:
-                stmt = replace(stmt, input=shared, index=(parity, *stmt.index[1 + len(batch) :]), dtype=tensor.dtype)
+                stmt = stmt.replace(input=shared, index=(parity, *cells_of(stmt.index)), dtype=tensor.dtype)
+            elif isinstance(stmt, Write) and any(stmt.output == s.output for s in final):
+                continue
             elif isinstance(stmt, Write) and stmt.output == port:
                 if port in retained:
                     out.append(stmt)
-                stmt = replace(
-                    stmt, output=shared, index=(Literal(1, "int") - parity, *stmt.index[1 + len(batch) :]), value_dtype=tensor.dtype
-                )
+                stmt = stmt.replace(output=shared, index=(Literal(1, "int") - parity, *cells_of(stmt.index)), value_dtype=tensor.dtype)
             elif stmt.nested():
                 stmt = stmt.with_bodies(tuple(rewrite(child) for child in stmt.nested()))
             out.append(stmt)
         return Body(s for s in out if not isinstance(s, Load) or s.name not in discarded)
 
     step = rewrite(tile.body)
-    snapshots = tuple(s for s in loop.body.iter() if isinstance(s, Write))
-    if port in retained:
-        snapshots += (Write(port, (Var(loop.axis.name), *carry.index), carry.value),)
+    snapshots = tuple(s for s in snapshots if s not in final)
+    if port in retained and port not in written:
+        snapshots += (Write(port, (Var(loop.axis.name), *carry.cell), (carry.value,)),)
     snapshot = _parallel_copy(op, program, step, shared, parity, shape, batch, tile.block_threads, tensor.dtype, snapshots)
     if snapshot is not None:
-        copying, step, predicate = snapshot
+        copying, step, predicate, lagging = snapshot
     else:
-        copying, predicate = (), None
+        copying, predicate, lagging = (), None, False
     step = Body((*step, Sync()))
     for axis in reversed(grid):
-        start, end = Literal(0, "int"), axis.extent_expr()
+        start, end = Literal(0, "int"), axis.extent_expression()
         if predicate is not None:
-            for condition in _conjuncts(predicate):
-                if not isinstance(condition, BinaryExpr):
+            for condition in conjuncts(predicate):
+                if not isinstance(condition, BinaryExpression):
                     continue
                 if condition.op == "<" and condition.left == Var(axis.name) and condition.right.free_vars() <= {*batch, loop.axis.name}:
-                    end = TernaryExpr(condition.right.lt(end), condition.right, end)
+                    end = TernaryExpression(condition.right.lt(end), condition.right, end)
                 if condition.op == "<=" and condition.right == Var(axis.name) and condition.left.free_vars() <= {*batch, loop.axis.name}:
-                    start = TernaryExpr(start.lt(condition.left), condition.left, start)
-        step = Body((StridedLoop(axis, start, Literal(1, "int"), step, end=end),))
+                    start = TernaryExpression(start.lt(condition.left), condition.left, start)
+        step = Body((Loop.strided(axis, start, Literal(1, "int"), step, end=end),))
     step = Body((Loop(loop.axis, (*copying, *step, Sync())),))
-    cell = Var("_carry_cell")
-    suffix = []
-    stride = prod(shape)
-    for extent in shape:
-        stride //= extent
-        suffix.append(BinaryExpr("/", cell, Literal(stride, "int")) % Literal(extent, "int"))
+    suffix = _cells(Var("_carry_cell"), shape)
     initial = (*(Var(name) for name in batch), *suffix)
     if isinstance(carry.seed, str):
-        seed = Load("_carry_seed", carry.seed, seed_index(initial, op.inputs[carry.seed].shape), dtype=op.inputs[carry.seed].dtype)
+        seed = Load(("_carry_seed",), carry.seed, seed_index(initial, op.inputs[carry.seed].shape), dtype=op.inputs[carry.seed].dtype)
     else:
         seed = Let("_carry_seed", Literal(float(carry.seed)))
-    initialize = StridedLoop(
-        Axis("_carry_cell", prod(shape)),
-        Builtin("thread_idx.x"),
-        Literal(tile.block_threads, "int"),
-        (seed, Write(shared, (Literal(0, "int"), *suffix), "_carry_seed", value_dtype=seed.dtype)),
-    )
+    # A copy that follows the changed cells finds the unchanged ones in both buffers.
+    seeded = tuple(Write(shared, (Literal(slot, "int"), *suffix), ("_carry_seed",), value_dtype=seed.dtype) for slot in range(1 + lagging))
+    threads = Literal(tile.block_threads, "int")
+    initialize = Loop.strided(Axis("_carry_cell", prod(shape)), Builtin("thread_idx.x"), threads, (seed, *seeded))
+    closing = ()
+    if final:
+        cells = _cells(Var("_carry_last"), shape)
+        ended = Load(("_carry_end",), shared, (Literal(loop.axis.extent.as_static() % 2, "int"), *cells), dtype=tensor.dtype)
+        coordinates = (*(Var(name) for name in batch), *cells)
+        stores = tuple(
+            Write(s.output, seed_index(coordinates, op.outputs[s.output].shape), ("_carry_end",), value_dtype=tensor.dtype) for s in final
+        )
+        closing = (Loop.strided(Axis("_carry_last", prod(shape)), Builtin("thread_idx.x"), threads, (ended, *stores)),)
     # One padding column per row keeps column-strided reads of the state off one bank.
-    body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), cuda_name(tensor.dtype)), initialize, Sync(), *step)
-    return replace(op, serial=(), body=Body((replace(tile, axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
+    body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), tensor.dtype), initialize, Sync(), *step, *closing)
+    return replace(op, serial=(), body=Body((tile.replace(axes=(*tile.axes[:lead], *tile.axes[split:]), body=Body(body)),)))
+
+
+def _cells(cell, shape):
+    """The coordinates of flat ``cell`` in a state of ``shape``."""
+    out, stride = [], prod(shape)
+    for extent in shape:
+        stride //= extent
+        out.append(BinaryExpression("/", cell, Literal(stride, "int")) % Literal(extent, "int"))
+    return out
+
+
+def _stores_state(op, loop, carry, store, dtype) -> bool:
+    """Whether ``store`` writes the state's next value itself, through copies that keep its ``dtype``."""
+    defs = {s.name: s for s in loop.body.iter() for _ in s.defines() if hasattr(s, "name")}
+    value = store.value
+    while isinstance(defs.get(value), Assign) and isinstance(defs[value].value, Var):
+        if defs[value].dtype not in (None, dtype):
+            return False
+        value = defs[value].value.name
+    return value == carry.value and op.outputs[store.output].dtype == dtype
 
 
 def _guard_stores(body: Body, types=None) -> Body:
@@ -222,10 +186,7 @@ def _guard_stores(body: Body, types=None) -> Body:
     Other readers, nested effects and intervening writes to a cone's input keep the stream unchanged.
     """
     if types is None:
-        ctx = _stamp._StampCtx({})
-        _stamp._seed_explicit_dtypes(body, ctx)
-        _stamp._stamp_body(body, ctx)
-        types = ctx.ssa_dtypes
+        types = value_dtypes(body)
     stmts = [stmt.with_bodies(tuple(_guard_stores(b, types) for b in stmt.nested())) if stmt.nested() else stmt for stmt in body]
     uses = Counter(name for stmt in Body(stmts).iter() for name in free_names(stmt))
     position = 0
@@ -276,7 +237,7 @@ def _guard_stores(body: Body, types=None) -> Body:
             not moved
             or branches[0] & branches[1]
             or any(
-                not isinstance(stmt, (Affine, Assign, Let, Load, Select, Write)) or getattr(stmt, "output", None) in reads
+                not isinstance(stmt, (Assign, Let, Load, Select, Write)) or getattr(stmt, "output", None) in reads
                 for i, stmt in enumerate(stmts[:position])
                 if min(moved) <= i and i not in moved
             )
@@ -290,9 +251,9 @@ def _guard_stores(body: Body, types=None) -> Body:
             for i in sorted(found):
                 stmt = stmts[i]
                 if isinstance(stmt, Load):
-                    stmt = replace(stmt, index=tuple(_resolve(e.simplify(SimplifyCtx.empty()), cond, truth) for e in stmt.index))
+                    stmt = stmt.replace(index=tuple(_resolve(e.simplify(SimplifyCtx.empty()), cond, truth) for e in stmt.index))
                 chain.append(stmt)
-            chain.append(Assign(select.name, "copy", (branch.value,), dtype=types.get(select.name, F32)))
+            chain.append(Assign(select.name, Var(branch.value), dtype=types.get(select.name, F32)))
             guarded.append(_guard_stores(Body((*chain, *continuation, *stores)), types))
         replacement = Cond(cond, guarded[0], guarded[1])
         stmts = [stmt for i, stmt in enumerate(stmts) if i not in moved and not position <= i < end]
@@ -310,16 +271,10 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
     if not isinstance(selected, Select) or len(selected.branches) != 2:
         return None
     previous = defs.get(selected.branches[1].value)
-    if not isinstance(previous, Pre) or previous.carrier != carry.name or previous.index != carry.index:
+    if not isinstance(previous, Load) or previous.input != carry.name or tuple(previous.index[1:]) != tuple(carry.cell):
         return None
-    for store in outputs:
-        value = store.value
-        while isinstance(defs.get(value), Assign) and defs[value].op.name == "copy":
-            if defs[value].dtype not in (None, dtype):
-                return None
-            value = defs[value].args[0]
-        if value != carry.value or op.outputs[store.output].dtype != dtype:
-            return None
+    if any(not _stores_state(op, loop, carry, store, dtype) for store in outputs):
+        return None
 
     definitions = {name: s for s in step.iter() for name in s.defines()}
 
@@ -333,15 +288,15 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
             stmt = definitions.get(name)
             if isinstance(stmt, Load) and stmt.input == shared:
                 return stmt.index
-            if isinstance(stmt, Assign) and stmt.op.name == "copy" and stmt.dtype in (None, dtype):
-                return address(stmt.args[0])
+            if isinstance(stmt, Assign) and isinstance(stmt.value, Var) and stmt.dtype in (None, dtype):
+                return address(stmt.value.name)
             return None
 
         for s in body:
             if isinstance(s, Load) and s.input == shared:
                 values[s.name] = s.index
-            elif isinstance(s, Assign) and s.op.name == "copy" and s.dtype in (None, dtype) and address(s.args[0]) is not None:
-                values[s.name] = address(s.args[0])
+            elif isinstance(s, Assign) and isinstance(s.value, Var) and s.dtype in (None, dtype) and address(s.value.name) is not None:
+                values[s.name] = address(s.value.name)
             elif isinstance(s, Write) and address(s.value) is not None:
                 stores.append(s)
                 if s.output == shared and s.index[1:] != address(s.value)[1:]:
@@ -357,7 +312,7 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
         out = []
         for stmt in body:
             if isinstance(stmt, Cond) and copy_branch(stmt.else_body):
-                stmt = replace(stmt, else_body=Body())
+                stmt = stmt.replace(else_body=Body())
                 removed = True
             if stmt.nested():
                 stmt = stmt.with_bodies(tuple(omit(child) for child in stmt.nested()))
@@ -367,41 +322,56 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
     changed = omit(_guard_stores(step))
     if not removed:
         return None
-    cell = Var("_carry_copy")
-    indices = []
-    stride = prod(shape)
-    for extent in shape:
-        stride //= extent
-        indices.append(BinaryExpr("/", cell, Literal(stride, "int")) % Literal(extent, "int"))
-    load = Load("_carry_old", shared, (parity, *indices), dtype=dtype)
-    stores = [Write(shared, (Literal(1, "int") - parity, *indices), "_carry_old", value_dtype=dtype)]
+    indices = _cells(Var("_carry_copy"), shape)
+    load = Load(("_carry_old",), shared, (parity, *indices), dtype=dtype)
+    stores = [Write(shared, (Literal(1, "int") - parity, *indices), ("_carry_old",), value_dtype=dtype)]
     coordinates = (*(Var(name) for name in batch), *indices)
     for store in outputs:
         index = (Var(loop.axis.name), *seed_index(coordinates, op.outputs[store.output].shape[1:]))
-        stores.append(Write(store.output, index, "_carry_old", value_dtype=dtype))
-    copying = StridedLoop(Axis("_carry_copy", prod(shape)), Builtin("thread_idx.x"), Literal(threads, "int"), (load, *stores))
-    return (copying, Sync()), changed, selected.branches[0].select
+        stores.append(Write(store.output, index, ("_carry_old",), value_dtype=dtype))
+    predicate = selected.branches[0].select
+    start, end = Builtin("thread_idx.x"), None
+    # With no snapshot to store, the buffer a step writes differs from the state it reads only in the cells the
+    # step before changed: where the predicate bounds those along the state's leading cell, only they are copied.
+    rows = _bounds(predicate, next(name for name in carry.cells if name not in batch), {*batch, loop.axis.name})
+    lagging = not outputs and None not in rows
+    if lagging:
+        before = {loop.axis.name: Var(loop.axis.name) - Literal(1, "int")}
+        low, high = (bound.substitute(before) for bound in rows)
+        zero, extent, width = Literal(0, "int"), Literal(shape[0], "int"), Literal(prod(shape[1:]), "int")
+        start = start + TernaryExpression(zero.lt(low), low, zero) * width
+        end = TernaryExpression(high.lt(extent), high, extent) * width
+    copying = Loop.strided(Axis("_carry_copy", prod(shape)), start, Literal(threads, "int"), (load, *stores), end=end)
+    return (copying, Sync()), changed, predicate, lagging
+
+
+def _bounds(predicate, name, free):
+    """``(low, high)`` with ``low <= name < high`` wherever ``predicate`` holds, each over ``free`` names alone
+    or ``None`` where no conjunct bounds that side."""
+    low = high = None
+    for condition in conjuncts(predicate):
+        if not isinstance(condition, BinaryExpression):
+            continue
+        if condition.op == "<" and condition.left == Var(name) and condition.right.free_vars() <= free:
+            high = condition.right
+        if condition.op == "<=" and condition.right == Var(name) and condition.left.free_vars() <= free:
+            low = condition.left
+    return low, high
 
 
 def rewrite(match: Match, root: Node, ctx=None):
     op = root.op
-    if not op.serial or SHARED_CARRY.name in op.knobs:
-        raise RuleSkipped("shared carry already decided or no serial state")
-    program = _program(op)
+    scheduled = next((s for s in op.source_chain() if isinstance(s, TileOp) and s.schedule is not None), None)
+    state = getattr(getattr(scheduled.schedule, "kernel", None), "state", None) if scheduled is not None else None
+    if not op.serial or state is None or state.is_direct:
+        raise RuleSkipped("the schedule keeps this kernel's state in global memory, or it carries none")
+    program = carried_program(op)
     retained = frozenset(t.name for t in root.outputs if t.name in match.graph.outputs or match.graph.buffer_users(t.name))
-    if program is None or _resident(op, program, retained) is None:
-        raise RuleSkipped("this kernel has no CTA-owned state that fits shared memory")
-    variants = []
-    for enabled in SHARED_CARRY.narrow((0, 1)):
-        selected = _resident(op, program, retained) if enabled else op
-        if selected.smem_bytes() > ctx.max_dynamic_smem:
-            continue
-        selected = replace(selected, source=op, knobs={**op.knobs, SHARED_CARRY.name: enabled})
-        variants.append(
-            DeferredFork(lambda selected=selected: _materialize._drop_private_ports(match, root, selected, "shared"), knobs=selected.knobs)
-            if enabled
-            else selected
-        )
-    if not variants:
-        raise RuleSkipped("the requested carried-state storage exceeds shared memory")
-    return variants
+    selected = _resident(op, program, retained) if program is not None else None
+    # The schedule offers shared storage on what it can prove before lowering; what only the lowered kernel
+    # shows (its stores, the room beside the schedule's own scratch) declines the row here, and the pick moves on.
+    if selected is None:
+        raise RuleSkipped("this kernel has no CTA-owned state the row's shared storage can hold", reject=True)
+    if selected.smem_bytes() > ctx.max_dynamic_smem:
+        raise RuleSkipped("the carried state and the schedule's scratch exceed shared memory", reject=True)
+    return _materialize._drop_private_ports(match, root, replace(selected, source=op, knobs=op.knobs), "shared")

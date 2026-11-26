@@ -1,6 +1,6 @@
 """CUDA program execution for ``Graph[CudaOp]``: the Python facade over the runtime.
 
-Python compiles — nvcc into the content-addressed cubin cache, the execution plan, the host
+Python compiles — ptxas into the content-addressed cubin cache, the execution plan, the host
 bytes every input and constant starts from — and hands the runtime (``crates/emmy-runtime``,
 hosted in-process through the ``emmy.emmy_runtime`` extension) the plan's JSON form, one cubin path
 per kernel, those bytes, and the memory every region of the program's layout lives in. The
@@ -39,7 +39,7 @@ import numpy as np
 from emmy import config, emmy_runtime
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.binding import host_bindings, is_device_tensor, resolve_symbolic, with_generated_constants
-from emmy.compiler.backend.cuda import nvcc
+from emmy.compiler.backend.cuda import ptxas
 from emmy.compiler.backend.cuda.device import device, torch_module
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
 from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, plan_from_graph, plan_to_dict
@@ -69,7 +69,7 @@ def _cubin_path(name: str, spec: KernelSpec, *, cubin_dir: Path | None = None) -
     and errors otherwise — the pack loader pre-checks cubin existence, so hitting this means the
     cache was cleared mid-boot."""
     if spec.binary_key is not None:
-        path = (cubin_dir or nvcc.cubin_cache_dir()) / f"{spec.binary_key}.cubin"
+        path = (cubin_dir or ptxas.cubin_cache_dir()) / f"{spec.binary_key}.cubin"
         if path.exists():
             return path
         if spec.source is None:
@@ -79,14 +79,14 @@ def _cubin_path(name: str, spec: KernelSpec, *, cubin_dir: Path | None = None) -
             )
     if spec.source is None:
         raise RuntimeError(f"kernel {name!r}: plan carries neither a source nor a cached cubin")
-    return nvcc.compile_kernel(spec.source, name, arch_specific=spec.arch_specific)
+    return ptxas.compile_kernel(spec.source, name)
 
 
 def _compile_kernels(plan: ExecutionPlan, *, deadline: float | None = None, cubin_dir: Path | None = None) -> dict[str, str]:
     """One cubin path per kernel of ``plan``, compiled through the cache where needed.
 
     ``deadline`` is the compile budget's monotonic expiry, checked BETWEEN kernels — the only
-    boundary a Python-level check has, since one compile is a single call into nvcc. Checking
+    boundary a Python-level check has, since one compile is a single call into ptxas. Checking
     here rather than after the whole load is what keeps a cold multi-kernel compile from
     outliving the wall cap that SIGKILLs the bench worker: past the cap the operator is told a
     worker died, which reads as a slow kernel, and the fact that nothing about the kernel was
@@ -140,7 +140,8 @@ def device_view(pinned):
     """Address a pinned (page-locked) host tensor as a CUDA tensor of the same shape and dtype:
     under unified addressing a mapped host allocation is reachable from the device at its own
     address, so a kernel gathers from it over PCIe with no copy. ``pinned`` must stay alive as
-    long as the view; the view owns nothing."""
+    long as the view; the view owns nothing. The view is on torch's current device: on a rank of a tensor-parallel
+    group, a view on device 0 would open a context there and run its ops on another rank's card."""
     import torch  # noqa: PLC0415
 
     if not pinned.is_pinned() or not pinned.is_contiguous():
@@ -150,7 +151,7 @@ def device_view(pinned):
         raise RuntimeError("this platform does not map host allocations into the device address space")
     np_dtype = np.dtype(str(pinned.dtype).removeprefix("torch."))
     capsule = emmy_runtime.device_tensor_capsule(
-        pinned.data_ptr(), list(pinned.shape), _DLPACK_CODES[np_dtype.kind], np_dtype.itemsize * 8, 0
+        pinned.data_ptr(), list(pinned.shape), _DLPACK_CODES[np_dtype.kind], np_dtype.itemsize * 8, torch.cuda.current_device()
     )
     return torch.from_dlpack(capsule)
 
@@ -267,7 +268,7 @@ class CompiledProgram:
     captured graphs on the other.
 
     Constructed inside ``gpu_lock()`` by the public entry points (:func:`run_program`,
-    :func:`run_program_debug`, :func:`benchmark_program`) so every CUDA-touching phase — nvcc,
+    :func:`run_program_debug`, :func:`benchmark_program`) so every CUDA-touching phase — ptxas,
     allocation, the kernel-launch loop, the output copy — runs with the lock held. Peer xdist
     workers never interleave with us on the device, which previously surfaced as small numerical
     divergence in multi-kernel attention tests when the suite ran in parallel.
@@ -634,8 +635,9 @@ class CompiledProgram:
     def output_prefix_device(self, sym_values: dict[str, int] | None = None) -> dict:
         """Device twin of :meth:`outputs`: each output buffer's real-S prefix as a torch view
         with NO host copy — the serving zero-copy path. ``sym_values`` slices to the real shape
-        exactly like :meth:`outputs`; without it the whole buffer view is returned."""
-        return {name: self.buffer_view(name, sym_values) for name in self.plan.outputs}
+        exactly like :meth:`outputs`; without it the whole buffer view is returned. A paged output is left
+        out, as there: the caller reads its own pages."""
+        return {name: self.buffer_view(name, sym_values) for name in self.plan.outputs if name not in self.plan.paged}
 
     def alias_buffer(self, name: str, tensor, *, wait: bool = True) -> None:
         """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a
@@ -833,9 +835,9 @@ def benchmark_program(
         stack.enter_context(prog.on_torch_stream())
         eviction = None
         if cold:
-            from emmy.compiler.backend.cuda.cache import L2Eviction  # noqa: PLC0415
+            from emmy.compiler.backend.cuda.cache import CacheEviction  # noqa: PLC0415
 
-            eviction = L2Eviction()
+            eviction = CacheEviction()
         n = len(prog.plan.launches)
         batch_sizes = [1] * n
         # Per-launch sample list — kept around to compute the median
@@ -1019,9 +1021,8 @@ class _AsyncBenchWorker:
 
     Drives the ``_bench_worker`` protocol (``<8-byte LE length><pickle>``, both
     directions) over asyncio streams, so one event loop can keep N device-pinned
-    workers benching concurrently. The deployable ``--bench`` comparison awaits
-    ``benchmark_compare_isolated_async`` over a one-shot instance (via
-    ``_run_job_oneshot``); the pinned-row jobs share one persistent instance per run.
+    workers benching concurrently. One run session's jobs — the greedy comparison and every pinned
+    row — share one persistent instance.
 
     The wall-clock cap is :func:`asyncio.wait_for`; on overrun the child is
     SIGKILLed and respawned on the next bench."""
@@ -1035,11 +1036,9 @@ class _AsyncBenchWorker:
 
     @staticmethod
     def _encode(request: dict) -> bytes:
-        from emmy.compiler.pipeline.search.space import FAST_MATH, cold_cache, precision_pin  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import cold_cache, precision_pins  # noqa: PLC0415
 
-        return pickle.dumps(
-            {**request, "fast_math": precision_pin(FAST_MATH), "cold_cache": cold_cache()}, protocol=pickle.HIGHEST_PROTOCOL
-        )
+        return pickle.dumps({**request, "precision": precision_pins(), "cold_cache": cold_cache()}, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def _decode(body: bytes) -> dict:
@@ -1048,7 +1047,7 @@ class _AsyncBenchWorker:
     def __init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         # Bounded tail of the CURRENT child's stderr, fed by a background drain task. A
-        # chatty child (HF shard-download progress, nvcc warnings) would otherwise fill
+        # chatty child (HF shard-download progress, ptxas warnings) would otherwise fill
         # the ~64 KB stderr pipe and block mid-job — which the parent misreads as a
         # wall-timeout hang — and the tail is the diagnostic every failure path wants.
         self._stderr_tail = ""
@@ -1258,12 +1257,6 @@ class _AsyncBenchWorker:
             return resp
         raise RuntimeError("bench worker unreachable")  # both attempts exhausted (defensive)
 
-    async def warmup(self, *, wall_timeout_s: float = 60.0) -> None:
-        """Initialize the child CUDA context outside a candidate's wall budget."""
-        response = await self.run_job({"worker_warmup": True}, wall_timeout_s=wall_timeout_s)
-        if not response.get("warmed"):
-            raise RuntimeError("bench worker did not acknowledge CUDA warmup")
-
     def _tail_suffix(self) -> str:
         """The drained stderr tail as an error-message suffix ('' when the child was quiet)."""
         return f"; child stderr tail:\n{self._stderr_tail}" if self._stderr_tail.strip() else ""
@@ -1334,11 +1327,11 @@ async def benchmark_compare_worker_async(
     want_ref: bool = False,
     strict_accuracy: bool = False,
 ) -> dict:
-    """``run --bench``'s greedy-row transport: the same comparison job as
-    :func:`benchmark_compare_isolated_async` but over a caller-supplied persistent
-    ``worker`` (shared with the pinned-row jobs — one worker per run session) and with the
-    run path's extras: ``accuracy`` (the in-child real-input emmy-vs-eager verdict) and
-    ``want_ref`` (that run's ``(inputs, outputs)`` for the pinned rows' wrong-answer gate).
+    """``run --bench``'s greedy-row transport: the eager / torch.compile / emmy comparison as one job on
+    ``worker``, the persistent worker the pinned-row jobs share (one per run session). ``torch_spec`` rebuilds the
+    torch side in the child (``_bench_worker._run_job``), so no live module crosses the pipe and a hung kernel hangs
+    the child, which the parent SIGKILLs on ``wall_timeout_s``. ``accuracy`` asks for the in-child real-input
+    emmy-vs-eager verdict, ``want_ref`` for that run's ``(inputs, outputs)``, the pinned rows' wrong-answer reference.
     Returns the normalized response dict — keys ``results`` / ``result`` /
     ``torch_available`` / ``captured`` / ``accuracy_error`` / ``run_io`` plus the optional
     ``greedy_error`` / ``reference_run_us`` when an embedded Loop reference completed before
@@ -1369,63 +1362,3 @@ async def benchmark_compare_worker_async(
         "sym_env": resp.get("sym_env"),
         "correctness": resp.get("correctness"),
     }
-
-
-async def _run_job_oneshot(request_obj: dict, *, wall_timeout_s: float) -> dict:
-    """Spawn a fresh ``_AsyncBenchWorker``, run one job, tear it down.
-    The transport for the synchronous one-shot bridges below — they each wrap this
-    in ``asyncio.run`` (the worker's streams bind to the loop, so it can't persist
-    across ``asyncio.run`` calls; the per-call ~0.2 s spawn is negligible against a
-    deployable ``--bench``)."""
-    worker = _AsyncBenchWorker()
-    try:
-        return await worker.run_job(request_obj, wall_timeout_s=wall_timeout_s)
-    finally:
-        await worker.aclose()
-
-
-async def benchmark_compare_isolated_async(
-    *,
-    lowered: Graph,
-    torch_spec: tuple,
-    bench_backends: str,
-    wall_timeout_s: float,
-    warmup: int,
-    iters: int,
-    seed: int,
-    nvcc_flags: str | None = None,
-) -> tuple:
-    """Run the deployable eager / torch.compile / emmy comparison in the
-    SIGKILL-able worker, awaiting a fresh one-shot :class:`_AsyncBenchWorker`
-    (the one transport).
-
-    Unlike the emmy-only autotune bench, the deployable comparison interleaves emmy with
-    real torch in one process and so couldn't be isolated before — a hung generated kernel wedged
-    the whole run. This ships the *entire* comparison to the worker: a hung kernel hangs the child,
-    which the parent SIGKILLs on ``wall_timeout_s``, freeing the device and leaving the parent clean.
-
-    ``torch_spec`` rebuilds the torch side **in the child** (no live module crosses the pipe), reusing
-    the same core functions the in-process path uses:
-
-    - ``("trace_args", {code, input, adapter, layer, seq_len, dynamic})`` → ``load_or_trace`` rebuilds the real
-      module (an HF model id or a ``--code`` expression), benched via ``bench_full_model_real``.
-    - ``("frontend_graph", Graph | None)`` → ``bench_lowered_vs_torch`` (per-kernel reproducer; ``None``
-      benches emmy-only when the graph isn't torch-runnable).
-
-    Returns ``(results, bench, torch_available, captured, accuracy_error)`` — the shape
-    ``bench_lowered_vs_torch`` returns (``captured``: all backends were timed under CUDA graph
-    capture; False means the all-or-nothing fallback ran and the timings include host dispatch).
-    ``accuracy_error`` is the non-fatal eager-reference verdict for a frontend reproducer."""
-    resp = await _run_job_oneshot(
-        {
-            "graph": lowered,
-            "nvcc_flags": nvcc_flags,
-            "torch_spec": torch_spec,
-            "bench_backends": bench_backends,
-            "warmup": warmup,
-            "iters": iters,
-            "seed": seed,
-        },
-        wall_timeout_s=wall_timeout_s,
-    )
-    return resp["results"], resp["result"], resp["torch_available"], resp.get("captured", False), resp.get("accuracy_error")

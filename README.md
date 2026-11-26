@@ -9,7 +9,7 @@ deploys models on local or cloud GPUs with vLLM and SGLang.
 
 [Compile](#compile) · [Tune](#tune) · [Deploy](#deploy) · [Benchmark](#benchmark) · [Serve](#serve) · [Recipes](#recipes)
 
-See Emmy in action: [Outperforming vLLM on Gemma4-12B](https://www.cloudrift.ai/blog/optimizing-gemma-4-12b-rtx).
+See Emmy in action: [Outperforming vLLM on Gemma4-12B](https://riftstack.ai/research/optimizing-gemma-4-12b-rtx).
 
 ## Install
 
@@ -36,11 +36,12 @@ emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark against eager PyTorch and torch.compile
 emmy run --bench -c "nn.Softmax(dim=-1)(torch.randn(1,28,2048,2048))"
 
-# Inspect the generated CUDA
-emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda
+# Inspect the generated PTX
+emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir ptx
 ```
 
-Running compiled kernels requires an NVIDIA GPU and the CUDA toolkit (`nvcc`); source builds also need Rust.
+Running compiled kernels requires an NVIDIA GPU and the CUDA toolkit's PTX assembler (`ptxas`); source builds also
+need Rust.
 For GPUs older than Turing, use CUDA 12 and a PyTorch build that supports your GPU. Fast math is enabled by default;
 set `EMMY_FAST_MATH=0` to disable it.
 
@@ -58,13 +59,13 @@ LN()(torch.randn(64, 2048))"
 
 For Python integration, use `torch.compile(model, backend="emmy", dynamic=False)` under `torch.no_grad()`.
 Read the [compiler guide](emmy/compiler/ARCHITECTURE.md) or the
-[compiler walkthrough](https://www.cloudrift.ai/blog/building-gpu-compiler-from-scratch-1) for more.
+[compiler walkthrough](https://riftstack.ai/research/building-gpu-compiler-from-scratch-1) for more.
 
 ### Lowered kernel example
 
 **Readable Schedule**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir tile`
 ```
-kernel k_rms_norm_reduce  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight  outputs: rms_norm
+kernel k_b70c36714207  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight  outputs: rms_norm
     in0 = load rms_norm_mean_count[0]
     in1 = load rms_norm_eps[0]
     Tile(axes=(a0:256=THREAD, a1:32=BLOCK)):
@@ -85,70 +86,35 @@ kernel k_rms_norm_reduce  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight
             rms_norm[0, a1, a3] = v5
 ```
 
-**Optimized CUDA kernel**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda`
+**Optimized kernel, as PTX**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir ptx` (an excerpt;
+each Kernel IR statement stands as a comment above its instructions)
 
-```c
-extern "C" __global__
-__launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_weight, float* rms_norm) {
-    float in0 = 2048.0f;
-    float in1 = 1e-06f;
-    {
-        int a1 = blockIdx.x;
-        int a0 = threadIdx.x;
-        float acc0 = 0.0f;
-        __syncthreads();
-        __shared__ float x_smem[2048];
-        for (int x_smem_flat = a0; x_smem_flat < 2048; x_smem_flat += 256) {
-            {
-                unsigned int _smem_addr = __cvta_generic_to_shared(&x_smem[x_smem_flat]);
-                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                             :: "r"(_smem_addr), "l"(&x[a1 * 2048 + x_smem_flat])
-                             : "memory");
-            }
-        }
-        asm volatile("cp.async.commit_group;\n" ::: "memory");
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        __syncthreads();
-        __shared__ float p_weight_smem[2048];
-        for (int p_weight_smem_flat = a0; p_weight_smem_flat < 2048; p_weight_smem_flat += 256) {
-            {
-                unsigned int _smem_addr = __cvta_generic_to_shared(&p_weight_smem[p_weight_smem_flat]);
-                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                             :: "r"(_smem_addr), "l"(&p_weight[p_weight_smem_flat])
-                             : "memory");
-            }
-        }
-        asm volatile("cp.async.commit_group;\n" ::: "memory");
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        __syncthreads();
-        for (int a2 = a0; a2 < 2048; a2 += 256) {
-            float in2 = x_smem[a2];
-            float v0 = in2 * in2;
-            acc0 += v0;
-        }
-        __shared__ float acc0_smem[256];
-        acc0_smem[a0] = acc0;
-        __syncthreads();
-        for (int s = 128; s > 0; s >>= 1) {
-            if (a0 < s) {
-                acc0_smem[a0] = acc0_smem[a0] + acc0_smem[a0 + s];
-            }
-            __syncthreads();
-        }
-        __syncthreads();
-        float acc0_b = acc0_smem[0];
-        float v1 = acc0_b / in0;
-        float v2 = v1 + in1;
-        float v3 = rsqrtf(v2);
-        for (int a3 = a0; a3 < 2048; a3 += 256) {
-            float in3 = x_smem[a3];
-            float in4 = p_weight_smem[a3];
-            float v4 = in3 * v3;
-            float v5 = v4 * in4;
-            rms_norm[a1 * 2048 + a3] = v5;
-        }
-    }
-}
+```
+.visible .entry k_b70c36714207(
+	.param .u64 .ptr .align 16 k_b70c36714207_param_0,
+	.param .u64 .ptr .align 16 k_b70c36714207_param_1,
+	.param .u64 .ptr .align 16 k_b70c36714207_param_2
+)
+.maxntid 256, 1, 1
+{
+	...
+	// Grid(axes=(a0 in 0..32, a1_co in 0..256), decode=(block_idx.x, thread_idx.x), block_threads=256):
+	mov.u32 %r0, %ctaid.x;
+	mov.u32 %r1, %tid.x;
+	// init f32 acc0 = 0
+	mov.f32 %f0, 0f00000000;
+	// f32 in0__u0 = load buf0[2048 * a0 + a1_co]
+	mul.wide.s32 %rd3, %r0, 8192;
+	add.s64 %rd4, %rd0, %rd3;
+	mul.wide.s32 %rd5, %r1, 4;
+	add.s64 %rd6, %rd4, %rd5;
+	ld.global.nc.f32 %f1, [%rd6];
+	// f32 v0__u0 = in0__u0 * in0__u0
+	// f32 acc0 <- add(acc0, v0__u0) over a1_co
+	fma.rn.ftz.f32 %f0, %f1, %f1, %f0;
+	// f32 in0__u1 = load buf0[2048 * a0 + a1_co + 256]
+	ld.global.nc.f32 %f2, [%rd6+1024];
+	...
 ```
 
 ## Tune
@@ -160,19 +126,23 @@ emmy run --bench --cold-cache --tune 20 -c "nn.Linear(4096,4096,bias=False)(torc
 ```
 
 Successful measurements are saved so later compiles can reuse them when the kernel and measurement settings match.
+A program of several kernels is tuned kernel by kernel, and so are the other ways the compiler could have cut it
+into kernels, so the next compile picks both the kernels and their schedules from measurements.
 
 ### Fit the priors
 
 The schedule prior ranks kernel schedules; the placement prior chooses how to split work into kernels. Both guide
-compilation when no compatible measurement is available. You can refit them from the repository's golden files in a
-[source checkout](#contributing), without a GPU:
+compilation when no compatible measurement is available. You can refit them from the hardware goldens in a
+[source checkout](#contributing), without a GPU. A recipe's golden is no training data until its rows are promoted
+into the card's hardware golden.
 
 ```bash
-# Load the repository goldens and the measurement freeze into a separate database
+# Load the hardware goldens into a separate database
 emmy db import --db _data/dataset.db --fresh --repository
 
 # Export a dataset for each prior
-emmy db export --db _data/dataset.db _data/schedule --space schedule
+emmy db export --db _data/dataset.db _data/schedule --space schedule \
+  --candidates emmy/compiler/pipeline/search/candidates/records
 emmy db export --db _data/dataset.db _data/placement --space placement
 
 # Refit the shipped weights
@@ -183,6 +153,9 @@ emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.j
 emmy eval prior _data/schedule
 emmy eval prior _data/placement
 ```
+
+Each command logs a progress line about every 30 seconds and a timing summary at the end, with the slowest pools; the
+export and the fit also write that summary to `timing.json` beside their output.
 
 To experiment without replacing the shipped weights, fit a separate candidate and compare it on the same dataset:
 
@@ -199,24 +172,25 @@ a JSON report. See the [CLI reference](emmy/commands/ARCHITECTURE.md) for all tu
 
 ### Keep what a tune measured
 
-`emmy run --bench --tune N` writes every clean row it measures into the tune DB of the machine it ran on, and
-freezes the same rows into one file beside the card's under `emmy/compiler/pipeline/search/freezes/`, the
-measurement freeze the repository keeps, one golden file per card in git LFS: `--repository` reads it beside the
-goldens, and the nightly refresh reports the prior's regret over its pools. Commit the tune's file with your change
-(run `git lfs install` once on the machine that commits); the nightly refresh folds the files into each card's file
-on `main`. A tune on a rented card writes the file into the copy there: copy it back next to the card's file, as you
-do the working golden. `EMMY_FREEZE_DIR` names another directory or, set empty, none.
+`emmy run --bench --tune N` writes every clean row it measures into the tune DB of the machine it ran on
+(`~/.cache/emmy/autotune.db`, or the file `EMMY_TUNE_DB` names), where the next compile on that machine picks the
+fastest. The rows travel with that file: after tuning on a rented card, copy it back before the VM goes. The best
+schedule reaches the repository through a record into a golden (`--record-greedy`) and a few of the others through
+the card's candidate file (below). A tune DB is also a source a dataset can name beside the goldens
+(`emmy db import --db _data/dataset.db --repository autotune.db`), which gives `emmy eval prior --pools measured` its
+pools.
 
-A tune DB from a machine with no checkout is merged by hand (`~/.cache/emmy/autotune.db`, or the file `EMMY_TUNE_DB`
-names, copied over):
+### Candidate files
 
-```bash
-emmy db import --db _data/freeze.db --fresh emmy/compiler/pipeline/search/freezes autotune.db
-emmy db freeze --db _data/freeze.db --out emmy/compiler/pipeline/search/freezes
-```
-
-A schedule measured on both sides takes the tune DB's row, faster or slower, a kernel the compiler no longer lowers
-drops out, and merging the same tune DB again changes nothing. Commit the rewritten files.
+A hardware golden holds the best known schedule of each kernel. A candidate file, one per hardware golden under
+`emmy/compiler/pipeline/search/candidates/records/`, holds a few other measured schedules of the same kernels: 3 where
+the kernel's schedule space is small, up to 10 where it is large, the slow ones beside the near misses. `emmy
+candidates build --db TUNE_DB` fills the files from the tune DB the card's tunes wrote and lists the groups still
+under their target; `emmy bench .github/candidates-fill --filter golden=PATH` tunes those kernels on the golden's
+card and returns the filled file. `emmy candidates check`, `restamp` and `realize --drop` keep the files current, as
+the `emmy golden` commands keep a golden; the `refresh-candidates` skill is the flow around them. No compile reads a
+candidate file; the schedule dataset export reads them (`--candidates`), and a candidate over 1.1× slower than its
+group's golden trains the schedule prior as a negative.
 
 ## Deploy
 
@@ -393,7 +367,8 @@ require CloudRift organization access.
     - [ir/](emmy/compiler/ir/) — per-dialect op definitions (torch / tensor / loop / kernel / cuda) (see
       [ARCHITECTURE.md](emmy/compiler/ir/ARCHITECTURE.md))
       - [schedule/](emmy/compiler/ir/schedule/) — schedule interfaces, reusable choices, and classic scheduling (see
-        [ARCHITECTURE.md](emmy/compiler/ir/schedule/ARCHITECTURE.md))
+        [ARCHITECTURE.md](emmy/compiler/ir/schedule/ARCHITECTURE.md); the classic schedule is compared with the best
+        known hand-written kernels in [classic/ARCHITECTURE.md](emmy/compiler/ir/schedule/classic/ARCHITECTURE.md))
     - [trace/](emmy/compiler/trace/) — PyTorch/HuggingFace → Graph IR capture (see
       [ARCHITECTURE.md](emmy/compiler/trace/ARCHITECTURE.md))
     - [pipeline/](emmy/compiler/pipeline/) — rewrite engine + passes + dump hooks (see
@@ -414,6 +389,7 @@ require CloudRift organization access.
   what `emmy deploy` runs (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
 - [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
   [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
+  [emmy-native](docker/emmy-native/) — a recipe's native lane: the native server and its prepared pack;
   [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned 1Cat-vLLM runtimes and request-time GPU caches for Volta)
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
   what `emmy bench` runs (see [ARCHITECTURE.md](experiments/ARCHITECTURE.md))
@@ -422,7 +398,17 @@ require CloudRift organization access.
   pack loader and cached generation (design, hosts, and qualification in
   [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
   its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
-- [crates/emmy-server/](crates/emmy-server/) — Native text and HTTP adapter
+- [crates/emmy-ir/](crates/emmy-ir/) — The compiler's statement and expression vocabulary in Rust: the statement types,
+  bodies, their text, value numbering and normalization (see [ARCHITECTURE.md](crates/emmy-ir/ARCHITECTURE.md));
+  [crates/emmy-ir-py/](crates/emmy-ir-py/) is the `emmy.emmy_ir` extension the `ir/stmt`, `ir/expression` and
+  `ir/pure` modules export from
+- [crates/emmy-pure/](crates/emmy-pure/) — The pure terms in Rust: the `Lambda` every IR level binds with, the Tile IR
+  `Fold` term and its twist recipe, the tree normalization and the lowering to Loop IR (see
+  [ARCHITECTURE.md](crates/emmy-pure/ARCHITECTURE.md))
+- [crates/emmy-ptx/](crates/emmy-ptx/) — The compiler from Kernel IR to PTX: an instruction list, its builder, printer
+  and verifier, and the rule of each statement type; scalar kernels so far, and no pipeline stage calls it yet (see
+  [ARCHITECTURE.md](crates/emmy-ptx/ARCHITECTURE.md))
+- [crates/emmy-server/](crates/emmy-server/) — Native HTTP adapter: text and image processing
   (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))
@@ -439,7 +425,8 @@ require CloudRift organization access.
 
 ## Contributing
 
-Source setup requires Python 3.12+ and a Rust toolchain:
+Source setup requires Python 3.12+ and a Rust toolchain. `make setup` builds the Rust extensions into the
+package and runs again on its own after a Rust or `pyproject.toml` change:
 
 ```bash
 git clone https://github.com/cloudrift-ai/emmy.git

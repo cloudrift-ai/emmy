@@ -45,6 +45,7 @@ tests/compiler/passes/
 ├── test_batched_matvec_unit_row.py # per-batch matvec MMA and numerical parity
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
 ├── test_chunk_early_stop.py        # the chunk tier's stream bounds, read off the coordinate masks where the loop opens
+├── test_grouped_decode_attention.py # native decode attention: one cache read per key-value group, split over partials
 ├── test_stage_inputs_classify.py   # Stage-input classifier
 ├── test_lowering_accuracy.py       # 040 / 060 / 070 + TMA end-to-end CUDA accuracy
 ├── test_knob_pinning.py            # EMMY_KNOBS-pinned regression configs (article-reproduction tile/transport sweep)

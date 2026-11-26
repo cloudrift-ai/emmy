@@ -26,7 +26,7 @@ optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a pr
 **The codec values are SITE-LOCAL**: a kernel's worker inventory is spelled exactly once, in the
 ``WORK`` family (:class:`Work`), so a ``TILE`` value carries no unit widths
 (``<atom>/f<FM>x<FN>[/k<bk>]`` warp | ``f<fn>[x<fm>]`` scalar) and a ``REDUCE`` value no coop width
-(``[g<n>[a|k]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Work` and are
+(``[g<n>[a|k[<p>]]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Work` and are
 hand-written here. The empty ``TILE`` is only the per-cell choice; a parallel unit-register thread
 tile spells ``f1``, so the site value and ``WORK`` decode without cross-family inference. There is
 no second, self-contained reading — the retired embedded-worker grammar
@@ -53,7 +53,7 @@ from functools import cached_property
 
 from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Literal
+from emmy.compiler.ir.expression import Expression, Literal
 
 # ===========================================================================================
 # The one rule every codec below shares. Each value type parses and spells its own grammar by
@@ -118,11 +118,16 @@ class ReduceStage:
     ``finalize`` is meaningful only at ``GRID``: how ``030_cut`` realizes the cross-CTA
     combine — ``"atomic"`` (the partial kernel ``atomicAdd``\\ s into the output, one kernel,
     additive carriers only) or ``"kernel"`` (a deferred sibling combine kernel over a
-    workspace, the only legal arm for a twisted carrier). The ``g<n>[a|k]`` codec letter."""
+    workspace, the only legal arm for a twisted carrier). The ``g<n>[a|k]`` codec letter.
+
+    ``pairs`` is meaningful only under the kernel finalize of a carried state's split: how many times
+    the parts' affine maps are composed pairwise, each a product kernel over half the maps of the one
+    before, ahead of the kernel that walks what is left. The ``g<n>k<p>`` codec digits."""
 
     level: Level
     width: int = 1
     finalize: str = "kernel"  # GRID only: "atomic" | "kernel" (the g<n> finalize letter)
+    pairs: int = 0  # GRID + kernel finalize only: pairwise compositions of the parts' maps (``g<n>k<p>``)
     # BLOCK only (the ``coop-t`` codec token): swap the cooperative thread mapping for a
     # k-major B operand — warp lanes sweep the OUTPUT axis (contiguous B loads at every k
     # step) and the k partition rides the upper thread bits; the combine becomes the
@@ -147,6 +152,8 @@ class ReduceStage:
             raise ValueError(f"ReduceStage finalize must be atomic or kernel, got {self.finalize!r}")
         if self.level is not Level.GRID and self.finalize != "kernel":
             raise ValueError("only a GRID ReduceStage can select atomic finalization")
+        if type(self.pairs) is not int or self.pairs < 0 or (self.pairs and (self.level is not Level.GRID or self.finalize != "kernel")):
+            raise ValueError(f"ReduceStage pairs must be a count of compositions under a GRID kernel finalize, got {self.pairs!r}")
         if type(self.transposed) is not bool:
             raise TypeError("ReduceStage transposed must be a bool")
         if self.level is not Level.BLOCK and self.transposed:
@@ -213,6 +220,7 @@ class Reduce:
         coop: int = 1,
         reg: int = 1,
         finalize: str = "kernel",
+        pairs: int = 0,
         coop_transposed: bool = False,
         columns: int = 1,
         output_lanes: int = 32,
@@ -234,7 +242,9 @@ class Reduce:
             raise ValueError("Reduce output lanes are meaningful only when coop > 1")
         stages: list[ReduceStage] = []
         if cta > 1:
-            stages.append(ReduceStage(Level.GRID, cta, finalize=finalize))
+            stages.append(ReduceStage(Level.GRID, cta, finalize=finalize, pairs=pairs))
+        elif pairs:
+            raise ValueError("Reduce pairwise composition is meaningful only when cta > 1")
         if coop > 1:
             stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed, columns=columns, output_lanes=output_lanes))
         if reg > 1:
@@ -244,14 +254,14 @@ class Reduce:
     def spell(self) -> str:
         """The ``REDUCE`` codec value for this plan — the pipeline coarse→fine, SITE-LOCAL: the
         coop WIDTH lives in the kernel's ``WORK`` inventory, never here, so the value is
-        ``[g<n>[a|k]][/coop[-t][/n8][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
+        ``[g<n>[a|k[<p>]]][/coop[-t][/n8][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
         serial remainder is never spelled — it derives as ``ceil(extent / parallel)``). The GRID
         finalize letter IS kept: ``a``/``k`` is the atomic-vs-deferred finalize MODE, a site-local
         fact — ``g4a`` and ``g2k`` are semantically different rows, both live in the golden
         corpus."""
         parts: list[str] = []
         if self.cta > 1:
-            parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}")
+            parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}{self.pairs or ''}")
         if self.coop > 1:
             parts.append("coop-t" if self.coop_transposed else "coop")
         if self.coop_output_lanes != 32:
@@ -270,13 +280,14 @@ class Reduce:
         raises, so a width-carrying spelling (the retired ``b<n>`` embedded-worker grammar) is a
         loud error, not a silent second reading."""
         s = (spec or "").strip()
-        cta, coop, reg, finalize, transposed, columns, output_lanes = 1, 1, 1, "kernel", False, 1, 32
+        cta, coop, reg, finalize, pairs, transposed, columns, output_lanes = 1, 1, 1, "kernel", 0, False, 1, 32
         for t in s.split("/") if s else ():
             if t.startswith("g"):
-                body = t[1:]
-                if body.endswith(("a", "k")):
-                    finalize = "atomic" if body[-1] == "a" else "kernel"
-                    body = body[:-1]
+                body, letter, composed = t[1:].partition("k")
+                if letter and composed:
+                    pairs = _codec_width(composed, tok=t, codec="REDUCE")
+                elif body.endswith("a"):
+                    finalize, body = "atomic", body[:-1]
                 cta = _codec_width(body, tok=t, codec="REDUCE")
             elif t in ("coop", "coop-t"):
                 if work is None or work.kind != "thread":
@@ -293,11 +304,20 @@ class Reduce:
                     raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop' or 'coop-t'")
                 columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
-                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t][/n8][/v<n>] / r<n>)")
+                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k[<p>]] / coop[-t][/n8][/v<n>] / r<n>)")
         return _canonical_choice(
             "REDUCE",
             spec,
-            cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed, columns=columns, output_lanes=output_lanes),
+            cls.of(
+                cta=cta,
+                coop=coop,
+                reg=reg,
+                finalize=finalize,
+                pairs=pairs,
+                coop_transposed=transposed,
+                columns=columns,
+                output_lanes=output_lanes,
+            ),
         )
 
     @property
@@ -338,6 +358,11 @@ class Reduce:
             if s.level is Level.GRID:
                 return s.finalize
         return "kernel"
+
+    @property
+    def pairs(self) -> int:
+        """The GRID stage's pairwise compositions of a carried state's part maps (0 if none)."""
+        return next((s.pairs for s in self.stages if s.level is Level.GRID), 0)
 
     @property
     def reg(self) -> int:
@@ -1016,9 +1041,9 @@ class Raster:
 _RASTER_RE = re.compile(r"g([mn])(\d+)")
 
 
-def _ext_expr(axis: Axis) -> Expr:
-    """The axis extent as an ``Expr`` — a literal int (static) or the symbolic ``Dim`` expr."""
-    return Literal(axis.extent.as_static(), "int") if axis.extent.is_static else axis.extent.expr
+def _ext_expression(axis: Axis) -> Expression:
+    """The axis extent as an ``Expression`` — a literal int (static) or the symbolic ``Dim`` expression."""
+    return Literal(axis.extent.as_static(), "int") if axis.extent.is_static else axis.extent.expression
 
 
 def _overhangs(axis: Axis, tile: int) -> bool:
@@ -1059,9 +1084,9 @@ class Side:
         return _overhangs(self.axis, self.tile)
 
     @property
-    def ext(self) -> Expr:
-        """The axis extent as an ``Expr`` — a static literal or the symbolic ``Dim`` expr."""
-        return _ext_expr(self.axis)
+    def ext(self) -> Expression:
+        """The axis extent as an ``Expression`` — a static literal or the symbolic ``Dim`` expression."""
+        return _ext_expression(self.axis)
 
 
 __all__ = [

@@ -23,7 +23,6 @@ engine:
         --kv-cache-dtype auto
         --language-model-only
         --max-num-batched-tokens 4096
-        --no-async-scheduling
         --mamba-cache-mode align
         --enable-prefix-caching
         --kv-cache-memory-bytes 2684354560

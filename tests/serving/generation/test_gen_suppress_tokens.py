@@ -13,6 +13,7 @@ torch = pytest.importorskip("torch")
 def _model_with(suppress_ids):
     vllm_model_gen = pytest.importorskip("emmy.serving.vllm_model_gen")
     m = vllm_model_gen.EmmyGenModel.__new__(vllm_model_gen.EmmyGenModel)
+    torch.nn.Module.__init__(m)
     # The surface compute_logits reads; the identity processor makes the hidden-states argument
     # stand in for the logits tensor. Only the last pipeline stage owns the head, so the double
     # is that stage — the single-rank case every non-pipelined deployment runs.
@@ -36,11 +37,16 @@ def test_no_suppress_list_is_noop():
 
 
 def test_coded_head_supplies_logits_before_the_processor():
+    from tests.serving.generation.helpers import coded_head_double
+
     model = _model_with(None)
     model._coded_head_spec = object()
-    model._coded_head = lambda hidden: hidden + 7
-    out = model.compute_logits(torch.zeros((2, 8)))
+    model.lm_head = coded_head_double(torch.eye(8) * 7)
+    out = model.compute_logits(torch.ones((2, 8)))
     assert (out == 7).all()
+    model.lm_head = None
+    with pytest.raises(RuntimeError, match="coded lm_head was not loaded"):
+        model.compute_logits(torch.ones((2, 8)))
 
 
 def test_earlier_pipeline_stage_refuses_to_compute_logits():

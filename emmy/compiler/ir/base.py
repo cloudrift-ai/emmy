@@ -6,7 +6,7 @@ anything — they appear unchanged from the frontend stage all the way through
 to fusion, and the numpy backend supplies their values at runtime.
 
 The shared base for body-carrying ops (``LoopOp`` / ``KernelOp``) is
-:class:`emmy.compiler.ir.stmt.ir.BodyOp`; ``TileOp`` subclasses ``Op``
+:class:`emmy.compiler.ir.body_op.BodyOp`; ``TileOp`` subclasses ``Op``
 directly (it stores a pure term, not a body).
 
 ``_keepdim_axis`` is a small shape helper used by both ``ReduceOp`` (minimal IR,
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from emmy.compiler.graph import Graph, Node
-    from emmy.compiler.ir.expr import Expr
+    from emmy.compiler.ir.expression import Expression
     from emmy.compiler.tensor import Tensor
 
 
@@ -288,9 +288,9 @@ class ConstantOp(Op):
 
     - ``value`` — a **static** scalar fixed at trace/compile time (eps, scale, a folded dim).
     - ``context_value`` — a **runtime** scalar bound at launch from the context (the
-      ``sym_values`` symbolic-dim env) via an :class:`~emmy.compiler.ir.expr.Expr` over
+      ``sym_values`` symbolic-dim env) via an :class:`~emmy.compiler.ir.expression.Expression` over
       symbolic-dim names; e.g. a dynamic mean's divisor = the runtime reduce-axis size
-      (``Var("seq_len")``). The backend fills the buffer with ``float(expr.eval(sym_values))``
+      (``Var("seq_len")``). The backend fills the buffer with ``float(expression.eval(sym_values))``
       per run.
     - **neither** — an **executor-supplied** tensor (weights / RoPE tables loaded from
       safetensors, or fed as ``input_data``).
@@ -303,7 +303,7 @@ class ConstantOp(Op):
 
     name: str
     value: float | int | bool | None = None  # a STATIC scalar (None ⇒ not a static constant)
-    context_value: Expr | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
+    context_value: Expression | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
     load_ops: tuple[Op, ...] = ()
     source_path: str | None = None
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()  # axis-0 concat of (path, shape) parts; see class doc
@@ -341,6 +341,20 @@ class ConstantOp(Op):
         if self.value is not None:
             return np.array([self.value], dtype=np.float32)
         raise NotImplementedError("ConstantOp with value=None must be supplied by the executor")
+
+
+def is_f4_pair_table(node) -> bool:  # noqa: ANN001
+    """Whether ``node`` is the e2m1 pair table an NVFP4 weight decodes through: the 256 x 2 constant the loader builds
+    from ``from_f4e2m1`` of each byte's two nibbles (``loader.quant``). A backend reads a lookup into it as that decode,
+    computed, where the lookup itself would be a gather of one 16-bit value per lane."""
+    op = getattr(node, "op", None)
+    source = getattr(op, "source_graph", None)
+    return (
+        isinstance(op, ConstantOp)
+        and source is not None
+        and tuple(op.source_shape or ()) == (256, 2)
+        and any(getattr(getattr(n.op, "op", None), "name", None) == "from_f4e2m1" for n in source.nodes.values())
+    )
 
 
 def _keepdim_axis(shape: tuple, axis: int | str) -> tuple:

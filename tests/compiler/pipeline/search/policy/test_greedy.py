@@ -13,7 +13,6 @@ from emmy.compiler.pipeline.search.features import Featurizer
 from emmy.compiler.pipeline.search.policy import greedy
 from emmy.compiler.pipeline.search.policy.greedy import (
     EvidenceError,
-    _db_measured_index_build,
     _direct_measured_pick,
     _require_evidence,
     _route_candidates,
@@ -41,31 +40,37 @@ def _identities(monkeypatch) -> None:
     monkeypatch.setattr(greedy, "kernel_identity", lambda op: op.identity if isinstance(op, StubKernel) else kernel_identity(op))
 
 
-def test_db_measured_index_collects_kernels_whose_every_measured_variant_failed() -> None:
-    """A ``bench_fail`` row is evidence too — the watchdog measured that variant not finishing.
-    When EVERY measured variant of one structural shape failed, the shape itself is disqualified;
-    one surviving ``ok`` variant means only some rows are bad and the shape stays rankable.
+def _measured_db(rows: dict[str, list[tuple[dict, float]]]):
+    """A DB instance holding each kernel's measured schedule rows, and the context they were measured under."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row
 
-    Failures are collected before the placement-route filter the ``ok`` tier applies: a route's
-    LATENCY is unattributable without a child-schedule receipt, but a kernel that hung is
-    attributable to the kernel whatever route produced it."""
+    db, ctx = SearchDB(), Context.from_target((12, 0), gpu_name=GPU_5090)
+    for kernel, measured in rows.items():
+        db.record_kernel(kernel_row(kernel))
+        for knobs, us in measured:
+            db.record_perf(ctx, kernel, bindings={}, knobs=knobs, status="ok", us=us)
+    return db, ctx
 
-    def row(kernel: str, status: str, us: float, **knobs) -> SimpleNamespace:
-        return SimpleNamespace(kernel=kernel, status=status, stats=SimpleNamespace(median=us), knobs=knobs)
 
-    rows = [
-        row("doomed", "bench_fail", 2_000_000.0, WORK="t32"),
-        row("doomed", "bench_fail", 2_000_000.0, WORK="t64"),
-        row("mixed", "bench_fail", 2_000_000.0, WORK="t32"),
-        row("mixed", "ok", 7.0, WORK="t64"),
-    ]
-    db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
-    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name=None, compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
+class _Failures:
+    """A DB instance that holds nothing but the kernels whose every measured variant failed."""
 
-    measured = _db_measured_index_build(db, ctx)
-    assert "doomed" in measured.failed, "every measured variant of this kernel hit the watchdog"
-    assert "mixed" not in measured.failed, "a kernel with one ok variant is not disqualified"
-    assert measured.ok == {"mixed": [({"WORK": "t64"}, 7.0)]}
+    def __init__(self, failed: set[str]) -> None:
+        self._failed = failed
+
+    def failed(self, _ctx) -> set[str]:
+        return self._failed
+
+    def has_perf(self, _ctx) -> bool:
+        return False
+
+    def measured(self, _ctx, _kernel, *, bindings) -> list:
+        return []
+
+    def priced_arms(self, _ctx, _kernel, *, bindings) -> list:
+        return []
 
 
 @dataclass(frozen=True)
@@ -98,14 +103,9 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     rows = [{"TILE": str(tile), "STAGE": str(stage)} for tile in range(100) for stage in range(100)]
     tree = _tree(rows, lambda row: materialized.append(row))
 
-    point = ForkPoint(
-        match=SimpleNamespace(root_node_id="node", graph=None),
-        options=[tree],
-        root_op=_kernel(),
-        ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
-    )
-    index = {"k": [({"TILE": "42", "STAGE": "73"}, 1.25)], "another": [({"TILE": "1", "STAGE": "1"}, 0.5)]}
-    leaf, knobs, price = _direct_measured_pick(point, None, index)
+    db, ctx = _measured_db({"k": [({"TILE": "42", "STAGE": "73"}, 1.25)], "another": [({"TILE": "1", "STAGE": "1"}, 0.5)]})
+    point = ForkPoint(match=SimpleNamespace(root_node_id="node", graph=None), options=[tree], root_op=_kernel(), ctx=ctx)
+    leaf, knobs, price = _direct_measured_pick(point, None, db)
 
     assert knobs == {"TILE": "42", "STAGE": "73"}
     assert leaf.knobs == knobs
@@ -114,15 +114,11 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
 
 
 def test_measured_schedule_survives_missing_prior(monkeypatch) -> None:
-    point = _point([{"TILE": "0", "STAGE": "0"}, {"TILE": "1", "STAGE": "0"}])
+    db, ctx = _measured_db({"k": [({"TILE": "1", "STAGE": "0"}, 1.0)]})
+    point = _point([{"TILE": "0", "STAGE": "0"}, {"TILE": "1", "STAGE": "0"}], ctx)
     monkeypatch.setattr(greedy, "_schedule_fork", lambda _fp: True)
     monkeypatch.setattr(greedy, "_decision_key", lambda _fp, _blocked: ("schedule",))
-    monkeypatch.setattr(
-        greedy,
-        "_db_measured_index",
-        lambda _db, _ctx: SimpleNamespace(ok={"k": [({"TILE": "1", "STAGE": "0"}, 1.0)]}, failed=set()),
-    )
-    chosen = greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=object())(point)
+    chosen = greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=db)(point)
     assert leaf_knobs(chosen) == {"TILE": "1", "STAGE": "0"}
     assert point.score == 1.0
 
@@ -133,27 +129,19 @@ def test_strict_evidence_refuses_lazy_schedule_without_prior(monkeypatch) -> Non
     monkeypatch.setenv("EMMY_STRICT_EVIDENCE", "1")
     monkeypatch.setattr(greedy, "_schedule_fork", lambda _fp: True)
     monkeypatch.setattr(greedy, "_decision_key", lambda _fp, _blocked: ("schedule",))
-    monkeypatch.setattr(greedy, "_db_measured_index", lambda _db, _ctx: SimpleNamespace(ok={}, failed=set()))
     with pytest.raises(EvidenceError, match="no prior loaded"):
-        greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=object())(point)
+        greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=None)(point)
 
 
 def test_measured_rows_do_not_cross_exact_kernel_identities() -> None:
     """Two kernels of one structure are two kernels: each one's rows price its own candidates, and a kernel
     nothing measured has none."""
-    rows = [
-        SimpleNamespace(kernel="flat", status="ok", stats=SimpleNamespace(median=17.0), knobs={"WORK": "t32"}),
-        SimpleNamespace(kernel="strided", status="ok", stats=SimpleNamespace(median=27.0), knobs={"WORK": "t512"}),
-        SimpleNamespace(kernel="flat", status="ok", stats=SimpleNamespace(median=1.0), knobs={"WORK": "t64"}),
-    ]
-    db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
-    ctx = SimpleNamespace(gpu_name="card", compute_capability=(7, 0))
-    index = _db_measured_index_build(db, ctx)
+    db, ctx = _measured_db({"flat": [({"WORK": "t32"}, 17.0), ({"WORK": "t64"}, 1.0)], "strided": [({"WORK": "t512"}, 27.0)]})
     candidates = [{"WORK": work} for work in ("t32", "t64", "t512")]
 
-    assert greedy._db_measured_pick(index.ok["strided"], candidates) == (2, 27.0)
-    assert greedy._db_measured_pick(index.ok["flat"], candidates) == (1, 1.0)
-    assert "unmeasured" not in index.ok
+    assert greedy._db_measured_pick(db.measured(ctx, "strided", bindings={}), candidates) == (2, 27.0)
+    assert greedy._db_measured_pick(db.measured(ctx, "flat", bindings={}), candidates) == (1, 1.0)
+    assert db.measured(ctx, "unmeasured", bindings={}) == []
 
 
 def test_standard_golden_schedule_cannot_win_under_fast_exp() -> None:
@@ -166,10 +154,9 @@ def test_standard_golden_schedule_cannot_win_under_fast_exp() -> None:
     # Golden schedules omit precision knobs: those belong to their input regime.
     db.record_perf_row(perf_row("k", us=1.0, knobs={"WORK": "t32"}, source="golden:standard"))
     db.record_perf_row(perf_row("k", us=2.0, knobs={"WORK": "t64", "FAST_EXP": True}, precision={"FAST_EXP": True}))
-    ctx = Context.from_target((12, 0), gpu_name=GPU_5090, compile_flags="", precision={"FAST_EXP": True})
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090, precision={"FAST_EXP": True})
     candidates = [{"WORK": "t32", "FAST_EXP": True}, {"WORK": "t64", "FAST_EXP": True}]
-    index = _db_measured_index_build(db, ctx)
-    assert greedy._db_measured_pick(index.ok["k"], candidates) == (1, 2.0)
+    assert greedy._db_measured_pick(db.measured(ctx, "k", bindings={}), candidates) == (1, 2.0)
 
 
 def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> None:
@@ -194,7 +181,7 @@ def test_strict_evidence_lets_a_hand_pin_decide_a_kernel_set_fork(monkeypatch) -
     cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
     fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
     ctx = SimpleNamespace(
-        structural_key=lambda: "ctx", gpu_name="", backend_name="cuda", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0}
+        structural_key=lambda: "ctx", gpu_name="", backend_name="cuda", compute_capability=(8, 9), features=lambda: {"H_cc": 89.0}
     )
     match = SimpleNamespace(root_node_id="node", rule=SimpleNamespace(name="030_cut"), graph=None)
 
@@ -223,13 +210,13 @@ class _BarePrior:
         return [_score(r) for r in rows]
 
 
-def _point(rows):
+def _point(rows, ctx=None):
     tree = _tree(rows, lambda row: (_ for _ in ()).throw(AssertionError("no leaf may materialize during ranking")))
     return ForkPoint(
         match=SimpleNamespace(root_node_id="node", graph=None),
         options=[tree],
         root_op=_kernel(),
-        ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
+        ctx=ctx or SimpleNamespace(features=lambda: {"H_cc": 89.0}),
     )
 
 
@@ -240,13 +227,13 @@ def _rows(n_tile=18, n_stage=7):
 def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     monkeypatch.setattr(greedy, "_CHUNK", 10)  # force many uneven chunks over the 126-leaf pool
     point = _point(_rows())
-    got = _stream_tiers(point, _BarePrior(), None, {})
+    got = _stream_tiers(point, _BarePrior(), None, None)
     assert got is not None
     leaf, knobs, price, _tier = got
 
     flat = [(o, leaf_knobs(o)) for o in list(iter_leaves(point.options))]
     rows = [k for _, k in flat]
-    scores = _BarePrior().mean_scores_features([Featurizer({"H_opt": 3.0}).features(point.root_op, k) for _, k in flat])
+    scores = _BarePrior().mean_scores_features([Featurizer({"H_cc": 89.0}).features(point.root_op, k) for _, k in flat])
     best_i = min(range(len(rows)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
     assert knobs == flat[best_i][1]
     # The lazy walk mints fresh (content-equal) leaf objects per expansion, so identity is by row.
@@ -258,8 +245,8 @@ def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
     monkeypatch.setattr(greedy, "_CHUNK", 10)
     # The measured DB row must win the deploy even though the model scores other rows better
     # (every row with _score == 0.0 beats the measured row's model score).
-    db_idx = {"k": [({"TILE": "7", "STAGE": "3"}, 2.0)]}
-    got = _stream_tiers(_point(_rows()), _BarePrior(), None, db_idx)
+    db, ctx = _measured_db({"k": [({"TILE": "7", "STAGE": "3"}, 2.0)]})
+    got = _stream_tiers(_point(_rows(), ctx), _BarePrior(), None, db)
     assert got is not None
     leaf, knobs, price, _tier = got
     assert knobs == {"TILE": "7", "STAGE": "3"}
@@ -269,14 +256,14 @@ def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
 def test_streamed_degenerate_pools() -> None:
     # Single-leaf pool: plain (unscored) return of that leaf.
     point = _point([{"TILE": "0", "STAGE": "0"}])
-    leaf, knobs, price, _tier = _stream_tiers(point, _BarePrior(), None, {})
+    leaf, knobs, price, _tier = _stream_tiers(point, _BarePrior(), None, None)
     assert knobs is None and price is None
     assert leaf_knobs(leaf) == {"TILE": "0", "STAGE": "0"}
     # Every leaf blocklisted: plain return of the first leaf.
     rows = _rows(3, 2)
     point = _point(rows)
     blocked = {tile_identity(dict(r)) for r in rows}
-    leaf, knobs, price, _tier = _stream_tiers(point, _BarePrior(), blocked, {})
+    leaf, knobs, price, _tier = _stream_tiers(point, _BarePrior(), blocked, None)
     assert knobs is None and price is None
     assert leaf_knobs(leaf) == rows[0]
 
@@ -316,21 +303,21 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     point = _point(rows)
     point.options = [_BoundedFork(inner=point.options[0])]
     prior = _CountingPrior()
-    got = _stream_tiers(point, prior, None, {})
+    got = _stream_tiers(point, prior, None, None)
     assert got is not None
     leaf, knobs, price, _tier = got
     assert (knobs["TILE"], knobs["STAGE"]) in all_rows  # a legal complete row off the real tree
     assert leaf_knobs(leaf) == knobs  # the drawn row built back to its own leaf
     assert prior.scored <= 64  # the draw, never the pool
     prior2 = _CountingPrior()
-    again = _stream_tiers(point, prior2, None, {})
+    again = _stream_tiers(point, prior2, None, None)
     assert again[1] == knobs and again[2] == price  # seeded off the pool identity → reproducible
 
     blocked_point = _point(rows)
     wrapper = _BoundedFork(inner=blocked_point.options[0])
     blocked_point.options = [wrapper]
     blocked = {tile_identity(dict(row)) for row in rows}
-    assert _stream_tiers(blocked_point, _CountingPrior(), blocked, {}) == (NO_OPTION, None, None, None)
+    assert _stream_tiers(blocked_point, _CountingPrior(), blocked, None) == (NO_OPTION, None, None, None)
     assert len(wrapper.expansions) == 4 * 64  # four attempts per drawn row, and no exhaustive fallback
 
 
@@ -349,7 +336,7 @@ def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
     priced as the sum of its pieces' fastest rows on this card — every piece, or the arm is off the
     ballot. The parent is matched by exact identity, so another kernel's cut never prices this one."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.db import PerfStats, RoutingRow, SearchDB
+    from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
     from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row
 
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
@@ -362,17 +349,16 @@ def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
 
     def measured(kernel: str, us: float, work: str = "w1x8") -> None:
         # Through the live context, so the row lands in the regime this compile reads (the suite's flags included).
-        stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
-        db.record_perf(ctx, kernel, bindings={}, knobs={"WORK": work}, status="ok", stats=stats)
+        db.record_perf(ctx, kernel, bindings={}, knobs={"WORK": work}, status="ok", us=us)
 
     measured("c1", 30.0)
-    assert _route_candidates(point, greedy._EMPTY_MEASURED, db) == [], "a piece without a row leaves the cut unpriced"
+    assert _route_candidates(point, db) == [], "a piece without a row leaves the cut unpriced"
     measured("c2", 50.0)
     measured("c2", 70.0, work="t8")
-    assert _route_candidates(point, greedy._EMPTY_MEASURED, db) == [(cut, 80.0)]
-    assert _route_candidates(point, greedy._EMPTY_MEASURED, None) == []
+    assert _route_candidates(point, db) == [(cut, 80.0)]
+    assert _route_candidates(point, None) == []
     other = Context.from_target((12, 0), gpu_name="NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition")
-    assert _route_candidates(SimpleNamespace(**{**vars(point), "ctx": other}), greedy._EMPTY_MEASURED, db) == []
+    assert _route_candidates(SimpleNamespace(**{**vars(point), "ctx": other}), db) == []
 
 
 def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> None:
@@ -386,7 +372,7 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
     from emmy.compiler.pipeline.pipeline import Run
     from emmy.compiler.pipeline.search.bench_record import kernel_row
-    from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+    from emmy.compiler.pipeline.search.db import SearchDB
     from tests.compiler.pipeline.search.helpers import GPU_5090
 
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
@@ -406,16 +392,8 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
         return lambda fp: next(o for o in fp.options if leaf_knobs(o).get("REDUCE", "") == reduce)
 
     def measured(db, op, us: float) -> None:
-        stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
-        db.record_kernel(kernel_row(op, op.name))
-        db.record_perf(
-            ctx,
-            op.identity_key(structural=False, with_io=True),
-            bindings={},
-            knobs={"WORK": "w1x8"},
-            status="ok",
-            stats=stats,
-        )
+        db.record_kernel(kernel_row(op))
+        db.record_perf(ctx, op.identity_key(structural=False, with_io=True), bindings={}, knobs={"WORK": "w1x8"}, status="ok", us=us)
 
     [fused] = kernels(arm("")).values()
     pieces = kernels(arm("g8k"))
@@ -430,6 +408,56 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
 
     assert deployed(21.0) == {"y__partial", "y"}, "a measured split faster than the unsplit kernel must be taken"
     assert deployed(60.0) == {"y"}, "a measured split slower than the unsplit kernel must lose to it"
+
+
+def test_a_kernel_measured_at_two_sizes_is_ranked_at_the_size_it_compiles_at() -> None:
+    """One kernel over a symbolic reduction, measured at two sizes (native's attention, priced per range of windows):
+    a compile at each size ranks the rows measured there. Unsplit, the matvec takes 10 us over 4,096 positions and
+    300 us over 131,072, where a split takes 21 us: the short compile keeps it whole and the long one splits, never
+    pricing the long kernel at its short time."""
+    import torch
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.bench_record import kernel_row
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.specialize import rehint_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.compiler.wire import kernel_bindings
+    from tests.compiler.pipeline.search.helpers import GPU_5090
+
+    class Matvec(torch.nn.Module):
+        def forward(self, x, w):
+            return x @ w
+
+    n = torch.export.Dim("n", min=2, max=1 << 20)
+    examples = (torch.zeros(1, 512, dtype=torch.float16), torch.zeros(512, 16, dtype=torch.float16))
+    traced = trace_module(Matvec(), examples, dynamic_shapes={"x": {1: n}, "w": {0: n}})
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
+
+    def kernels(size: int, decide) -> dict:
+        lowered = Pipeline.build(LOOP_PASSES).run(rehint_program(traced, {"n": size}), ctx=ctx)
+        terminal, _trace = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx).resolve(lowered, decide)
+        return {nid: node.op for nid, node in terminal.nodes.items() if isinstance(node.op, TileOp)}
+
+    def arm(reduce: str):
+        return lambda fp: next(o for o in fp.options if leaf_knobs(o).get("REDUCE", "") == reduce)
+
+    def measured(op, us: float) -> None:
+        db.record_kernel(kernel_row(op))
+        identity = op.identity_key(structural=False, with_io=True)
+        db.record_perf(ctx, identity, bindings=kernel_bindings(op), knobs={"WORK": "w1x8"}, status="ok", us=us)
+
+    db = SearchDB()
+    for size, us in ((4096, 10.0), (131072, 300.0)):
+        [fused] = kernels(size, arm("")).values()
+        measured(fused, us)
+    for nid, op in kernels(131072, arm("g8k")).items():
+        measured(op, 20.0 if nid.endswith("__partial") else 1.0)
+
+    assert len(kernels(4096, greedy.greedy_decide(prior=None, db=db))) == 1, "measured whole at 4,096, the matvec stays whole"
+    assert len(kernels(131072, greedy.greedy_decide(prior=None, db=db))) == 2, "the long matvec's whole time is its own 300 us"
 
 
 def test_stored_placement_cuts_register_composed_and_child_routes() -> None:
@@ -463,7 +491,7 @@ def _kernel_sets(decide, case: str = "fused/linear-add-place-cut-sm70.json"):
     from tests.compiler.realization import helpers as corpus
 
     case = corpus.load_case(corpus.CASES_DIR / case)
-    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision={})
     with pinned_knobs(case.regime), unpinned_decisions():
         terminal, _trace = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx).resolve(case.program(), decide)
     return [node.op for node in terminal.nodes.values() if isinstance(node.op, TileOp)]
@@ -496,8 +524,9 @@ def test_with_no_placement_prior_every_kernel_set_fork_takes_its_first_arm() -> 
 
 
 def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatch) -> None:
-    """A measurement can disqualify: where every measured variant of a kernel failed, an arm that leaves that kernel
-    loses to any arm that does not, whatever the prior says. The join is the kernel's exact identity, so a failure
+    """A measurement can disqualify: where every measured variant of a kernel failed, keeping its parent whole is off
+    the ballot whatever the prior says, since the parent computes it — the cut is taken even when the one cut there is
+    leaves the failed kernel, which then meets its own fork. The join is the kernel's exact identity, so a failure
     recorded on another kernel condemns nothing — that is how DeepSeek-V4's post block kept a fused arm whose every
     benched variant hung, until the failures were read."""
     from emmy.compiler.wire import kernel_identity
@@ -505,10 +534,70 @@ def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatc
     cut = _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))
     assert len(cut) > 1
 
-    def kernels_with_failed(failed: set[str]) -> list[str]:
-        monkeypatch.setattr(greedy, "_db_measured_index", lambda *_: greedy._Measured({}, {kernel: [2e6] for kernel in failed}))
-        return [kernel_identity(k) for k in _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))]
+    def kernels_with_failed(failed: set[str], weight: float) -> list[str]:
+        decide = greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(weight), db=_Failures(failed))
+        return [kernel_identity(k) for k in _kernel_sets(decide)]
 
-    failed = kernel_identity(cut[0])
-    assert failed not in kernels_with_failed({failed}), "an arm leaving a failed kernel must lose"
-    assert kernels_with_failed({"another"}) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"
+    [whole] = kernels_with_failed(set(), -1.0)  # a prior penalizing pieces keeps the kernel whole
+    assert whole not in kernels_with_failed({kernel_identity(cut[0])}, -1.0), "the parent of a failed kernel is cut"
+    assert kernels_with_failed({"another"}, 1.0) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"
+
+
+@pytest.mark.parametrize("failed_at", ["whole", "piece"])
+def test_a_failure_takes_the_keep_whole_arm_off_its_kernel(monkeypatch, failed_at: str) -> None:
+    """Every piece a cut leaves computes part of its parent, so the failure of a kernel, or of a piece one of its
+    cuts leaves, rules out keeping that kernel whole, and an arm that leaves the failed kernel is off the ballot. The
+    prior here prefers fewer pieces, so with nothing failed the kernel stays whole."""
+    from emmy.compiler.wire import kernel_identity
+
+    case = "attention/sdpa-hd128-softmax-v-mma.json"
+
+    def compile_with(failed: set[str]) -> list:
+        return _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(-1.0), db=_Failures(failed)), case)
+
+    [whole] = compile_with(set())
+    cut = compile_with({kernel_identity(whole)})
+    failed = whole if failed_at == "whole" else next(op for op in cut if any("__place_" in buffer for buffer in op.outputs))
+
+    kept = {kernel_identity(op) for op in compile_with({kernel_identity(failed)})}
+    assert kernel_identity(whole) not in kept and kernel_identity(failed) not in kept
+
+
+def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(tmp_path) -> None:
+    """The failure writer and the evidence pick name one kernel: ``persist_bench_failure`` files the ``bench_fail``
+    row off the compiled CUDA op (``kernel_key``: the tile its schedule fork was offered), and the next compile's
+    kernel-set fork reads it back under the identity of the arm it offers (``kernel_set_ranking``) — through the tune DB,
+    with no mocked index — so the fused kernel that hung is off the ballot and the fork takes a cut. The GDN audit
+    read three hangs of one kernel name as three picks of one arm, back when a piece of a cut kept its parent's name;
+    this test pins what the rows do, by identity."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.bench_record import persist_bench_failure
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions
+    from emmy.compiler.wire import kernel_identity
+    from tests.compiler.pipeline.search.helpers import CARDS
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision={})
+    db = SearchDB(tmp_path / "tune.db")
+
+    def compile_once() -> list:
+        with pinned_knobs(case.regime), unpinned_decisions():
+            terminal, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=ctx).resolve(
+                case.program(), greedy.greedy_decide(placement_prior=None, db=db)
+            )
+        return [node for node in terminal.nodes.values() if isinstance(node.op, CudaOp)]
+
+    [fused] = compile_once()  # no placement prior: the first arm, the kernel kept whole
+    hang = RuntimeError(f'kernel "{fused.op.kernel_name}" did not complete within 2000 ms — hung kernel')
+    assert persist_bench_failure(db, ctx, [fused], hang, 2e6) == [fused]
+    assert [row.status for row in db.iter_perf_rows()] == ["bench_fail"]
+
+    cut = compile_once()
+    assert len(cut) > 1, "the fused arm whose kernel hung must lose to a cut"
+    assert kernel_identity(fused.op) not in {kernel_identity(node.op) for node in cut}
+    assert fused.op.kernel_name not in {node.op.kernel_name for node in cut}, "each piece is named by its own identity"

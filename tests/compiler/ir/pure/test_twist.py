@@ -11,14 +11,13 @@ import pytest
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.pure.twist import RECIPES, SOFTMAX, WELFORD, Recipe
-from emmy.compiler.ir.stmt import Let
 
 
 def _eval(lam, args: tuple) -> tuple:
-    """Evaluate a pure lambda on floats — the ANF chain of ``Assign``s and ``Let`` defs."""
+    """Evaluate a pure lambda on floats — its ``Assign`` and ``Let`` definitions in order."""
     env = dict(zip(lam.params, args, strict=True))
     for stmt in lam.body:
-        env[stmt.name] = stmt.value.value if isinstance(stmt, Let) else stmt.op(*(env[arg] for arg in stmt.args))
+        env[stmt.name] = stmt.value.eval(env)
     return tuple(env[result] for result in lam.results)
 
 
@@ -77,5 +76,7 @@ def test_an_expectation_channel_joins_the_same_advance() -> None:
     """Online softmax and flash attention are ONE recipe: the three-state program is the two-state
     one plus a channel rescaled by the same two factors — no second advance, no second ``exp``."""
     softmax, flash = SOFTMAX.program(("m", "l")), SOFTMAX.program(("m", "o", "l"))
-    assert set(softmax.body) < set(flash.body)
-    assert sum(stmt.op.name == "exp" for stmt in flash.body) == 2
+    assert softmax.canonical() != flash.canonical()
+    assert {stmt for stmt in softmax.body if stmt.name == "m"} < set(flash.body)
+    exps = [node for stmt in flash.body for node in stmt.value.subterms() if node.operation is not None and node.operation.name == "exp"]
+    assert len(exps) == 2

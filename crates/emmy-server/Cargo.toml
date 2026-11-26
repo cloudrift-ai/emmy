@@ -7,6 +7,9 @@ license = "Apache-2.0"
 [dependencies]
 anyhow = "1"
 axum = "0.8"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+ureq = "3"
 clap = { version = "4", features = ["derive"] }
 emmy-runtime = { path = "../emmy-runtime" }
 minijinja = { version = "2", features = ["builtins", "json", "loader"] }

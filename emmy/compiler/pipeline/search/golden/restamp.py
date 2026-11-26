@@ -11,8 +11,9 @@ What a restamp keeps is decided per row, never guessed: a target no fresh kernel
 dropped with its decisions and rows, since a row is a schedule of one kernel; a decision the fresh parent no longer
 takes the same way (another arm, another number of pieces) is dropped with its pieces' rows, unless only its seam
 addresses moved and nearby seams mint exactly its stored pieces (:func:`_respelled`); a row whose kernel kept its
-identity keeps its measurement, and one whose kernel was re-keyed keeps its schedule and loses its microseconds —
-a proposal, no evidence until a record run on the card measures it again. Re-keyed means the stored body and the
+identity and whose keys name the same sites keeps its measurement, and one whose kernel was re-keyed, or whose
+scoped keys were re-spelled onto the nearest offered sites or dropped, keeps its schedule and loses its microseconds
+— a proposal, no evidence until a record run on the card measures it again. Re-keyed means the stored body and the
 fresh lowering are two kernels: their exact identities, both computed now, differ. A change to how identity is
 computed therefore re-keys nothing. A kernel that kept its identity keeps its stored body too: one identity can be
 minted by several parents, each spelling the body's buffers its own way. When the decisions that name one stored
@@ -20,23 +21,32 @@ piece (two programs' kernel sets sharing a kernel, say) now mint different kerne
 the stored kernel keep it and its rows, whatever order the file lists them in, and every other decision is
 re-pointed to the kernel it mints; so a restamp of one program and of the whole file agree on whether that
 program's kernel set is current. A row's whole-target latency names the kernel set it timed, and is cleared exactly
-when one of those kernels is re-keyed or dropped.
+when one of those kernels is re-keyed or dropped. A row's scoped schedule keys address sites as a seam does (a path
+from the root, by operand position), and move with it: a key the kernel's fresh tile no longer offers is re-spelled to
+the one offered key of its family and kind one segment away (:func:`_respelled_keys`), and a key that rule cannot map
+to exactly one site is dropped from its row and named, never guessed.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from itertools import chain, count, product
+from itertools import product
 from math import prod
+from pathlib import Path
 
 from emmy.compiler import pipeline
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
+from emmy.compiler.ir.schedule.classic.schedule import CLASSIC_FAMILIES, classic_keys
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile.ops import UnbindableProjection
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.passes.tile._cut import joined_halves
+from emmy.compiler.pipeline.passes.tile._fromloop import scheduled_form
 from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
@@ -44,7 +54,7 @@ from emmy.compiler.pipeline.search.db import RoutingRow, knobs_json
 from emmy.compiler.pipeline.search.inventory import KernelInventory
 from emmy.compiler.pipeline.search.pins import composed_routes, seam_aliases, spelled_arm, unpinned_decisions
 from emmy.compiler.specialize import specialize_program
-from emmy.compiler.wire import declared_outputs, wire_writes
+from emmy.compiler.wire import declared_outputs, name_of, wire_writes
 
 from .format import GoldenFile, Kernel, Row
 
@@ -55,12 +65,12 @@ CUT_PASSES = ["tile/lift", "tile/cut"]
 RESPELL_TRIES = 16
 
 
-def definition(tile, name: str, **provenance) -> Kernel:
+def definition(tile, **provenance) -> Kernel:
     """The :class:`Kernel` entry of a tile kernel: its ``kernel`` row
     (:func:`~emmy.compiler.pipeline.search.bench_record.kernel_row`) with ``provenance`` (``traced``, ``origins``,
-    ``bindings``) beside it; the body is spelled under ``name``, the entry's own."""
-    row = kernel_row(tile, name)
-    return Kernel(loop_ir=_named(row.loop_ir, name), name=name, formed=row.formed, **provenance).keyed(row.exact_identity)
+    ``bindings``) beside it."""
+    row = kernel_row(tile)
+    return Kernel(loop_ir=row.loop_ir, formed=row.formed, **provenance).keyed(row.exact_identity)
 
 
 def lift_targets(graph, ctx: Context) -> dict[frozenset[str], TileOp]:
@@ -77,7 +87,13 @@ def lift_targets(graph, ctx: Context) -> dict[frozenset[str], TileOp]:
 
 
 def mint(
-    root: Kernel, path: list[RoutingRow], ctx: Context, *, document: GoldenFile | None = None, seams: dict | None = None
+    root: Kernel,
+    path: list[RoutingRow],
+    ctx: Context,
+    *,
+    document: GoldenFile | None = None,
+    seams: dict | None = None,
+    minted: dict[str, TileOp] | None = None,
 ) -> list[tuple[RoutingRow, bool, list[Kernel]]]:
     """Take the compatible decisions of ``path`` again, from ``root`` down: the kernel's body through the lift and cut pass,
     each fork on a kernel ``path`` decides taking the arm its route spells, every other fork keeping the kernel whole.
@@ -87,8 +103,9 @@ def mint(
     route the cut pass still offers — or mints another number of pieces) and the pieces' fresh definitions.
     With ``document``, fresh pieces align to stored children by exact identity first, then by what they read and
     write, then by order (:func:`_paired`). ``root`` is the kernel ``path[0]`` names as its parent. With ``seams``, each
-    placement fork the path decides records there, under its parent's ``ref``, the seams its parent offers to cut."""
-    return _replay(root, path, ctx, document=document, seams=seams)[1]
+    placement fork the path decides records there, under its parent's ``ref``, the seams its parent offers to cut; with
+    ``minted``, each piece's tile is recorded there under its exact identity."""
+    return _replay(root, path, ctx, document=document, seams=seams, minted=minted)[1]
 
 
 def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str, int]) -> Graph:
@@ -99,10 +116,11 @@ def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str
         return document.executable(kernel, bindings)
     path = document.path_to(kernel.ref)
     if not path:
-        raise ValueError(f"kernel {kernel.ref!r} has no recorded route to its derived body")
+        raise ValueError(f"kernel {_label(kernel)} has no recorded route to its derived body")
     root = document.kernel(path[0].parent)
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name)
-    graph, taken = _replay(root, path, ctx, document=document, bindings=bindings)
+    minted: dict[str, TileOp] = {}
+    graph, taken = _replay(root, path, ctx, document=document, bindings=bindings, minted=minted)
     if (
         graph is None
         or len(taken) != len(path)
@@ -112,7 +130,7 @@ def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str
             for route, same, children in taken
         )
     ):
-        raise ValueError(f"kernel {kernel.ref!r} has a stale recorded route")
+        raise ValueError(f"kernel {_label(kernel)} has a stale recorded route")
     matches = [
         node.id
         for node in graph.nodes.values()
@@ -120,7 +138,10 @@ def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str
         and node.op.with_io(graph, node).identity_key(structural=False, with_io=True) == kernel.exact_identity
     ]
     if len(matches) != 1:
-        raise ValueError(f"kernel {kernel.ref!r} has {len(matches)} exact matches after its recorded route")
+        raise ValueError(f"kernel {_label(kernel)} has {len(matches)} exact matches after its recorded route")
+    # Replay keeps unspecified pieces whole. Isolation starts at the piece's birth, before those
+    # temporary fuse/layout/split decisions, while retaining receipts inherited from its parent.
+    graph.nodes[matches[0]].op = minted[kernel.exact_identity]
     return single_node_graph(graph, matches[0])
 
 
@@ -132,9 +153,10 @@ def _replay(
     document: GoldenFile | None,
     bindings: Mapping[str, int] | None = None,
     seams: dict | None = None,
+    minted: dict[str, TileOp] | None = None,
 ) -> tuple[Graph | None, list[tuple[RoutingRow, bool, list[Kernel]]]]:
     """The shared recorded-route replay, keeping both its live graph and the definitions a restamp consumes."""
-    ref_of: dict[str, str] = {root.exact_identity: path[0].parent}  # a fresh kernel's identity -> its ``ref`` in the file
+    ref_of: dict[str, int] = {root.exact_identity: path[0].parent}  # a fresh kernel's identity -> its ``ref`` in the file
     by_parent = {route.parent: route for route in path}
     # The layouts the path recorded are the program's: the replay compiles under them settled, as serving and the
     # bench walk compile a program whose family settled them, so a sibling the path says nothing about reads the
@@ -143,7 +165,7 @@ def _replay(
     out: list[tuple[RoutingRow, bool, list[Kernel]]] = []
     # Per decided parent, its fork's other seam spellings: the inventory reports the arm a pass took in each seam's
     # own spelling, while a stored route may spell a seam at any of its occurrences, as ``spelled_arm`` reads it.
-    aliases: dict[str, dict[str, str]] = {}
+    aliases: dict[int, dict[str, str]] = {}
 
     def decide(fp):
         if fp.structural and isinstance(fp.root_op, TileOp):
@@ -164,7 +186,9 @@ def _replay(
         route = by_parent.get(ref_of.get(parent.identity_key(structural=False, with_io=True)))
         if route is None:
             return
-        kernels = [definition(piece, piece.name) for piece in pieces]
+        if minted is not None:
+            minted.update((piece.identity_key(structural=False, with_io=True), piece) for piece in pieces)
+        kernels = [definition(piece) for piece in pieces]
         spelled = aliases.get(route.parent, {})
         same = len(kernels) == len(route.children) and {str(k): str(v) for k, v in arm.items()} == {
             spelled.get(str(k), str(k)): str(v) for k, v in route.arm.items()
@@ -214,6 +238,12 @@ class Report:
     filled_latencies: list[str] = field(default_factory=list)
     cleared_latencies: list[str] = field(default_factory=list)
     dropped_rows: list[str] = field(default_factory=list)
+    respelled_rows: list[str] = field(default_factory=list)
+    dropped_keys: list[str] = field(default_factory=list)
+    #: For each row of the restamped file, the position of the row of the file it was restamped from.
+    sources: list[int] = field(default_factory=list)
+    #: Every surviving kernel's ref in the file restamped from, to the ref it is stored under.
+    stored_as: dict[int, int] = field(default_factory=dict)
 
     @property
     def changed(self) -> bool:
@@ -228,11 +258,16 @@ class Report:
                 self.filled_latencies,
                 self.cleared_latencies,
                 self.dropped_rows,
+                self.respelled_rows,
+                self.dropped_keys,
             )
         )
 
     def lines(self) -> list[str]:
-        out = [f"{len(self.rekeyed)} of {self.kernels} kernels re-keyed, {len(self.dropped_kernels)} dropped"]
+        out = [
+            f"{len(self.rekeyed)} of {self.kernels} kernels re-keyed, {len(self.dropped_kernels)} dropped, "
+            f"{len(self.dropped_routes)} decisions dropped, {len(self.demoted)} measured rows demoted"
+        ]
         out.extend(f"re-keyed {name}" for name in self.rekeyed)
         out.extend(f"re-pointed {name}" for name in self.repointed)
         out.extend(f"dropped kernel {reason}" for reason in self.dropped_kernels)
@@ -242,6 +277,8 @@ class Report:
         out.extend(f"filled the kernel set of the whole-target latency {name}" for name in self.filled_latencies)
         out.extend(f"cleared whole-target latency {reason}" for reason in self.cleared_latencies)
         out.extend(f"dropped row {reason}" for reason in self.dropped_rows)
+        out.extend(f"re-spelled row {change}" for change in self.respelled_rows)
+        out.extend(f"dropped key {reason}" for reason in self.dropped_keys)
         return out
 
 
@@ -261,16 +298,17 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
     report.kernels = len(scope)
     # A piece two programs' kernel sets share (one kernel by identity) is reached here through a route of a program
     # in scope, never through the other program's route, whose target this restamp does not lower.
-    reached: dict[str, RoutingRow] = {}
+    reached: dict[int, RoutingRow] = {}
     for route in document.routing:
         if route.parent in scope:
             for child in route.children:
                 reached.setdefault(child, route)
 
-    fresh: dict[str, Kernel | None] = {}  # a kernel's ref -> the kernel as the fresh lowering has it, None if dropped
+    fresh: dict[int, Kernel | None] = {}  # a kernel's ref -> the kernel as the fresh lowering has it, None if dropped
     added: list[Kernel] = []  # pieces the fresh lowering mints that the file holds under no ref
+    tiles: dict[str, TileOp] = {}  # a fresh kernel's exact identity -> the tile the lowering built it as
 
-    def entry(kernel: Kernel) -> str:
+    def entry(kernel: Kernel) -> int:
         """The ref of the kernel of ``kernel``'s identity: a fresh one, a stored one out of scope, or ``kernel`` stored anew."""
         identity = kernel.exact_identity
         for ref, candidate in fresh.items():
@@ -279,9 +317,8 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         for stored in (*added, *document.kernels):
             if stored.ref not in scope and _identity(stored) == identity:
                 return stored.ref
-        taken = {stored.ref for stored in (*document.kernels, *added)}
-        ref = next(ref for ref in chain([kernel.name], (f"{kernel.name}#{n}" for n in count(2))) if ref not in taken)
-        added.append(replace(kernel, key="" if ref == kernel.name else ref).keyed(identity))
+        ref = max(stored.ref for stored in (*document.kernels, *added)) + 1
+        added.append(kernel.with_ref(ref))
         return ref
 
     groups: dict[tuple, list[Kernel]] = {}
@@ -293,17 +330,18 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             tile = lifted.get(wire_writes(kernel.loop_ir))
             if tile is None:
                 fresh[kernel.ref] = None
-                report.dropped_kernels.append(f"{kernel.name}: no fresh kernel writes its outputs")
+                report.dropped_kernels.append(f"{_label(kernel)}: no fresh kernel writes its outputs")
                 continue
-            fresh[kernel.ref] = _rekeyed(kernel, definition(tile, kernel.name), report)
+            fresh[kernel.ref] = _rekeyed(kernel, definition(tile), report)
+            tiles[tile.identity_key(structural=False, with_io=True)] = tile
 
     carried = {child for route in document.routing if route.parent not in scope for child in route.children}
     routing: list[RoutingRow | None] = list(document.routing)
     # A stored piece's ref -> (decision index, position, fresh body) for each decision that mints it.
-    minted: dict[str, list[tuple[int, int, Kernel]]] = {}
+    minted: dict[int, list[tuple[int, int, Kernel]]] = {}
     depth = _depths(document.routing, scope)
 
-    def settle(child: str) -> None:
+    def settle(child: int) -> None:
         """Give the stored piece ``child`` its fresh kernel once every decision in scope that mints it was taken again.
         The decisions minting the stored kernel keep the ``ref`` and its rows, whatever order the file lists them in;
         when none does and no decision out of scope keeps the stored kernel, the decisions replayed first keep it,
@@ -326,10 +364,14 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             route = routing[index]
             ref = entry(kernel)
             routing[index] = replace(route, children=tuple(ref if at == position else old for at, old in enumerate(route.children)))
-            report.repointed.append(f"{route.parent} {child} -> {ref}: this decision mints another kernel now")
+            report.repointed.append(
+                f"{_label(document.kernel(route.parent))} {_label(stored)} -> {kernel.name}: this decision mints another kernel now"
+            )
 
     # Decisions are taken again by depth, so every decision that mints a piece is taken before the piece is settled
     # and before any decision on it.
+    # The outcome of each path a decision was replayed along, with the seams its parents offered.
+    replays: dict[tuple, tuple[bool, list[Kernel], dict[int, set[str]]]] = {}
     for level in sorted({depth[route.parent] for route in document.routing if route.parent in scope}):
         for index, route in enumerate(document.routing):
             if route.parent not in scope or depth[route.parent] != level:
@@ -337,27 +379,41 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             path = [*_path_in(reached, route.parent), route]
             if any(fresh.get(step.parent) is None for step in path):
                 routing[index] = None
-                report.dropped_routes.append(f"{route.parent} {route.arm}: its parent is gone")
+                report.dropped_routes.append(f"{_label(document.kernel(route.parent))} {route.arm}: its parent is gone")
                 for child in route.children:
                     fresh.setdefault(child, None)
                 continue
-            offered: dict[str, set[str]] = {}
-            taken = {
-                (old.parent, knobs_json(old.arm)): (same, kernels)
-                for old, same, kernels in mint(fresh[path[0].parent], path, ctx, document=document, seams=offered)
-            }
-            same, kernels = taken.get((route.parent, knobs_json(route.arm)), (False, []))
-            if not same and (found := _respelled(document, fresh[path[0].parent], path, offered.get(route.parent, set()), ctx)):
+            if (key := _spelled(path)) not in replays:
+                # One replay down the plain decisions below this one takes each of them as its own replay would.
+                extended = [*path, *_plain_descent(document.routing, route, scope)]
+                offered: dict[int, set[str]] = {}
+                for old, taken, pieces in mint(fresh[path[0].parent], extended, ctx, document=document, seams=offered, minted=tiles):
+                    at = next(at for at, step in enumerate(extended) if step is old)
+                    replays[_spelled(extended[: at + 1])] = (taken, pieces, offered)
+                replays.setdefault(key, (False, [], offered))
+            same, kernels, offered = replays[key]
+            root = fresh[path[0].parent]
+            # A seam a re-keyed parent still offers can name another sibling now (a chain of single cuts peeling the
+            # projections off one kernel, in another order), so a spelling whose pieces are neither the stored ones
+            # nor read and write as they do is re-spelled like a lost one.
+            misnamed = same and not _stands_for([document.kernel(ref) for ref in route.children], kernels, root)
+            if (not same or misnamed) and (
+                found := _respelled(document, root, path, offered.get(route.parent, set()), ctx, misnamed=misnamed)
+            ):
                 respelled, kernels = found
                 report.respelled.extend(
-                    f"{route.parent} {old} -> {new}" for old, new in zip(route.arm, respelled.arm, strict=True) if old != new
+                    f"{_label(document.kernel(route.parent))} {old} -> {new}"
+                    for old, new in zip(route.arm, respelled.arm, strict=True)
+                    if old != new
                 )
                 routing[index] = respelled
                 reached.update({child: respelled for child, via in reached.items() if via is route})
                 same = True
             if not same:
                 routing[index] = None
-                report.dropped_routes.append(f"{route.parent} {route.arm}: the fresh parent does not take it the same way")
+                report.dropped_routes.append(
+                    f"{_label(document.kernel(route.parent))} {route.arm}: the fresh parent does not take it the same way"
+                )
                 for child in route.children:
                     fresh.setdefault(child, None)
                 continue
@@ -369,19 +425,19 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
     # Two stored kernels the fresh lowering makes one are stored once, under the first's ref. A piece in scope that
     # no decision in scope mints any more is dropped, unless a decision out of scope still reaches it.
     kernels: list[Kernel] = []
-    stored_as: dict[str, str] = {}  # every surviving kernel's ref -> the ref it is stored under
-    by_identity: dict[str, str] = {}
+    stored_as: dict[int, int] = {}  # every surviving kernel's ref -> the ref it is stored under
+    by_identity: dict[str, Kernel] = {}
     for kernel in (*document.kernels, *added):
         rekeyed = kernel if kernel.ref not in scope or (kernel.ref not in fresh and kernel.ref in carried) else fresh.get(kernel.ref)
         if rekeyed is None:  # dropped, or a piece no decision of the file reaches
             continue
         identity = _identity(rekeyed)
         if identity is not None and identity in by_identity:
-            stored_as[kernel.ref] = by_identity[identity]
-            report.dropped_kernels.append(f"{kernel.ref}: the fresh lowering makes it the kernel {by_identity[identity]}")
+            stored_as[kernel.ref] = by_identity[identity].ref
+            report.dropped_kernels.append(f"{_label(kernel)}: the fresh lowering makes it the kernel {by_identity[identity].name}")
             continue
         if identity is not None:
-            by_identity[identity] = kernel.ref
+            by_identity[identity] = rekeyed
         stored_as[kernel.ref] = kernel.ref
         kernels.append(rekeyed)
 
@@ -390,23 +446,42 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         if route is None:
             continue
         if any(ref not in stored_as for ref in (route.parent, *route.children)):
-            report.dropped_routes.append(f"{route.parent} {route.arm}: a piece is gone")
+            report.dropped_routes.append(f"{_label(document.kernel(route.parent))} {route.arm}: a piece is gone")
             continue
         kept.append(replace(route, parent=stored_as[route.parent], children=tuple(stored_as[child] for child in route.children)))
 
-    def stale(ref: str) -> str | None:
+    def stale(ref: int) -> str | None:
         """Why the stored kernel ``ref`` is no longer what a compile builds: gone, or re-keyed; ``None`` when it is."""
         if ref not in stored_as:
-            return f"{ref} is gone"
-        return f"{ref} was re-keyed" if fresh.get(ref) not in (None, document.kernel(ref)) else None
+            return f"{_label(document.kernel(ref))} is gone"
+        return f"{_label(document.kernel(ref))} was re-keyed" if fresh.get(ref) not in (None, document.kernel(ref)) else None
+
+    def keys_of(ref: int) -> frozenset[str] | None:
+        """The schedule keys the surviving kernel ``ref`` offers: the row keys of the tile this restamp built it as, in
+        the form the classic schedule addresses — the serial form of a kernel that carries a state, as the schedule
+        pass offers it. ``None`` for a kernel this restamp did not build (out of scope, or kept from the file)."""
+        identity = _identity(next(kernel for kernel in kernels if kernel.ref == ref))
+        tile = tiles.get(identity or "")
+        if tile is None:
+            return None
+        return frozenset(classic_keys(scheduled_form(tile, tile.name)))
 
     rows: list[Row] = []
-    for row in document.rows:
+    report.stored_as = stored_as
+    for source, row in enumerate(document.rows):
         if row.kernel not in stored_as:
             report.dropped_rows.append(f"{row.name}: its kernel is gone")
             continue
         fresh_row = replace(row, kernel=stored_as[row.kernel])
-        if row.measurements is not None and stale(row.kernel) is not None:
+        offered_keys = keys_of(fresh_row.kernel) if row.knobs else None
+        changed = False
+        if offered_keys is not None:
+            moved, dropped = _respelled_keys(row.knobs, offered_keys)
+            changed = bool(dropped) or any(old != new for old, new in moved.items())
+            report.respelled_rows.extend(f"{row.name} {old} -> {new}" for old, new in moved.items() if old != new)
+            report.dropped_keys.extend(f"{row.name}: {key} names no site of {_label(document.kernel(row.kernel))}" for key in dropped)
+            fresh_row = replace(fresh_row, knobs={moved[key]: value for key, value in row.knobs.items() if key not in dropped})
+        if row.measurements is not None and (stale(row.kernel) is not None or changed):
             fresh_row = replace(fresh_row, measurements=None)
             report.demoted.append(row.name)
         latencies = {}
@@ -421,31 +496,88 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
                 continue
             latencies[card] = replace(latency, kernels=tuple(dict.fromkeys(stored_as[ref] for ref in latency.kernels)))
         rows.append(replace(fresh_row, latency=latencies or None))
+        report.sources.append(source)
     out = replace(document, kernels=kernels, routing=kept, rows=rows)
     return out, report
 
 
+def carried(
+    path: Path, document: GoldenFile, fresh: GoldenFile, report, baseline: Path, *, jobs: int | None = None
+) -> tuple[GoldenFile, list[str]]:
+    """``fresh``, the restamp of ``document`` already written to ``path``, with every time decided by the code: a row
+    whose kernel compiles under the row's schedule to the PTX ``baseline`` holds for it keeps the measurement
+    ``document`` has, whether or not the restamp re-keyed its kernel; a row whose PTX differs, or that no longer
+    realizes, loses it. A row the baseline holds no PTX for stays as the restamp left it. A whole-target latency is
+    kept when every kernel it timed still stands and every measured row of those kernels kept its code; a kernel of
+    it with no such row decides by the restamp's own rule (re-keyed or not). The second value names each row whose
+    code changed. The report is the restamp's: it says which row of ``document`` each row came from."""
+    import tempfile  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.golden.realize import _DOCUMENTS, ptx_path, realize  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as scratch:
+        realize([path], jobs=jobs, ptx=Path(scratch))
+        _DOCUMENTS.pop(str(path), None)
+        verdict: dict[int, bool] = {}  # a fresh row's index -> whether its code is the baseline's
+        for index, source in enumerate(report.sources):
+            before = ptx_path(baseline, path, source)
+            if before.exists():
+                after = ptx_path(Path(scratch), path, index)
+                verdict[index] = after.exists() and after.read_bytes() == before.read_bytes()
+    same_code: dict[int, bool] = {}  # a fresh kernel's ref -> whether every measured row of it kept its code
+    for index, same in verdict.items():
+        if document.rows[report.sources[index]].measurements is not None:
+            ref = fresh.rows[index].kernel
+            same_code[ref] = same_code.get(ref, True) and same
+    rows, changed = [], []
+    for index, row in enumerate(fresh.rows):
+        old = document.rows[report.sources[index]]
+        if index in verdict and old.measurements is not None:
+            row = replace(row, measurements=old.measurements if verdict[index] else None)
+            if not verdict[index]:
+                changed.append(row.name)
+        latencies = {}
+        for card, latency in (old.latency or {}).items():
+            kernels = [report.stored_as.get(ref) for ref in latency.kernels]
+            kept = (row.latency or {}).get(card)
+            if latency.kernels and None not in kernels and all(same_code.get(ref, kept is not None) for ref in kernels):
+                latencies[card] = replace(latency, kernels=tuple(dict.fromkeys(kernels)))
+            elif kept is not None and all(same_code.get(ref, True) for ref in kept.kernels):
+                latencies[card] = kept
+        rows.append(replace(row, latency=latencies or None))
+    return replace(fresh, rows=rows), changed
+
+
 def _respelled(
-    document: GoldenFile, root: Kernel, path: list[RoutingRow], offered: set[str], ctx: Context
+    document: GoldenFile, root: Kernel, path: list[RoutingRow], offered: set[str], ctx: Context, *, misnamed: bool = False
 ) -> tuple[RoutingRow, list[Kernel]] | None:
     """The last route of ``path`` with its seams spelled where the fresh parent cuts its stored pieces, and those
     pieces; ``None`` when no re-spelling does. A seam address is an operand position, so a change of canonical operand
     order moves it while the computation stays: the stored pieces, whose identities this compiler computes from their
     stored bodies, are what the decision cut. Each seam the parent no longer offers is tried at the offered seams of
-    its kind nearest to it — fewest route segments changed, added or removed. A candidate one operand index away is
+    its kind nearest to it — fewest route segments changed, added or removed; a seam's kind is its last route segment,
+    one per site of a joined key, so a joined key is re-spelled as a joined key. A candidate one operand index away is
     also tried as a swap of the two operands of that node, which moves every seam of the route under either; a swap
     can leave a moved seam on an offered spelling that now names the other operand. The nearest combinations are
-    minted, at most :data:`RESPELL_TRIES`; one is taken only when the fresh parent mints exactly the stored pieces. Two
-    arms that mint one set of pieces are one kernel set: the first is taken."""
+    minted, at most :data:`RESPELL_TRIES`; one is taken when the fresh parent mints exactly the stored pieces. Where the
+    change also re-keyed a piece, the candidates whose pieces read the same target inputs and write outputs of the same
+    dtypes and sizes as the stored ones, one to one, stand for the decision; sibling cones over one input match alike,
+    so the one that mints the most stored pieces again is taken, and a tie takes none. Two arms that mint one set of
+    pieces are one kernel set (a seam reached through two consumers of one cone): the first is taken, on either
+    path. A ``misnamed`` arm is one the parent offers whose pieces are not the stored ones: every seam of it moves."""
     route = path[-1]
-    lost = [key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut" and key not in offered]
+    cuts = [key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut"]
+    lost = cuts if misnamed else [key for key in cuts if key not in offered]
     if not lost or not offered:
         return None
     free = sorted(offered - set(route.arm))
 
+    def kind(key: str) -> tuple[str, ...]:
+        return tuple(site.rsplit("/", 1)[-1] for site in joined_halves(key))
+
     def moves(key: str) -> list[tuple[int, dict[tuple[str, ...], tuple[str, ...]]]]:
         """Each way to re-spell ``key``, nearest first, as its distance and a map of route prefixes to replace."""
-        ranked = sorted((_distance(key, other), other) for other in free if other.rsplit("/", 1)[-1] == key.rsplit("/", 1)[-1])
+        ranked = sorted((_distance(key, other), other) for other in free if kind(other) == kind(key))
         out = []
         for far, other in [(far, other) for far, other in ranked if far <= ranked[0][0] + 1][:4] if ranked else []:
             old, new = _segments(key), _segments(other)
@@ -463,7 +595,10 @@ def _respelled(
         return key
 
     combinations = sorted(product(*map(moves, lost)), key=lambda choice: sum(far for far, _ in choice))
-    want = sorted(_identity(document.kernel(ref)) or "" for ref in route.children)
+    stored = [document.kernel(ref) for ref in route.children]
+    want = sorted(_identity(kernel) or "" for kernel in stored)
+    inputs = frozenset(root.loop_ir["inputs"])
+    alike: list[tuple[int, RoutingRow, list[Kernel]]] = []
     seen: set[str] = set()
     for choice in combinations:
         prefixes = {prefix: into for _, move in choice for prefix, into in move.items()}
@@ -473,12 +608,49 @@ def _respelled(
             continue
         seen.add(knobs_json(arm))
         candidate = replace(route, arm=arm)
-        for taken, same, kernels in mint(root, [*path[:-1], candidate], ctx, document=document):
+        try:
+            minted = mint(root, [*path[:-1], candidate], ctx, document=document)
+        except UnbindableProjection:
+            # Each seam is offered alone; a combination whose pieces cannot own their outputs is not the route.
+            minted = []
+        for taken, same, kernels in minted:
             if taken is candidate and same and sorted(kernel.exact_identity for kernel in kernels) == want:
                 return candidate, kernels
+            if taken is candidate and same and _io(stored, inputs) == _io(kernels, inputs):
+                alike.append((sum((Counter(want) & Counter(kernel.exact_identity for kernel in kernels)).values()), candidate, kernels))
         if len(seen) == RESPELL_TRIES:
             break
-    return None
+    most = max((kept for kept, _, _ in alike), default=None)
+    best = [(candidate, kernels) for kept, candidate, kernels in alike if kept == most]
+    sets = {tuple(sorted(kernel.exact_identity for kernel in kernels)) for _, kernels in best}
+    return best[0] if len(sets) == 1 else None
+
+
+def _scoped(key: str) -> bool:
+    """Whether ``key`` names a site of a classic schedule family (``TILE@…``, ``REDUCE@…``, ``STAGE@…``)."""
+    return "@" in key and family_of(key) in CLASSIC_FAMILIES
+
+
+def _respelled_keys(knobs: Mapping[str, object], offered: frozenset[str]) -> tuple[dict[str, str], list[str]]:
+    """Each key of a row by its spelling on the row's kernel as the fresh lowering built it, and the keys that have
+    none. A scoped schedule key the fresh tile no longer offers moves as a seam does: to the one offered key of its
+    family and kind (last route segment) one segment away, when no other offered key is as near and no key of the row
+    lands there already. A site address is an operand position, so a node the lift forms before it moves the address
+    while the site stays; a key the rule cannot map to exactly one site is dropped, never guessed."""
+    moved = {key: key for key in knobs}
+    dropped: list[str] = []
+    taken = {key for key in knobs if not _scoped(key) or key in offered}
+    for key in knobs:
+        if not _scoped(key) or key in offered:
+            continue
+        same = [other for other in offered - taken if family_of(other) == family_of(key) and _segments(other)[-1] == _segments(key)[-1]]
+        ranked = sorted((_distance(key, other), other) for other in same)
+        if ranked and ranked[0][0] == 1 and (len(ranked) == 1 or ranked[1][0] > 1):
+            moved[key] = ranked[0][1]
+            taken.add(ranked[0][1])
+        else:
+            dropped.append(key)
+    return moved, dropped
 
 
 def _segments(key: str) -> tuple[str, ...]:
@@ -497,19 +669,19 @@ def _distance(key: str, other: str) -> int:
     return row[-1]
 
 
-def _depths(routing: list[RoutingRow], scope: set[str]) -> dict[str, int]:
+def _depths(routing: list[RoutingRow], scope: set[int]) -> dict[int, int]:
     """Each kernel of ``scope`` by its depth: ``0`` for a kernel no decision in scope mints (a target); for a piece,
     one more than the greatest depth among the parents of the decisions in scope that mint it. A decision's pieces
     are cut from its parent, so routing has no cycles; ``seen`` only stops a malformed file from recursing forever,
     and the memoized depths of such a file then depend on visit order."""
-    minters: dict[str, list[str]] = {}
+    minters: dict[int, list[int]] = {}
     for route in routing:
         if route.parent in scope:
             for child in route.children:
                 minters.setdefault(child, []).append(route.parent)
-    out: dict[str, int] = {}
+    out: dict[int, int] = {}
 
-    def depth(ref: str, seen: frozenset[str]) -> int:
+    def depth(ref: int, seen: frozenset[int]) -> int:
         if ref not in out:
             parents = [parent for parent in minters.get(ref, []) if parent not in seen]
             out[ref] = 1 + max((depth(parent, seen | {ref}) for parent in parents), default=-1)
@@ -520,7 +692,28 @@ def _depths(routing: list[RoutingRow], scope: set[str]) -> dict[str, int]:
     return out
 
 
-def _path_in(reached: dict[str, RoutingRow], ref: str) -> list[RoutingRow]:
+def _spelled(path: list[RoutingRow]) -> tuple:
+    """A replay path by value: the same decisions in the same order replay the same way."""
+    return tuple((step.parent, knobs_json(step.arm), step.children) for step in path)
+
+
+def _plain_descent(routing: list[RoutingRow], route: RoutingRow, scope) -> list[RoutingRow]:
+    """The decisions straight below ``route``, each on a piece the one above mints, while each one cuts a single seam
+    and settles no layout: adding such a decision to a replay changes neither the composed cuts nor the layouts the
+    replay compiles under, so the decisions above it replay as they would alone. A nested cut a prior walk recorded
+    is such a chain, often dozens deep, and replaying it once instead of once per decision keeps a restamp linear in
+    its depth."""
+    out: list[RoutingRow] = []
+    while (below := next((step for step in routing if step.parent in route.children and step.parent in scope), None)) is not None:
+        cuts = [key for key, value in below.arm.items() if family_of(key) == "PLACE" and value == "cut"]
+        if len(cuts) > 1 or any(family_of(key) == "LAYOUT" for key in below.arm):
+            break
+        out.append(below)
+        route = below
+    return out
+
+
+def _path_in(reached: dict[int, RoutingRow], ref: int) -> list[RoutingRow]:
     """The decisions from a target down to ``ref`` through the routes ``reached`` holds, in order (``path_to`` over
     one program's kernel sets)."""
     path: list[RoutingRow] = []
@@ -543,20 +736,9 @@ def _paired(stored: list[Kernel], fresh: list[Kernel], inputs: frozenset[str]) -
     def reads(kernel: Kernel) -> frozenset[str]:
         return frozenset(kernel.loop_ir["inputs"]) & inputs
 
-    def writes(kernel: Kernel) -> tuple:
-        wire = kernel.loop_ir
-        return tuple(
-            sorted(
-                (str(dtype), str(prod(dims)) if all(isinstance(dim, int) for dim in dims) else str(dims))
-                for node in wire["nodes"]
-                for name, dtype, dims in node["outputs"]
-                if name in wire["outputs"]
-            )
-        )
-
     remaining = dict(enumerate(fresh))
     out: dict[int, Kernel] = {}
-    for signature in (_identity, lambda kernel: (reads(kernel), writes(kernel)), reads, writes):
+    for signature in (_identity, lambda kernel: (reads(kernel), _writes(kernel)), reads, _writes):
         for index, piece in enumerate(stored):
             if index in out:
                 continue
@@ -568,6 +750,32 @@ def _paired(stored: list[Kernel], fresh: list[Kernel], inputs: frozenset[str]) -
     return [out[index] if index in out else next(rest) for index in range(len(stored))]
 
 
+def _writes(kernel: Kernel) -> tuple:
+    """The dtype and element count of each output ``kernel`` writes."""
+    wire = kernel.loop_ir
+    return tuple(
+        sorted(
+            (str(dtype), str(prod(dims)) if all(isinstance(dim, int) for dim in dims) else str(dims))
+            for node in wire["nodes"]
+            for name, dtype, dims, *_alias in node["outputs"]
+            if name in wire["outputs"]
+        )
+    )
+
+
+def _stands_for(stored: list[Kernel], fresh: list[Kernel], root: Kernel) -> bool:
+    """Whether the pieces ``fresh`` are the ``stored`` ones: one keeps a stored identity, or they read the target's
+    inputs and write outputs as the stored pieces do."""
+    inputs = frozenset(root.loop_ir["inputs"])
+    kept = {_identity(kernel) for kernel in stored} & {kernel.exact_identity for kernel in fresh}
+    return bool(kept) or _io(stored, inputs) == _io(fresh, inputs)
+
+
+def _io(kernels: list[Kernel], inputs: frozenset[str]) -> list[tuple]:
+    """What each of ``kernels`` reads of the target ``inputs`` and writes, as one sortable multiset."""
+    return sorted((sorted(frozenset(kernel.loop_ir["inputs"]) & inputs), _writes(kernel)) for kernel in kernels)
+
+
 def _identity(kernel: Kernel) -> str | None:
     """``kernel``'s exact identity, or ``None`` when its stored body no longer lowers to a kernel."""
     try:
@@ -576,20 +784,18 @@ def _identity(kernel: Kernel) -> str | None:
         return None
 
 
+def _label(kernel: Kernel) -> str:
+    """``kernel`` as a report names it: its name, or its position's ref when its stored body no longer lowers."""
+    identity = _identity(kernel)
+    return name_of(identity) if identity is not None else f"kernel #{kernel.ref}"
+
+
 def _rekeyed(stored: Kernel, fresh: Kernel, report: Report) -> Kernel:
-    """``stored`` as the fresh lowering defines it. A kernel that kept its identity keeps its entry — body and
-    name; one the fresh lowering makes another kernel takes the fresh body, spelled under the stored name and known
-    by the stored ``ref``, and is reported."""
+    """``stored`` as the fresh lowering defines it. A kernel that kept its identity keeps its entry; one the fresh
+    lowering makes another kernel takes the fresh body, known by the stored ``ref``, and is reported."""
     old = _identity(stored)
     if fresh.exact_identity == old:
         return stored
-    out = replace(stored, loop_ir=_named(fresh.loop_ir, stored.name), formed=fresh.formed).keyed(fresh.exact_identity)
-    report.rekeyed.append(f"{stored.ref} {(old or 'no kernel')[:12]} -> {out.exact_identity[:12]}")
+    out = replace(stored, loop_ir=fresh.loop_ir, formed=fresh.formed).keyed(fresh.exact_identity)
+    report.rekeyed.append(f"{_label(stored)} -> {out.name}")
     return out
-
-
-def _named(wire: dict, name: str) -> dict:
-    """``wire`` with its loop node spelled under ``name``: the one part of a body two lowerings of one kernel spell
-    differently, and no part of its identity."""
-    nodes = [{**node, "attrs": {**node["attrs"], "name": name}} if node.get("op") == "loop" else node for node in wire["nodes"]]
-    return {**wire, "nodes": nodes}

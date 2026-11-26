@@ -41,7 +41,7 @@
           # ``pip install ruff`` puts a generic-linux binary in the venv, which NixOS cannot
           # exec. The nixpkgs build is what ``make lint`` finds on PATH here.
           pkgs.ruff
-          # ``nvcc``, which the CUDA backend shells out to for every kernel it compiles.
+          # ``ptxas``, which the CUDA backend shells out to for every kernel it assembles.
           cudaPkgs.cudatoolkit
           # ``make setup`` builds the runtime extension (``crates/emmy-runtime-py``) with cargo.
           pkgs.rustc

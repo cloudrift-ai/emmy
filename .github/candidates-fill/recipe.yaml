@@ -1,0 +1,111 @@
+# Fill the candidate file of a hardware golden on its own card: tune every kernel whose group is under its target, as
+# `emmy candidates build --json` lists them, build the file again from the tune DB the tunes wrote, and return it
+# with that tune DB. Whoever runs this (`emmy bench .github/candidates-fill --filter golden=PATH`, the
+# `refresh-candidates` skill) copies the returned file over the repository's. short.json lists the groups still under
+# their target after the fill; the run stops starting tunes when `budget_s` is spent.
+command:
+  stage:
+    - emmy
+    - crates
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - Cargo.toml
+    - Cargo.lock
+  run: |
+    set -uo pipefail
+    export PATH=$$HOME/.cargo/bin:/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq || exit 1
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq make build-essential python3.12-venv python3.12-dev || exit 1
+    command -v cargo >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal
+    # The marker, not the directory: an install that failed halfway leaves a venv and must run again.
+    [ -f venv/.setup-complete ] || make setup || exit 1
+    export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_CUBIN_CACHE=$task_dir/cubins
+    export CUDA_VISIBLE_DEVICES="$gpu_device_ids"
+    export EMMY_BENCH_RUN_TIMEOUT_S=$run_limit_s
+    # The listing reads no DB, only the staged candidate file.
+    ./venv/bin/emmy candidates build "$golden" --json $task_dir/todo.json || exit 1
+    deadline=$$((SECONDS + $budget_s))
+    jq -c '.[]' $task_dir/todo.json | while IFS= read -r entry; do
+      if [ "$$SECONDS" -ge "$$deadline" ]; then
+        echo "budget spent; the remaining groups stay under their target"
+        break
+      fi
+      kernel=$$(jq -r .kernel <<< "$$entry")
+      pins=$$(jq -r '.pins | to_entries | map("\(.key)=\(if .value == true then 1 elif .value == false then 0 else .value end)") | join(",")' <<< "$$entry")
+      # A tune exits 1 when it flags some rows and still records the clean ones: the build below is the test.
+      env EMMY_KNOBS="$$pins" timeout 3600 ./venv/bin/emmy run --golden "$golden" --kernel "$$kernel" --bench --tune $tune \
+        </dev/null >> $task_dir/fill.log 2>&1
+    done
+    ./venv/bin/emmy candidates build "$golden" --db $task_dir/autotune.db --json $task_dir/short.json || exit 1
+    cp emmy/compiler/pipeline/search/candidates/records/$$(basename "$golden") $task_dir/candidates.json
+  result_files:
+    - candidates.json
+    - short.json
+    - autotune.db
+    - fill.log
+  timeout: 9000
+
+# One row per hardware golden on its own card; tests/github/test_golden_fill_recipe.py keeps the list whole.
+matrices:
+  - golden: emmy/compiler/pipeline/search/golden/records/a100_sm80.json
+    deploy.gpu: "NVIDIA A100 40GB"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60
+  - golden: emmy/compiler/pipeline/search/golden/records/h100_sm90.json
+    deploy.gpu: "NVIDIA H100 80GB"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60
+  - golden: emmy/compiler/pipeline/search/golden/records/rtx4080_sm89.json
+    deploy.gpu: "NVIDIA GeForce RTX 4080"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60
+  - golden: emmy/compiler/pipeline/search/golden/records/rtx4090_sm89.json
+    deploy.gpu: "NVIDIA GeForce RTX 4090"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60
+  - golden: emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json
+    deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60
+  - golden: emmy/compiler/pipeline/search/golden/records/rtxpro6000_sm120.json
+    deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60
+  - golden: emmy/compiler/pipeline/search/golden/records/rtxpro6000_se_sm120.json
+    deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60
+  - golden: emmy/compiler/pipeline/search/golden/records/rtxpro6000_ws_sm120.json
+    deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60
+  - golden: emmy/compiler/pipeline/search/golden/records/v100_sm70.json
+    deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60
+  - golden: emmy/compiler/pipeline/search/golden/records/v100_sxm2_sm70.json
+    deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+    deploy.gpu_count: 1
+    budget_s: 7200
+    tune: 40
+    run_limit_s: 60

@@ -18,6 +18,12 @@ def test_detect_local_gpus_nvidia():
     assert count == 2
 
 
+def test_detect_gcp_rtx_pro_6000_server():
+    """G4 reports the Server Edition PCI ID on all eight physical GPUs."""
+    output = "".join(f"0000:{bus}:00.0,0x10de,0x2bb5\n" for bus in ("05", "06", "0a", "0b", "84", "85", "89", "8a"))
+    assert _parse_sysfs_output(output) == ("NVIDIA RTX PRO 6000 Blackwell Server Edition", 8)
+
+
 def test_detect_local_gpus_mixed_error():
     """Different GPU types raise RuntimeError."""
     output = "0000:01:00.0,0x10de,0x2b85\n0000:02:00.0,0x10de,0x2684\n"

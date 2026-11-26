@@ -445,6 +445,27 @@ def test_serve_cmd_generate_boots_the_hybrid_class_with_decode_capture_for_gdn_l
     assert "--enforce-eager" not in cmd
 
 
+def test_serve_cmd_generate_boots_the_vision_class_only_when_images_are_served(tmp_path):
+    """A Qwen3.5 / Qwen3.8 vision-language checkpoint boots ``EmmyGenQwenVLModel``, vLLM's vision tower in front of the
+    hybrid trunk. ``--language-model-only`` keeps the text-only hybrid class, whose decode graph records the gather."""
+    pytest.importorskip("transformers.models.qwen3_5")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
+
+    from tests.serving.helpers import QWEN3_5_TINY
+
+    def architecture(args):
+        cmd = build_serve_cmd(str(tmp_path), stock=False, vllm_args=args, generate=True)
+        assert json.loads(cmd[cmd.index("--compilation-config") + 1])["cudagraph_mode"] == "FULL_DECODE_ONLY"
+        return json.loads(cmd[cmd.index("--hf-overrides") + 1])["architectures"]
+
+    Qwen3_5Config(text_config=QWEN3_5_TINY, architectures=["Qwen3_5ForConditionalGeneration"]).save_pretrained(tmp_path)
+    assert architecture([]) == ["EmmyGenQwenVLModel"]
+    assert architecture(["--language-model-only"]) == ["EmmyGenHybridModel"]
+    # Another family's vision-language wrapper keeps the text-only class.
+    Qwen3_5Config(text_config=QWEN3_5_TINY, architectures=["Qwen3_5MoeForConditionalGeneration"]).save_pretrained(tmp_path)
+    assert architecture([]) == ["EmmyGenHybridModel"]
+
+
 def test_serve_cmd_generate_nulls_the_quantization_config_for_nvfp4(tmp_path):
     """Same ownership rule for a modelopt/NVFP4 checkpoint (the nvidia/* shape): emmy's loader
     reads the packed weight / block scale / global scale trio itself, so vLLM must be handed an

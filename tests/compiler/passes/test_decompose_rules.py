@@ -14,7 +14,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32, F64
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, Var, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     LayerNormOp,
@@ -30,7 +30,7 @@ from emmy.compiler.ir.frontend.ir import (
     UnsqueezeOp,
 )
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Affine, Assign
+from emmy.compiler.ir.stmt import Assign
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, ReduceOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 
@@ -200,20 +200,16 @@ def test_silu_uses_the_input_opmath_dtype(dtype, opmath_dtype):
 def test_silu_f16_lifting_keeps_one_widening_and_one_final_narrowing():
     result = Pipeline.build(LOOP_PASSES).run(_make_silu_graph(F16))
     loop = next(n.op for n in result.nodes.values() if isinstance(n.op, LoopOp))
-    assigns = [
-        (stmt.op.name if isinstance(stmt, Assign) else type(stmt).__name__, stmt.dtype)
-        for stmt in loop.body.iter()
-        if isinstance(stmt, (Assign, Affine))
-    ]
-
-    # The negation and the ``1 + exp`` sum are Affine statements.
-    assert assigns == [
-        ("copy", F32),
-        ("Affine", None),
-        ("exp", None),
-        ("Affine", None),
-        ("divide", F16),
-    ]
+    assigns = [stmt for stmt in loop.body.iter() if isinstance(stmt, Assign)]
+    widening, narrowing = assigns[0], assigns[-1]
+    # The widening is a typed alias of the loaded value; the narrowing is the last definition, one operation each
+    # (the negation's sum, the exp, the division) between them.
+    assert isinstance(widening.value, Var) and widening.dtype == F32
+    assert narrowing.value.operation.name == "divide" and narrowing.dtype == F16
+    operations = {
+        node.operation.name for stmt in loop.body.iter() if isinstance(stmt, Assign) for node in stmt.value.subterms() if node.operation
+    }
+    assert {"negative", "exp", "add", "divide"} <= operations
 
 
 def test_silu_correctness():
@@ -369,6 +365,21 @@ def test_layer_norm_no_affine_decomposes():
     assert out_node.op.name == "multiply"  # centered * rsqrt, no affine tail
 
 
+def test_half_precision_layer_norm_computes_in_f32():
+    """A bf16 layer norm reads its input, weight and bias as f32 copies, keeps its statistics in f32 and rounds once at
+    the output, as torch's does."""
+    g = _make_layer_norm_graph()
+    for node in g.nodes.values():
+        node.outputs = tuple(Tensor(t.name, t.shape, "bf16") for t in node.outputs)
+    result = _apply(g, "085_layer_norm.py")
+    out = result.nodes[result.outputs[0]]
+    assert (out.op.name, out.output.dtype.name) == ("copy", "bf16")
+    means = [n for n in result.nodes.values() if isinstance(n.op, MeanOp)]
+    assert len(means) == 2 and all(n.output.dtype.name == "f32" for n in means)
+    widened = [n for n in result.nodes.values() if isinstance(n.op, ElementwiseOp) and n.op.name == "copy" and n is not out]
+    assert sorted(n.output.name for n in widened) == ["out_b_f32", "out_w_f32", "out_x_f32"]
+
+
 def test_layer_norm_weight_only_decomposes():
     """bias=False: weight scale applied, no bias add."""
     result = _apply(_make_layer_norm_graph(bias=False), "085_layer_norm.py")
@@ -506,6 +517,30 @@ def test_sdpa_produces_softmax_pattern():
     reduce_fns = {n.op.name for n in result.nodes.values() if isinstance(n.op, ReduceOp)}
     assert {"subtract", "exp", "divide"} <= fns
     assert "maximum" in reduce_fns
+
+
+def test_a_causal_sdpa_folds_each_rows_keys_over_a_range():
+    """Causal attention is no mask: the softmax's two reductions and the product with V walk the keys at or before
+    the query's row, and the decomposition mints no fill constant. The numpy meaning of the decomposed graph is
+    the masked attention."""
+    result = _apply(_make_sdpa_graph(seq_len=6, is_causal=True), "010_sdpa.py")
+    ranges = {
+        (n.op.name, tuple(str(bound) for bound in n.op.range)) for n in result.nodes.values() if isinstance(n.op, ReduceOp) and n.op.range
+    }
+    row, product_row = placeholder(1), placeholder(1)
+    assert ranges == {("maximum", ("0", str(row + Literal(1, "int")))), ("sum", ("0", str(product_row + Literal(1, "int"))))}
+    assert sum(isinstance(n.op, ReduceOp) and n.op.range is not None for n in result.nodes.values()) == 3
+    assert not any(isinstance(n.op, ConstantOp) and "mask" in n.op.name for n in result.nodes.values())
+    assert not any(isinstance(n.op, ReduceOp) and n.op.range for n in _apply(_make_sdpa_graph(), "010_sdpa.py").nodes.values())
+
+    rng = np.random.default_rng(0)
+    q, k, v = (rng.standard_normal((1, 6, 8)).astype(np.float32) for _ in range(3))
+    scores = q @ k.transpose(0, 2, 1) / np.sqrt(8.0)
+    scores = np.where(np.tril(np.ones((6, 6), dtype=bool)), scores, -np.inf)
+    weights = np.exp(scores - scores.max(-1, keepdims=True))
+    expected = (weights / weights.sum(-1, keepdims=True)) @ v
+    got = _run(Pipeline.build(["frontend/decomposition"]).run(_make_sdpa_graph(seq_len=6, is_causal=True)), {"Q": q, "K": k, "V": v})
+    np.testing.assert_allclose(got["sdpa_out"], expected, rtol=1e-5, atol=1e-5)
 
 
 def test_sdpa_produces_scale_constant():
@@ -817,9 +852,9 @@ def test_slice_negative_start_normalizes_symbolic():
 
     rewritten = _apply(g, "140_slice.py")
     (imap,) = [n.op for n in rewritten.nodes.values() if isinstance(n.op, IndexMapOp)]
-    offset_expr = imap.sources[0].coord_map[1]
-    assert "s" in offset_expr.free_vars(), f"symbolic extent must appear in the offset: {offset_expr!r}"
-    assert offset_expr == placeholder(1) + (Dim("s") + (-1)).expr
+    offset_expression = imap.sources[0].coord_map[1]
+    assert "s" in offset_expression.free_vars(), f"symbolic extent must appear in the offset: {offset_expression!r}"
+    assert offset_expression == placeholder(1) + (Dim("s") + (-1)).expression
 
 
 # ===================================================================

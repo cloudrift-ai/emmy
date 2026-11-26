@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: Aleph-Alpha/Kolibri-1
-  rationale: "Strong current attention: HN 669 pts and prior HF #1 trending; mature but high."
-  heat: 75
+  rationale: "Prior HN #1-trending pillars did not reproduce; trending #27 now, no arena row; strong config holds."
+  heat: 60
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

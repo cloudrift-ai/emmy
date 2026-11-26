@@ -552,7 +552,7 @@ def test_trace_rejects_copy_mutation_through_nonunit_slice():
             base[:, ::2].copy_(source)
             return base
 
-    with pytest.raises(NotImplementedError, match="slice_scatter requires .* step 1"):
+    with pytest.raises(NotImplementedError, match="slice(_scatter)? requires .*step 1"):
         trace_module(StridedCopy(), (torch.randn(1), torch.randn(1, 2, 8)))
 
 
@@ -1072,6 +1072,39 @@ def test_trace_bmm_produces_matmul_and_matches_eager():
     np.testing.assert_allclose(got, torch.bmm(a, b).numpy(), rtol=1e-5, atol=1e-5)
 
 
+def test_trace_permute_moves_data_and_matches_eager():
+    """aten.permute reorders the elements: a TransposeOp over the full permutation, not a reshape of the same bytes.
+    A permute that moves only size-1 axes keeps every element in place and stays a reshape."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Permute(nn.Module):
+        def __init__(self, dims):
+            super().__init__()
+            self.dims = dims
+
+        def forward(self, x):
+            return x.permute(*self.dims) * 2.0
+
+    backend = LoopBackend()
+    for shape, dims in (((3, 4), (1, 0)), ((2, 3, 4), (2, 0, 1)), ((2, 3, 4), (0, 2, 1)), ((2, 3, 4), (-1, 0, -2))):
+        x = torch.randn(*shape)
+        graph = trace_module(Permute(dims), (x,))
+        assert any(isinstance(node.op, TransposeOp) for node in graph.nodes.values())
+        compiled = backend.compile(graph)
+        result, _ = backend.run(compiled, input_data={compiled.inputs[0]: x.numpy()})
+        np.testing.assert_array_equal(next(iter(result.outputs.values())), Permute(dims)(x).numpy())
+
+    graph = trace_module(Permute((1, 0, 2)), (torch.randn(1, 3, 4),))
+    assert not any(isinstance(node.op, TransposeOp) for node in graph.nodes.values())
+    assert any(isinstance(node.op, ReshapeOp) for node in graph.nodes.values())
+
+
 def test_trace_default_softplus_is_stable_frontend_op():
     import torch
     import torch.nn as nn
@@ -1141,6 +1174,20 @@ def test_trace_passthrough_ops_no_extra_nodes():
 
     # Should just have input(s) — contiguous is a no-op.
     assert len(g.outputs) >= 1
+
+
+def test_trace_refuses_a_stepped_slice():
+    """A slice's step has no index-map form yet; dropping it would read every row."""
+    import torch
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Stepped(torch.nn.Module):
+        def forward(self, x):
+            return x[:, 1::2] * 2.0
+
+    with pytest.raises(NotImplementedError, match="step 1"):
+        trace_module(Stepped(), (torch.randn(2, 8),))
 
 
 def test_trace_zero_width_pad_is_an_alias():
@@ -1919,7 +1966,27 @@ def test_trace_keeps_a_dynamic_dim_symbolic_at_an_example_of_one():
 
     graph = trace_module(Project(), (torch.randn(1, 16),), dynamic_shapes={"x": {0: torch.export.Dim("rows", min=1, max=64)}})
     rows = [graph.buffer(name).shape[0] for name in graph.inputs]
-    assert any(not dim.is_static and dim.expr.free_vars() == {"rows"} for dim in rows)
+    assert any(not dim.is_static and dim.expression.free_vars() == {"rows"} for dim in rows)
+
+
+def test_trace_cat_on_its_default_axis():
+    """``torch.cat(xs)`` traces without its axis, which defaults to 0; one-row pieces of rank 3 make a wrong axis
+    visible, since their flat data differs from a cat on the last axis."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class Rows(nn.Module):
+        def forward(self, x, y):
+            return torch.cat([x, y])
+
+    x, y = torch.randn(1, 2, 4), torch.randn(1, 2, 4)
+    backend = LoopBackend()
+    result, _ = backend.run(backend.compile(trace_module(Rows(), (x, y))), input_data={"x": x.numpy(), "y": y.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), torch.cat([x, y]).numpy())
 
 
 def test_trace_index_copy_is_a_scatter_written_in_place():
@@ -1949,6 +2016,83 @@ def test_trace_index_copy_is_a_scatter_written_in_place():
     assert not any(load.input == "x" for load in kernel.op.loads), "the destination is never read"
     result, _ = backend.run(compiled, input_data={"x": x.numpy(), "idx": idx.numpy(), "v": v.numpy()})
     np.testing.assert_array_equal(next(iter(result.outputs.values())), x.index_copy(0, idx, v).numpy())
+
+
+def test_trace_scatter_of_a_tensor_source_is_a_scatter_and_other_forms_are_refused():
+    """``x.scatter(1, idx, src)`` is a ScatterOp along its ``dim``; a scalar source or a reduction is not that op,
+    so the tracer refuses them rather than dropping the reduction."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import ScatterOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Slots(nn.Module):
+        def forward(self, x, idx, src):
+            return x.scatter(1, idx, src)
+
+    x, idx, src = torch.zeros(2, 4), torch.tensor([[3, 0], [1, 2]]), torch.randn(2, 2)
+    graph = trace_module(Slots(), (x, idx, src))
+    (scatter,) = [node for node in graph.nodes.values() if isinstance(node.op, ScatterOp)]
+    assert scatter.op.axis == 1
+    backend = LoopBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={"x": x.numpy(), "idx": idx.numpy(), "src": src.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), x.scatter(1, idx, src).numpy())
+    # Along a leading axis of a rank-3 destination, as native generation stores a chunk into its cache: every
+    # cell keeps its trailing coordinates.
+    x, src = torch.zeros(5, 2, 3), torch.randn(2, 2, 3)
+    idx = torch.tensor([3, 1]).view(2, 1, 1).expand(2, 2, 3)
+
+    class Rows(nn.Module):
+        def forward(self, x, idx, src):
+            return x.scatter(0, idx, src)
+
+    result, _ = backend.run(
+        backend.compile(trace_module(Rows(), (x, idx, src))), input_data={"x": x.numpy(), "idx": idx.numpy(), "src": src.numpy()}
+    )
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), x.scatter(0, idx, src).numpy())
+
+    class Filled(nn.Module):
+        def forward(self, x, idx):
+            return x.scatter(1, idx, 1.0)
+
+    class Summed(nn.Module):
+        def forward(self, x, idx, src):
+            return x.scatter(1, idx, src, reduce="add")
+
+    with pytest.raises(NotImplementedError, match="tensor source"):
+        trace_module(Filled(), (x, idx))
+    with pytest.raises(NotImplementedError, match="tensor source"):
+        trace_module(Summed(), (x, idx, src))
+
+
+def test_trace_index_fill_is_a_scatter_of_one_value():
+    """``x.index_fill(dim, idx, value)``: a ScatterOp on ``dim`` whose values input is the scalar the rows take.
+    torch 2.15 lowers ``x[idx] = scalar`` to this op."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import ScatterOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Fill(nn.Module):
+        def forward(self, x, idx):
+            return x.index_fill(1, idx, 2.0)
+
+    x = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    idx = torch.tensor([2, 0])
+    graph = trace_module(Fill(), (x, idx))
+    scatters = [node for node in graph.nodes.values() if isinstance(node.op, ScatterOp)]
+    assert len(scatters) == 1 and scatters[0].op.axis == 1
+    assert len(scatters[0].inputs) == 3
+
+    backend = LoopBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={"x": x.numpy(), "idx": idx.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), Fill()(x, idx).numpy())
 
 
 def test_trace_index_put_on_a_fresh_tensor_lifts_its_scalar_constant():

@@ -62,6 +62,13 @@ point: a replay costs a rebind instead of ~1M `schedule()` calls per model, and 
 machine-local tune DB a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
 row decides raises `EvidenceError` naming the kernel, so a stale or partial golden fails loudly instead of quietly
 restoring the search. Regenerate with `python -m tests.serving.regen` when a shape changes or a new one joins a table.
+The plugin's Gated DeltaNet engine tests serve a float16 hybrid that `RUNNERS` holds at their widths, so their engines
+compile from the golden strictly too. On those shapes the prior alone keeps each GDN program one kernel that runs as a
+single thread block, so the regen captures and completes them under the cut pins `CUTS` names, and the golden's
+routing rows record the cuts. Those shapes make the regen slow (hours of compiles at one worker), so its two halves
+also run apart: `--capture PATH` needs the card, `--complete PATH` runs GPU-free. Native generation's tiny GDN tests
+compile the same GDN programs, so they take the lane's golden as evidence beside the prior
+(`evidence_scope(strict=False)`).
 These unmeasured scalar schedules are scoped to the live card. Missing or stale schedules still fail strict evidence;
 they must be refreshed when compiler changes alter the traced kernels.
 
@@ -122,6 +129,15 @@ the shared module already provides.
 
 ## Conventions
 
+- **A check of a kernel's structure reads its Kernel IR, not its code.** Which statements a kernel holds, how many,
+  in what order, with which fields (a product's shape, a load's clamp, a copy's swizzle, a slab's size, a loop's
+  bounds) is asserted on the statements the code was generated from: `compile_with_kernels` in
+  `tests/compiler/helpers.py` runs the compile a test would run and returns, beside the compiled graph, each kernel's
+  `KernelOp` as the last lowering pass read it (`recording_kernels` does the same for a compile the test does not run
+  itself), and `statements` lists a kernel's statements by type. A launch fact (a runtime argument, the argument
+  order, a TMA descriptor) is read off the `CudaOp`. Only a check of which instructions the code holds (a vector
+  access, a rounding, a page table's read) reads the kernel's PTX; how one statement compiles is the PTX
+  compiler's own test (`crates/emmy-ptx/tests`, `tests/compiler/ptx`).
 - **Prefer combinatorial coverage matrices over per-capability test files.** The compiler e2e suite covers each
   regime with one parameterized matrix (`test_matmul_coverage.py`'s tile × stage × reduce × static/dynamic grid,
   `test_reduce_coverage.py`, `test_attention_coverage.py`, `test_fused_edge.py`'s producer × tier product) rather
@@ -141,7 +157,7 @@ the shared module already provides.
   lowering stage is machine-independent and an sm_70 lockout is exercised on a box that has no sm_70. Only the build
   and accuracy stages consult the live card, and they gate on `device_compute_capability() == compute_cap`, beside
   `requires_sm90` in spirit but keyed on equality rather than a floor. The restamp check is machine-independent the
-  same way: every repository golden is held to the fresh lowering of its programs on the default lane, GPU-free, so a
+  same way: every repository golden is held to the fresh lowering of its programs, GPU-free, so a
   stale golden is detectable on any machine; re-recording a row is what needs the card.
 - **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
   records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
@@ -189,9 +205,10 @@ the shared module already provides.
 ## Running
 
 Cold-cache coverage lives with backend program tests, CLI recording tests and the search DB/pin tests. CPU tests
-check both directions of regime isolation, freeze/export retention, worker propagation and eviction ordering.
-The CUDA program test streams float buffers smaller than L2 and compares hot timing against a single replay
-after eviction; its kernel processes every allocated element.
+check both directions of regime isolation, export retention, worker propagation and eviction ordering.
+The CUDA program tests compare hot timing against a single replay after eviction: one streams float buffers smaller
+than L2, and its kernel processes every allocated element; the other runs 32 KB of straight-line code, which a
+repeated launch finds in the instruction cache.
 
 While developing, run only the tests that cover the change, under a two-minute budget. The whole suite takes many
 minutes and belongs to the finalization stage of a PR — see the Contribution Instructions in `AGENTS.md`.
@@ -199,8 +216,10 @@ minutes and belongs to the finalization stage of a PR — see the Contribution I
 ```bash
 pytest tests/deploy/test_recipe.py -v   # single file — the development lane
 pytest tests/deploy/ -k recipe -v      # a few tests — the development lane
-pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf` tests)
+pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf`, `sweep`, `goldens` tests)
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
+pytest tests/ -m goldens -n auto       # every golden but the RTX 5090's, which the nightly refresh holds
+pytest tests/compiler/ptx/ -m sweep    # each math function over every f32 input, half a minute a function
 ```
 
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two
@@ -255,6 +274,9 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
+The `sweep` marker is gated the same way. It holds the tests that put every f32 bit pattern through a math function
+of the PTX compiler on the card (`tests/compiler/ptx/test_math.py`); the default suite samples the same functions.
+
 A lane whose torch has no CUDA hides the device from the compiler as well (`tests/conftest.py` empties
 `CUDA_VISIBLE_DEVICES`). The CI runners carry a GTX 1080 Ti that CPU-only torch cannot use, yet the runtime reached
 it through the driver and the prior featured its SM count, so an unpinned pick there diverged from every other host.
@@ -266,7 +288,7 @@ machine-local evidence a CLI compile picks from, and the CI runners keep their h
 import, the one file reaches every xdist worker and subprocess; a test that needs a DB of its own still sets one.
 
 `tests/compiler/pipeline/search/test_golden.py` holds every repository golden — the hardware goldens and each
-maintained recipe's model golden — to the fresh lowering of its own traced programs on the DEFAULT lane: a restamp
+maintained recipe's model golden — to the fresh lowering of its own traced programs: a restamp
 (`golden.restamp`, the rewrite `emmy golden restamp` writes) must leave the file unchanged, one node per traced
 program so the work scatters over the workers and a failure names the kernels, decisions and rows the compiler now
 disagrees with. Neither this nor the import check has a list of expected failures: a golden the compiler re-keys is
@@ -274,7 +296,10 @@ red until `emmy golden restamp` rewrites the file, which needs no card (the `ref
 a re-keyed kernel keep their schedule and lose their microseconds until a record run on the card measures them again).
 Never re-record a row to make a red node green: a re-keyed kernel is a change in the lowering, and re-recording
 enshrines it. The realization corpus's staleness test is the same restamp (see
-`tests/compiler/realization/ARCHITECTURE.md`).
+`tests/compiler/realization/ARCHITECTURE.md`). Every test that reads the repository goldens one node per file or
+program marks its node through `golden_lane`: the RTX 5090's goldens stay on the default lane, every other card's
+carry the off-lane `goldens` marker and run in the nightly refresh, since all six full hardware goldens together
+outlast the PR job.
 
 A golden file and a corpus case store inputs only — no kernel identity, no `S_*` stamp — so a change to how
 identity is computed turns no golden red. What it does turn red is the pinned-identity test in
@@ -299,8 +324,8 @@ original tracing card does not restrict these unmeasured correctness cases, and 
 fixture publishes the golden's shared precision pins while building the runner, so its precise schedules remain valid
 when the compiler default is fast math. The mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport)
 auto-enumerates and is validated on **sm_90+**; on sm_80-89 it is pin-only and currently non-functional for two
-independent reasons — the `sm_NNa` arch-accelerated target the TMA path emits is rejected by nvcc (`Unsupported gpu
-architecture 'sm_89a'`), and `ldmatrix` itself faults at runtime on at least Ada (sm_89). Tests that **force** the
+independent reasons — the `sm_NNa` arch-accelerated target the TMA path emits does not exist below sm_90 (ptxas
+refuses `sm_89a`), and `ldmatrix` itself faults at runtime on at least Ada (sm_89). Tests that **force** the
 warp tier via a warp `TILE` codec (`<atom>/…`) + `STAGE` carry `requires_sm90` so they skip below sm_90 instead of
 faulting (a single warp-tier fault corrupts the shared `cuda` context and cascades `cudaErrorIllegalAddress` into
 every later test on the worker, CUDA or not). The warp-tier matmul coverage all lives in `test_matmul_coverage.py` —

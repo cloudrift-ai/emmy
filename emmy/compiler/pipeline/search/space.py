@@ -19,8 +19,6 @@ The main groups:
   fork points serialized by ``ClassicScheduleCodec``. The typed schedule is materialized in
   ``lowering/kernel/010_materialize``; its encoded row rides on ``TileOp.knobs`` so the online
   prior can featurize and tune the decision. ``off=""`` is the explicit direct leaf value.
-- **Kernel storage knobs** (``SHARED_CARRY``) — a later lowering choice retained in measured rows: global
-  storage and the padded shared layout offered as siblings.
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
   policies recorded on the kernel op (idempotence + env override), on by default and not search
   dimensions (``hints=(True,)``).
@@ -55,7 +53,7 @@ LAYOUT = Knob(
 REDUCE = Knob(
     "REDUCE",
     KnobType.STR,
-    help="Reduce-axis partition codec, site-local (g<n>[a|k] cta / coop[-t] / r<n> reg; empty=serial; "
+    help="Reduce-axis partition codec, site-local (g<n>[a|k[<p>]] cta / coop[-t] / r<n> reg; empty=serial; "
     "the coop WIDTH lives in WORK). "
     "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",
@@ -155,15 +153,6 @@ RASTER = Knob(
 )
 
 
-SHARED_CARRY = Knob(
-    "SHARED_CARRY",
-    KnobType.INT,
-    hints=(0, 1),
-    help="Carried-state storage: 0 global with one launch per ordered step, 1 two shared buffers padded by one column per row.",
-    off=0,
-)
-
-
 # --- Kernel-lowering policy knobs -------------------------------------------
 #
 # Boolean codegen policies recorded on the kernel op — on by default, not search dimensions
@@ -210,16 +199,16 @@ PAIR_LDMATRIX = Knob(
     off=False,
 )
 
-#: The unroll budget — the max static loop trip count eligible for ``#pragma unroll``. Pin-only
-#: (``off`` defaults to ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the
-#: search or the goldens): ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact,
-#: readable kernels — e.g. for a blog listing), a high value unrolls more. Unset → each call site's
-#: built-in cap (64 for an inner reduce, 128 for the flash KV fold, uncapped for the tensor-core
-#: K-chunk), so the default codegen is byte-identical. Consumed by ``lowering/kernel/_atom.unroll_ok``.
+#: The unroll budget — the max static loop trip count a lowering site flags for unrolling
+#: (``lowering/kernel/117_unroll_loops`` then writes the flagged loops out). Pin-only (``off`` defaults to
+#: ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the search or the goldens):
+#: ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact kernels), a high value flags more. Unset →
+#: each call site's built-in cap (64 for an inner reduce, 16 for a lane loop, none for the tensor-core K loop).
+#: Consumed by ``lowering/kernel/_atom.unroll_ok``.
 UNROLL = Knob(
     "UNROLL",
     KnobType.INT,
-    help="Max static loop trip count to #pragma-unroll (the unroll budget); pin 0 to keep loops rolled. Unset = per-site cap.",
+    help="Max static loop trip count a lowering site flags for unrolling; pin 0 to keep loops rolled. Unset = per-site cap.",
 )
 
 FAST_EXP = Knob(
@@ -228,8 +217,44 @@ FAST_EXP = Knob(
     # Pin-only precision policy; its effective default follows FAST_MATH. An explicit
     # EMMY_FAST_EXP pin overrides the umbrella without changing the other precision gates.
     hints=(False,),
-    help="Lower f32 exp through the SFU fast path (__expf: one FMUL + MUFU.EX2) instead of libm expf.",
+    help="Lower f32 exp through the SFU fast path (__expf: one FMUL + MUFU.EX2) instead of libm expf; with FAST_MATH, "
+    "the logarithm, sine, cosine, hyperbolic tangent and power take their approximate instruction too.",
     off=False,
+)
+
+# The other instruction classes of the precision-trading family, each pin-only and, but for FMA contraction, following
+# FAST_MATH like FAST_EXP. An approximate instruction is an operation the kernel body names
+# (``lowering/kernel/130_approximate_math``); flush to zero and FMA contraction hold for a whole kernel and reach the
+# PTX compiler as the kernel's two precision decisions.
+
+FAST_DIV = Knob(
+    "FAST_DIV",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Approximate f32 division and reciprocal (div.approx, rcp.approx); a floating divisor invariant in its loop "
+    "becomes one hoisted reciprocal and a multiply (lowering/kernel/040). Unset follows FAST_MATH.",
+)
+
+FAST_SQRT = Knob(
+    "FAST_SQRT",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Approximate f32 square root (sqrt.approx). Unset follows FAST_MATH.",
+)
+
+FLUSH_TO_ZERO = Knob(
+    "FLUSH_TO_ZERO",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Flush f32 subnormal operands and results to zero (the .ftz instruction forms). Unset follows FAST_MATH.",
+)
+
+CONTRACT_FMA = Knob(
+    "CONTRACT_FMA",
+    KnobType.BOOL,
+    hints=(True,),
+    help="Contract a multiply and an add into one fused multiply-add (fma). On in both regimes, so the umbrella "
+    "never turns it off; pin 0 to round every multiply and add on its own.",
 )
 
 
@@ -249,10 +274,9 @@ CPU_TILE = Knob(
 
 # --- The regime knobs: the precision-trading family (under the FAST_MATH umbrella) and the cache knob ------
 #
-# Precedence: an individual pin > FAST_MATH > True (precision_pin). The umbrella also
-# controls NVCC fast math and invariant reciprocal division. It is unfeatured: concrete
-# schedule choices retain their own identity, while effective compiler flags separate
-# the fast and precise measurement contexts. Golden input pins record the umbrella.
+# Precedence: an individual pin > FAST_MATH > True (precision_pin); CONTRACT_FMA alone keeps its own default. The
+# umbrella is unfeatured: concrete schedule choices retain their own identity, while the flush flag and the
+# independent overrides separate the fast and precise measurement contexts. Golden input pins record the umbrella.
 
 COLD_CACHE = Knob(
     "COLD_CACHE",
@@ -267,8 +291,8 @@ FAST_MATH = Knob(
     "FAST_MATH",
     KnobType.BOOL,
     hints=(True,),
-    help="Fast math is enabled by default: NVCC fast math, invariant reciprocal division, and the "
-    "precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA). Pin 0 to disable; individual pins win.",
+    help="Fast math is enabled by default: the precision-trading knobs that follow it (FAST_EXP, FAST_DIV, FAST_SQRT, "
+    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA, TF32_MMA, F32_AS_BF16_MMA). Pin 0 to disable; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
 
@@ -298,9 +322,48 @@ FP8_MMA = Knob(
 )
 
 
-#: The precision-trading family: the umbrella and the knobs that follow it (:func:`precision_pin`) — what sorts a
+TF32_MMA = Knob(
+    "TF32_MMA",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the TF32 tensor-core atom forks (mma_m16n8k8_tf32_f32 — both multiplicands f32 values the "
+    "instruction reads at ten bits of mantissa, the accumulator f32) for a product of two f32 operands, which "
+    "otherwise runs on the scalar tier. Each product keeps about three decimal digits, so the fork family is "
+    "precision-trading: pin 1 to offer, 0 never; unset follows FAST_MATH. "
+    "Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
+F32_AS_BF16_MMA = Knob(
+    "F32_AS_BF16_MMA",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Offer the bf16 tensor-core atom forks (mma_m16n8k16_bf16_f32 and its wgmma form — the accumulator f32) "
+    "for a product of two f32 operands, each operand rounded to bf16 where its shared-memory slab is filled. bf16 "
+    "keeps f32's exponent range and eight bits of mantissa, so the fork family is precision-trading: pin 1 to "
+    "offer, 0 never; unset follows FAST_MATH. A product with a bf16 or f16 operand takes that cell whatever this "
+    "says. Enumeration-gate only — the realized fork is identified by the TILE codec's atom token.",
+)
+
+
+#: The precision-trading family: the umbrella and the knobs under it (:func:`precision_pin`) — what sorts a
 #: row into the fast-math lane.
-PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)
+PRECISION_KNOBS = (
+    FAST_MATH,
+    FAST_EXP,
+    F16_MMA_F32_ACC,
+    FP8_MMA,
+    TF32_MMA,
+    F32_AS_BF16_MMA,
+    FAST_DIV,
+    FAST_SQRT,
+    FLUSH_TO_ZERO,
+    CONTRACT_FMA,
+)
+
+#: The precision-trading knobs whose default is their own first hint, not the umbrella's decision: the standard
+#: regime contracts multiply-adds as well, so the umbrella leaves contraction on in both.
+_OWN_DEFAULT = (CONTRACT_FMA,)
 
 #: The regime knobs: the input pins a measured row is filed under beside the card and the kernel — the
 #: precision-trading family and the cache knob. Every reader of a regime iterates this tuple through
@@ -308,16 +371,36 @@ PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)
 REGIME_KNOBS = (*PRECISION_KNOBS, COLD_CACHE)
 
 
+def precision_default(knob: Knob, umbrella: bool) -> bool:
+    """A precision-trading ``knob``'s decision when nothing pins it, under the ``FAST_MATH`` decision ``umbrella``: the
+    umbrella's, or the knob's own default for one the umbrella does not move. A decision that differs from it is an
+    independent override, which keys a regime apart."""
+    return knob.hints[0] if knob in _OWN_DEFAULT else umbrella
+
+
 def precision_pin(knob: Knob) -> bool:
     """The effective pin for a precision-trading BOOL ``knob``: its own ``EMMY_<NAME>`` pin when
-    set, else the ``FAST_MATH`` umbrella pin, else its enabled default."""
+    set, else its default under the ``FAST_MATH`` umbrella pin or the umbrella's enabled default."""
     raw = knob.raw()
     if raw is not None:
         return knob.parse(raw)
     raw = FAST_MATH.raw()
-    if raw is not None:
-        return FAST_MATH.parse(raw)
-    return FAST_MATH.hints[0]
+    return precision_default(knob, FAST_MATH.parse(raw) if raw is not None else FAST_MATH.hints[0])
+
+
+#: The gates of the tensor-core atom families, each under the flag of ``ClassicProblem``'s precision policy it decides.
+ATOM_GATES = {
+    "allow_f16_accumulate": F16_MMA_F32_ACC,
+    "allow_fp8": FP8_MMA,
+    "allow_tf32": TF32_MMA,
+    "allow_f32_as_bf16": F32_AS_BF16_MMA,
+}
+
+
+def precision_policy() -> dict[str, bool]:
+    """The precision policy of an unpinned schedule enumeration, as ``ClassicProblem`` takes it: each atom gate as
+    its live pin resolves it."""
+    return {flag: precision_pin(gate) is True for flag, gate in ATOM_GATES.items()}
 
 
 def regime_pin(knob: Knob) -> bool:
@@ -340,7 +423,14 @@ def precision_pins(pins: dict | None = None) -> dict[str, bool]:
     if pins is None:
         return {knob.name: precision_pin(knob) for knob in PRECISION_KNOBS}
     umbrella = bool(pins.get(FAST_MATH.name, False))
-    return {knob.name: bool(pins.get(knob.name, umbrella)) for knob in PRECISION_KNOBS}
+    return {knob.name: bool(pins.get(knob.name, precision_default(knob, umbrella))) for knob in PRECISION_KNOBS}
+
+
+def precision_overrides(pins: dict) -> dict[str, bool]:
+    """The independent overrides among effective precision decisions ``pins`` (:func:`precision_pins`): each decision
+    that differs from its default under the umbrella ``pins`` records."""
+    umbrella = pins[FAST_MATH.name]
+    return {knob.name: pins[knob.name] for knob in PRECISION_KNOBS if pins[knob.name] != precision_default(knob, umbrella)}
 
 
 def regime_pins(pins: dict | None = None) -> dict[str, bool]:
@@ -353,18 +443,8 @@ def regime_pins(pins: dict | None = None) -> dict[str, bool]:
     return {**precision_pins(pins), **others}
 
 
-LOOPIFY = Knob(
-    "LOOPIFY",
-    KnobType.INT,
-    # Off by default (0) and not a search dimension — a readability-only codegen policy: re-roll a
-    # maximal run of parallel per-fragment ``FragmentApply`` (the flash mma epilogue's element-wise
-    # C-fragment arithmetic) into a ``#pragma unroll`` loop over an arrayed fragment family. The value
-    # is the MINIMUM run length to re-roll: ``0`` / unset (and any value < 2) → off, byte-identical
-    # CUDA; ``EMMY_LOOPIFY=4`` re-rolls the 8-long O rescale / divide runs (most of the win) while
-    # skipping the 2-long QK scale; ``EMMY_LOOPIFY=2`` re-rolls every run ≥ 2. Identical SASS (nvcc
-    # unrolls the pragma) — purely a listing-shrink for blog / ``--ir cuda`` inspection.
-    hints=(0,),
-    help="Min parallel FragmentApply run length to re-roll into a #pragma-unroll loop (0 = off, byte-identical).",
-    off=0,
-    unfeatured=True,  # SASS-identical listing re-spell — excluded from the feature vector; batch-enabled by EMMY_READABLE
-)
+#: Retired: the pass that read it (a re-roller of statement runs into ``#pragma unroll`` loops, for listings) is gone
+#: and nothing stamps or reads it. The name stays registered because the rows stored while that pass ran (the
+#: goldens, the candidate files, tune DBs) carry ``LOOPIFY: 0``, and a row key no knob declares is a number to the priors'
+#: featurizer. It goes with a rewrite of those rows.
+LOOPIFY = Knob("LOOPIFY", KnobType.INT, hints=(0,), help="Retired; stored rows carry its 0.", off=0, unfeatured=True)

@@ -1,40 +1,61 @@
 //! Single-request cached generation over a compiler-prepared token-step program. The step
 //! computes the logits and the greedy token on the device; sampling at positive temperature
-//! happens here, on the host, so nothing the device runs is hand-written.
+//! happens here, on the host, so nothing the device runs is hand-written. The prompt stays on the
+//! host: each step uploads the tokens it embeds. A pack with a drafter also holds a verify
+//! program, which at temperature zero checks the last step's drafts and drafts the next ones,
+//! deciding on the device which drafts stand.
 
 use crate::{
-    artifact::{Artifact, Paging},
-    cuda::{Device, Executor},
+    artifact::{Artifact, Env, Paging, member},
+    cuda::{Device, DeviceMemory, Executor, HostMemory},
+    pager::Pager,
+    vision::{Image, Rows, STEP_INPUTS, Tower, Vision},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
-const GENERATION_FORMAT: u32 = 7;
+const GENERATION_FORMAT: u32 = 16;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
 const TOKEN_BYTES: usize = size_of::<i64>();
-const MAX_CONTEXT: usize = 4096;
+/// The longest context a pack may declare: the window of the checkpoints native serves.
+const MAX_CONTEXT: usize = 262_144;
+/// The symbolic axis attention reads the cache to: the leading positions a step attends over.
+const WINDOW: &str = "cache_tokens";
+/// The window grows in steps of this many positions, so a request captures a graph per step.
+const WINDOW_STEP: usize = 4096;
 const PROGRAM: &str = "decode";
 const LOGIT_BYTES: usize = size_of::<f32>();
+/// The token after a chunk's row past the prompt, which its drafter pass embeds: the chunk's own
+/// greedy pick, which its program puts in place of this.
+const CHUNK_PICK: i64 = -1;
+/// Where a paged buffer's pages live: the resident ones in device memory, the rest in pinned host
+/// memory.
+type Homes = (DeviceMemory, HostMemory);
 
-/// The token one decode step selects from its FP32 logits at positive temperature: the tokens in
-/// descending logit order, ties by ascending id, the smallest prefix of that order reaching top-p,
-/// and a draw over it in id order with f64 weights against a SplitMix64 counter of the request
-/// seed and the generated-token `index`, so captured and uncaptured steps select the same token
-/// for the same logits. Greedy selection is the decode program's own output. A nonfinite logit
-/// fails the request.
-fn sample(logits: &[f32], sampling: &Sampling, index: u64) -> Result<i64> {
-    ensure!(
-        logits.iter().all(|value| value.is_finite()),
-        "nonfinite logit"
-    );
+/// The nucleus of `logits`: the tokens of the smallest prefix of the descending-logit order (ties
+/// by ascending id) reaching top-p, each with its positive f64 weight at the sampling temperature,
+/// in id order, and their weights' sum.
+fn nucleus(logits: &[f32], sampling: &Sampling) -> (Vec<(usize, f64)>, f64) {
     let maximum = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let weights: Vec<f64> = logits
         .iter()
         .map(|&value| ((f64::from(value) - f64::from(maximum)) / sampling.temperature).exp())
         .collect();
+    if sampling.top_p == 1.0 {
+        // Every positive weight is kept, in the id order the tokens already have.
+        let kept: Vec<(usize, f64)> = weights
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, weight)| weight > 0.0)
+            .collect();
+        let mass = kept.iter().map(|&(_, weight)| weight).sum();
+        return (kept, mass);
+    }
     let target_mass = sampling.top_p * weights.iter().sum::<f64>();
     // Signed zeros compare equal, and every logit is finite, so the order is total.
     let mut order: Vec<usize> = (0..logits.len()).collect();
@@ -44,29 +65,47 @@ fn sample(logits: &[f32], sampling: &Sampling, index: u64) -> Result<i64> {
             .expect("finite logits")
             .then(a.cmp(&b))
     });
-    let mut kept = vec![false; logits.len()];
+    let mut kept = Vec::with_capacity(logits.len());
     let mut mass = 0.0;
     for &token in &order {
-        kept[token] = true;
+        // Weights descend with the logits, so the first underflow ends the positive ones.
+        if weights[token] == 0.0 {
+            break;
+        }
+        kept.push((token, weights[token]));
         mass += weights[token];
         if mass >= target_mass {
             break;
         }
     }
-    let mut random = sampling
-        .seed
-        .wrapping_add(0x9e37_79b9_7f4a_7c15u64.wrapping_mul(index));
+    kept.sort_unstable_by_key(|&(token, _)| token);
+    (kept, mass)
+}
+
+/// A uniform draw in [0, 1) from the SplitMix64 counter of `seed` and `index`.
+fn uniform(seed: u64, index: u64) -> f64 {
+    let mut random = seed.wrapping_add(0x9e37_79b9_7f4a_7c15u64.wrapping_mul(index));
     random = (random ^ (random >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     random = (random ^ (random >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     random ^= random >> 31;
-    let target = (random >> 11) as f64 * 2f64.powi(-53) * mass;
+    (random >> 11) as f64 * 2f64.powi(-53)
+}
+
+/// The token one decode step selects from its FP32 logits at positive temperature: a draw over
+/// the nucleus in id order against the request seed and the generated-token `index`, so captured
+/// and uncaptured steps select the same token for the same logits. Greedy selection is the decode
+/// program's own output. A nonfinite logit fails the request.
+fn sample(logits: &[f32], sampling: &Sampling, index: u64) -> Result<i64> {
+    ensure!(
+        logits.iter().all(|value| value.is_finite()),
+        "nonfinite logit"
+    );
+    let (kept, mass) = nucleus(logits, sampling);
+    let target = uniform(sampling.seed, index) * mass;
     let (mut cumulative, mut last) = (0.0, None);
-    for token in 0..logits.len() {
-        if !kept[token] || weights[token] == 0.0 {
-            continue;
-        }
+    for (token, weight) in kept {
         last = Some(token as i64);
-        cumulative += weights[token];
+        cumulative += weight;
         if target < cumulative {
             return Ok(token as i64);
         }
@@ -114,16 +153,24 @@ pub struct Config {
     pub version: u32,
     pub context_length: usize,
     pub vocab_size: usize,
-    pub prefill_size: usize,
+    /// The prefill chunk widths, widest first; a chunk is taken at the widest that fits
+    /// (`chunk_fits`), so a prompt's tail runs at a narrower one before it runs a token at a time.
+    pub prefill_sizes: Vec<usize>,
     pub eos_ids: Vec<i64>,
     pub state: Vec<String>,
+    /// A pack that answers images: its vision tower (`vision.rs`).
+    #[serde(default)]
+    pub vision: Option<Vision>,
+    /// The tokens the verify program drafts a step; zero for a pack without one.
+    pub drafts: usize,
 }
 
-/// Whether the prefill program may take the chunk at `position`. A chunk's rows past the
-/// prompt embed the previous selection and write cache rows the decode step overwrites, so it
-/// is taken wherever the whole chunk fits the context and the prompt's last token stays for
-/// decode. Carried state has no such repair: a row past the prompt would be folded into the
-/// request, so then every row of the chunk must be a prompt token before the last.
+/// Whether the prefill program may take the chunk at `position`. A chunk's head reads its last
+/// row, so the chunk whose last row is the prompt's last token gives the first generated token. A
+/// chunk's rows past the prompt embed a padding token and write cache rows the decode step
+/// overwrites, so it is taken wherever the whole chunk fits the context, and the prompt's last
+/// token then stays for decode. Carried state has no such repair: a row past the prompt would be
+/// folded into the request, so then every row of the chunk must be a prompt token.
 fn chunk_fits(
     position: usize,
     prompt_length: usize,
@@ -133,7 +180,24 @@ fn chunk_fits(
 ) -> bool {
     position + 1 < prompt_length
         && position + prefill_size <= context_length
-        && (!carried || position + prefill_size < prompt_length)
+        && (!carried || position + prefill_size <= prompt_length)
+}
+
+/// The positions a verify step at `position` reaches: the target's rows, the token it continues
+/// from and the `drafts` drafts, and the drafter's later steps, each one past the last accepted
+/// row, up to one row short of twice the drafts past `position`.
+fn verify_reach(drafts: usize) -> usize {
+    2 * drafts
+}
+
+/// The static shape of step input `name` in a program of `rows` rows: the position is one
+/// word, an M-RoPE position three a row, every other input one a row.
+fn input_shape(name: &str, rows: i64) -> Vec<i64> {
+    match name {
+        "position" => vec![1],
+        "mrope" => vec![rows, 3],
+        _ => vec![rows],
+    }
 }
 
 impl Config {
@@ -147,8 +211,11 @@ impl Config {
             "unsupported context length"
         );
         ensure!(
-            (1..=self.context_length).contains(&self.prefill_size),
-            "invalid prefill size"
+            self.prefill_sizes
+                .iter()
+                .all(|&size| (2..=self.context_length).contains(&size))
+                && self.prefill_sizes.windows(2).all(|pair| pair[0] > pair[1]),
+            "invalid prefill sizes"
         );
         ensure!(
             self.vocab_size > 0 && self.vocab_size <= i64::MAX as usize,
@@ -164,6 +231,10 @@ impl Config {
         ensure!(
             self.state.iter().all(|name| names.insert(name)),
             "a state buffer is named twice"
+        );
+        ensure!(
+            verify_reach(self.drafts) < self.context_length,
+            "invalid draft count"
         );
         Ok(())
     }
@@ -181,142 +252,457 @@ impl Config {
         );
         Ok(())
     }
+
+    /// The decode and prefill programs' step inputs: the position, the tokens they embed, in a
+    /// pack with a drafter the token after each of them, which the drafter embeds as it writes its
+    /// cache, and in a pack with a tower each row's M-RoPE position and image row.
+    fn inputs(&self) -> Vec<&'static str> {
+        let next = (self.drafts > 0).then_some("next_tokens");
+        ["position", "tokens"]
+            .into_iter()
+            .chain(next)
+            .chain(self.vision.iter().flat_map(|_| STEP_INPUTS))
+            .collect()
+    }
+}
+
+/// The program the last step's tokens came from, whose rows of logits are theirs.
+#[derive(Clone, Copy)]
+enum Last {
+    Decode,
+    /// The prefill program at this index, whose chunk ended the prompt.
+    Chunk(usize),
+    /// The verify program, with the rows of the tokens it generated.
+    Verify(usize),
 }
 
 pub struct Generator {
-    // The borrower drops before the decode executor that owns the shared allocations.
-    prefill: Option<Executor>,
+    // The borrowers drop before the decode executor that owns the shared allocations, and all
+    // before the pager's tables and slots and the pages they point at.
+    tower: Option<Tower>,
+    // The prefill chunk programs, widest first, each with its rows.
+    prefill: Vec<(usize, Executor)>,
+    verify: Option<Executor>,
     executor: Executor,
+    _pager: Pager,
+    _homes: Vec<Homes>,
     config: Config,
     sampling: Sampling,
     position: usize,
-    prompt_length: usize,
+    prompt: Vec<i64>,
+    // The token the last decode step selected, which the next one embeds.
+    selected: i64,
+    // The drafts the last verify step made for the next one; zeros before the first, which may
+    // match by chance, and a draft the target confirms is its greedy token whatever drafted it.
+    drafts: Vec<i64>,
+    last: Last,
+    // A pack with a tower: each row's M-RoPE position and image row, which every step uploads.
+    rows: Option<Rows>,
     stopped: bool,
 }
 
+/// The cache positions a step of `rows` rows at `position` attends over: every position it reads,
+/// in steps of [`WINDOW_STEP`] up to the context.
+fn window(position: usize, rows: usize, context: usize) -> i64 {
+    (position + rows).next_multiple_of(WINDOW_STEP).min(context) as i64
+}
+
+/// Point `executor`'s attention at its [`window`]; a program with no attention has none. Each
+/// window replays its own graph, so the env moves only when the window grows.
+fn set_window(executor: &mut Executor, position: usize, rows: usize, context: usize) -> Result<()> {
+    let window = window(position, rows, context);
+    match executor.env().get(WINDOW) {
+        Some(&current) if current != window => {
+            executor.set_env(Env::from([(WINDOW.to_owned(), window)]))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Check that `artifact` has the step buffer `name` with this dtype, role and static shape.
+fn check_buffer(
+    artifact: &Artifact,
+    name: &str,
+    dtype: &str,
+    role: &str,
+    shape: &[i64],
+) -> Result<()> {
+    let buffer = artifact
+        .program
+        .buffer(name)
+        .with_context(|| format!("missing generation buffer {name}"))?;
+    ensure!(
+        buffer.dtype == dtype
+            && buffer.role == role
+            && buffer.static_shape().as_deref() == Some(shape),
+        "invalid generation buffer {name}"
+    );
+    Ok(())
+}
+
+/// Check that `artifact` is a token-step program over `inputs` of `rows` rows writing the logits
+/// and greedy token of `logit_rows` rows, then the single-token outputs `extra`, and nothing else.
+fn check_interface(
+    artifact: &Artifact,
+    inputs: &[&str],
+    rows: i64,
+    logit_rows: i64,
+    vocab: i64,
+    extra: &[String],
+) -> Result<()> {
+    for name in inputs {
+        check_buffer(artifact, name, "i64", "input", &input_shape(name, rows))?;
+    }
+    check_buffer(artifact, "logits", "f32", "output", &[logit_rows, vocab])?;
+    check_buffer(artifact, "token", "i64", "output", &[logit_rows])?;
+    for name in extra {
+        check_buffer(artifact, name, "i64", "output", &[1])?;
+    }
+    let outputs = ["logits", "token"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(extra.iter().cloned());
+    ensure!(
+        artifact.program.inputs == inputs && artifact.program.outputs.iter().cloned().eq(outputs),
+        "invalid generation interface"
+    );
+    Ok(())
+}
+
+/// Read the pages of `owner`'s paged buffer `name` from the pack where the manifest `entry` puts
+/// them, the resident ones into device memory and the rest into pinned host memory, and declare
+/// them with `pager`. The two homes live as long as the pager.
+fn declare_pages(
+    device: &Device,
+    root: &Path,
+    name: &str,
+    entry: &serde_json::Value,
+    owner: &Artifact,
+    pager: &mut Pager,
+) -> Result<Homes> {
+    let (buffer, paging) = (owner.program.buffer(name)?, &owner.program.paged[name]);
+    let env = owner.program.default_env();
+    ensure!(
+        paging.geometry(buffer, &env)?.0 == 1,
+        "{name} is not paged along its leading axis, so its bytes are not page after page"
+    );
+    let (pages, page_bytes) = (
+        paging.page_count(buffer, &env)?,
+        paging.page_bytes(buffer, &env)?,
+    );
+    let slots = paging
+        .slots
+        .with_context(|| format!("{name} has pages but no device slots"))?;
+    let resident = entry["resident"]
+        .as_u64()
+        .with_context(|| format!("{name} has no resident page count"))? as usize;
+    ensure!(
+        resident <= pages,
+        "{name} has {resident} resident pages of {pages}"
+    );
+    let path = member(root, entry["path"].as_str().context("invalid page path")?)?;
+    let mut file = std::fs::File::open(&path)?;
+    ensure!(
+        file.metadata()?.len() == (pages * page_bytes) as u64,
+        "{} does not hold {pages} pages of {page_bytes} bytes",
+        path.display()
+    );
+    let on_device = DeviceMemory::read(device, &mut file, resident * page_bytes)?;
+    let home = HostMemory::read(device, &mut file, (pages - resident) * page_bytes)?;
+    pager.declare(
+        device,
+        name,
+        (on_device.ptr(), home.device_ptr()?),
+        (pages, page_bytes, slots, resident),
+    )?;
+    Ok((on_device, home))
+}
+
+/// Load the pack's prefill programs, widest first as `config` lists them, and check each one's
+/// interface: a step over a chunk of that many prompt rows writing the logits and greedy token of
+/// its last row.
+fn load_prefill(root: &Path, config: &Config, vocab: i64) -> Result<Vec<(usize, Artifact)>> {
+    let inputs = config.inputs();
+    config
+        .prefill_sizes
+        .iter()
+        .map(|&size| {
+            let prefill = Artifact::load(root, &format!("prefill{size}"))?;
+            check_interface(&prefill, &inputs, size as i64, 1, vocab, &[])?;
+            Ok((size, prefill))
+        })
+        .collect()
+}
+
+/// Check that each of decode's `state` buffers is a flat output the step writes in place.
+fn check_state(decode: &Artifact, state: &[String]) -> Result<()> {
+    for name in state {
+        let buffer = decode
+            .program
+            .buffer(name)
+            .context("missing state buffer")?;
+        ensure!(
+            buffer.role == "output" && !decode.program.paged.contains_key(name),
+            "state buffer {name} is not a flat output the step writes in place"
+        );
+    }
+    Ok(())
+}
+
+/// Declare every paged buffer the pack's `manifest` holds pages for with `pager`, each owned by
+/// the first of `owners` that pages it. Returns the homes of the pages and the names declared.
+fn declare_pack(
+    device: &Device,
+    root: &Path,
+    manifest: &serde_json::Value,
+    owners: &[&Artifact],
+    pager: &mut Pager,
+) -> Result<(Vec<Homes>, BTreeSet<String>)> {
+    let (mut homes, mut held) = (Vec::new(), BTreeSet::new());
+    for (name, entry) in manifest["pages"].as_object().into_iter().flatten() {
+        let owner = owners
+            .iter()
+            .find(|a| a.program.paged.contains_key(name))
+            .with_context(|| format!("{name} has pages but is not paged"))?;
+        homes.push(declare_pages(device, root, name, entry, owner, pager)?);
+        held.insert(name.clone());
+    }
+    Ok((homes, held))
+}
+
+/// Check that every paged buffer with device slots in `programs` has its pages `held` by the pack.
+fn check_held<'a>(
+    programs: impl IntoIterator<Item = &'a Artifact>,
+    held: &BTreeSet<String>,
+) -> Result<()> {
+    for program in programs {
+        for (name, paging) in &program.program.paged {
+            let owner = name.strip_suffix("__view").unwrap_or(name);
+            ensure!(
+                paging.slots.is_none() || held.contains(owner),
+                "paged buffer {name} has no pages in the pack"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Load the pack's verify program and check its interface: a step over the token it continues
+/// from and `config`'s drafts, writing their logits and greedy tokens, the count of drafts the
+/// target confirmed, then each draft for the next step.
+fn load_verify(root: &Path, config: &Config, vocab: i64) -> Result<Artifact> {
+    let verify = Artifact::load(root, "verify")?;
+    let rows = config.drafts as i64 + 1;
+    // Its rows are past the prompt: with a tower it takes their M-RoPE positions alone.
+    let inputs: Vec<&str> = ["position", "tokens"]
+        .into_iter()
+        .chain(config.vision.iter().map(|_| STEP_INPUTS[0]))
+        .collect();
+    let outputs: Vec<String> = std::iter::once("accepted".to_owned())
+        .chain((1..=config.drafts).map(|j| format!("draft{j}")))
+        .collect();
+    check_interface(&verify, &inputs, rows, rows, vocab, &outputs)?;
+    Ok(verify)
+}
+
+/// The buffers `borrower` takes from decode's `owner` as it loads: every output decode carries
+/// (the cache, the state), constant whose binding is decode's file, and pager table, split into
+/// the flat ones it lends as regions and the paged ones whose page tables it lends. A program's
+/// step inputs and outputs are its own: the host binds and reads them every step. The borrower
+/// reads none of the files it shares: decode uploads them and lends them.
+fn shared(owner: &Artifact, borrower: &mut Artifact) -> Result<(Vec<String>, Vec<String>)> {
+    let (mut flat, mut paged) = (Vec::new(), Vec::new());
+    for buffer in &borrower.program.buffers {
+        let own = &borrower.program;
+        if buffer.role == "scratch"
+            || own.inputs.contains(&buffer.name)
+            || own.outputs.contains(&buffer.name)
+            || (buffer.role == "output"
+                && !owner
+                    .program
+                    .buffer(&buffer.name)
+                    .is_ok_and(|b| b.role == "output"))
+        {
+            continue;
+        }
+        // A constant decode and the borrower share is one file of the pack.
+        if buffer.role == "constant"
+            && owner.files.get(&buffer.name) != borrower.files.get(&buffer.name)
+        {
+            continue;
+        }
+        let original = owner
+            .program
+            .buffer(&buffer.name)
+            .context("missing shared buffer")?;
+        ensure!(
+            buffer.dtype == original.dtype
+                && buffer.role == original.role
+                && buffer.static_shape() == original.static_shape()
+                && own.paged.get(&buffer.name) == owner.program.paged.get(&buffer.name),
+            "invalid shared buffer {}",
+            buffer.name
+        );
+        // A paged buffer lends its page table where a flat one lends its region.
+        if owner.program.paged.contains_key(&buffer.name) {
+            paged.push(buffer.name.clone());
+        } else {
+            flat.push(buffer.name.clone());
+        }
+    }
+    borrower.files.retain(|name, _| !flat.contains(name));
+    Ok((flat, paged))
+}
+
+/// Load `artifact` onto decode's memory: each buffer it shares (`shared`) is lent as it loads,
+/// so nothing shared is allocated or uploaded twice.
+fn borrow(
+    device: &Device,
+    owner: &Executor,
+    artifact: Artifact,
+    (flat, paged): (Vec<String>, Vec<String>),
+) -> Result<Executor> {
+    let layout = artifact.program.layout(&artifact.program.default_env())?;
+    let mut lent = BTreeMap::new();
+    for name in &flat {
+        let view = owner.buffer(name)?;
+        lent.insert(layout.buffers[name].region.clone(), (view.ptr, view.bytes));
+    }
+    let mut borrower = Executor::load_with(device, artifact, None, Some(lent))?;
+    for name in paged {
+        let (ptr, len) = owner.page_table(&name)?;
+        borrower.set_external(&Paging::table(&name), ptr, len)?;
+    }
+    Ok(borrower)
+}
+
+/// The token after each of `rows` rows at `position`, which the drafter embeds as it writes its
+/// cache: the prompt's, else `past`. Decode takes token zero there, whose cache row a later step
+/// rewrites; a chunk takes [`CHUNK_PICK`], so the chunk that ends the prompt writes its last row
+/// from the first generated token.
+fn next_tokens(prompt: &[i64], position: usize, rows: usize, past: i64) -> Vec<u8> {
+    (1..=rows)
+        .flat_map(|row| {
+            prompt
+                .get(position + row)
+                .copied()
+                .unwrap_or(past)
+                .to_le_bytes()
+        })
+        .collect()
+}
+
+/// Little-endian i64 words.
+fn words(bytes: &[u8]) -> Vec<i64> {
+    bytes
+        .as_chunks::<TOKEN_BYTES>()
+        .0
+        .iter()
+        .map(|word| i64::from_le_bytes(*word))
+        .collect()
+}
+
 impl Generator {
-    pub fn load(device: &Device, root: &Path) -> Result<Self> {
+    /// Load the pack at `root`; with `draft` off a pack's verify program stays unloaded and every
+    /// step decodes one token.
+    pub fn load(device: &Device, root: &Path, draft: bool) -> Result<Self> {
+        let root = &root.canonicalize()?;
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("manifest.json"))?)?;
         let config: Config = serde_json::from_value(manifest["key"]["generation"].clone())?;
         config.validate()?;
+
         let artifact = Artifact::load(root, PROGRAM)?;
+        let (vocab, inputs) = (config.vocab_size as i64, config.inputs());
+
         // Fixed interface names and geometry are part of the generation contract. Check before GPU allocation.
-        for (name, dtype, role, shape) in [
-            ("prompt", "i64", "input", vec![config.context_length as i64]),
-            ("prompt_length", "i64", "input", vec![1]),
-            ("position", "i64", "input", vec![1]),
-            ("next_token", "i64", "input", vec![1]),
-            ("logits", "f32", "output", vec![1, config.vocab_size as i64]),
-            ("token", "i64", "output", vec![1]),
-        ] {
-            let buffer = artifact
-                .program
-                .buffer(name)
-                .context("missing generation buffer")?;
-            ensure!(
-                buffer.dtype == dtype
-                    && buffer.role == role
-                    && buffer.static_shape().as_deref() == Some(shape.as_slice()),
-                "invalid generation buffer {name}"
-            );
-        }
-        ensure!(
-            artifact.program.inputs == ["prompt", "prompt_length", "position", "next_token"],
-            "invalid generation inputs"
-        );
-        ensure!(
-            artifact.program.outputs == ["logits", "token"],
-            "invalid generation outputs"
-        );
-        let prefill_artifact = if config.prefill_size > 1 {
-            Some(Artifact::load(root, "prefill")?)
-        } else {
-            None
+        check_interface(&artifact, &inputs, 1, 1, vocab, &[])?;
+
+        let mut prefill_artifacts = load_prefill(root, &config, vocab)?;
+        let mut verify_artifact = (draft && config.drafts > 0)
+            .then(|| load_verify(root, &config, vocab))
+            .transpose()?;
+        let prefill_shared = prefill_artifacts
+            .iter_mut()
+            .map(|(_, p)| shared(&artifact, p))
+            .collect::<Result<Vec<_>>>()?;
+        let verify_shared = verify_artifact
+            .as_mut()
+            .map(|v| shared(&artifact, v))
+            .transpose()?;
+        check_state(&artifact, &config.state)?;
+
+        // The buffers the pager holds keep every page at its home, read straight from the pack: the
+        // resident pages in device memory, the rest in pinned host memory, and the device slots
+        // their paging declares. One pager serves every program: decode loads with its tables
+        // lent, and the others share them with decode's other buffers.
+        let mut pager = Pager::default();
+        let towers = match &config.vision {
+            Some(vision) => Tower::artifacts(root, vision, &artifact)?,
+            None => Vec::new(),
         };
-        let mut shared = Vec::new();
-        let mut shared_tables = Vec::new();
-        if let Some(prefill) = &prefill_artifact {
-            ensure!(
-                prefill.program.inputs == ["prompt", "prompt_length", "position", "next_token"]
-                    && prefill.program.outputs.is_empty(),
-                "invalid prefill interface"
-            );
-            for buffer in &prefill.program.buffers {
-                if buffer.role == "scratch"
-                    || (buffer.role == "output"
-                        && !artifact
-                            .program
-                            .buffer(&buffer.name)
-                            .is_ok_and(|b| b.role == "output"))
-                {
-                    continue;
-                }
-                if buffer.role == "constant"
-                    && artifact.bindings.get(&buffer.name) != prefill.bindings.get(&buffer.name)
-                {
-                    continue;
-                }
-                let original = artifact
-                    .program
-                    .buffer(&buffer.name)
-                    .context("missing shared prefill buffer")?;
-                ensure!(
-                    buffer.dtype == original.dtype
-                        && buffer.role == original.role
-                        && buffer.static_shape() == original.static_shape()
-                        && prefill.program.paged.get(&buffer.name)
-                            == artifact.program.paged.get(&buffer.name),
-                    "invalid shared prefill buffer {}",
-                    buffer.name
-                );
-                // A paged buffer lends its page table where a flat one lends its region.
-                if artifact.program.paged.contains_key(&buffer.name) {
-                    shared_tables.push(buffer.name.clone());
-                } else {
-                    shared.push(buffer.name.clone());
-                }
-            }
+        // The tower's pools are buffers of its programs; every other paged buffer is decode's.
+        let owners: Vec<&Artifact> = std::iter::once(&artifact)
+            .chain(towers.iter().map(|(_, tower)| tower))
+            .collect();
+        let (homes, held) = declare_pack(device, root, &manifest, &owners, &mut pager)?;
+        check_held(
+            std::iter::once(&artifact)
+                .chain(prefill_artifacts.iter().map(|(_, p)| p))
+                .chain(&verify_artifact),
+            &held,
+        )?;
+        let decoded: BTreeSet<String> = held
+            .into_iter()
+            .filter(|name| artifact.program.paged.contains_key(name))
+            .collect();
+        let mut lent = BTreeMap::new();
+        for name in &decoded {
+            lent.extend(pager.regions(name)?);
         }
-        for name in &config.state {
-            let buffer = artifact
-                .program
-                .buffer(name)
-                .context("missing state buffer")?;
-            ensure!(
-                buffer.role == "output" && !artifact.program.paged.contains_key(name),
-                "state buffer {name} is not a flat output the step writes in place"
-            );
+        let mut executor = Executor::load_with(device, artifact, None, Some(lent))?;
+        for name in &decoded {
+            pager.bind(&mut executor, name)?;
         }
-        let executor = Executor::load(device, artifact)?;
-        let prefill = if let Some(artifact) = prefill_artifact {
-            let mut prefill = Executor::load(device, artifact)?;
-            for name in shared {
-                let view = executor.buffer(&name)?;
-                let region = prefill.layout().buffers[&name].region.clone();
-                prefill.set_region(&region, view.ptr, view.bytes, true)?;
-            }
-            for name in shared_tables {
-                let (ptr, len) = executor.page_table(&name)?;
-                prefill.set_external(&Paging::table(&name), ptr, len)?;
-            }
-            Some(prefill)
-        } else {
-            None
+        let tower = match &config.vision {
+            Some(vision) => Some(Tower::load(device, vision, towers, &executor, &pager)?),
+            None => None,
         };
+
+        let prefill = prefill_artifacts
+            .into_iter()
+            .zip(prefill_shared)
+            .map(|((size, artifact), shared)| {
+                Ok((size, borrow(device, &executor, artifact, shared)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let verify = verify_artifact
+            .zip(verify_shared)
+            .map(|(artifact, shared)| borrow(device, &executor, artifact, shared))
+            .transpose()?;
+
         Ok(Self {
+            tower,
             prefill,
+            verify,
             executor,
+            _pager: pager,
+            _homes: homes,
+            drafts: vec![0; config.drafts],
             config,
             sampling: Sampling::default(),
             position: 0,
-            prompt_length: 0,
+            prompt: Vec::new(),
+            selected: 0,
+            last: Last::Decode,
+            rows: None,
             stopped: true,
         })
     }
 
     /// Reset request state. Old cache entries are invisible until overwritten at their absolute
-    /// positions, and the state a step carries starts at zero.
+    /// positions, and the state a step carries starts at zero. The prompt stays on the host.
     pub fn start(&mut self, prompt: &[i64], sampling: Sampling) -> Result<()> {
         self.config.validate_prompt(prompt)?;
         sampling.validate()?;
@@ -325,56 +711,156 @@ impl Generator {
         for name in &self.config.state {
             self.executor.zero(name)?;
         }
-        self.executor.bind("next_token", &0i64.to_le_bytes())?;
-        let mut bytes = vec![0; self.config.context_length * TOKEN_BYTES];
-        for (slot, token) in bytes
-            .as_chunks_mut::<TOKEN_BYTES>()
-            .0
-            .iter_mut()
-            .zip(prompt)
-        {
-            slot.copy_from_slice(&token.to_le_bytes());
-        }
-        self.executor.bind("prompt", &bytes)?;
-        self.executor
-            .bind("prompt_length", &(prompt.len() as i64).to_le_bytes())?;
-        if let Some(prefill) = &mut self.prefill {
-            // A chunk's rows past the prompt embed the selection too; nothing reads their cache
-            // rows before the decode step rewrites them.
-            for name in ["prompt", "prompt_length", "next_token"] {
-                let view = self.executor.buffer(name)?;
-                prefill.bind_device(name, view.ptr, view.bytes)?;
-            }
-        }
+        self.prompt = prompt.to_vec();
+        self.rows = self.tower.as_ref().map(|_| Rows::text(prompt.len()));
         self.position = 0;
-        self.prompt_length = prompt.len();
+        self.drafts.fill(0);
         self.stopped = false;
         Ok(())
     }
 
-    /// Consume a prefill chunk, or one token on the unchanged decode program. The chunk rule
-    /// (`chunk_fits`) says which; the decode step covers the rest.
-    pub fn advance(&mut self, capture: bool, ignore_eos: bool) -> Result<Option<i64>> {
+    /// [`start`](Self::start) a request whose prompt carries `image`: the tower writes its rows,
+    /// and every prompt token takes its M-RoPE position and, for an image token, its image row.
+    pub fn start_image(
+        &mut self,
+        prompt: &[i64],
+        image: &Image,
+        capture: bool,
+        sampling: Sampling,
+    ) -> Result<()> {
+        let tower = self
+            .tower
+            .as_ref()
+            .context("the pack holds no vision tower")?;
+        let rows = Rows::image(prompt, image, tower.vision())?;
+        self.start(prompt, sampling)?;
+        self.stopped = true;
+        if let Some(tower) = &mut self.tower {
+            tower.encode(image, capture)?;
+        }
+        self.rows = Some(rows);
+        self.stopped = false;
+        Ok(())
+    }
+
+    /// Consume a prefill chunk, a verify step or one token on the decode program, and return the
+    /// tokens it generated. The chunk rule (`chunk_fits`) says where a chunk is taken, at the widest
+    /// width that fits, and the chunk that ends the prompt generates the first token; at temperature
+    /// zero a pack's verify program takes every step from the prompt's last token on, where its rows
+    /// fit the context; the decode step covers the rest.
+    pub fn advance(&mut self, capture: bool, ignore_eos: bool) -> Result<Vec<i64>> {
         ensure!(!self.stopped, "generation is stopped");
-        if chunk_fits(
-            self.position,
-            self.prompt_length,
-            self.config.prefill_size,
-            self.config.context_length,
-            !self.config.state.is_empty(),
-        ) && let Some(prefill) = &mut self.prefill
+        let (position, length) = (self.position, self.prompt.len());
+        let (context, carried) = (self.config.context_length, !self.config.state.is_empty());
+        if let Some((index, rows, prefill)) = self
+            .prefill
+            .iter_mut()
+            .enumerate()
+            .map(|(index, (rows, prefill))| (index, *rows, prefill))
+            .find(|(_, rows, _)| chunk_fits(position, length, *rows, context, carried))
         {
             self.stopped = true;
+            // The chunk's prompt tokens; a row past the prompt embeds token zero, and nothing reads
+            // its cache row before the decode step rewrites it.
+            let mut tokens = vec![0; rows * TOKEN_BYTES];
+            let chunk = &self.prompt[self.position..length.min(self.position + rows)];
+            for (slot, token) in tokens
+                .as_chunks_mut::<TOKEN_BYTES>()
+                .0
+                .iter_mut()
+                .zip(chunk)
+            {
+                slot.copy_from_slice(&token.to_le_bytes());
+            }
+            set_window(prefill, self.position, rows, self.config.context_length)?;
             prefill.bind("position", &(self.position as i64).to_le_bytes())?;
+            prefill.bind("tokens", &tokens)?;
+            if self.config.drafts > 0 {
+                prefill.bind(
+                    "next_tokens",
+                    &next_tokens(&self.prompt, self.position, rows, CHUNK_PICK),
+                )?;
+            }
+            if let Some(image) = &self.rows {
+                image.bind(prefill, self.position, rows)?;
+            }
             prefill.advance(capture)?;
-            self.position += self
-                .config
-                .prefill_size
-                .min(self.prompt_length - self.position - 1);
+            if self.position + rows == length {
+                self.position = length;
+                self.last = Last::Chunk(index);
+                return Ok(vec![self.select(ignore_eos)?]);
+            }
+            self.position += rows.min(length - self.position - 1);
             self.stopped = false;
-            return Ok(None);
+            return Ok(Vec::new());
         }
-        self.step(capture, ignore_eos)
+        if self.sampling.temperature == 0.0
+            && self.position + 1 >= length
+            && self.position + verify_reach(self.config.drafts) <= self.config.context_length
+            && self.verify.is_some()
+        {
+            return self.verify(capture, ignore_eos);
+        }
+        Ok(self.step(capture, ignore_eos)?.into_iter().collect())
+    }
+
+    /// One verify step: the target over the token it continues from and the last step's drafts,
+    /// which takes the drafts its greedy choice confirms and carries the state after the last
+    /// accepted row, all decided on the device, and the drafter's drafts for the next step. The
+    /// tokens are the target's picks through the last accepted row, up to the first EOS.
+    fn verify(&mut self, capture: bool, ignore_eos: bool) -> Result<Vec<i64>> {
+        self.stopped = true;
+        let drafts = self.config.drafts;
+        let first = self
+            .prompt
+            .get(self.position)
+            .copied()
+            .unwrap_or(self.selected);
+        let tokens: Vec<u8> = std::iter::once(first)
+            .chain(self.drafts.iter().copied())
+            .flat_map(i64::to_le_bytes)
+            .collect();
+        let verify = self.verify.as_mut().context("no verify program")?;
+        set_window(
+            verify,
+            self.position,
+            verify_reach(drafts),
+            self.config.context_length,
+        )?;
+        verify.bind("position", &(self.position as i64).to_le_bytes())?;
+        verify.bind("tokens", &tokens)?;
+        if let Some(rows) = &self.rows {
+            rows.bind(verify, self.position, drafts + 1)?;
+        }
+        verify.advance(capture)?;
+        let picks = words(&verify.output("token")?);
+        let accepted = words(&verify.output("accepted")?)[0];
+        ensure!(
+            (0..=drafts as i64).contains(&accepted),
+            "invalid accepted draft count"
+        );
+        for (j, draft) in self.drafts.iter_mut().enumerate() {
+            *draft = words(&verify.output(&format!("draft{}", j + 1))?)[0];
+        }
+        let vocab = self.config.vocab_size as i64;
+        // A nonfinite logit leaves a pick, or a draft, out of range.
+        ensure!(
+            picks
+                .iter()
+                .chain(&self.drafts)
+                .all(|t| (0..vocab).contains(t)),
+            "invalid selected token"
+        );
+        let picked = &picks[..=accepted as usize];
+        self.position += picked.len();
+        self.selected = picked[picked.len() - 1];
+        let stop = picked
+            .iter()
+            .position(|token| !ignore_eos && self.config.eos_ids.contains(token));
+        let generated = picked[..stop.map_or(picked.len(), |at| at + 1)].to_vec();
+        self.last = Last::Verify(generated.len());
+        self.stopped = stop.is_some();
+        Ok(generated)
     }
 
     pub fn position(&self) -> usize {
@@ -390,25 +876,52 @@ impl Generator {
             "generation is stopped or context is full"
         );
         self.stopped = true;
+        // The prompt's token at this position while the prompt lasts, else the last selection.
+        let token = self
+            .prompt
+            .get(self.position)
+            .copied()
+            .unwrap_or(self.selected);
+        self.last = Last::Decode;
+        set_window(
+            &mut self.executor,
+            self.position,
+            1,
+            self.config.context_length,
+        )?;
         self.executor
             .bind("position", &(self.position as i64).to_le_bytes())?;
+        self.executor.bind("tokens", &token.to_le_bytes())?;
+        if self.config.drafts > 0 {
+            self.executor.bind(
+                "next_tokens",
+                &next_tokens(&self.prompt, self.position, 1, 0),
+            )?;
+        }
+        if let Some(rows) = &self.rows {
+            rows.bind(&mut self.executor, self.position, 1)?;
+        }
         self.executor.advance(capture)?;
-        let position = self.position;
         self.position += 1;
-        if self.position < self.prompt_length {
+        if self.position < self.prompt.len() {
             self.stopped = false;
             return Ok(None);
         }
+        self.select(ignore_eos).map(Some)
+    }
+
+    /// The token the program that took the token before `position` generated: its greedy pick, or
+    /// at positive temperature one sampled here from its logits. The next step embeds it.
+    fn select(&mut self, ignore_eos: bool) -> Result<i64> {
+        let executor = match self.last {
+            Last::Chunk(index) => &self.prefill[index].1,
+            _ => &self.executor,
+        };
         let token = if self.sampling.temperature == 0.0 {
             // The program's own greedy pick; a nonfinite logit leaves it out of range.
-            let bytes = self.executor.output("token")?;
-            i64::from_le_bytes(
-                bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("invalid token size"))?,
-            )
+            words(&executor.output("token")?)[0]
         } else {
-            let bytes = self.executor.output("logits")?;
+            let bytes = executor.output("logits")?;
             let logits: Vec<f32> = bytes
                 .as_chunks::<LOGIT_BYTES>()
                 .0
@@ -423,42 +936,55 @@ impl Generator {
             sample(
                 &logits,
                 &self.sampling,
-                (position + 2 - self.prompt_length) as u64,
+                (self.position + 1 - self.prompt.len()) as u64,
             )?
         };
         ensure!(
             token >= 0 && (token as usize) < self.config.vocab_size,
             "invalid selected token"
         );
-        self.executor.bind("next_token", &token.to_le_bytes())?;
+        self.selected = token;
         self.stopped = !ignore_eos && self.config.eos_ids.contains(&token);
-        Ok(Some(token))
+        Ok(token)
     }
 
-    /// Diagnostic transfer only; a decode step at positive temperature downloads them anyway.
+    /// Diagnostic transfer only; a step at positive temperature downloads them anyway. A verify
+    /// step's are the rows of the tokens it generated, a chunk's its last row's.
     pub fn logits(&self) -> Result<Vec<u8>> {
-        self.executor.output("logits")
+        match self.last {
+            Last::Verify(rows) => {
+                let verify = self.verify.as_ref().context("no verify program")?;
+                let mut bytes = verify.output("logits")?;
+                bytes.truncate(rows * self.config.vocab_size * LOGIT_BYTES);
+                Ok(bytes)
+            }
+            Last::Chunk(index) => self.prefill[index].1.output("logits"),
+            Last::Decode => self.executor.output("logits"),
+        }
     }
 
+    /// Each generated token, with the time since the request started at which the host had it.
     pub fn generate(
         &mut self,
         prompt: &[i64],
         max_new_tokens: usize,
         capture: bool,
         sampling: Sampling,
-    ) -> Result<Vec<i64>> {
+    ) -> Result<Vec<(i64, Duration)>> {
         self.config.validate_prompt(prompt)?;
         ensure!(
             max_new_tokens <= self.config.context_length - prompt.len(),
             "generation exceeds context capacity"
         );
+        let started = Instant::now();
         self.start(prompt, sampling)?;
         let mut tokens = Vec::new();
         while tokens.len() < max_new_tokens && !self.stopped {
-            if let Some(token) = self.advance(capture, false)? {
-                tokens.push(token);
-            }
+            let generated = self.advance(capture, false)?;
+            let at = started.elapsed();
+            tokens.extend(generated.into_iter().map(|token| (token, at)));
         }
+        tokens.truncate(max_new_tokens);
         self.stopped = true;
         Ok(tokens)
     }
@@ -470,7 +996,7 @@ mod tests {
 
     /// The independent nucleus distribution of `values`: a stable sort by value, the smallest
     /// prefix reaching top-p, renormalized.
-    fn nucleus(values: &[f32], temperature: f64, top_p: f64) -> Vec<f64> {
+    fn reference_nucleus(values: &[f32], temperature: f64, top_p: f64) -> Vec<f64> {
         let n = values.len();
         let mut probabilities = vec![0.0; n];
         let maximum = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -517,7 +1043,7 @@ mod tests {
         for logits in [random, zeros, edges, close] {
             let values = logits.clone();
             for (temperature, top_p) in [(0.7, 0.8), (2.0, 1.0), (1e-300, 0.01), (1e300, 0.5)] {
-                let expected = nucleus(&values, temperature, top_p);
+                let expected = reference_nucleus(&values, temperature, top_p);
                 let draws = 1024;
                 let mut counts = vec![0usize; n];
                 for seed in 0..draws {
@@ -606,18 +1132,84 @@ mod tests {
 
     #[test]
     fn carried_state_takes_a_chunk_only_inside_the_prompt() {
-        // Dense: a chunk is taken while the prompt's last token stays for decode and the chunk
-        // fits the context, rows past the prompt included.
+        // Dense: a chunk is taken while a prompt token stays before the last and the chunk fits
+        // the context, rows past the prompt included.
         assert!(chunk_fits(0, 2, 4, 8, false));
         assert!(chunk_fits(4, 8, 4, 8, false));
         assert!(!chunk_fits(5, 8, 4, 8, false));
         assert!(!chunk_fits(7, 8, 4, 8, false));
-        // Carried: every row must be a prompt token before the last.
+        // Carried: every row must be a prompt token, the last one included.
         assert!(!chunk_fits(0, 2, 4, 8, true));
         assert!(chunk_fits(0, 5, 4, 8, true));
-        assert!(!chunk_fits(0, 4, 4, 8, true));
-        assert!(chunk_fits(4, 9, 4, 16, true));
-        assert!(!chunk_fits(4, 8, 4, 16, true));
+        assert!(chunk_fits(0, 4, 4, 8, true));
+        assert!(chunk_fits(4, 8, 4, 16, true));
+        assert!(!chunk_fits(4, 7, 4, 16, true));
+        assert!(!chunk_fits(7, 8, 4, 16, true));
+    }
+
+    #[test]
+    fn the_drafter_embeds_the_prompt_token_after_each_row() {
+        // Past the prompt a row's next token is unknown: decode's token zero, whose cache row a
+        // later step rewrites, or the chunk's own pick.
+        assert_eq!(words(&next_tokens(&[5, 6, 7, 8], 1, 3, 0)), [7, 8, 0]);
+        assert_eq!(words(&next_tokens(&[5], 0, 1, 0)), [0]);
+        assert_eq!(
+            words(&next_tokens(&[5, 6, 7, 8], 0, 4, CHUNK_PICK)),
+            [6, 7, 8, CHUNK_PICK]
+        );
+    }
+
+    #[test]
+    fn the_window_covers_every_position_a_step_reads() {
+        assert_eq!(window(0, 1, MAX_CONTEXT), WINDOW_STEP as i64);
+        assert_eq!(window(WINDOW_STEP - 1, 1, MAX_CONTEXT), WINDOW_STEP as i64);
+        assert_eq!(window(WINDOW_STEP, 1, MAX_CONTEXT), 2 * WINDOW_STEP as i64);
+        assert_eq!(
+            window(WINDOW_STEP - 64, 64, MAX_CONTEXT),
+            WINDOW_STEP as i64
+        );
+        assert_eq!(
+            window(WINDOW_STEP - 63, 64, MAX_CONTEXT),
+            2 * WINDOW_STEP as i64
+        );
+        // A context short of a step, or past the last whole step, caps it.
+        assert_eq!(window(3, 1, 8), 8);
+        assert_eq!(window(MAX_CONTEXT - 1, 1, MAX_CONTEXT), MAX_CONTEXT as i64);
+    }
+
+    #[test]
+    fn a_step_attends_through_its_window_ranges_program() {
+        // One layer's attention priced for a short and a long range of windows, split here at
+        // 32,768 positions: each launch runs only in its range.
+        let attend = |id: &str, first: i64, last: i64| {
+            serde_json::json!({"node_id": id, "kernel": "attend", "args": ["q", "y"],
+                "grid": [[1], [1], [1]], "block": [[32], [1], [1]],
+                "size_range": [WINDOW, first, last], "cuda": {"tma": []}})
+        };
+        let plan = serde_json::json!({
+            "format": 1, "backend": "cuda", "inputs": ["q"], "outputs": ["y"],
+            "buffers": [
+                {"name": "q", "shape": [4], "dtype": "f32", "role": "input"},
+                {"name": "y", "shape": [4], "dtype": "f32", "role": "output"}
+            ],
+            "kernels": {"attend": {"binary_key": "ab"}},
+            "launches": [attend("attend0", 1, 32767), attend("attend0-long", 32768, MAX_CONTEXT as i64)]
+        });
+        let program = crate::artifact::Program::parse(&plan.to_string()).unwrap();
+        let attends = |position: usize, rows: usize| {
+            let env = Env::from([(WINDOW.to_owned(), window(position, rows, MAX_CONTEXT))]);
+            let ran = program.launches.iter().filter(|l| l.runs_at(&env).unwrap());
+            ran.map(|l| l.node_id.as_str()).collect::<Vec<_>>()
+        };
+        // The window steps by 4,096 positions: a chunk ending at 28,672 attends over the short
+        // range's last window, one more position over the long range's first.
+        assert_eq!(attends(0, 64), ["attend0"]);
+        assert_eq!(attends(28_672 - 64, 64), ["attend0"]);
+        assert_eq!(attends(28_672 - 63, 64), ["attend0-long"]);
+        assert_eq!(attends(197_632, 3), ["attend0-long"]);
+        assert_eq!(attends(MAX_CONTEXT - 1, 1), ["attend0-long"]);
+        // A launch's range names the window, which every step sets.
+        assert!(program.launches[0].runs_at(&Env::new()).is_err());
     }
 
     #[test]
@@ -626,11 +1218,19 @@ mod tests {
             version: GENERATION_FORMAT,
             context_length: 8,
             vocab_size: 32,
-            prefill_size: 1,
+            prefill_sizes: vec![],
             eos_ids: vec![31],
             state: vec!["state".into(), "history".into()],
+            vision: None,
+            drafts: 0,
         };
         config.validate().unwrap();
+        // A verify step's reach must stay inside the context.
+        config.drafts = 3;
+        config.validate().unwrap();
+        config.drafts = 4;
+        assert!(config.validate().is_err());
+        config.drafts = 0;
         config.state.push("state".into());
         assert!(config.validate().is_err());
         config.state.clear();
@@ -638,11 +1238,13 @@ mod tests {
         for prompt in [vec![], vec![-1], vec![32], vec![1; 9]] {
             assert!(config.validate_prompt(&prompt).is_err());
         }
-        for size in [0, 9] {
-            config.prefill_size = size;
+        for sizes in [vec![1], vec![9], vec![4, 4], vec![2, 4]] {
+            config.prefill_sizes = sizes;
             assert!(config.validate().is_err());
         }
-        config.prefill_size = 1;
+        config.prefill_sizes = vec![4, 2];
+        config.validate().unwrap();
+        config.prefill_sizes.clear();
         config.context_length = MAX_CONTEXT + 1;
         assert!(config.validate().is_err());
         config.context_length = 8;

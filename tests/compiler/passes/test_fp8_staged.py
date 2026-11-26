@@ -22,13 +22,30 @@ from emmy.compiler.dtype import F8E4M3, F16, F32, DataType
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
+from emmy.compiler.ir.kernel.ir import FragmentLoad, MmaSyncPtx, Smem
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.catalog import stage_moves
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
-from emmy.compiler.ir.stmt import Load
-from tests.compiler.helpers import requires_cuda, requires_sm
+from emmy.compiler.ir.stmt import parse_body
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction
+
+
+def _mma_kernel(kernels):
+    """The kernel of ``kernels`` that holds a tensor-core product, or ``None``."""
+    return next((kernel for kernel in kernels.values() if statements(kernel, MmaSyncPtx)), None)
+
+
+def _slab(kernel, name: str) -> str | None:
+    """The dtype name of ``kernel``'s shared slab ``name``, or ``None`` when it declares none."""
+    return next((slab.dtype.name for slab in statements(kernel, Smem) if slab.name == name), None)
+
+
+def _byte_drains(kernel, role: str) -> list:
+    """The staged gathers of ``kernel`` that drain a slab of FP8 bytes into the ``role`` operand's fragments."""
+    return [load for load in statements(kernel, FragmentLoad) if load.staged and load.role == role and load.src_dtype == F8E4M3]
+
 
 K16 = "mma_m16n8k16_f16_f32"
 K32 = "mma_m16n8k32_e4m3_f32"
@@ -44,9 +61,8 @@ def _tma_pins() -> tuple[str, ...]:
 
 def _node(*, a_dtype: DataType = F16, b_dtype: DataType = F8E4M3, m=512, n=4096, k=4096, b_trans=False):
     ka = Axis("k", Dim(k))
-    a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=a_dtype)
-    b_index = (Var("n"), Var("k")) if b_trans else (Var("k"), Var("n"))
-    b = Load(name="wb", input="w_bits", index=b_index, dtype=b_dtype)
+    [a] = parse_body(f"{a_dtype.name} a = load x[m, k]")
+    [b] = parse_body(f"{b_dtype.name} wb = load w_bits[{'n, k' if b_trans else 'k, n'}]")
     node = contraction(ka, a, (b, "acc"))
     b_shape = (n, k) if b_trans else (k, n)
     inputs = {"x": Tensor("x", (m, k), a_dtype), "w_bits": Tensor("w_bits", b_shape, b_dtype)}
@@ -114,11 +130,8 @@ def test_k32_atoms_resolve_staged_byte_slabs():
         st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs, k_axis=ka)
         assert st is not None and st.bk_elems == tile.bk * 32
     ka = Axis("k", Dim("seq"))
-    sym = contraction(
-        ka,
-        Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F8E4M3),
-        (Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3), "acc"),
-    )
+    [a, b] = parse_body("f8e4m3 a = load x[m, k]\nf8e4m3 wb = load w_bits[k, n]")
+    sym = contraction(ka, a, (b, "acc"))
     assert resolve_warp_stage(sym, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 
@@ -136,6 +149,57 @@ def test_16bit_operands_resolve_exactly_as_without_dtype_info():
             assert with_info.spell() == without.spell()
 
 
+def _byte_a_graph(dtype):
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a8", (33, 64), "f8e4m3"), node_id="a8")
+    graph.add_node(InputOp(), [], Tensor("b", (64, 32), dtype), node_id="b")
+    graph.add_node(ElementwiseOp("from_f8e4m3"), ["a8"], Tensor("a", (33, 64), dtype), node_id="a")
+    graph.add_node(MatmulOp(), ["a", "b"], Tensor("y", (33, 32), "f32"), node_id="y")
+    graph.inputs, graph.outputs = ["a8", "b"], ["y"]
+    return graph
+
+
+def _byte_a_pins(dtype):
+    return {"PLACE": "fuse", "TILE": f"mma_m16n8k16_{dtype}_f32/f2x2/k2", "WORK": "w1x1", "STAGE": "d1/smem"}
+
+
+@pytest.mark.parametrize("dtype", ["f16", "bf16"])
+def test_byte_a_widens_into_the_tensor_core_slab(dtype):
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    with pinned_knobs(_byte_a_pins(dtype)):
+        _, kernels = compile_with_kernels(_byte_a_graph(dtype), ctx=Context.from_target((12, 0)), db=None)
+    [kernel] = kernels.values()
+    assert statements(kernel, MmaSyncPtx) and _slab(kernel, "_a_smem") is not None
+
+
+@requires_cuda
+@requires_sm(8)
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("dtype", ["f16", "bf16"])
+def test_byte_a_widening_matches_decoded_matmul_cuda(dtype):
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.dtype import decode_bf16, decode_f8, encode_bf16
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    rng = np.random.default_rng(12)
+    bits = rng.integers(0, 256, (33, 64), dtype=np.uint8)
+    bits[(bits & 0x7F) == 0x7F] = 0
+    values = rng.standard_normal((64, 32)).astype(np.float32) * 0.01
+    b = encode_bf16(values) if dtype == "bf16" else values.astype(np.float16)
+    expected = decode_f8(bits, "f8e4m3").astype(np.float32) @ (decode_bf16(b) if dtype == "bf16" else b.astype(np.float32))
+    backend = CudaBackend()
+    with pinned_knobs(_byte_a_pins(dtype)):
+        compiled = backend.compile(_byte_a_graph(dtype))
+    actual = backend.run(compiled, input_data={"a8": bits, "b": b})[0].outputs["y"]
+    np.testing.assert_allclose(actual, expected, rtol=2e-4, atol=2e-4)
+
+
 # ===================================================================
 # The drain's bank spread — the BYTE_SLAB_PAD regression (the lane→bank oracle)
 # ===================================================================
@@ -143,7 +207,7 @@ def test_16bit_operands_resolve_exactly_as_without_dtype_info():
 
 def _drain_max_way(rows: int, cols: int, pad: int, reads) -> int:
     """Worst per-instruction ``max_way`` over the drain's per-lane slab reads. ``reads`` yields
-    ``(row_expr, col_expr)`` per emitted load, in the fragment loaders' lane→element map."""
+    ``(row_expression, col_expression)`` per emitted load, in the fragment loaders' lane→element map."""
     taxes = (Axis("_t", Dim(32)),)
     worst = 0
     for row, col in reads:
@@ -153,24 +217,24 @@ def _drain_max_way(rows: int, cols: int, pad: int, reads) -> int:
     return worst
 
 
-def _lane_exprs():
+def _lane_expressions():
     lane = Var("_t")
-    return BinaryExpr("/", lane, Literal(4, "int")), BinaryExpr("%", lane, Literal(4, "int"))
+    return BinaryExpression("/", lane, Literal(4, "int")), BinaryExpression("%", lane, Literal(4, "int"))
 
 
 def _k16_trans_reads(grp, tig):
     # emmy_mma_load_b_smem_trans_f8_f16: one fp8x2 (2 B) load per k-half — model its first byte
     # (the pair shares the bank word).
-    return [(grp, BinaryExpr("+", BinaryExpr("*", tig, Literal(2, "int")), Literal(8 * i, "int"))) for i in (0, 1)]
+    return [(grp, BinaryExpression("+", BinaryExpression("*", tig, Literal(2, "int")), Literal(8 * i, "int"))) for i in (0, 1)]
 
 
 def _k32_reads(grp, tig, *, a_side: bool):
     # the u32 loads: (row, 4*tig + 16*half) — A visits rows grp / grp+8, trans-B row grp.
     out = []
     for i in range(4 if a_side else 2):
-        row = BinaryExpr("+", grp, Literal(8 * (i & 1), "int")) if a_side else grp
+        row = BinaryExpression("+", grp, Literal(8 * (i & 1), "int")) if a_side else grp
         half = (16 if (i & 2) else 0) if a_side else (16 if i else 0)
-        out.append((row, BinaryExpr("+", BinaryExpr("*", tig, Literal(4, "int")), Literal(half, "int"))))
+        out.append((row, BinaryExpression("+", BinaryExpression("*", tig, Literal(4, "int")), Literal(half, "int"))))
     return out
 
 
@@ -178,7 +242,7 @@ def test_byte_slab_pad_keeps_the_drain_conflict_free():
     """The 16 B row pad's reason, stated as a regression: at ``BYTE_SLAB_PAD`` every byte-slab
     drain instruction is ≤ 2-way (the oracle's broadcast-corrected worst bank); dense rows
     (pad 0 — the TMA deposit) are 4-way on the same maps."""
-    grp, tig = _lane_exprs()
+    grp, tig = _lane_expressions()
     cases = [
         ("k16 trans-B", 128, 64, _k16_trans_reads(grp, tig)),
         ("k32 trans-B", 128, 64, _k32_reads(grp, tig, a_side=False)),
@@ -202,13 +266,12 @@ def _run_w8a16(backend, stage_pin, x, bits, scale, m, n, k):
 
     pins = {"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}
     with pinned_knobs(pins):
-        compiled = backend.compile(_fp8_linear_graph(m, n, k))
-    srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-    mma_src = next((s for s in srcs if "mma.sync" in s), "")
+        compiled, kernels = compile_with_kernels(_fp8_linear_graph(m, n, k))
+    mma_kernel = _mma_kernel(kernels)
     input_data = {"x": x}
     input_data.update(bind_constants(compiled, {"layer.weight": bits, "layer.weight_scale": scale}))
     result, _ = backend.run(compiled, input_data=input_data)
-    return np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n), mma_src
+    return np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n), mma_kernel
 
 
 @requires_cuda
@@ -216,8 +279,8 @@ def _run_w8a16(backend, stage_pin, x, bits, scale, m, n, k):
 @requires_sm(8)
 def test_w8a16_staged_bit_identical_to_gmem_direct_cuda():
     """Staged fp8-B (cp.async and TMA) is BIT-identical to the gmem-direct fragment-convert
-    kernel — same per-element convert, same K order, same atoms — and the staged source carries
-    the byte-slab machinery (the fp8 slab decl + a byte-gather drain)."""
+    kernel — same per-element convert, same K order, same atoms — and the staged kernel carries
+    the byte-slab machinery (the fp8 slab + a byte-gather drain)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
     m, n, k = 32, 512, 512
@@ -229,12 +292,13 @@ def test_w8a16_staged_bit_identical_to_gmem_direct_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    base, base_src = _run_w8a16(backend, None, x, bits, scale, m, n, k)
-    assert "_b_smem" not in base_src
+    base, base_kernel = _run_w8a16(backend, None, x, bits, scale, m, n, k)
+    assert _slab(base_kernel, "_b_smem") is None
     for pin in ("d1/smem-async", "d2/smem-async", "d2/smem-async/p2", *_tma_pins()):
-        y, src = _run_w8a16(backend, pin, x, bits, scale, m, n, k)
-        assert "__nv_fp8_e4m3 _b_smem" in src or "__nv_fp8_e4m3* _b_smem" in src, pin
-        assert "emmy_mma_load_b_smem_trans_f8_f16" in src or "emmy_mma_load_b_gmem" in src, pin
+        y, kernel = _run_w8a16(backend, pin, x, bits, scale, m, n, k)
+        assert _slab(kernel, "_b_smem") == "f8e4m3", pin
+        drains = _byte_drains(kernel, "b")
+        assert drains and all(load.src_buffer == "_b_smem" for load in drains), pin
         assert np.array_equal(y.view(np.uint16), base.view(np.uint16)), pin
 
 
@@ -271,18 +335,19 @@ def test_canonical_byte_b_and_splitk_compose_cuda():
 
     def run(stage, red):
         with pinned_knobs({"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": red, "STAGE": stage}):
-            compiled = backend.compile(graph())
-        srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-        src = next((s for s in srcs if "mma.sync" in s), "")
+            compiled, kernels = compile_with_kernels(graph())
         result, _ = backend.run(compiled, input_data={"x": x, "w8": wbits})
-        return np.asarray(result.outputs["y"]).reshape(m, n), src
+        return np.asarray(result.outputs["y"]).reshape(m, n), _mma_kernel(kernels)
 
     bases: dict[str, np.ndarray] = {}
     for stage, red in [("d2/smem-async", ""), ("d2/smem-async", "g4k"), *((s, r) for s in _tma_pins() for r in ("", "g4k"))]:
         if red not in bases:
             bases[red] = run("", red)[0]
-        y, src = run(stage, red)
-        assert "_b_smem" in src and "emmy_mma_load_b_gmem<__nv_fp8_e4m3, __half>" in src, (stage, red)
+        y, kernel = run(stage, red)
+        # The canonical slab strides its bytes along K: the drain converts element by element into f16 fragments.
+        drains = _byte_drains(kernel, "b")
+        converting = all(not load.b_trans and load.dtype == F16 for load in drains)
+        assert _slab(kernel, "_b_smem") is not None and drains and converting, (stage, red)
         assert np.array_equal(y.view(np.uint16), bases[red].view(np.uint16)), (stage, red)
 
 
@@ -306,15 +371,16 @@ def test_k32_staged_bit_identical_to_gmem_direct_cuda():
     def run(stage_pin):
         pins = {"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}
         with pinned_knobs(pins):
-            compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
-        srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-        src = next((s for s in srcs if "m16n8k32" in s), "")
+            compiled, kernels = compile_with_kernels(_bare_f8_linear_graph(m, n, k))
+        k32 = next(kernel for kernel in kernels.values() if any(tuple(mma.shape) == (16, 8, 32) for mma in statements(kernel, MmaSyncPtx)))
         result, _ = backend.run(compiled, input_data={"a8": abits, "w8": wbits})
-        return np.asarray(result.outputs["y"]).reshape(m, n), src
+        return np.asarray(result.outputs["y"]).reshape(m, n), k32
 
-    base, base_src = run(None)
-    assert "_a_smem" not in base_src
+    base, base_kernel = run(None)
+    assert _slab(base_kernel, "_a_smem") is None
     for pin in ("d1/smem-async", "d2/smem-async", *_tma_pins()):
-        y, src = run(pin)
-        assert "emmy_mma_load_a_smem_b8v" in src, pin
+        y, kernel = run(pin)
+        # Raw bytes repacked into an FP8 fragment, no conversion.
+        drains = _byte_drains(kernel, "a")
+        assert drains and all(load.dtype == F8E4M3 for load in drains), pin
         assert np.array_equal(y.view(np.uint32), base.view(np.uint32)), pin

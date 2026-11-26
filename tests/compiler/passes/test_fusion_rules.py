@@ -13,9 +13,10 @@ import pytest
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, Var, affine_node, affine_terms, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
-from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, LoopOp, Select, Write
+from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Select, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp, ScanOp
 from emmy.compiler.pipeline import Pipeline
 
@@ -58,18 +59,56 @@ def _kernel_nodes(graph: Graph) -> list:
     return [n for n in graph.nodes.values() if isinstance(n.op, LoopOp)]
 
 
+def _is_copy(stmt) -> bool:
+    """An ``Assign`` that copies one name: an alias (a bare name) or a typed ``copy`` that spells a rounding."""
+    if not isinstance(stmt, Assign):
+        return False
+    op = stmt.value.operation
+    return isinstance(stmt.value, Var) or (op is not None and op.name == "copy" and len(stmt.value.operands) == 1)
+
+
+def _spine(value, out=None):
+    """The shape of every maximal sum in ``value``, outermost first: its sorted literal coefficients and its offset, one
+    entry per affine region (additions, subtractions, negations and literal scales), the analog of one sum statement.
+    A term below a non-affine operation (``exp(-x)``) is its own region."""
+    out = [] if out is None else out
+    if affine_node(value):
+        terms, offset, _ = affine_terms(value)
+        out.append((tuple(sorted(coefficient for coefficient, _ in terms)), offset))
+        for _, leaf in terms:
+            _spine(leaf, out)
+    else:
+        for child in value.children():
+            _spine(child, out)
+    return out
+
+
+def _operations(body) -> list[str]:
+    """The elementwise operations a body computes beyond its sums: every operation node of an ``Assign`` or ``Accum``
+    value that is not part of an affine region (an addition, a subtraction, a negation, a literal scale)."""
+    names = []
+    for stmt in body.iter():
+        if not isinstance(stmt, (Assign, Accum)):
+            continue
+        for node in stmt.value.subterms():
+            if node.operation is not None and not affine_node(node):
+                names.append(node.operation.name)
+    return names
+
+
 def _assign_fns(body) -> list[str]:
-    return [s.op.name for s in body.iter() if isinstance(s, Assign)]
+    return _operations(body)
 
 
 def _affine_shapes(body) -> list[tuple[tuple[float, ...], float]]:
-    """Every Affine's sorted coefficients and offset: the folded form a sum, difference or negation takes."""
-    return sorted((tuple(sorted(s.coefficients)), s.offset) for s in body.iter() if isinstance(s, Affine))
+    """Every sum's top-level shape in a body: the literal coefficients and the offset of each affine region, sorted —
+    the one node the normal form spells a sum, difference, negation or literal scale as."""
+    return sorted(shape for s in body.iter() if isinstance(s, (Assign, Accum)) for shape in _spine(s.value))
 
 
 def _count_copies(body) -> int:
-    """Count identity ``Assign(op=copy)`` statements in a LoopOp body."""
-    return sum(1 for s in body.iter() if isinstance(s, Assign) and s.op.name == "copy")
+    """Count alias ``Assign`` statements (a value that is a bare name) in a LoopOp body."""
+    return sum(1 for s in body.iter() if _is_copy(s))
 
 
 def _has_update(body) -> bool:
@@ -113,7 +152,6 @@ def test_multisource_indexmap_lowers_unconditional_branch_as_bool():
     lowered = Pipeline.build(["loop/lowering"]).run(graph)
     select = next(stmt for stmt in _kernel_nodes(lowered)[0].op.body.iter() if isinstance(stmt, Select))
     assert select.branches[-1].select == Literal(True, "bool")
-    assert select.branches[-1].select.render(None) == "1"
     _assert_close(_run(graph, inputs), _run(lowered, inputs))
 
     restored = Graph.from_wire(json.loads(json.dumps(lowered.to_wire())))
@@ -262,7 +300,7 @@ def test_typed_copy_fanout_fuses_after_contraction_halves_join():
 
     result = _fuse(g)
     (kernel,) = _kernel_nodes(result)
-    assert "copy" in _assign_fns(kernel.op.body)
+    assert any(_is_copy(s) for s in kernel.op.body.iter())
     assert any(isinstance(stmt, Accum) for stmt in kernel.op.body.iter())
 
 
@@ -307,8 +345,8 @@ def test_transcendental_is_not_duplicated_across_contraction_columns():
         if isinstance(node, Fold):
             for child in (*node.operands, *node.lift.body):
                 fold_ops(child, acc)
-        elif getattr(node, "op", None) is not None:
-            acc.append(node.op.name)
+        elif isinstance(node, Assign):
+            acc.extend(sub.operation.name for sub in node.value.subterms() if sub.operation is not None)
         return acc
 
     with pinned_knobs({"PLACE@inner.1/map": "cut"}):
@@ -577,7 +615,7 @@ def test_ssa_invariants_hold():
         from emmy.compiler.ir.loop import Accum, Load
 
         for s in k.op:
-            if isinstance(s, (Assign, Affine)):
+            if isinstance(s, Assign):
                 for arg in s.deps():
                     assert arg in defined, f"arg {arg!r} not defined before use in {s.name}"
                 defined.add(s.name)
@@ -706,7 +744,7 @@ def test_softmax_has_both_accumulators():
 
 
 def _is_pure_indexmap(op: LoopOp) -> bool:
-    return not any(isinstance(s, (Affine, Assign, Accum)) for s in op.body.iter())
+    return not any(isinstance(s, (Assign, Accum)) for s in op.body.iter())
 
 
 def _pure_indexmap_kernels(graph: Graph) -> list:
@@ -757,19 +795,19 @@ def test_shared_const_broadcast_correctness(scalar_dtype):
 
 def test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel():
     from emmy.compiler.ir.cuda import CudaOp
-    from emmy.compiler.pipeline import CUDA_PASSES
+    from tests.compiler.helpers import compile_with_kernels
 
-    result = Pipeline.build(CUDA_PASSES).run(_make_shared_const_broadcast())
+    result, kernels = compile_with_kernels(_make_shared_const_broadcast())
     (kernel,) = [node for node in result.nodes.values() if isinstance(node.op, CudaOp)]
     assert kernel.buffer_names() == ("c1", "c2")
-    assert kernel.op.arg_order[-2:] == ("c1", "c2")
-    assert "float* __restrict__ c1" in kernel.op.kernel_source and "float* __restrict__ c2" in kernel.op.kernel_source
+    assert sorted(kernel.op.arg_order[-2:]) == ["c1", "c2"]  # the launcher binds by name
+    assert {name: tensor.dtype.name for name, tensor in kernels[kernel.id].outputs.items()} == {"c1": "f32", "c2": "f32"}
 
 
 def _make_shared_transpose():
     """A transpose (general layout op) feeding two elementwise consumers —
     covers the non-constant pure-indexmap path."""
-    from emmy.compiler.ir.expr import placeholder
+    from emmy.compiler.ir.expression import placeholder
     from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import single_indexmap
 
     g = Graph()
@@ -964,71 +1002,35 @@ def test_output_reshape_folds_into_reduce_producer(rows):
     projection inlined once per output column.
     """
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-    from emmy.compiler.ir.loop import Load, Loop
-    from emmy.compiler.ir.stmt import Body
 
     H, D = 3, 8
 
     def make_graph():
         # Producer: per-head scale-by-row-sum (a reduce + sweep per (row, head) — reduce-heavy).
-        a0, a1 = Var("a0"), Var("a1")
-        red = Loop(
-            axis=Axis(name="a2", extent=Dim(D)),
-            body=Body(
-                (
-                    Load(name="in0", input="x", index=(a0, a1, Var("a2"))),
-                    Accum(name="acc", value="in0", op="add", axes=("a2",)),
-                )
-            ),
-        )
-        sweep = Loop(
-            axis=Axis(name="a3", extent=Dim(D)),
-            body=Body(
-                (
-                    Load(name="in1", input="x", index=(a0, a1, Var("a3"))),
-                    Assign(name="v0", op="multiply", args=("in1", "acc")),
-                    Write(output="y", index=(a0, a1, Var("a3")), value="v0"),
-                )
-            ),
-        )
         producer = LoopOp(
-            body=Body(
-                (
-                    Loop(
-                        axis=Axis(name="a0", extent=Dim(rows)),
-                        body=Body((Loop(axis=Axis(name="a1", extent=Dim(H)), body=Body((red, sweep))),)),
-                    ),
-                )
+            body=parse_body(
+                f"""
+                for a0 in 0..{rows}:
+                    for a1 in 0..{H}:
+                        for a2 in 0..{D}:
+                            in0 = load x[a0, a1, a2]
+                            acc <- add(acc, in0) over a2
+                        for a3 in 0..{D}:
+                            in1 = load x[a0, a1, a3]
+                            v0 = multiply(in1, acc)
+                            y[a0, a1, a3] = v0
+                """
             )
         )
         # Consumer: the traced flatten (4, H, D) -> (4, H*D) — a flat-memory identity copy.
-        b0, b1 = Var("b0"), Var("b1")
         copy = LoopOp(
-            body=Body(
-                (
-                    Loop(
-                        axis=Axis(name="b0", extent=Dim(rows)),
-                        body=Body(
-                            (
-                                Loop(
-                                    axis=Axis(name="b1", extent=Dim(H * D)),
-                                    body=Body(
-                                        (
-                                            Load(
-                                                name="c0",
-                                                input="y",
-                                                index=(b0, BinaryExpr("/", b1, Literal(D, "int")), BinaryExpr("%", b1, Literal(D, "int"))),
-                                            ),
-                                            Write(output="out", index=(b0, b1), value="c0"),
-                                        )
-                                    ),
-                                ),
-                            )
-                        ),
-                    ),
-                )
+            body=parse_body(
+                f"""
+                for b0 in 0..{rows}:
+                    for b1 in 0..{H * D}:
+                        c0 = load y[b0, b1 / {D}, b1 % {D}]
+                        out[b0, b1] = c0
+                """
             )
         )
         g = Graph()
@@ -1045,7 +1047,7 @@ def test_output_reshape_folds_into_reduce_producer(rows):
     assert len(writes) == 1 and writes[0].output == "out"
     idx = writes[0].index
     assert len(idx) == 2, "the retargeted Write indexes the flat output shape"
-    assert "/" not in idx[1].pretty() and "%" not in idx[1].pretty(), f"clean affine index expected: {idx[1].pretty()}"
+    assert "/" not in str(idx[1]) and "%" not in str(idx[1]), f"clean affine index expected: {idx[1]}"
     # The producer's loops carry the kernel: no loop over the flat width, under which the reduce
     # would run once per output column.
     assert not any(loop.axis.extent == Dim(H * D) for loop in kernels[0].op.body.loops), "the reduce runs per column"
@@ -1064,15 +1066,6 @@ def test_output_reshape_folds_into_reduce_producer(rows):
 # ===================================================================
 
 
-def _loops2(inner, ax0, ext0, ax1, ext1):
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.loop import Loop
-    from emmy.compiler.ir.stmt import Body
-
-    return Body((Loop(axis=Axis(name=ax0, extent=Dim(ext0)), body=Body((Loop(axis=Axis(name=ax1, extent=Dim(ext1)), body=inner),))),))
-
-
 def _make_pending_product_into_exp_residual_add():
     """The mid-fusion state the engine reaches on every transformer layer past the first: the
     decomposed o_proj's sum-reduce already merged into the residual add (which also reads the
@@ -1081,67 +1074,58 @@ def _make_pending_product_into_exp_residual_add():
     still merge into the add's reduce — the flash P@V deferral must not mistake the post-reduce
     residual operand for a V operand (it kept every o_proj product materialized: a (b, s, k, n)
     gmem scratch per layer, 17 GB at S=4096 on the Qwen3 embed trunk)."""
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.loop import Load, Loop
-    from emmy.compiler.ir.stmt import Body
-
     S, K, N = 4, 8, 6
-    a0, a1, a2 = Var("a0"), Var("a1"), Var("a2")
 
-    ew_cell = Body(
-        (
-            Loop(
-                axis=Axis(name="a2", extent=Dim(N)),
-                body=Body(
-                    (
-                        Load(name="i0", input="act", index=(a0, a1)),
-                        Load(name="i1", input="w", index=(a2, a1)),
-                        Assign(name="v0", op="multiply", args=("i0", "i1")),
-                        Write(output="ew", index=(a0, a1, a2), value="v0"),
-                    )
-                ),
-            ),
+    ew = LoopOp(
+        body=parse_body(
+            f"""
+            for a0 in 0..{S}:
+                for a1 in 0..{K}:
+                    for a2 in 0..{N}:
+                        i0 = load act[a0, a1]
+                        i1 = load w[a2, a1]
+                        v0 = multiply(i0, i1)
+                        ew[a0, a1, a2] = v0
+            """
         )
     )
-    ew = LoopOp(body=_loops2(ew_cell, "a0", S, "a1", K))
-
-    exp_cell = Body(
-        (
-            Load(name="c0", input="r", index=(a0, a1)),
-            Assign(name="c1", op="exp", args=("c0",)),
-            Write(output="e", index=(a0, a1), value="c1"),
+    e = LoopOp(
+        body=parse_body(
+            f"""
+            for a0 in 0..{S}:
+                for a1 in 0..{N}:
+                    c0 = load r[a0, a1]
+                    c1 = exp(c0)
+                    e[a0, a1] = c1
+            """
         )
     )
-    e = LoopOp(body=_loops2(exp_cell, "a0", S, "a1", N))
-    res_cell = Body(
-        (
-            Load(name="d0", input="r", index=(a0, a1)),
-            Load(name="d1", input="e", index=(a0, a1)),
-            Assign(name="d2", op="add", args=("d0", "d1")),
-            Write(output="res", index=(a0, a1), value="d2"),
+    res = LoopOp(
+        body=parse_body(
+            f"""
+            for a0 in 0..{S}:
+                for a1 in 0..{N}:
+                    d0 = load r[a0, a1]
+                    d1 = load e[a0, a1]
+                    d2 = add(d0, d1)
+                    res[a0, a1] = d2
+            """
         )
     )
-    res = LoopOp(body=_loops2(res_cell, "a0", S, "a1", N))
-
-    add_cell = Body(
-        (
-            Loop(
-                axis=Axis(name="a2", extent=Dim(K)),
-                body=Body(
-                    (
-                        Load(name="in0", input="ew", index=(a0, a2, a1)),
-                        Accum(name="acc0", value="in0", op="add", axes=("a2",)),
-                    )
-                ),
-            ),
-            Load(name="in1", input="res", index=(a0, a1)),
-            Assign(name="v1", op="add", args=("acc0", "in1")),
-            Write(output="y", index=(a0, a1), value="v1"),
+    add13 = LoopOp(
+        body=parse_body(
+            f"""
+            for a0 in 0..{S}:
+                for a1 in 0..{N}:
+                    for a2 in 0..{K}:
+                        in0 = load ew[a0, a2, a1]
+                        acc0 <- add(acc0, in0) over a2
+                    in1 = load res[a0, a1]
+                    v1 = add(acc0, in1)
+                    y[a0, a1] = v1
+            """
         )
     )
-    add13 = LoopOp(body=_loops2(add_cell, "a0", S, "a1", N))
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("act", (S, K)), node_id="act")
@@ -1173,36 +1157,17 @@ def test_pending_product_exp_residual_correctness():
 
 def test_product_reduction_fuses_before_upstream_activation():
     """An activation feeding a decomposed contraction must not strand its M×K×N product."""
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.loop import Load, Loop
-    from emmy.compiler.ir.stmt import Body
-
     graph = _make_pending_product_into_exp_residual_add()
     graph.rename_node("act", "act_src")
-    a0, a1 = Var("a0"), Var("a1")
     activation = LoopOp(
-        body=Body(
-            (
-                Loop(
-                    axis=Axis("a0", Dim(4)),
-                    body=Body(
-                        (
-                            Loop(
-                                axis=Axis("a1", Dim(8)),
-                                body=Body(
-                                    (
-                                        Load(name="x", input="act_src", index=(a0, a1)),
-                                        Assign(name="xa", op="tanh", args=("x",)),
-                                        Write(output="act", index=(a0, a1), value="xa"),
-                                    )
-                                ),
-                            ),
-                        )
-                    ),
-                ),
-            )
+        body=parse_body(
+            """
+            for a0 in 0..4:
+                for a1 in 0..8:
+                    x = load act_src[a0, a1]
+                    xa = tanh(x)
+                    act[a0, a1] = xa
+            """
         )
     )
     graph.add_node(activation, ["act_src"], Tensor("act", (4, 8)), node_id="act")

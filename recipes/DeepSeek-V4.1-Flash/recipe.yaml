@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-V4.1-Flash
-  rationale: "Breakout attention across OpenRouter volume, download velocity, and Hugging Face trending signals."
-  heat: 94
+  rationale: "Legacy route retired; community wave fully shifted to the 1017 revision."
+  heat: 70
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

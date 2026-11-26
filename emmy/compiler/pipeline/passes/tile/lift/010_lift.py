@@ -17,10 +17,10 @@ def rewrite(match: Match, root: Node, ctx=None):
     from dataclasses import replace  # noqa: PLC0415
 
     loop: LoopOp = root.op
-    tile = lift_kernel(loop, name=loop.name)
+    tile = lift_kernel(loop)
     if not tile.carries:
         return replace(tile, outputs={root.output.name: root.output})
-    # A carried state: the term carries it (``Fold.cells``), and the classic schedule realizes it
+    # A carried state: the kernel stores it (``TileOp.states``), and the classic schedule realizes it
     # as a buffer the kernel owns — so the node gains that port here, a splice where every other
     # lift is a rebind — which threads the loop op in as the tile's ``source``, so the splice does the
     # same. Register storage drops the port again.

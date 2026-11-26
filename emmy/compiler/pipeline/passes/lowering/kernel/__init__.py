@@ -7,7 +7,8 @@ fold rides inside the per-cell body and materializes through its carrier — so
 further kernel kinds reuse it once their schedules are enumerated.
 
 The remaining rules are ``KernelOp`` → ``KernelOp`` codegen-quality passes that
-walk the materialized body of statements; they are independent of the tile IR
+walk the materialized body of statements, which is optimized (every ``KernelOp`` takes the optimizing
+steps of the normal form at construction and keeps its order and names); they are independent of the tile IR
 (they only read/rewrite the kernel-IR ``Load`` / ``Assign`` / ``Write`` / ``Sync``
 vocabulary), so they were restored from the demolished pipeline ahead of the
 tile-tier rebuild:
@@ -16,14 +17,20 @@ tile-tier rebuild:
   them off the IR; overflow-prone fp16 squares promote to f32).
 - ``045_merge_select_loads`` — compute a coordinate select's two isomorphic branches once, each
   load reading at the selected index (RoPE's rotate-half partner).
-- ``047_reuse_lane_loads`` — unroll short lane-strided loops and load each read-only cell once, so a
-  cooperative row stays in registers from its reduce to its projection.
+- ``047_reuse_lane_loads`` — unroll short lane-strided loops, so a cooperative row stays in
+  registers from its reduce to its projection (the body's optimization loads each read-only cell once).
 - ``050_vectorize_loads`` / ``080_vectorize_stores`` — fold consecutive scalar
   Loads / Writes into one wide vector access.
 - ``095_interleave_loads`` — sink each Load to just before its first consumer.
 - ``097_widen_fragment_stores`` — store four adjacent ``wgmma`` accumulator cells as one
   16-byte row per lane.
 - ``110_drop_redundant_syncs`` — collapse no-op Sync stmts at the Tile body level.
+- ``117_unroll_loops`` — every loop a lowering site flagged, written out as copies of its body.
+- ``118_unroll_by_size`` — every other loop, by the work one trip does, as NVIDIA's compilers unrolled it.
+- ``119_vectorize_copies`` — the vector widenings again, over the runs the copies line up.
+- ``120_explicit_conversions`` — every operation at one dtype, every conversion a definition of its own.
+- ``125_spell_composites`` — every composite function (``sigmoid``, ``relu``, …) as its primitive operations.
+- ``130_approximate_math`` — last: the approximate form of each instruction class a precision knob turns on.
 
 The tile-tier kernel passes (mma fragment lowering, register-tile split, smem
 staging, fp16 K-window packing) stay demolished — they consume tile structures

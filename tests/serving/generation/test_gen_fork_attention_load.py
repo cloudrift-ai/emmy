@@ -228,8 +228,8 @@ QSA_DEST = {
 
 def test_qwen_sparse_attention_keys_land_where_the_fork_expects_them():
     """Layer 3 is the stage's one sparse-attention layer. Its query (with the output gate), key and value load as
-    the three shards of the fork's fused projection; the Gated DeltaNet layer beside it, the gated residuals and
-    the MTP head's attention are not the hosted attention's."""
+    the three shards of the fork's fused projection; the Gated DeltaNet layer before it is another stage's, and the
+    gated residuals and the MTP head's attention are not the hosted attention's."""
     layer = _FakeAttention(sorted({dest for dest, _shard in QSA_DEST.values()}))
     model, _head = _model([layer])
     model.start_layer, model.end_layer = 3, 4
@@ -252,9 +252,104 @@ def test_qwen_sparse_attention_keys_land_where_the_fork_expects_them():
             assert param.loads == [None], f"{dest}: loads {param.loads}"
 
 
+# A Qwen3.8-Flash-Next Gated DeltaNet layer's keys (relative to ``model.language_model.layers.N.linear_attn.``), from
+# the published checkpoint's index, and where vLLM's ``QwenGatedDeltaNetAttention`` holds each one.
+GDN_DEST = {
+    "in_proj_qkv.weight": ("in_proj_qkvz.weight", (0, 1, 2)),
+    "in_proj_z.weight": ("in_proj_qkvz.weight", 3),
+    "in_proj_b.weight": ("in_proj_ba.weight", 0),
+    "in_proj_a.weight": ("in_proj_ba.weight", 1),
+    "conv1d.weight": ("conv1d.weight", None),
+    "A_log": ("A_log", None),
+    "dt_bias": ("dt_bias", None),
+    "norm.weight": ("norm.weight", None),
+    "out_proj.weight": ("out_proj.weight", None),
+}
+
+
+def test_qwen_gated_deltanet_keys_land_where_the_fork_expects_them():
+    """Layer 2 is a Gated DeltaNet layer. Its fused query, key and value projection loads as the first three shards of
+    the merged input projection and its output gate as the fourth, its two decay projections as the two shards of
+    theirs, and the rest whole; the sparse-attention layer after it is another stage's."""
+    layer = _FakeAttention(sorted({dest for dest, _shard in GDN_DEST.values()}))
+    model, _head = _model([layer])
+    model.start_layer, model.end_layer = 2, 3
+    base = "model.language_model.layers"
+    stream = [("lm_head.weight", torch.zeros(8, 4))]
+    stream += [(f"{base}.2.linear_attn.{key}", torch.zeros(2)) for key in GDN_DEST]
+    stream += [
+        (f"{base}.2.attn_hyper_connection.hc_norm.weight", torch.zeros(2)),
+        (f"{base}.3.self_attn.q_proj.weight", torch.zeros(2)),
+    ]
+
+    loaded = vllm_model_gen.EmmyGenModel.load_weights(model, iter(stream))
+
+    params = dict(layer.named_parameters())
+    assert {name for name in loaded if name.startswith("fork_attn.")} == {f"fork_attn.0.{dest}" for dest in params}
+    assert set(params["in_proj_qkvz.weight"].loads) == {(0, 1, 2), 3}
+    assert set(params["in_proj_ba.weight"].loads) == {0, 1}
+    for dest, param in params.items():
+        if dest not in ("in_proj_qkvz.weight", "in_proj_ba.weight"):
+            assert param.loads == [None], f"{dest}: loads {param.loads}"
+
+
 def test_a_double_loaded_attention_weight_is_a_loud_failure():
     """Two checkpoint keys landing on one destination shard would silently let the later one win."""
     model, _head = _model(_fake_layers())
     stream = _stream() + [("layers.0.attn.wq_b.weight", torch.zeros(2))]
     with pytest.raises(ValueError, match="second time"):
         vllm_model_gen.EmmyGenModel.load_weights(model, iter(stream))
+
+
+# A Qwen3.8-Flash-Next n-gram PLE's parameters (relative to ``model.language_model.layers.N.ple.``), from the published
+# checkpoint's index, beside its embedding's table: 128 FP8 row shards and one scale there, two here.
+PLE_KEYS = ["conv1d.weight", "key_proj.weight", "norm_conv.weight", "norm_key.weight", "norm_query.weight", "value_proj.weight"]
+TABLE_KEYS = ["layer_multipliers", "ngram_embedding.shard_0.weight", "ngram_embedding.shard_1.weight", "ngram_embedding.weight_scale"]
+
+
+class _FakeNGramEmbedding(torch.nn.Module):
+    """Loads itself, as the fork's n-gram embedding does: the row shards fill its one table."""
+
+    def __init__(self):
+        super().__init__()
+        self.ngram_embedding = _FakeAttention(["weight", "weight_scale"])
+        self.names = []
+
+    def load_weights(self, weights):
+        names = [name for name, _w in weights]
+        self.names += names
+        return {"ngram_embedding.weight" if ".shard_" in name else name for name in names}
+
+
+def _ple_stream(keys=PLE_KEYS):
+    base = "model.language_model.layers"
+    stream = [("lm_head.weight", torch.zeros(8, 4))]
+    stream += [(f"{base}.1.ple.{key}", torch.zeros(2)) for key in keys]
+    stream += [(f"{base}.1.ple.ple_embedding.{key}", torch.zeros(2)) for key in TABLE_KEYS]
+    return stream + [(f"{base}.5.ple.key_proj.weight", torch.zeros(2))]  # a layer this stage does not hold
+
+
+def test_qwen_ple_keys_load_through_the_hosted_ple_module():
+    """Layer 2 (one-indexed) reads the n-gram PLE. Its keys load into the hosted PLE module by its own loader, the
+    table's through the embedding's own; a key of a layer this stage does not hold is not claimed."""
+    ple = _FakeAttention(PLE_KEYS)
+    ple.ple_embedding = _FakeNGramEmbedding()
+    model, _head = _model([])
+    model.fork_ple = torch.nn.ModuleDict({"1": ple})
+
+    loaded = vllm_model_gen.EmmyGenModel.load_weights(model, iter(_ple_stream()))
+
+    assert {f"fork_ple.1.{name}" for name, _ in ple.named_parameters()} <= loaded
+    assert not any(".5." in name for name in loaded)
+    assert ple.ple_embedding.names == TABLE_KEYS
+    for name in PLE_KEYS:
+        assert ple.get_parameter(name).loads == [None], name
+
+
+def test_an_unloaded_ple_parameter_is_a_loud_failure():
+    ple = _FakeAttention(PLE_KEYS)
+    ple.ple_embedding = _FakeNGramEmbedding()
+    model, _head = _model([])
+    model.fork_ple = torch.nn.ModuleDict({"1": ple})
+    with pytest.raises(ValueError, match="key_proj.weight"):
+        vllm_model_gen.EmmyGenModel.load_weights(model, iter(_ple_stream([key for key in PLE_KEYS if key != "key_proj.weight"])))

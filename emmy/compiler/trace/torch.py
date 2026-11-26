@@ -18,7 +18,7 @@ from emmy.compiler.dtype import get as resolve_dtype
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl, is_elementwise
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
@@ -308,7 +308,7 @@ def _sym_rename_map(exported, dynamic_shapes: dict) -> dict[str, str]:
             if axis >= len(val.shape):
                 continue
             sym_int = val.shape[axis]
-            # ``SymInt`` carries the symbol via ``.node.expr`` (sympy
+            # ``SymInt`` carries the symbol via ``.node.expression`` (sympy
             # ``Symbol``); ``str(symbol)`` is the internal name like ``s0``.
             sym_name = _symint_name(sym_int)
             if sym_name is None:
@@ -325,10 +325,10 @@ def _symint_name(value) -> str | None:
     node = getattr(value, "node", None)
     if node is None:
         return None
-    expr = getattr(node, "expr", None) or node
+    expression = getattr(node, "expression", None) or node
     # Sympy Symbols stringify to their name (``s0``); compound expressions
     # would stringify to e.g. ``2*s0`` — we only support plain symbols today.
-    return str(expr)
+    return str(expression)
 
 
 def _wrap_shape(raw_shape, sym_rename: dict[str, str] | None = None):
@@ -1066,7 +1066,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
                     IndexSource(
                         input_idx=0,
                         coord_map=(Literal(0, "int"),),
-                        select=BinaryExpr("==", placeholder(0), placeholder(1)),
+                        select=BinaryExpression("==", placeholder(0), placeholder(1)),
                     ),
                     IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
                 ),
@@ -1312,9 +1312,11 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         for axis, extent in enumerate(base_shape):
             lo, hi = (start, end) if axis == dim else (0, extent)
             coord = placeholder(axis)
-            select = BinaryExpr("&&", select, BinaryExpr("&&", BinaryExpr(">=", coord, Literal(lo, "int")), coord.lt(Literal(hi, "int"))))
+            select = BinaryExpression(
+                "&&", select, BinaryExpression("&&", BinaryExpression(">=", coord, Literal(lo, "int")), coord.lt(Literal(hi, "int")))
+            )
         src_coords = [
-            TernaryExpr(select, placeholder(a) - Literal(start, "int") if a == dim and start else placeholder(a), Literal(0, "int"))
+            TernaryExpression(select, placeholder(a) - Literal(start, "int") if a == dim and start else placeholder(a), Literal(0, "int"))
             for a in range(len(base_shape))
             if not (a == dim and op_name == "select_scatter")
         ]
@@ -1369,8 +1371,8 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
 
         row = placeholder(len(shape) - 2)
         column = placeholder(len(shape) - 1)
-        boundary = row if diagonal == 0 else BinaryExpr("+", row, Literal(diagonal, "int"))
-        keep = BinaryExpr(">=", column, boundary) if op_name == "triu" else BinaryExpr("<=", column, boundary)
+        boundary = row if diagonal == 0 else BinaryExpression("+", row, Literal(diagonal, "int"))
+        keep = BinaryExpression(">=", column, boundary) if op_name == "triu" else BinaryExpression("<=", column, boundary)
         identity = tuple(placeholder(axis) for axis in range(len(shape)))
         zero_name = f"{name}_zero"
         zero_id = g.add_node(
@@ -1458,12 +1460,14 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         for offset in range(len(raw_pad) // 2):
             axis = len(input_shape) - offset - 1
             coords[axis] = coords[axis] - Literal(raw_pad[2 * offset], "int")
-            inside = BinaryExpr("&&", BinaryExpr(">=", coords[axis], Literal(0, "int")), coords[axis].lt(input_shape[axis].expr))
-            valid = BinaryExpr("&&", valid, inside)
+            inside = BinaryExpression(
+                "&&", BinaryExpression(">=", coords[axis], Literal(0, "int")), coords[axis].lt(input_shape[axis].expression)
+            )
+            valid = BinaryExpression("&&", valid, inside)
         zero = g.add_node(ConstantOp(name=f"{name}_zero", value=0), [], Tensor(f"{name}_zero", (1,), dtype), node_id=f"{name}_zero")
         sources = (IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),)
         if not any(size == 0 for size in input_shape):
-            safe = tuple(TernaryExpr(valid, coord, Literal(0, "int")) for coord in coords)
+            safe = tuple(TernaryExpression(valid, coord, Literal(0, "int")) for coord in coords)
             sources = (IndexSource(input_idx=0, coord_map=safe, select=valid), *sources)
         node_map[name] = g.add_node(
             IndexMapOp(out_shape=shape, sources=sources), [input_ids[0], zero], Tensor(name, shape, dtype), node_id=name
@@ -1757,7 +1761,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         sources = []
         coord_map = tuple(placeholder(axis if axis < dim else axis + 1) for axis in range(output_rank - 1))
         for index in range(len(tensor_ids)):
-            select = BinaryExpr("==", placeholder(dim), Literal(index, "int")) if index < len(tensor_ids) - 1 else None
+            select = BinaryExpression("==", placeholder(dim), Literal(index, "int")) if index < len(tensor_ids) - 1 else None
             sources.append(IndexSource(input_idx=index, coord_map=coord_map, select=select))
         nid = g.add_node(
             op=IndexMapOp(out_shape=shape, sources=tuple(sources)),
@@ -1769,6 +1773,16 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
 
     # --- Squeeze / permute ---
+    # A permute that moves only size-1 axes keeps every element in place, so it is a reshape like a squeeze. Any
+    # other permute moves data: a ``TransposeOp`` over the full permutation, never a reshape of the same bytes.
+    if op_name == "permute":
+        x_shape = tuple(g.nodes[input_ids[0]].output.shape)
+        perm = tuple(axis % len(x_shape) for axis in fx_node.args[1])
+        moved = [axis for axis in perm if not (x_shape[axis].is_static and x_shape[axis].as_static() == 1)]
+        if moved != sorted(moved):
+            nid = g.add_node(op=TransposeOp(axes=perm), inputs=input_ids[:1], output=Tensor(name, shape, dtype), node_id=name)
+            node_map[name] = nid
+            return
     if op_name in ("squeeze", "permute"):
         # ``ReshapeOp.shape`` is ``tuple[int | str, ...]`` — unwrap Dim wrappers
         # so the op-level field carries the raw int / symbolic-name form.
@@ -1830,6 +1844,8 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
             args = fx_node.args
             dim_raw = args[1] if len(args) > 1 else 0
             start_raw = args[2] if len(args) > 2 else None
+            if len(args) > 4 and args[4] != 1:
+                raise NotImplementedError(f"aten.slice requires step 1, got {args[4]!r}")
             dim = dim_raw if isinstance(dim_raw, int) and not isinstance(dim_raw, bool) else None
             start = 0 if start_raw is None else (start_raw if isinstance(start_raw, int) and not isinstance(start_raw, bool) else None)
             nid = g.add_node(
@@ -1843,6 +1859,13 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
 
     # --- Cat ---
     if op_name == "cat":
+        if len(fx_node.args) < 2 and "dim" not in fx_node.kwargs:
+            # ``aten.cat`` leaves out its default axis 0, and the decomposition reads the axis from a trailing constant.
+            axis = g.add_node(
+                op=ConstantOp(name=f"{name}_dim", value=0.0), inputs=[], output=Tensor(f"{name}_dim", (1,), "f32"), node_id=f"{name}_dim"
+            )
+            node_map[f"{name}_dim"] = axis
+            input_ids = [*input_ids, axis]
         nid = g.add_node(
             op=CatOp(),
             inputs=input_ids,
@@ -1878,12 +1901,16 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
 
     # --- Scatter: the destination with rows replaced, written in place ---
-    if op_name in ("index_copy", "index_put"):
-        # ``index_copy(self, dim, index, source)`` passes ``dim`` as an int, captured as a ConstantOp at
-        # input_ids[1] exactly as ``index_select`` does; ``index_put(self, [index], values, accumulate)``
-        # takes one index tensor on axis 0.
+    if op_name in ("index_copy", "index_fill", "index_put", "scatter"):
+        # ``index_copy(self, dim, index, source)``, ``index_fill(self, dim, index, value)`` and
+        # ``scatter(self, dim, index, src)`` pass ``dim`` as an int, captured as a ConstantOp at input_ids[1]
+        # exactly as ``index_select`` does; a scatter's index has the destination's rank, and a fill's value is
+        # one scalar the rows broadcast. ``index_put(self, [index], values, accumulate)`` takes one index tensor
+        # on axis 0; torch 2.15 lowers ``x[idx] = scalar`` to ``index_fill``.
         axis = 0
-        if op_name == "index_copy":
+        if op_name == "scatter" and (getattr(fx_node.target, "_overloadname", None) != "src" or fx_node.kwargs.get("reduce")):
+            raise NotImplementedError("aten.scatter is supported with a tensor source and no reduction")
+        if op_name in ("index_copy", "index_fill", "scatter"):
             axis = fx_node.args[1]
             input_ids = [input_ids[0], *input_ids[2:]]
         else:

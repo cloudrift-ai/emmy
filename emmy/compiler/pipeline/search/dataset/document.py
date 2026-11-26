@@ -20,7 +20,7 @@ import json
 import logging
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -32,7 +32,7 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 logger = logging.getLogger(__name__)
 
 FORMAT = "emmy-dataset"
-VERSION = 6  # Placement groups come from the single-seam walk; earlier exports labelled the composed route's pieces.
+VERSION = 7  # Golden groups hold their labeled negatives and measured rows, and the dataset its stale goldens.
 MANIFEST = "manifest.json"
 
 
@@ -51,14 +51,16 @@ class Dataset:
     """The exported training data: the golden groups (each a candidate pool with its verified rows marked and the
     pools it folded), the measured groups (each a set of benched rows labelled with their microseconds), the golden
     rows that landed in no group with the reason, the rows the admission rule dropped by reason (``golden`` and
-    ``measured``), and the provenance — the DB the export read, the sources its rows came from, the pool sample and
-    seed, the featurizer version and the compiler commit."""
+    ``measured``), the provenance — the DB the export read, the sources its rows came from, the pool sample and
+    seed, the featurizer version and the compiler commit — and the stale goldens: each candidate measured faster than
+    every golden row of its pool, as ``(gpu, pool name, candidate µs, golden µs)``."""
 
     golden: list[GoldenGroup]
     measured: list[MeasuredGroup]
     skipped: list[tuple[str, str, str]]
     dropped: dict[str, dict[str, int]]
     provenance: dict
+    stale: list[tuple[str, str, float, float]] = field(default_factory=list)
 
     def dump(self, path: str | Path) -> Path:
         """Write the dataset directory at ``path``: the matrices first, then the manifest, so a directory without a
@@ -83,6 +85,7 @@ class Dataset:
             "measured": measured,
             "skipped": [list(entry) for entry in self.skipped],
             "dropped": self.dropped,
+            "stale": [list(entry) for entry in self.stale],
         }
         (out / MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n")
         return out
@@ -113,6 +116,7 @@ class Dataset:
             [tuple(entry) for entry in manifest["skipped"]],
             manifest["dropped"],
             provenance,
+            [tuple(entry) for entry in manifest["stale"]],
         )
 
 
@@ -125,8 +129,8 @@ def _is_dataset(manifest: Path) -> bool:
 
 def _write_group(out: Path, group: Group, matrix: str, index: dict[str, int], kernels: list[dict]) -> dict:
     """``group``'s matrix written at ``matrix`` under ``out`` and its manifest entry: the fields every group has, then
-    a golden group's verified rows and the pools it folded (each pool's kernel interned into ``kernels``), or a
-    measured group's microseconds and regime."""
+    a golden group's verified rows, labeled negatives, measured rows and the pools it folded (each pool's kernel
+    interned into ``kernels``), or a measured group's microseconds and regime."""
     (out / matrix).parent.mkdir(parents=True, exist_ok=True)
     np.save(out / matrix, group.feats)
     wire = {
@@ -142,9 +146,10 @@ def _write_group(out: Path, group: Group, matrix: str, index: dict[str, int], ke
     }
     if isinstance(group, GoldenGroup):
         wire["golden_ids"] = list(group.golden_ids)
+        wire["negative_ids"] = list(group.negative_ids)
+        wire["measured_ids"] = list(group.measured_ids)
         wire["pools"] = [_pool_wire(pool, index, kernels) for pool in group.pools]
     elif isinstance(group, MeasuredGroup):
-        wire["h_opt"] = group.h_opt
         wire["latency_us"] = group.latency_us.tolist()
     return wire
 
@@ -178,5 +183,11 @@ def _read_group(base: Path, wire: dict, kernels: list[tuple[dict, str]]) -> Grou
             read = GoldenPool.from_wire({**pool, "kernel": definition})
             read.kernel.keyed(identity)  # the manifest's own: a reader names the pool without lifting its kernel
             pools.append(read)
-        return GoldenGroup(*common, golden_ids=tuple(wire["golden_ids"]), pools=tuple(pools))
-    return MeasuredGroup(*common, latency_us=np.asarray(wire["latency_us"], dtype=float), h_opt=wire["h_opt"])
+        return GoldenGroup(
+            *common,
+            golden_ids=tuple(wire["golden_ids"]),
+            negative_ids=tuple(wire["negative_ids"]),
+            measured_ids=tuple(wire["measured_ids"]),
+            pools=tuple(pools),
+        )
+    return MeasuredGroup(*common, latency_us=np.asarray(wire["latency_us"], dtype=float))

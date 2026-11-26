@@ -12,9 +12,6 @@ Design contract:
   with ``env=dict(os.environ)``, so anything written here propagates to them;
   tests monkeypatch ``os.environ`` directly, so getters must read it **live**.
 - Getters read ``os.environ`` on every call (never cache at import).
-- The one setter, :func:`set_nvcc_flags`, centralizes the ``--flag > env >
-  default`` override that used to live in the CLI layer, so every callsite
-  (CLI, programmatic, tests) shares it.
 
 Out of scope: provider/secret vars (``HF_TOKEN``, ``CLOUDRIFT_*``, ``GCP_*``,
 ``NO_COLOR``) — those stay at their use sites, and ``emmy/redact.py`` owns
@@ -33,18 +30,15 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
-FREEZE_DIR = "EMMY_FREEZE_DIR"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 GOLDEN_FILE = "EMMY_GOLDEN_FILE"
 STRICT_EVIDENCE = "EMMY_STRICT_EVIDENCE"
-NVCC_FLAGS = "EMMY_NVCC_FLAGS"
 DEBUG = "EMMY_DEBUG"
 DUMP_DIR = "EMMY_DUMP_DIR"
 KNOBS = "EMMY_KNOBS"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
-NO_NVCC = "EMMY_NO_NVCC"
 KERNEL_TIMEOUT_MS = "EMMY_KERNEL_TIMEOUT_MS"
 FIRST_ITER_TIMEOUT_MS = "EMMY_FIRST_ITER_TIMEOUT_MS"
 BENCH_COMPILE_TIMEOUT_S = "EMMY_BENCH_COMPILE_TIMEOUT_S"
@@ -59,10 +53,10 @@ GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
-GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
+GEN_EMBED_GPU = "EMMY_GEN_EMBED_GPU"
+GEN_VISION_GPU = "EMMY_GEN_VISION_GPU"
 GEN_EXPERTS_GPU = "EMMY_GEN_EXPERTS_GPU"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
-READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 WORKERS = "EMMY_WORKERS"
 POOL_DRAW = "EMMY_POOL_DRAW"
@@ -172,24 +166,13 @@ def tune_db_path() -> Path:
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
 
 
-def freeze_dir(default: Path | None) -> Path | None:
-    """The directory a tune writes the freeze of its run into, ``EMMY_FREEZE_DIR``: a path; ``""`` — set but
-    empty — for none, which the test suite sets as it points ``EMMY_TUNE_DB`` at a fresh DB; unset → ``default``,
-    the repository freeze when the checkout holds one (``search.db.freeze.run_freeze_dir``)."""
-    raw = os.environ.get(FREEZE_DIR)
-    if raw is None:
-        return default
-    return Path(raw).expanduser() if raw else None
-
-
 def golden_scope() -> str | None:
     """The golden evidence scope ``EMMY_GOLDEN_FILE`` names: ``None`` when unset (the repository's
     per-card goldens), paths joined by ``os.pathsep`` (those files' measured rows instead — a model
     golden beside its card's hardware golden), or ``""`` — set but empty — for
-    NO golden evidence at all. The empty form mirrors ``EMMY_NVCC_FLAGS=``: ``make test`` sets it,
-    because the correctness lane never asks how fast a pick is and importing a card's goldens is
-    work every worker process would repeat. Set by ``emmy serve --golden PATH`` for the vLLM child
-    it spawns; ``run`` / ``compile`` scope the same evidence in-process through
+    NO golden evidence at all. ``make test`` sets the empty form, because the suite never asks how
+    fast a pick is and importing a card's goldens is work every worker process would repeat. Set by
+    ``emmy serve --golden PATH`` for the vLLM child it spawns; ``run`` / ``compile`` scope the same evidence in-process through
     ``search.golden.evidence_scope``, which takes precedence."""
     return os.environ.get(GOLDEN_FILE)
 
@@ -248,55 +231,9 @@ def offline_path() -> Path | None:
     return Path(override) if override else None
 
 
-def nvcc_flags() -> str:
-    """Extra nvcc flags for this compile (``EMMY_NVCC_FLAGS``, ``""`` if unset).
-
-    Read fresh each call so a per-invocation override (set via
-    :func:`set_nvcc_flags`) and the bench-worker subprocess (which inherits the
-    env) see the same value, and so the flags fold into cache keys."""
-    return _str(NVCC_FLAGS)
-
-
-@contextmanager
-def nvcc_flags_override(flags: str | None):
-    """Temporarily swap ``EMMY_NVCC_FLAGS`` for one compile (e.g. re-benching
-    a tune winner at ``-Xcicc -O3``). ``None`` is a no-op. Since ``nvcc_flags`` is
-    read fresh and folds into the cubin cache key, this transparently selects the
-    right (and separately-cached) cubin. Applied in whichever process compiles —
-    the bench worker reads it off the request and wraps its own compile."""
-    if flags is None:
-        yield
-        return
-    prev = os.environ.get(NVCC_FLAGS)
-    os.environ[NVCC_FLAGS] = flags
-    try:
-        yield
-    finally:
-        if prev is None:
-            os.environ.pop(NVCC_FLAGS, None)
-        else:
-            os.environ[NVCC_FLAGS] = prev
-
-
 def debug_enabled() -> bool:
     """``EMMY_DEBUG`` — per-launch debug dump path in the CUDA backend."""
     return _bool(DEBUG)
-
-
-def readable() -> bool:
-    """``EMMY_READABLE`` — batch-enable the readability-only codegen policies (currently ``LOOPIFY``),
-    which re-spell the emitted CUDA for legible ``--ir`` listings but are SASS-identical. Default off;
-    the ``compile`` CLI turns it on (so inspection output is readable) while ``tune`` / ``run`` /
-    ``bench`` leave it off to keep production codegen — and compiler work — minimal."""
-    return _bool(READABLE)
-
-
-def set_readable(on: bool, *, overwrite: bool = False) -> None:
-    """Set ``EMMY_READABLE`` in ``os.environ`` so the pipeline (and bench subprocesses) see it. With
-    ``overwrite=False`` (the default), an explicit user setting wins — the ``compile`` CLI calls this
-    to default readability ON without clobbering ``EMMY_READABLE=0``."""
-    if overwrite or READABLE not in os.environ:
-        os.environ[READABLE] = "1" if on else "0"
 
 
 def dump_dir() -> Path | None:
@@ -373,34 +310,86 @@ def gen_chunk_capture(default: int = 1) -> int:
     return int_env(GEN_CHUNK_CAPTURE, default)
 
 
-def gen_embed_host(default: int = 0) -> int:
-    """``EMMY_GEN_EMBED_HOST`` — keep the generative runner's token-embedding table in
-    **mapped host memory** instead of device memory (default 0 = device-resident).
-
-    The gather kernel reads the rows straight over PCIe (the allocation is
-    ``cudaHostAlloc``-mapped, so its host address IS a valid device address), which keeps the
-    lookup a plain device-side gather — no host round trip, so the whole-step decode capture
-    still records it. The table then costs zero VRAM, and on a card the weights already fill
-    that is KV-cache budget: a vocab-sized fp16 table is over a GiB (GLM-4.5-Air: 151552 x 4096
-    = 1.156 GiB, and the checkpoint is untied so nothing else shares it).
-
-    The price is PCIe latency on every embedded token — about 8 KiB per token, so the per-step
-    cost scales with the step's width. Leave it off on any deployment with device headroom; a
-    device-resident gather is roughly two orders of magnitude faster. Ignored when a tied
-    checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
-    nothing to share. See `serving/gen_runner.py`."""
-    return int_env(GEN_EMBED_HOST, default)
-
-
 def gen_experts_gpu() -> int | None:
-    """``EMMY_GEN_EXPERTS_GPU`` — how many routed experts per MoE layer the generative runner holds in
-    device memory at once (default: all). Below the layer's expert count the experts are paged: every
-    expert lives in pinned host memory and the device holds that many pages as a cache of the most
-    recently routed ones, refilled by the paging program ahead of each step's expert launches, with the
-    same programs, the same schedules and the same tokens. A budget for host-resident experts. See
-    `serving/ARCHITECTURE.md`."""
+    """``EMMY_GEN_EXPERTS_GPU`` — how many routed experts per MoE layer the generative runner, or a
+    native export, holds in device memory at once (default: all). Below the layer's expert count the
+    experts are paged (:func:`paged_split`): most of the budget is resident experts that never leave the
+    device, the rest are slots the other experts, in pinned host memory, move through ahead of each step's
+    expert launches, with the same programs, the same schedules and the same tokens. See
+    `serving/ARCHITECTURE.md` and `serving/native/ARCHITECTURE.md`."""
     raw = _str(GEN_EXPERTS_GPU)
-    return int(raw) if raw else None
+    budget = int(raw) if raw else None
+    if budget is not None and budget < 1:
+        raise ValueError(f"{GEN_EXPERTS_GPU} must hold at least one expert, got {budget}")
+    return budget
+
+
+@contextmanager
+def gen_budgets_override(*, experts: int | None, embed: int | None):
+    """Temporarily set the device budgets ``EMMY_GEN_EXPERTS_GPU`` and ``EMMY_GEN_EMBED_GPU`` to ``experts`` and
+    ``embed``; ``None`` unsets one, so the device holds every expert or the whole table."""
+    budgets = {GEN_EXPERTS_GPU: experts, GEN_EMBED_GPU: embed}
+    prev = {name: os.environ.pop(name, None) for name in budgets}
+    os.environ.update({name: str(value) for name, value in budgets.items() if value is not None})
+    try:
+        yield
+    finally:
+        for name, value in prev.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
+
+
+def paged_split(budget: int | None, pages: int, listed: int) -> tuple[int, int] | None:
+    """How a paged buffer of ``pages`` pages holds the ``budget`` pages a device budget gives it, as ``(slots,
+    resident)``, or ``None`` when the budget holds every page and nothing is paged. The first ``resident`` pages stay
+    on the device for good, with no host copy; the rest live in pinned host memory and move through ``slots`` device
+    slots. The slots are as many as one launch of the decode step lists at most (``listed``), so no decode launch
+    reads a page in place over the link; a wider launch reads the misses past them in place. The rest of the budget
+    is resident, so the host holds only the pages off the device and the budget still counts the pages on it."""
+    if budget is None or budget >= pages:
+        return None
+    slots = min(budget, listed)
+    return slots, budget - slots
+
+
+def gen_expert_slots(experts: int, picks: int) -> tuple[int, int] | None:
+    """The ``(slots, resident)`` split (:func:`paged_split`) a MoE layer of ``experts`` routed experts takes under
+    :func:`gen_experts_gpu`, or ``None`` when the device holds every one. ``picks`` is the most one decode launch lists:
+    one token's, or a verify step's rows' together."""
+    return paged_split(gen_experts_gpu(), experts, picks)
+
+
+def gen_embed_slots(pages: int) -> tuple[int, int] | None:
+    """``EMMY_GEN_EMBED_GPU`` — how many pages of the generative runner's token-embedding table the device holds
+    (default: all), as the ``(slots, resident)`` split (:func:`paged_split`) a table of ``pages`` pages takes, or
+    ``None`` when the device holds it whole. Below the page count the table is paged: it lives in pinned host memory,
+    the runtime pager holds that many pages on the device as a cache of the most recently gathered ones, and one
+    compiled program gathers each step's rows through the page table. The gather takes any number of rows, so one
+    launch may list every page, every page of the budget is a slot and none is resident. Zero holds none: every row
+    is read in place over the link, which frees the whole table for the KV cache. A tied checkpoint's table is the
+    output head's and stays with it. See `serving/ARCHITECTURE.md`."""
+    raw = _str(GEN_EMBED_GPU)
+    budget = int(raw) if raw else None
+    if budget is not None and budget < 0:
+        raise ValueError(f"{GEN_EMBED_GPU} is a page count, got {budget}")
+    return paged_split(budget, pages, pages)
+
+
+def gen_vision_slots(blocks: int) -> tuple[int, int] | None:
+    """``EMMY_GEN_VISION_GPU`` — how many blocks of a compiled vision tower the device holds (default: all), as the
+    ``(slots, resident)`` split (:func:`paged_split`) a tower of ``blocks`` blocks pages its projection weights into,
+    or ``None`` when the device holds it whole. Below the block count each block's projection weights are one page of
+    the runtime pager; an image prefill lists one block's pages at a time, so one block of the budget is the slot an
+    image prefill moves each host block into right before it runs, one read of those blocks over the link per image,
+    and the rest are the first blocks, resident. A text request never touches them. Zero holds none: every block
+    reads its weights in place over the link, many times over, which costs a second or more per image. See
+    `serving/ARCHITECTURE.md`."""
+    raw = _str(GEN_VISION_GPU)
+    budget = int(raw) if raw else None
+    if budget is not None and budget < 0:
+        raise ValueError(f"{GEN_VISION_GPU} is a block count, got {budget}")
+    return paged_split(budget, blocks, 1)
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:
@@ -450,7 +439,7 @@ def gen_decode_bucket(default: int = 16) -> int:
 def bench_backends_raw(cli_value: str | None, *, default: str = "eager,emmy") -> str:
     """Raw comma-separated bench-backend selection. Precedence: ``cli_value`` >
     ``EMMY_BENCH_BACKENDS`` > ``default`` (normally ``"eager,emmy"``). Backend-key
-    normalization stays at the call site (``run.py:_resolve_backends``)."""
+    normalization stays at the call site (``backend/cuda/compare.resolve_backends``)."""
     return cli_value or os.environ.get(BENCH_BACKENDS) or default
 
 
@@ -473,11 +462,6 @@ def pack_dir() -> Path | None:
     return Path(override) if override else None
 
 
-def nvcc_disabled() -> bool:
-    """``EMMY_NO_NVCC`` — declare nvcc unavailable (every kernel compile then fails loudly)."""
-    return _bool(NO_NVCC)
-
-
 def pool_draw() -> int:
     """``EMMY_POOL_DRAW`` — the complete rows a greedy compile draws from a schedule pool too large to walk
     (default 8192). Seeded uniform descents cover every level's values, unlike an emission-order prefix; a descent
@@ -493,9 +477,10 @@ def set_workers(count: int) -> None:
 
 
 def workers() -> int:
-    """``EMMY_WORKERS`` — the processes Emmy's CPU-parallel work runs on: a greedy compile's cold-pool draw and
-    ``emmy db export``'s pool enumeration and ``emmy eval prior``'s schedule reproduction (default: one per CPU this
-    process may use; ``1`` runs in this process).
+    """``EMMY_WORKERS`` — the processes Emmy's CPU-parallel work runs on: a greedy compile's cold-pool draw,
+    the row compiles of a pinned bench (``run --bench --ab`` / ``--tune``), ``emmy db export``'s pools and
+    ``emmy eval prior``'s reproduction (default: one per CPU this process may use;
+    ``1`` runs in this process).
     Their results are the same at any count."""
     default = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
     return max(1, int_env(WORKERS, default))
@@ -509,15 +494,23 @@ def kernel_timeout_ms() -> float:
     return float(raw) if raw else 2000.0
 
 
+# What a program's first launch may spend beyond its kernel's own run: lazy SASS upload, the smem-carveout
+# reconfig, allocator first-touch (the rationale lives at the backend call site). Each is a one-off setup cost
+# of milliseconds that does not grow with the kernel's run time, so the grace is a fixed term, not a multiple of
+# the steady deadline; a minute is the headroom the 2 s default always had (30x it), kept so a default run sees no
+# new false hang.
+FIRST_LAUNCH_GRACE_MS = 60_000.0
+
+
 def first_iter_timeout_ms() -> float:
     """``EMMY_FIRST_ITER_TIMEOUT_MS`` — the watchdog deadline for a program's FIRST iteration,
-    which may legitimately stall past the steady deadline without any kernel being hung (lazy
-    SASS upload, the smem-carveout reconfig, allocator first-touch — the rationale lives at the
-    backend call site). Default 30x :func:`kernel_timeout_ms`, the grace it was hard-coupled at
-    before the knob existed: at the 30 s steady watchdog a serving twin needs, that coupling
-    priced every hang at 900 s. Set it alone to bound what a hang costs without touching the
-    steady deadline."""
-    return float_env(FIRST_ITER_TIMEOUT_MS, 30.0 * kernel_timeout_ms())
+    which may legitimately stall past the steady deadline without any kernel being hung. Default
+    :func:`kernel_timeout_ms` plus :data:`FIRST_LAUNCH_GRACE_MS`: 62 s at the 2 s default, 80 s at
+    the 20 s a slow program's kernels need. The 30x coupling it replaced priced every hang at
+    600 s there (900 s at a serving twin's 30 s), holding the GPU lock for it, and its wall kill
+    pre-empted the watchdog that names the hung kernel. Set it alone to bound what a hang costs
+    without touching the steady deadline."""
+    return float_env(FIRST_ITER_TIMEOUT_MS, kernel_timeout_ms() + FIRST_LAUNCH_GRACE_MS)
 
 
 def bench_compile_timeout_s(default: float = 30.0) -> float:
@@ -552,23 +545,3 @@ def ncu_child() -> bool:
 # (``025_swizzle_blocks.py``) so it shows up in ``emmy knobs`` and reads
 # through the descriptor's env path. Env access still routes through this
 # module's ``knob_raw`` / ``int_env`` primitives.
-
-
-# --- Setters (write os.environ so subprocesses inherit) --------------------
-
-
-def set_nvcc_flags(cli_value: str | None, default: str) -> str:
-    """Resolve and publish the effective extra nvcc flags via
-    ``EMMY_NVCC_FLAGS`` (the carrier the cubin compiler, the bench-worker
-    subprocess, and ``Context.structural_key`` all read).
-
-    Precedence: ``cli_value`` (a ``--nvcc-flags`` override, when not ``None``) >
-    a pre-set env var > ``default`` (per-command policy: ``""`` for compile/run,
-    ``""`` everywhere today — tune measures in the same deployable regime it deploys into).
-    Must run before any compile/bench. Returns the
-    effective string."""
-    if cli_value is not None:
-        os.environ[NVCC_FLAGS] = cli_value
-    elif NVCC_FLAGS not in os.environ:
-        os.environ[NVCC_FLAGS] = default
-    return os.environ.get(NVCC_FLAGS, "")

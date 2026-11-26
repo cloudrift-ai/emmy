@@ -1,8 +1,13 @@
 """Recipe dataclass types."""
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
+
+#: The seconds a deployed request has to answer before Relay abandons it: Relay's default wait for the backend's
+#: response headers, kept under the fronting nginx's 300 s. A non-streaming response sends its headers only after the
+#: whole generation, so onboarding lowers a recipe's context length until its full-context request fits.
+MAX_FULL_CONTEXT_LATENCY_S = 290
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,17 +51,39 @@ class SglangConfig:
 
 
 @dataclass
+class NativeConfig:
+    """Emmy's native server (``emmy-server``) over a pack prepared from the recipe golden.
+
+    ``image`` carries the server, the runtime worker and the pack, so a boot compiles nothing. The pack is prepared
+    from ``golden`` (recipe-relative) alone, under strict evidence, with ``extra_args`` and ``extra_env``: ``emmy serve
+    --runner generate --native``'s flags (the KV cache dtype, the page size, images, the drafter) and the widths and
+    pager budgets as ``EMMY_GEN_*``. The image bake reads them; the server does not."""
+
+    image: str = ""
+    golden: str = ""
+    extra_args: str = ""
+    extra_env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class LLMConfig:
     """Engine-agnostic LLM serving configuration."""
 
     context_length: int | None = None
     max_concurrent_requests: int | None = None
+    # A measurement, not a setting: the full-context latency of this deployment entry, in whole seconds. The
+    # slowest of three non-streaming completion requests sent one at a time, each filling the context (a prompt
+    # of context_length - 512 tokens, 512 generated tokens, EOS ignored). At most MAX_FULL_CONTEXT_LATENCY_S:
+    # onboarding lowers context_length until the request fits. The catalog exports it per deployment as the
+    # reference for Relay's non-streaming request timeout; unset until an onboarding run measures it.
+    full_context_latency_s: int | None = None
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     data_parallel_size: int = 1
     gpu_memory_utilization: float = 0.9
     vllm: VllmConfig | None = None
     sglang: SglangConfig | None = None
+    native: NativeConfig | None = None
     docker_options: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -66,7 +93,9 @@ class LLMConfig:
 
     @property
     def engine_name(self) -> str:
-        """Active engine name: 'vllm' or 'sglang'."""
+        """Active engine name: 'native', 'sglang' or 'vllm'."""
+        if self.native is not None:
+            return "native"
         if self.sglang is not None:
             return "sglang"
         return "vllm"
@@ -74,6 +103,8 @@ class LLMConfig:
     @property
     def image(self) -> str:
         """Docker image for the active engine."""
+        if self.native is not None:
+            return self.native.image
         if self.sglang is not None:
             return self.sglang.image
         if self.vllm is not None:
@@ -85,8 +116,11 @@ class LLMConfig:
         """Docker entrypoint override for the active engine.
 
         vLLM normally uses the image entrypoint but may override it for a same-image
-        control. SGLang images do not provide one, so its launcher is explicit.
+        control. SGLang images do not provide one, so its launcher is explicit. A native image's
+        entrypoint is its server over the baked pack.
         """
+        if self.native is not None:
+            return None
         if self.sglang is not None:
             return "python3 -m sglang.launch_server"
         if self.vllm is not None:
@@ -96,6 +130,8 @@ class LLMConfig:
     @property
     def extra_args(self) -> str:
         """Extra CLI flags for the active engine."""
+        if self.native is not None:
+            return self.native.extra_args
         if self.sglang is not None:
             return self.sglang.extra_args
         if self.vllm is not None:
@@ -105,6 +141,8 @@ class LLMConfig:
     @property
     def extra_env(self) -> dict[str, str]:
         """Extra environment variables for the active engine."""
+        if self.native is not None:
+            return self.native.extra_env
         if self.sglang is not None:
             return self.sglang.extra_env
         if self.vllm is not None:
@@ -167,7 +205,15 @@ class BenchmarkConfig:
     ``transcription_dataset`` replaces the random text prompts with the clips of a Hugging Face speech
     dataset the client reads (``openslr/librispeech_asr``), sent to ``/v1/audio/transcriptions``;
     ``transcription_subset`` / ``transcription_split`` name its configuration and split. The random
-    lengths and ``ignore_eos`` do not apply: each clip decides its own input and transcript length."""
+    lengths and ``ignore_eos`` do not apply: each clip decides its own input and transcript length.
+
+    ``client_image`` names the vLLM image that runs the bench client. Unset, a vLLM recipe's client runs in its
+    serving image and any other engine's in the default vLLM image; naming one gives every lane of a cross-engine
+    comparison the same client, and one whose tokenizer the default client cannot load a client that can.
+
+    ``session_request_timeout_s`` bounds each request of the session client, in seconds (unset: one hour); a request
+    that runs past it fails the run. The full-context latency lane sets it to the time a deployed request has to
+    answer, so a context too long for the platform fails at the first request instead of running for an hour."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -182,6 +228,12 @@ class BenchmarkConfig:
     transcription_dataset: str | None = None
     transcription_subset: str | None = None
     transcription_split: str | None = None
+    client_image: str | None = None
+    session_calls: int = 0
+    session_concurrencies: list[int] = field(default_factory=list)
+    session_new_tokens: int = 512
+    session_affinity: bool = True
+    session_request_timeout_s: int | None = None
 
 
 @dataclass
@@ -271,54 +323,30 @@ class Recipe:
 
         sglang_dict = llm_dict.get("sglang")
         sglang = SglangConfig(**sglang_dict) if sglang_dict is not None else None
+        native_dict = llm_dict.get("native")
+        native = NativeConfig(**native_dict) if native_dict is not None else None
 
         llm = LLMConfig(
             context_length=llm_dict.get("context_length"),
             max_concurrent_requests=llm_dict.get("max_concurrent_requests"),
+            full_context_latency_s=llm_dict.get("full_context_latency_s"),
             tensor_parallel_size=llm_dict.get("tensor_parallel_size", 1),
             pipeline_parallel_size=llm_dict.get("pipeline_parallel_size", 1),
             data_parallel_size=llm_dict.get("data_parallel_size", 1),
             gpu_memory_utilization=llm_dict.get("gpu_memory_utilization", 0.9),
             vllm=vllm,
             sglang=sglang,
+            native=native,
             docker_options=llm_dict.get("docker_options", {}),
         )
 
         bench_dict = d.get("benchmark", {})
-        workload_fields = {
-            "max_concurrency",
-            "num_prompts",
-            "random_input_len",
-            "random_prefix_len",
-            "random_output_len",
-            "seed",
-            "temperature",
-            "ignore_eos",
-            "num_warmups",
-            "repeats",
-            "transcription_dataset",
-            "transcription_subset",
-            "transcription_split",
-        }
+        workload_fields = {item.name for item in fields(BenchmarkConfig)}
         unsupported_benchmark_fields = set(bench_dict) - workload_fields
         if unsupported_benchmark_fields:
             names = ", ".join(sorted(unsupported_benchmark_fields))
             raise ValueError(f"unsupported benchmark fields: {names}; benchmark only describes workload generation")
-        benchmark = BenchmarkConfig(
-            max_concurrency=bench_dict.get("max_concurrency", 128),
-            num_prompts=bench_dict.get("num_prompts", 256),
-            random_input_len=bench_dict.get("random_input_len", 8000),
-            random_prefix_len=bench_dict.get("random_prefix_len", 0),
-            random_output_len=bench_dict.get("random_output_len", 8000),
-            seed=bench_dict.get("seed"),
-            temperature=bench_dict.get("temperature"),
-            ignore_eos=bench_dict.get("ignore_eos", False),
-            num_warmups=bench_dict.get("num_warmups", 0),
-            repeats=bench_dict.get("repeats", 1),
-            transcription_dataset=bench_dict.get("transcription_dataset"),
-            transcription_subset=bench_dict.get("transcription_subset"),
-            transcription_split=bench_dict.get("transcription_split"),
-        )
+        benchmark = BenchmarkConfig(**bench_dict)
 
         deploy_dict = d.get("deploy", {})
         deploy = DeployConfig(

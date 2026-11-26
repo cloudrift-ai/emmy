@@ -1,7 +1,7 @@
-"""CUDA backend: ``Graph`` → lowered ``Graph[CudaOp]`` → nvcc → GPU.
+"""CUDA backend: ``Graph`` → lowered ``Graph[CudaOp]`` → ptxas → GPU.
 
 The compiled artifact is the lowered ``Graph`` itself — every compute
-node carries a rendered CUDA kernel source plus its launch geometry.
+node carries its kernel's PTX plus its launch geometry.
 """
 
 from __future__ import annotations
@@ -94,10 +94,6 @@ class CudaBackend(Backend):
             await self._async_worker_obj.aclose()
             self._async_worker_obj = None
 
-    async def warm_async_worker(self, *, wall_timeout_s: float = 60.0) -> None:
-        """Initialize the isolated worker before candidate timing begins."""
-        await self._async_worker().warmup(wall_timeout_s=wall_timeout_s)
-
     def compile(self, graph: Graph, *, ctx: Context | None = None) -> Graph:
         """Lower ``Graph`` → ``Graph[LoopOp]`` → ``Graph[TileOp]`` → ``Graph[CudaOp]``."""
         db = None
@@ -136,14 +132,16 @@ class CudaBackend(Backend):
             time_ms = result.time_ms
         # Symbolic output shapes bind from the supplied input array shapes:
         # each atomic symbolic input dim records its runtime size. Output dims
-        # (possibly composite Dim exprs) then resolve via ``expr.eval(sym_env)``
-        # — one path covers Literal / Var / BinaryExpr uniformly.
+        # (possibly composite Dim expressions) then resolve via ``expression.eval(sym_env)``
+        # — one path covers Literal / Var / BinaryExpression uniformly.
         sym_env = compiled.symbolic_env(input_data)
 
         def shaped(values: dict) -> dict[str, np.ndarray]:
             buffers = {name: compiled.buffer(name) for name in values}
             return {
-                name: np.asarray(vals, dtype=buffers[name].dtype.np).reshape(tuple(int(d.expr.eval(sym_env)) for d in buffers[name].shape))
+                name: np.asarray(vals, dtype=buffers[name].dtype.np).reshape(
+                    tuple(int(d.expression.eval(sym_env)) for d in buffers[name].shape)
+                )
                 for name, vals in values.items()
             }
 
@@ -156,38 +154,26 @@ class CudaBackend(Backend):
         warmup: int = 5,
         num_iters: int | str = 20,
         on_iter=None,
-        nvcc_flags: str | None = None,
         capture_graphs: bool = True,
         input_data: dict | None = None,
     ) -> BenchmarkResult:
         """The in-process benchmarking entry point for ``CudaBackend`` (``emmy run --bench``).
 
-        ``nvcc_flags`` re-points this one bench's compile at a different opt level without
-        disturbing the ambient flags. ``input_data`` times the program on those inputs (the
+        ``input_data`` times the program on those inputs (the
         run's reference inputs) instead of the synthetic fill. Benches in-process via
         :func:`benchmark_program`: ``on_iter`` interleaves peer torch closures, which share
         torch state with this process and can't cross the subprocess boundary. The blocking
         bench runs directly on the event loop (it is the only work in flight), so ``async``
         here is just the uniform call shape."""
-        with config.nvcc_flags_override(nvcc_flags):
-            result = benchmark_program(
-                compiled,
-                input_data=input_data,
-                warmup=warmup,
-                num_iters=num_iters,
-                on_iter=on_iter,
-                compile_timeout_s=self.bench_compile_timeout_s,
-                run_timeout_s=self.bench_run_timeout_s,
-                capture_graphs=capture_graphs,
-            )
-        return BenchmarkResult(
-            time_ms=result.time_ms,
-            min_ms=result.min_ms,
-            num_launches=result.num_launches,
-            per_launch=result.per_launch,
-            captured=result.captured,
-            e2e_ms=result.e2e_ms,
-            e2e_min_ms=result.e2e_min_ms,
+        return benchmark_program(
+            compiled,
+            input_data=input_data,
+            warmup=warmup,
+            num_iters=num_iters,
+            on_iter=on_iter,
+            compile_timeout_s=self.bench_compile_timeout_s,
+            run_timeout_s=self.bench_run_timeout_s,
+            capture_graphs=capture_graphs,
         )
 
     async def bench_pinned_async(
@@ -205,13 +191,14 @@ class CudaBackend(Backend):
         stream. ``run_inputs`` adds one pre-bench execution on those inputs, returning the
         outputs (the wrong-answer gate's measurement side); ``run_inputs_key`` (session-unique)
         makes the inputs cross the pipe once per child instead of per row. The wall cap covers
-        the in-child compile + run budgets plus spawn / transport headroom."""
+        the in-child compile + run budgets, the first-iteration watchdog deadline (so a hung
+        kernel is named by the watchdog before the kill) and spawn / transport headroom."""
         from emmy.compiler.backend.cuda.program import benchmark_pinned_isolated_async  # noqa: PLC0415
 
         return await benchmark_pinned_isolated_async(
             compiled,
             worker=self._async_worker(),
-            wall_timeout_s=self.bench_compile_timeout_s + self.bench_run_timeout_s + 60.0,
+            wall_timeout_s=self.bench_compile_timeout_s + self.bench_run_timeout_s + config.first_iter_timeout_ms() / 1000.0 + 60.0,
             run_inputs=run_inputs,
             run_inputs_key=run_inputs_key,
             warmup=warmup,

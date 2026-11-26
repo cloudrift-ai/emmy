@@ -49,7 +49,11 @@ Concretely:
   prior's vocabulary, and a fix for a slow configuration is new evidence — a record run and a refreshed golden file —
   never a new compile-time condition.
 - A rewrite motivated by performance is a fork with the un-rewritten form as a sibling, so evidence can decide.
-  Hiding a sibling is forbidden, and so is arranging the siblings so one of them wins by default.
+  Hiding a sibling is forbidden, and so is arranging the siblings so one of them wins by default. A rewrite that is
+  exact on every input and removes work without adding any decides nothing and runs always: index simplification,
+  common subexpression elimination, dead code removal, merging congruent states, strength reduction. One that trades
+  registers, code size or rounding is a fork: moving a value out of a loop (it lengthens a live range), unrolling,
+  prefetching, an approximate instruction, contraction into an FMA.
 - A misdeploy is debugged as an evidence problem: a missing or stale golden row, an unfitted prior, or a gap in the
   feature/key vocabulary that makes two different candidates indistinguishable. Fix the evidence path; do not fence
   the compiler.
@@ -61,12 +65,13 @@ deleted gate is a template for its return, so it is deleted with the code rather
 ## A knob lives in its pass
 
 The transform a knob, a pin or an evidence row decides lives in the pass that reads that decision, and nowhere else.
-Body normalization (`ir/stmt/normalize.py`) is the opposite kind of code: the canonical form every Loop IR body
-takes at construction and every identity digest takes, which can answer to nothing the pipeline chooses, and `ir/`
-imports no pipeline module. A pass may call a normalization step as a mechanical helper; moving a pass's transform into the normalization
-module so another pass can reuse it inverts that direction and leaves a transform no normalization step runs
-(`040_split_invariant_divides` owns the loop-invariant hoist it applies to a kernel body). The IR `ARCHITECTURE.md` owns the
-normalization contract; `tests/architecture/test_layering.py` guards both sides.
+Body normalization (the `emmy-ir` crate's `normalize` module, `normalize_body`) is the opposite kind of code: the
+canonical form every Loop IR body takes at construction and every identity digest takes, which can answer to nothing
+the pipeline chooses, and `ir/` imports no pipeline module. A pass may call a normalization step as a mechanical
+helper; moving a pass's transform into the normalization module so another pass can reuse it inverts that direction
+and leaves a transform no normalization step runs (`040_split_invariant_divides` owns the loop-invariant hoist it
+applies to a kernel body). The IR `ARCHITECTURE.md` owns the normalization contract;
+`tests/architecture/test_layering.py` guards both sides.
 
 ## Quantization is not a concept past the decomposition band
 
@@ -84,18 +89,25 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`010_lift` reads a Loop IR carried state as a fold that carries it, and the classic schedule's fork realizes that
-fold as a serial kernel (`states_as_buffers`): the loop that carries the state becomes `Placement.serial`, the state
-a buffer the node owns and keeps every step of, a `Pre` read a load one launch back (the seed at the first), and the
-`Carry` a store of its value at this step. The step's own algebra is
-untouched, so a contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
-kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
-to completion before the next kernel's first, so pieces could not interleave step by step. The register schedule
-can realize that same ordered axis inside a CTA when every state read stays within its warp's rows. Its schedule
-choice goes through the same lazy fork adapter; the ordinary Fold tree and precision gates remain shared.
-Kernel lowering also offers shared storage when the complete state belongs to one CTA per independent batch and
-fits the card's shared-memory limit. It keeps the scheduled reduction order and requested snapshots while moving the
-ordered axis into the CTA. Global storage remains an offered sibling.
+`010_lift` lifts a Loop IR body node by node: the normal form gives every definition one operation (an affine region,
+the normal form's one sum, is one node) and an accumulation a name or a literal to sum (the lift names the literal),
+which is the granularity of the tile IR's nodes, so a body and its chain spelling lift to the same Fold tree and the
+cones, the edges between them and the seams `030_cut` offers do not depend on how a program was spelled
+(`test_total_lift.py` pins it). `010_lift` takes the loop that carries a Loop IR state as the kernel's serial axis
+(`Placement.serial`) and its body as the term, one step, with the `Carry` among the kernel's stores. The classic
+schedule's fork realizes that kernel over a state buffer (`serial_form`): the state a buffer the node owns and
+keeps every step of, a load of the state a load of that buffer one launch back (the seed at the first), and the
+`Carry` a store of its value at this step. The step's own algebra is untouched, so a contraction over the previous
+state is a contraction whose B slab is that buffer. The runner
+launches one kernel's steps to completion before the next kernel's first, so two pieces that read the state could
+not interleave step by step: `030_cut` cuts out of such a kernel only a cone that reads no state, which a kernel
+ahead of the loop computes for every step (below). Where the state lives
+is the row's `STAGE` at the state's route (`map.1/scan`), a site of the same schedule. Register storage realizes the
+ordered axis
+inside a CTA when every state read stays within its warp's rows. Shared storage does when the complete state
+belongs to one CTA per independent batch and fits the card's shared-memory limit; kernel lowering realizes it,
+keeping the scheduled reduction order and requested snapshots while moving the ordered axis into the CTA. Global
+storage, one launch per step, is the third value.
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over three ordered domains. It first offers the maximal fused tree beside every semantically
@@ -121,10 +133,13 @@ rectangular sweeps can also align coordinates an indexed input read proves equal
 equal-domain reduction binders. Only the remaining coordinates flatten; output indices keep their original order.
 Shared tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their
 original form. The common coordinates let ordinary Loop normalization share loads and combine sibling reductions.
-Output cuts remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid
-the cut minted; store sweeps that cannot be promoted stay sweeps.
-A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
-consecutive addresses; a contraction piece keeps the lift's order, because its last two grid axes are the
+Output cuts remain available, and measured evidence chooses the kernel set. The re-lift takes the grid the piece's
+own body lifts to, whatever grid the cut minted, so the piece is the kernel it forms alone; a loop its body keeps
+behind a hoisted row statistic stays a sweep.
+The lift orders the grid of a kernel with no contraction, fused or a piece, as its first store writes: last
+coordinate fastest, the larger stride slower within one coordinate, an axis the store does not name (a scatter's
+row, a split's partition) slowest. Its threads write consecutive addresses, and a piece benched alone from its stored
+body runs the grid its program runs. A contraction keeps the lift's order, because its last two grid axes are the
 fragment's rows and columns. A bare `PLACE=cut` pin
 names the placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than
 through the codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone,
@@ -143,7 +158,15 @@ under the captured axes substituted by position (hygienically: a loop inside the
 again keeps its own variable) — the tile-node shape does not decide it, because fusion keeps one
 definition of a value while the lifted tree holds one cone per scope that reads it, and those cones bind the same
 coordinate under different names and in different operand orders (the o_proj result feeds the norm's statistic
-inside a reduce and the residual add at the kernel's free axis). Per-component pruning closes dependencies to a
+inside a reduce and the residual add at the kernel's free axis). A cone that reads a coordinate's coarser quotient
+`x / (B·d)` beside a row `x / d` reads the value through `_row / B` (floor division composes over the non-negative
+coordinates a kernel indexes), so a statistic evaluated under a flattened `(h, j)` axis reads the compact `u[h, j]`
+rather than storing a second component broadcast over the part of the axis it does not read — the broadcast copy
+made a GDN readout's 128-long sum run once per broadcast cell. A copy that reads a coordinate's remainder `x % c`
+beside its quotient joins the seam that reads that remainder as a coordinate of its own, and reads its workspace at
+the remainder: a norm over each head of a flat (head, head-dim) width reads its operand at `(i / c, j)` under the
+statistic's reduce and at `(i / c, i % c)` at the free axis, and as two seams both products of a GDN readout and
+the stack of its chunk start states ran twice. Per-component pruning closes dependencies to a
 fixpoint: reading a carried state's previous value also keeps its later update, so a coupled carrier never leaves
 an unresolved state name in the comparison. The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
@@ -152,7 +175,10 @@ and reads that channel of the shared workspace. A cone that reads a captured coo
 of it is compared with that expression abstracted to the bare coordinate: RoPE's rotate-half reads the q projection
 at its own column and at the two half-shifted ones, one value at three addresses. A copy read through an expression
 joins the representative that reads the coordinate plainly and reads its workspace at that expression, when the
-expression's values stay on the representative's axis. A contraction stored by a flat row axis or a row-major
+expression's values stay on the representative's axis. Cones are compared over the cells their workspace stores, as
+the cut forms the piece: a coordinate read only as `i // d` keeps one cell per group of `d`, so a statistic read at
+`i // 2560` of a flattened 10240-wide axis is the same value as its copy over its own 4-wide stream axis, and pairs
+with it at the stored extent and address. A contraction stored by a flat row axis or a row-major
 `(block, lane)` pair also serves other block and packed-pair views: each channel's lowered body must have the same
 statement identity after its row address is abstracted, the remaining axes and component dtype must align, and
 interval analysis must bound the address inside the workspace. For a row-major representative, a reader at row `r`
@@ -176,17 +202,32 @@ stops at a reduce, whose carried state keeps its name.
 Both renames reach a term's own readers for free — a consumer's params are spelled as the result names of the edge
 they bind — but a kernel-boundary store sits OUTSIDE the term: `TileOp.output_specs` names its stored value as a plain
 string, so every piece's stores are re-spelled through the same map. Cutting a branch the kernel stores WHOLE leaves
-that store as the only reader the value has, and unre-spelled it names a value the consumer no longer defines.
+that store as the only reader the value has, and unre-spelled it names a value the consumer no longer defines. A store
+takes a re-spelled name only where the replaced root binds or defines it: two regions can compute one name, one
+reading it from a workspace and the other in place, and the in-place region's store keeps its own name.
 A seam whose cone solely produces some of the kernel's OWN outputs realizes as an OUTPUT-OWNING cut instead: the piece
 writes those outputs and the sibling piece keeps the rest, so no workspace is written and no dtype has to be
-determined for one. The ownership test is `ops.output_regions` — every store must read exactly one root operand, the
-operands' cones over the root body must be disjoint and must cover it — and the piece takes the projection statements
-its own stores read. The seam decides between the two readings rather than offering both, on the same ground as the
-storage frontier: the workspace here would hold the output's exact bytes at the output's exact dtype, leaving the
-sibling nothing to do for them but copy. Every independent output region offers this cut, including regions whose
+determined for one. The ownership test is `ops.output_regions` — every store's values must read exactly one root
+operand, the operands' cones over the root body must be disjoint and must cover it — and the piece takes the projection
+statements its own stores read. An operand a store reads only for its coordinates or guard — a scatter's row, computed
+once per row above the cell that stores it — owns no output and rides with the one operand whose stores read it, so the
+piece writing those stores is built over both. Native's rotary program stores the chunk's keys and values into the
+cache that way, beside the rotated queries. The seam decides between the two readings rather than offering both, on
+the same ground as the storage frontier: the workspace here would hold the output's exact bytes at the output's exact
+dtype, leaving the sibling nothing to do for them but copy. Every independent output region offers this cut, including regions whose
 pieces use the same grid. The cut remains available after sibling producers fuse, so evidence can choose their
 boundaries again. A piece's grid follows `TileOp`'s `promoted_sweep`; separating stores whose axes differ can expose
 the `(m, n)` pair that a contraction's schedule needs.
+A JOINED cut hands one piece a workspace seam and an output-owning region of the same kernel (`_cut.join_pairs`).
+It is offered for a pair whose cones share a value another seam stands for, a reduce both compute, when neither cone
+contains the other. The two are cut as their single arms cut them, then spliced through the Loop IR splicer and lifted
+as one piece, which writes the workspace and the region's outputs. In the GDN decode recurrence the producer of the
+recurrence output `o` and the new-state region share the correction the update subtracts, and both read the state:
+joined, one kernel reads the state, writes the new state and computes `o`. The pin and the route key name both halves
+joined by `+`, `PLACE@<workspace seam>+<region seam>=cut`, and a composed route lists it beside its other keys. The
+single cuts of each half stay arms beside it. No join puts a projection's epilogue into the piece of its contraction:
+the epilogue's region contains the contraction, and a join needs neither cone to contain the other. Nothing here forms
+the chunked prefill recurrence as one kernel.
 The producer piece is minted with its workspace axes as its store's SWEEP and an EMPTY placement, so the same rank
 rule decides its grid: an axis the piece's own reduce does not read is that reduce's row statistic, and binding it
 folds the statistic once per output cell. A free axis per workspace dimension did exactly that, and a materialized
@@ -194,33 +235,36 @@ RMSNorm + rotation cone launched one cooperative block per element.
 A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
 components of ONE fold, so there is no statistic edge to materialize, and the score contraction and the fold itself
 are the seams that stand there. The unpinned fork offers every seam as its own structural arm. Bare `PLACE=cut`
-resolves to the root-most seam: it names one deterministic pinned decision and is consumed on the fresh pieces.
+names no site: it cuts the root-most seam of every kernel no cut minted, once. A cut leaves only pieces, each a new
+kernel of its own name, which the pins its parent read never address. `PLACE@k_<hash>=cut` cuts the root-most seam
+of the one kernel of that name.
 Unpinned recursive placement converges in practice — pieces collapse onto shared identities as the tree shrinks —
 rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
-workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and all
-pieces consume that placement restriction for their current stage. Sibling workspace producers with the same workspace dependencies then
+workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and the
+kernel consumes that placement restriction, while each piece takes
+its own fork (see `030_cut` under "Kernel boundaries after maximal fusion"). A chosen seam can still go unread: a
+contraction's piece is built from the one occurrence whose read spans its whole space, so a cone chosen under another
+occurrence is computed in place there and nothing loads its workspace. Such a piece is dropped before any piece is
+fused or joined, so the decision mints what its other seams mint; fused into a piece something reads, it was a buffer
+no launch reads, which the backend refuses. Sibling workspace producers with the same workspace dependencies then
 lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled Tile IR. The consumer stays outside
 that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
 cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior
 cross-CTA split receipts survive the round trip. Packed storage retains its required boundary. A bare pinned cut
-consumes its one root-most cut the same way and may join scoped cuts in that single decision. A further cut can be
-pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
-`PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
-`place_<token>` is one rule, `_cut.seam_token`: the parent's structural identity and the seam's canonical key digested
-(a seam set's keys joined for the producers one decision fuses), and `_cut.place_token` reads it back off a kernel
-name, so a pin, a recorded route and the cut pass address a piece the same way. A later cut of the SAME-NAME remainder
-uses `PLACE@step.<n>/<site>=cut`, where `n` counts earlier cuts of that remainder from one; for example,
-`PLACE@step.1/map.1/map=cut` applies after the first cut, while `PLACE@step.2/map.2/map=cut` applies after
-the second. These explicit stages let a cut expose the next site's path without selecting an unpinned prerequisite.
-A named child's same-name remainder uses `PLACE@place_<token>/step.<n>/<site>=cut` for the same staged decision;
-its stage starts at zero when the child is minted, and a consumed child pin cannot run again on that remainder.
-Omitting the site suffix names that child's or remainder's root-most cut, as with `PLACE@place_abc123=cut` or
-`PLACE@step.1=cut`. The consumed key retains its full scope, so that cut cannot apply to another piece or step.
-A missing stage or a child pin that no piece resolves is rejected by the realized-pin audit. A scoped pin whose site
-path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses,
-deterministic, so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
+supplies the root-most seam of that single decision beside the scoped cuts.
+Every cut piece, split partial and finalize is a kernel of its own name, `k_` and the first 12 hex digits
+of its exact identity (`pipeline/ARCHITECTURE.md`), and a KERNEL pin `FAMILY@k_<hash>` names every kernel of that
+name, matched by equality (`knob.kernel_pin`, `knob.pinned_kernel`). A `PLACE` kernel pin may name a site of that
+kernel after a slash, relative to it: `PLACE@k_3f2a1b9c04de/map.1/inner=cut` cuts only kernels of that name, and the
+other children settle to fuse; without a site it cuts that kernel's root-most seam. A kernel with kernel pins of its
+own reads only those; a plain pin (`PLACE`, `PLACE@<site>`) applies only to kernels no cut minted, which carry no
+`cut.piece` node hint. To pin a piece anywhere down a chain of cuts, pin it by its own name, read off a dump or a first
+compile. A kernel pin no kernel resolves is rejected by the realized-pin audit. A scoped pin whose site
+path does not exist on a kernel addresses another kernel of the graph; a kernel such a pin fails to address fuses,
+deterministic, so under a pin-driven compile the unpinned placement fork returns only where no live pin is left to
+read: a pinned cut's pieces, which take their own fork. A pin that resolves to an edge no cut
 realizes is an addressing error. Newly fused producers and pieces of unpinned cuts can expose smaller seams before
 scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
 never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
@@ -262,27 +306,36 @@ typed `Schedule`, only the search boundary encodes exact node and consumer scope
 placed geometry and resolved transport facts. A row changes what a site offers and nothing else: it never overrides
 target, shape, addressing, or compatibility constraints. A partial row containing scoped keys is inert on a kernel
 where all of those keys are foreign; its bare kernel values travel with it instead of accidentally restricting every
-cut piece.
+cut piece. A hand pin reaches every piece of a cut at once, so a piece — a kernel a cut left, which carries the
+`cut.piece` node hint (`_cut.PIECE`) — takes the values it can and keeps its catalog where it cannot; the
+post-compile pin check still asks that some kernel realized the pin.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so the cross-CTA domain is the second slice of `030_cut`, BEFORE
 any schedule is composed. The
-rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges; any other
-fold slices through the generic `Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides
-its own row. The pieces' axis table holds one axis per name, so either slicer narrows every fold that names it.
+rewrite consumes only the stored Fold algebra: the fold keeps its body and its reads and walks the range of one
+block, `length * block .. length * (block + 1)`, inside the range it walked before (`ir/tile/split.py`). Each piece
+re-enters the scan as a fresh kernel that decides its own row. The block axis is a free axis of the partial, and the
+axis the fold binds keeps its name and its extent, with a partition window as the receipt of the split.
+A stream whose length is symbolic (an attention window) splits into blocks of `⌈K/w⌉` positions, and the last block
+ends where the stream does. A tier reads a block through the scheduled form (`Fold.scheduled`): the walk leaves
+from the block's start and takes the block's length, a load clamps onto the stream's last position, and the term
+keeps what the stream leaves of the block as its range, which the tier reads as it reads any range. A carried or
+observed fold is not split over a symbolic stream. The lift reads the absolute key unclamped (only a load needs
+the clamp), so a causal mask compares the key its loads read, and the chunk tier's stream bounds land per block:
+the block end plus the position minus the block's start, and a block past the diagonal folds nothing.
 A fold with an operand that reduces its own axis (a softmax's row maximum or a contraction's RMS statistic) is therefore
 offered no split, and a pin that names one raises the refusal instead of slicing. A piece is the region
 term rebound over the partial or the finalize fold: the projection keeps its epilogue and its other operands whole,
-and only the fold it is about is swapped, the finalize's reading its states from the workspace. The two keep the name
-of the kernel they split (`<piece>__partial` and `<piece>`), so a kernel pin that names a cut piece, its ordinal
-included, names both halves; a route's unnamed uncut root keeps its graph node id, which `node_` pins name. The split is CONSUMED
-by the kernel that realizes it — the sliced axis's partition `Window` is the receipt, kernel-scoped — so the pieces
-skip the fork, and the walk's pin path strips a `REDUCE` pin's `g<n>[a|k]` half on a kernel that carries the
-receipt (`g2k/coop` on a piece is `coop`); a realized split's independent projection SIBLING has no sliced axis, so
-it carries the consumed-split receipt as the `split_consumed` flag instead — one pinned split is one split, however
-the regions partition. The atomic arm's refusals (one additive state, a distributive
-projection, an output that rounds once) sit beside the offer in `tile/_split.py`; the walk's own catalog carries no
-`GRID` stage at all.
+and only the fold it is about is swapped, the finalize's reading its states from the workspace. The partial and the
+finalize are kernels of their own names: a kernel pin on the split kernel decides the split and reaches neither piece,
+which a pin on its own name addresses. The split is CONSUMED by the kernel that realizes it — the sliced axis's
+partition `Window` is the receipt, kernel-scoped — so the pieces skip the fork, and the walk's pin path strips a
+`REDUCE` pin's `g<n>[a|k]` half on a kernel that carries the receipt (`g2k/coop` on a piece is `coop`); a realized
+split's independent projection SIBLING has no sliced axis, so it carries the consumed-split receipt as the
+`split_consumed` flag instead — one pinned split is one split, however the regions partition. The atomic arm's
+refusals (one additive state, a distributive projection, an output that rounds once) sit beside the offer in
+`tile/_split.py`; the walk's own catalog carries no `GRID` stage at all.
 
 **A one-option fork is still a fork.** Every pass returns its decision as a fork even when nothing competes — the
 lone unsplit arm, a pinned `PLACE` fuse, a fully forced schedule walk — and the engine records a one-option fork as
@@ -452,13 +505,14 @@ the featurizer asks the scheduling problem when it featurizes a schedule row (`F
 `S_warp_eligible` column). The answer is read off the sites' own atoms, not off the rows, so a pin naming the scalar
 tier cannot erase "tensor cores were on offer here" from the rows it does enumerate.
 
-**The session kernel cache.** Greedy lowering of one fused kernel is a function — Loop-IR program in,
-lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/lift/005`
-fetches a finished lowering (io rebound through `Stmt.rename_buffers`) before the lift, and
-`lowering/cuda/001` harvests every single-kernel lowering just before the per-graph negotiations
-(zero-init delegation, rendering) that deliberately sit below the boundary. Caller-owned on
-`Context.kernel_cache` (nothing installs it by default), greedy-only (tune strips it, pricing probes
-strip it), multi-kernel origins poison their key. A twin program compiles ~750x faster than cold.
+**The session kernel cache.** Greedy lowering of one kernel is a function — the tile its kernel-set decisions start
+from in, lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/cut/010` fetches a
+finished lowering (io rebound through `Statement.rename_buffers`) ahead of the cut, and `lowering/cuda/001` harvests
+every single-kernel lowering under that tile just before the per-graph negotiations (zero-init delegation, code
+generation) that deliberately sit below the boundary. The tile is the hit's `source`, so a hit's name and code are a
+fresh lowering's, and each piece a cut leaves is cached as a kernel of its own. Caller-owned on `Context.kernel_cache`
+(nothing installs it by default), greedy-only (tune strips it, pricing probes strip it), a split's origin poisons its
+key.
 
 **The domains and pool identity.** Each `schedule()` call projects fixed independent domains from `p` and `t`, builds
 one immutable `c`, then evaluates Algorithm 1(c, p, t). `Fork.pool_id` stamps the deploy identity, target, ordered
@@ -472,7 +526,7 @@ behind the explicit classic reconstruction boundary.
 
 **A schedule ranks one kernel; a kernel set is decided before it.** A schedule fork picks one alternative and its cost
 is that alternative's latency. A cut — and a cross-CTA split — changes which kernels exist, which is why each is a
-separate structural decision with a separate rule (`policy/greedy._kernel_set_pick`: a measured arm, priced as the sum
+separate structural decision with a separate rule (`policy/greedy.greedy_decide`: a measured arm, priced as the sum
 of its pieces' rows, else the placement prior over the kernels each arm leaves) rather than something the per-row
 prior can rank. No arm is scheduled to decide it; each piece is scheduled afterwards, at its own fork.
 
@@ -493,14 +547,14 @@ How to comply:
   nested reductions remain nested `Fold` statements regardless of which frontend operation produced them.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
   report the first thing the transform *fundamentally cannot do* (an epilogue folds unless it has an ineligible op or
-  dependency) — the eligible set then grows with the renderer instead of with a hand-maintained list.
+  dependency) — the eligible set then grows with the code generator instead of with a hand-maintained list.
 - **Bail conservatively on well-formedness, never on shape identity.** `return None` / `RuleSkipped` for a body
   the rule doesn't fully understand is fine; the conditions must be structural properties (escaping values,
   symbolic extents, mixed dtypes), not "is this the X kernel".
-- **Phrase dataflow conditions over cones, don't hand-roll the walk.** `Body.backward_cone` / `forward_cone` /
-  `defs_die_at` (`ir/stmt/body.py`) are the shared slicing substrate: a rule asks for a cone and judges its
-  *properties* (members, external reads, escapes) — construction never fails, so every bail stays a rule-side
-  condition. See the dependence-cones section of `compiler/ir/ARCHITECTURE.md`.
+- **Phrase dataflow conditions over cones, don't hand-roll the walk.** `Body.backward_cone` is the shared slicing
+  substrate: a rule asks for a cone and judges its *properties* (members, external reads, escapes) — construction
+  never fails, so every bail stays a rule-side condition. See the dependence-cones section of
+  `compiler/ir/ARCHITECTURE.md`.
 - **When generalizing an existing rule, normalize its incidental divergences** (one dtype rule, one index rule)
   and name the behavioral deltas explicitly in the commit — don't preserve two behaviors behind one entry point.
 
@@ -530,7 +584,9 @@ precision or overflows at each half-precision multiply, even when the dot produc
 product dtype survives loop lowering and fusion, so scalar and tensor-core schedules implement the same wide product.
 
 SiLU widens FP16/BF16 inputs to FP32, computes `x / (1 + exp(-x))`, and narrows once to the output dtype. Replacing
-division with multiplication by a separately rounded reciprocal can change the final FP16 result.
+division with multiplication by a separately rounded reciprocal can change the final FP16 result. LayerNorm widens
+its FP16/BF16 input, weight and bias the same way and narrows once, as torch's does: a mean and variance held in BF16
+round every row's statistics, and the normalized values with them.
 
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
@@ -623,7 +679,7 @@ the wrong row, the weight load carries a third grid axis, and the warp/mma tiers
 search budget can reach a schedule family that does not exist. The canonicalization re-fuses a free pair via
 the bijective reindexing `p → f/Q, q → f%Q` (semantics-preserving unconditionally) and keeps the result only
 when every access folds clean: operand composites collapse to the bare fused axis (the `(f/Q)·Q + f%Q → f`
-recomposition fold in `Expr.simplify`), and a store spelling the pair as separate buffer dims keeps the honest
+recomposition fold in `Expression.simplify`), and a store spelling the pair as separate buffer dims keeps the honest
 split-store spelling — `[…, f/Q, f%Q]` when the buffer's row-major flatten folds it back to an affine address,
 or the permuted `[…, f/Q, …, f%Q]` of a transposed output. The pair need not be adjacent: free loops are
 parallel, so the perfectly-nested free loops between them (the `transpose(1, 2)` every attention projection
@@ -638,7 +694,9 @@ The inverse case is normalized first: an operand pair reading one static free co
 axes for contraction binding. Their separate operand reads prevent the fusion rule from undoing the split.
 
 It runs inside `lift_kernel`, the one function every kernel forms through: the lift of a fused region, and the
-re-form of every piece a cut or a split mints. A piece is therefore the kernel its own stored program forms, which is
+re-form of every piece a cut or a split mints. Every question the lift asks, the size-one output row it binds back for
+a contraction that owns no free axis included, reads the buffer shapes it is given, so a bare nest a cut is forming
+and a program's loop op answer alike. A piece is therefore the kernel its own stored program forms, which is
 what lets a row measured on the piece alone file under the identity the layer compile looks up. It is not a Loop
 pass: a cut piece never re-enters the Loop passes (fusion there would merge the cut back), and a per-kernel form
 belongs to formation, not to the graph-level passes that decide which kernels exist. It waits for fusion's fixpoint
@@ -694,6 +752,20 @@ evidence, not a schedule view or shape matcher, and it widens the catalog rather
 choices stay beside the fragment ones the bound row makes reachable. Decode attention is the standing case — one query
 row per head, whose score would otherwise be re-contracted once per output channel.
 
+Loop fusion merges loops of equal extent position by position, so two independent output regions of one kernel can
+share a grid coordinate that means different things to them. `_row` then re-spells one region's outer coordinates (the
+grid coordinates it reads and the ones its stores sweep) as the expressions another region reads a shared input at,
+when that makes more of their reads of shared inputs name the same element and breaks no read that already does, and
+lowers and lifts the kernel again, so the grid, the hoisting and the sweep come out of the same lift
+(`_paired_by_loads`). It applies to every kernel the lift forms and decides nothing: no fork, no knob. In the GDN decode
+recurrence on an `[H, K, V]` state, the output `o[h, v]` and the new state fuse with `o`'s `v` on the state's `k`, and
+each cell of the state's sweep over `v` folds its own column's correction again; re-spelled, both regions read
+`S[h, ·, v]` in one cell and the state store sweeps `k`. With K ≠ V fusion pairs no loop, and the rule still gives the
+state the `(h, v)` grid. A joined piece can pair regions with different loop shapes: `o` over `(h // 3, h % 3, v)` beside
+the state over `(h, k, v)` re-spells the state's `h` as `3·g + j`. A read that already coincides is never broken: a QKV
+projection whose q column and token are both 4096 long reads `hidden[t, ·]` alike in every region and keeps its
+spelling. Fused QKV projections whose regions each swept their own token coordinate share one after the rule.
+
 A piece is first formed from its closed nest, where `Fold.lower` picks the loop order and the grid follows it. The
 lift orients a single-product contraction with a computed operand by that order: two slabs orient by layout, while a
 computed operand keeps whichever order the nest spelled. A cut W4A16 projection over `x + 1` would then put the weight
@@ -736,28 +808,49 @@ chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-d
 `O(j)`. No cut repairs that — a cut materializes within one target, and chunk `j+1`'s target recomputes what chunk
 `j`'s stored.
 
-`loop/fusion/005_roll_recurrence` rolls it BEFORE fusion inlines it, while the structure is still plain. The states
-are a chain of nodes of one shape — the same body once its integer literals are taken out (`Body.literal_free_key`:
-load anchors, mask bounds, static loop extents) — each depending on the last. A step is what lies between two of
-them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
-reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
-shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a
-Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Each step is spliced into one body by the
-fusion rule's own splicer under step-independent buffer names, the literals'
-deltas are read off the first two, and the first step advanced `j` times must spell step `j`'s body for every `j`. A
-chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one it
-writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
+The merge rule rolls it where it would have inlined it (`loop/fusion/_recurrence`, entered from
+`010_merge_loop_ops`): before it splices any region it rolls the recurrences the regions hold, the largest first,
+and the regions it splices are those of the graph the rolls leave, since a kernel that carries a state is in no
+region. A roll is a splice with more asked of its nodes, in three parts kept apart: the ways to read part of a
+region as a recurrence, the proof of one, and the kernel written. The readings are held to the proof largest first,
+by the nodes their steps hold, and the first that is proved is written: a short recurrence that shares a state with
+a long one, a softmax's own division ahead of a Sinkhorn's row step, would otherwise be taken first and leave the
+long one a step short.
+
+**The readings.** The copies of a step are nodes of one region, what fusion would splice into one kernel, so a region
+is where they are looked for. The states are a chain of its nodes that store one tensor type and have one body once
+the integers of its coordinates are left out (load anchors, mask bounds, static loop extents: `Body.identity_apart`),
+each depending on the last. A step is what lies between two of them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first
+step is what the first state needs beyond what every step reads, and its state is the seed: the one buffer of the
+state's shape whose ancestry, taken out, leaves a first step shaped like every later one — the zeros the loop was
+seeded with, or the tensor it started from (a softmax before a Sinkhorn), which the carrier reads before its first
+step (`Carry.seed`). A reading may take every second state, where the states alternate two bodies (a row step, then
+a column step).
+
+**The proof.** Each step is spliced into one body by the fusion rule's own splicer under step-independent buffer
+names, and the steps must be one step taken again and again (`prove`). The proof is the crate's (`numbering::prove`,
+`ir/ARCHITECTURE.md`): the steps number alike with the integers of their coordinate expressions and static extents
+apart, statement by statement and scope by scope, and every such integer moves by one amount per step. It pairs
+statements by what they compute and where they nest, never by where they stand. Steps that read other buffers are
+other computations, the layers of a model each with its weights, and are no chain at all. A chain that is not one
+step advanced is left alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel.
+
+A chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one
+it writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
 straight-line code that fusion inlines once, and rolling it would only store every state. This is a structural
-distinction, not a size or speed threshold. A reduction whose extent grows with the step runs at its
-widest in the rolled body and folds its identity past the step's own bound — the mask the tracer itself spells a
-partial reduction with. Only then does one kernel replace the chain. It carries the state (`Carry`,
-`ir/ARCHITECTURE.md`) and stores what each step kept —
-the state and any other buffer read outside that step — with the step as its leading axis. Ordinary fusion then
-inlines one slice of those stores per replaced buffer into its reader. A chain whose states alternate two
-bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
-alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion
-splices whole, up to the splicer's construction bound. A kernel that carries a state is a fusion region of its own
-(`carries_state`): the splice inlines a store into its readers, and a state is stored once per step.
+distinction, not a size or speed threshold.
+
+**The kernel.** One kernel replaces the chain. It carries the state (`Carry`, `ir/ARCHITECTURE.md`) and stores what
+each step kept — the state and any other buffer read outside that step — with the step as its leading axis. A
+reduction whose extent grows with the step runs at its widest in the rolled body and folds its identity past the
+step's own bound — the mask the tracer itself spells a partial reduction with. A state nothing reads but the next step
+(a triangular inverse's row substitutions, a Sinkhorn iteration) is stored for no one until the last: its store has
+the state's shape and no step axis, each step stores over the last one's, and the one reader reads the whole of it.
+Ordinary fusion then inlines one slice of those stores per replaced buffer into its reader.
+
+What the roll leaves unrolled, fusion splices whole, up to the splicer's construction bound. A kernel that carries a
+state is a fusion region of its own (`carries_state`): the splice inlines a store into its readers, and a state is
+stored once per step.
 
 ## Kernel boundaries after maximal fusion
 
@@ -771,11 +864,22 @@ that canonical input:
   workspace at the address it computes, so each weight is read once. A channel that reads a coordinate only as
   `i // d` where another reads it plainly (GQA's k beside q) is computed by its own piece, once per group of `d`.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
-  an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
-  until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
-  materializes the cone feeding that
-  operand into its own kernel and the contraction reads it back as an ordinary load. A pointwise seam's workspace
+  are not. A kernel that carries a state offers the seams whose cone reads no state: such a cone is the same at
+  whichever step reads it, so its kernel computes every step's cells ahead, the step among the workspace's
+  coordinates where the cone reads it, and the kernel that keeps the state reads them back. A cone that reads the
+  state runs inside the step and is no seam. Closure reads the complete lowered statement stream through `Body`'s
+  scope-aware dependence analysis: an axis bound by one loop does not scope its siblings, and dead-but-still-emitted
+  statements retain their free axes until a lowering pass removes them. A contraction's operand edges are seams of
+  the same class: cutting one materializes the cone feeding that
+  operand into its own kernel and the contraction reads it back as an ordinary load. Every channel that computes
+  one contraction — the same cone, weight and reduction once its free operand indices are abstracted — is one seam
+  with one workspace in the contraction's own coordinates, each channel reading it at its own address; the
+  abstraction numbers those indices by the numbering under which the body digests smallest, not by the order the
+  lowered body reads the operands in (a block amax reads the weight first, the rest of the kernel the activation).
+  The workspace is laid out in the nest order of the first channel's loops: its coordinates by the scope position of
+  the innermost axis each reads, the one the consumer varies fastest last, so that consumer reads the rows it stores
+  contiguously; two at one depth keep their digest-min slot order. Never the operand-read order, which is the normal
+  form's statement order and moves with a spelling. A pointwise seam's workspace
   retains its inferred result dtype, including any explicit rounding in the producer. A downstream output encode
   cannot choose that earlier operand's precision: a BF16 operand feeding an FP8 output remains BF16 at the cut.
   A REDUCING seam's workspace holds the f32 carrier, except for a component every reader only converts to one narrower
@@ -796,8 +900,17 @@ that canonical input:
   them keeps later schedule and split axes in their original geometric roles. A coordinate read only through a common
   integer divisor stores one value per quotient; producers and consumers apply inverse index substitutions. The new
   producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same ordinary passes.
-  Cross-CTA partial workspaces order their free axes by output storage layout.
-  An unpinned cut may expose more cut choices; any pinned cut consumes its restriction on every piece. If the parent
+  Cross-CTA partial workspaces order their free axes by output storage layout. A matmul piece whose weight is read
+  straight from global memory and strided along its reduction axis puts the axes that weight owns in its layout
+  order, largest stride first, and keeps the other axes in the parent's order: the tile column is then the axis the
+  weight is unit-stride along, so the fragments' stores stay contiguous where a projection is viewed and transposed
+  downstream. A weight unit-stride along its reduction axis leaves the column to the workspace's own layout.
+  An unpinned cut may expose more cut choices. A pinned cut decides the one fork its pins name: each piece it mints is a
+  new kernel, marked with the `cut.piece` node hint, that no pin names unless a kernel pin on its name does, so a
+  piece no pin addresses takes the fork an unpinned compile's piece takes — evidence, the prior, or a strict refusal
+  (the recorded GDN routes once compiled every piece whole under their own pins, and no piece's own seam was ever
+  measured; a pinned cut once decided a piece fused with no fork asked, which left the tiny Gated DeltaNet programs'
+  pieces one thread block recomputing their whole cone per cell). If the parent
   already carries a cross-CTA split receipt, every placement piece inherits it, so a later cut cannot make the same
   split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific
   visitor discovers or realizes another placement decision.
@@ -808,7 +921,10 @@ that canonical input:
   a joint source arm for several weights. A measured row on each resulting kernel prices the choice; no shape or
   expected-speed rule decides it. The cut pass offers a layout fork per kernel; the first kernel to decide fixes the
   layout for the program, so the arm is priced over the program: the rows of every reader the decision settles, each
-  as the kernel that layout leaves it, all-or-nothing (`layout_readers`, `reader_kernel`). Every other reader is then
+  as the kernel that layout leaves it, all-or-nothing (`layout_readers`, `reader_kernel`). A reader whose placement
+  is still open meets its cut fork first, as it stands, and its pieces take the settled layout at their own forks: the
+  compile never forms it whole in the arm's layout, so a cut recorded on it as it stands prices the arm for it too.
+  Every other reader is then
   offered that layout only, and a reader the cut pass no longer offers a
   layout fork (a kernel the pass no longer decides at all — the rule's own gate, `takes_kernel_set_decision`, is the
   offer's first test — one that carries a state, a read other than through 2-D indices) keeps it folded, because
@@ -896,8 +1012,8 @@ so the depth is measured per shape), crossed with the shared `RASTER` launch-ord
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
 edge, 5090). The **redundant-statistic split-K** form is no longer a schedule row: the structural
 `030_cut` pass
-slices the contraction across CTAs BEFORE any schedule is composed, σ-reindexing the per-cell cone to
-absolute k while a statistic over a distinct axis stays full-row in every partition (each recomputes it, which is
+slices the contraction across CTAs BEFORE any schedule is composed, each block a range of the reduce axis,
+while a statistic over a distinct axis stays full-row in every partition (each recomputes it, which is
 cheap on the small-free decode shapes and is left to evidence to price), and the wrapping zero-axis fold's
 projection folds into the deferred finalize. Multi-channel (gate/up) nodes split too: the sliced contraction
 carries the true N-component identity-family carrier (one additive state per channel), the partial stores each

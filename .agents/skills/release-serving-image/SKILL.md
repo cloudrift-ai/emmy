@@ -92,7 +92,7 @@ Delegate to the `start-remote-server` skill, asking for the config's `SERVE_GPU`
 instance** template (e.g. "Ubuntu 22.04 VM", vastai/kvm, `vms_enabled=true` in search) — plain docker-container
 templates cannot run the host-level Docker builds; the account SSH key may not be injected, self-inject via
 `--onstart-cmd`. Capture `REMOTE` and the teardown handle. Then prepare the host (CloudRift image quirks:
-`apt update`, `python3.12-venv`/`python3.12-dev`, `nvcc` via `CUDA_HOME=/usr/local/cuda`; Docker + NVIDIA runtime
+`apt update`, `python3.12-venv`/`python3.12-dev`, `ptxas` via `CUDA_HOME=/usr/local/cuda`; Docker + NVIDIA runtime
 are preinstalled on CloudRift images — verify with `docker run --rm --gpus all
 nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi` or the vllm-emmy image itself). Also install `git-lfs` (the repo's
 hooks require it — a checkout without it dies mid-rebuild) and, when operating as root over a synced tree,
@@ -104,13 +104,13 @@ mutable state: a branch switch in another session mid-release yields a hybrid tr
 distant ways. Pin the selected release branch's commit SHA up front, get the tree onto the host (fresh clone, or
 rsync of the `git ls-files` list plus `.git`), then `git checkout -f <sha>` there — and re-verify
 `git rev-parse HEAD` before any rebuild. Then run `make setup`, and install `.[serving]` editable; the
-venv supports the headroom sweep and validation script. Host toolchain: a CUDA version whose nvcc supports the
+venv supports the headroom sweep and validation script. Host toolchain: a CUDA version whose ptxas supports the
 target arch (**>= 12.9** for sm_120 — FlashInfer refuses it below that, and the misleading error is "requires sm75
 or higher"); on non-CloudRift
 hosts verify the NVIDIA container toolkit actually works (`docker run --gpus all ... nvidia-smi`) — a registered
 runtime with missing binaries fails with `could not select device driver`. The venv-based steps (headroom sweep,
-validate) additionally need `CUDA_HOME`/nvcc exported in the step's own environment (emmy refuses to serve without
-nvcc) and a **system-wide** `ninja` (`apt install ninja-build` — FlashInfer's JIT subprocess won't see a venv-local
+validate) additionally need `CUDA_HOME`/ptxas exported in the step's own environment (emmy refuses to serve without
+ptxas) and a **system-wide** `ninja` (`apt install ninja-build` — FlashInfer's JIT subprocess won't see a venv-local
 one). For the model download use `hf download` with a retry loop and `HF_HUB_DISABLE_XET=1` — `huggingface-cli` is a
 deprecated no-op stub now, and the Xet transfer path flakes; note `warm.sh` resolves `warm/` relative to its own
 directory (`docker/vllm-emmy-serve/warm/`), so pre-seed the snapshot there, not at the repo root. Budget disk for

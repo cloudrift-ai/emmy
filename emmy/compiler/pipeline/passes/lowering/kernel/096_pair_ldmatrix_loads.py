@@ -9,7 +9,7 @@ emitter.
 
 Legality, judged structurally on the two loads:
 
-- both staged role-``"b"``, same slab / ``ldm`` / ``b_trans`` / swizzle mode (the drain's
+- both ``LdmatrixLoad`` of role ``"b"``, same slab / ``ldm`` / ``b_trans`` / swizzle mode (the drain's
   swizzle XOR is per-lane address-based, so it commutes with the paired lane map — each lane
   un-permutes its own 16 B chunk), no masks (staged loads carry none);
 - **transposed-B** (N-major slab): equal K col, N row exactly ``+8`` — the pair is one plain
@@ -17,13 +17,13 @@ Legality, judged structurally on the two loads:
 - **canonical-B** (K-major slab): equal K row, col exactly ``+8`` — the pair is one
   ``x4.trans`` (lanes 16-31 address the ``+8`` column). The ``+8``-half offsets are 16 B, so
   every paired lane address keeps ldmatrix's 16 B alignment;
-- **Volta**: adjacent logical fragment indices under the matching derived layout, with equal
+- **Volta** (two staged ``FragmentLoad``): adjacent logical fragment indices under the matching derived layout, with equal
   logical K coordinates. A pairs register rows; B pairs register columns. Each becomes one
   LDS.128 and the coupled row/row MMA plus interleaved accumulator map preserve the output;
-- the second load moves UP to the first's position: every intervening stmt must be barrier-free
-  straight-line code that neither redefines either fragment nor defines a free var of the moved
-  load's index (the flash drain interleaves ``MmaSyncPtx`` between the loads — reading the FIRST
-  fragment is fine, the pair fills both before any consumer runs).
+- no statement must stand between the two loads under the scope's ordering constraints
+  (:class:`Siblings`), wherever the two stand. A barrier, a slab
+  write or a consumer of the earlier value of either fragment between the two is such a
+  statement.
 
 The fusion is a pure perf transform: same slab cells, same values, same fragments — the paired
 kernel is bit-identical to its unpaired sibling. Idempotent: a paired load (``pair_frag`` set)
@@ -35,21 +35,12 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import (
-    VOLTA_B_CONGRUOUS,
-    VOLTA_CROSSWISE,
-    LdmatrixLoad,
-    MbarrierWait,
-    Sync,
-    WgmmaCommit,
-    WgmmaFence,
-    WgmmaMma,
-    WgmmaWait,
-)
-from emmy.compiler.ir.stmt import Body, Cond, Loop, Stmt, StridedLoop, Write
+from emmy.compiler.ir.kernel.ir import VOLTA_B_CONGRUOUS, VOLTA_CROSSWISE, FragmentLoad, LdmatrixLoad
+from emmy.compiler.ir.stmt import Body, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.lowering.kernel._siblings import Siblings
 from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -74,7 +65,7 @@ def rewrite(root: Node) -> KernelOp | None:
 
 
 def _walk(body: Body) -> tuple[Body, bool]:
-    stmts: list[Stmt] = []
+    stmts: list[Statement] = []
     changed = False
     for s in body:
         nested = s.nested()
@@ -93,12 +84,12 @@ def _walk(body: Body) -> tuple[Body, bool]:
     return Body(tuple(paired)), True
 
 
-def _split(e: Expr) -> tuple[tuple[str, ...], int]:
+def _split(e: Expression) -> tuple[tuple[str, ...], int]:
     """``e`` as the terms of its ``+`` chain and the sum of their integer literals. The literal can
     sit anywhere in the chain: a ring drain's row is ``slot * rows + (warp_row + 8)``, which a
     top-level ``base + constant`` split never sees. Terms compare by their rendered form, order
     free."""
-    if isinstance(e, BinaryExpr) and e.op == "+":
+    if isinstance(e, BinaryExpression) and e.op == "+":
         (lt, lc), (rt, rc) = _split(e.left), _split(e.right)
         return tuple(sorted(lt + rt)), lc + rc
     if isinstance(e, Literal) and isinstance(e.value, int):
@@ -106,95 +97,80 @@ def _split(e: Expr) -> tuple[tuple[str, ...], int]:
     return (repr(e),), 0
 
 
-def _delta(a: Expr, b: Expr) -> int | None:
+def _delta(a: Expression, b: Expression) -> int | None:
     """The structural constant difference ``b - a``, or ``None`` (not provably constant)."""
     if a == b:
         return 0
     free = a.free_vars() | b.free_vars()
     af, bf = affine_form(a, free), affine_form(b, free)
     if af is not None and bf is not None and af[1] == bf[1]:
-        diff = BinaryExpr("-", bf[0], af[0]).simplify(SimplifyCtx.empty())
+        diff = BinaryExpression("-", bf[0], af[0]).simplify(SimplifyCtx.empty())
         if isinstance(diff, Literal) and isinstance(diff.value, int):
             return diff.value
     (ab, ac), (bb, bc) = _split(a), _split(b)
     return bc - ac if ab == bb else None
 
 
-def _candidate(s: Stmt) -> bool:
-    # A staged byte-slab (fp8) drain is a cooperative gather, not an ldmatrix — nothing to pair.
-    if not isinstance(s, LdmatrixLoad) or not s.staged or s.byte_slab or s.pair_frag is not None or len(s.src_index) != 2:
+def _volta(s: Statement) -> bool:
+    """A staged gather under Volta's layout: a staged gather of a byte slab is nothing to pair."""
+    return isinstance(s, FragmentLoad) and s.staged and s.fragment_layout == "m8n8k4"
+
+
+def _candidate(s: Statement) -> bool:
+    if not (isinstance(s, LdmatrixLoad) or _volta(s)) or s.pair_frag is not None or len(s.src_index) != 2:
         return False
-    if s.fragment_layout == "m8n8k4":
+    if _volta(s):
         # A and a transposed B both drain the crosswise layout; only a canonical B is congruous.
-        return s.swizzle == VOLTA_CROSSWISE if s.role == "a" or s.b_trans else s.swizzle == VOLTA_B_CONGRUOUS
+        return s.slab_layout == VOLTA_CROSSWISE if s.role == "a" or s.b_trans else s.slab_layout == VOLTA_B_CONGRUOUS
     return s.role == "b"
 
 
-def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
+def _pairs_with(a: LdmatrixLoad | FragmentLoad, b: LdmatrixLoad | FragmentLoad) -> bool:
     """``b`` is ``a``'s slab-adjacent partner: the SECOND fragment of one x4 (the ``+8``
     matrices lanes 16-31 address)."""
     if (
-        a.src_buffer != b.src_buffer
+        type(a) is not type(b)
+        or a.frag == b.frag
+        or a.src_buffer != b.src_buffer
         or a.role != b.role
         or a.ldm != b.ldm
         or a.b_trans != b.b_trans
-        or a.swizzle != b.swizzle
-        or a.fragment_layout != b.fragment_layout
     ):
         return False
     row_d, col_d = _delta(a.src_index[0], b.src_index[0]), _delta(a.src_index[1], b.src_index[1])
-    if a.fragment_layout == "m8n8k4":
-        if b.fragment_index != a.fragment_index + 1:
+    if _volta(a):
+        if a.slab_layout != b.slab_layout or a.fragment_index % 2 or b.fragment_index != a.fragment_index + 1:
             return False
         # Crosswise pairs along the slab's ROW axis (A's M, a transposed B's N) at one K
         # column; the congruous canonical B pairs along its columns at one row.
-        return col_d == 0 if a.swizzle == VOLTA_CROSSWISE else row_d == 0
+        return col_d == 0 if a.slab_layout == VOLTA_CROSSWISE else row_d == 0
+    if a.swizzle != b.swizzle:
+        return False
     if a.b_trans:  # N-major slab: N rows adjacent, same K col
         return row_d == _ATOM8 and col_d == 0
     return row_d == 0 and col_d == _ATOM8  # K-major slab: same K row, cols adjacent
 
 
-def _blocks(s: Stmt, a_frag: str, moved_frag: str | None, moved_deps: set[str]) -> bool:
-    """An intervening stmt that forbids moving the partner load up to the pair position: a
-    barrier / control / slab-writing stmt; a redefinition of either fragment; a READ of the
-    moved fragment (its pre-move value — e.g. the previous streaming step's — would be
-    clobbered early); or a definition of a name the moved load's index reads. Reading the
-    KEPT fragment is fine — the pair fills it at its original position."""
-    if s.nested() or isinstance(s, (Sync, MbarrierWait, Write, Loop, StridedLoop, Cond, WgmmaFence, WgmmaCommit, WgmmaWait, WgmmaMma)):
-        return True
-    defs = set(s.defines())
-    if a_frag in defs or (moved_frag is not None and moved_frag in defs):
-        return True
-    if moved_frag is not None and moved_frag in s.deps():
-        return True
-    return bool(defs & moved_deps)
-
-
-def _pair(stmts: list[Stmt]) -> list[Stmt] | None:
-    out = list(stmts)
-    changed = False
-    i = 0
-    while i < len(out):
-        a = out[i]
-        if not _candidate(a):
-            i += 1
-            continue
-        if isinstance(a, LdmatrixLoad) and a.fragment_layout == "m8n8k4" and a.fragment_index % 2:
-            i += 1
-            continue
-        j = i + 1
-        while j < len(out):
-            b = out[j]
-            if _candidate(b) and _pairs_with(a, b):
-                moved_deps = {v for e in b.src_index for v in e.free_vars()}
-                if any(_blocks(s, a.frag, b.frag, moved_deps) for s in out[i + 1 : j]):
-                    break
-                out[i] = replace(a, pair_frag=b.frag)
-                del out[j]
-                changed = True
-                break
-            if _blocks(b, a.frag, None, set()):
-                break
-            j += 1
-        i += 1
-    return out if changed else None
+def _pair(stmts: list[Statement]) -> list[Statement] | None:
+    """Each low half fused with its high half wherever the scope's ordering constraints leave the two free of each
+    other. A run of adjacent fragments pairs from its first: a load some open low half can still take waits for it."""
+    candidates = [i for i, s in enumerate(stmts) if _candidate(s)]
+    high = {a: [b for b in candidates if b != a and _pairs_with(stmts[a], stmts[b])] for a in candidates}
+    if not any(high.values()):
+        return None
+    low = {b: [a for a in candidates if b in high[a]] for b in candidates}
+    scope = Siblings(stmts)
+    free = set(candidates)
+    progress = True
+    while progress:
+        progress = False
+        for a in candidates:
+            if a not in free or any(c in free and scope.fusable((c, a)) for c in low[a]):
+                continue
+            b = next((b for b in high[a] if b in free and scope.fusable((a, b))), None)
+            if b is not None:
+                scope.fuse([a, b], scope[a].replace(pair_frag=scope[b].frag))
+                free -= {a, b}
+                progress = True
+    changed = len(free) < len(candidates)
+    return scope.ordered() if changed else None

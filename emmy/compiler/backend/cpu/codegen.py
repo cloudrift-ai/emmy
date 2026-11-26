@@ -88,12 +88,14 @@ def _ext(loop):
 def _cost(stmts) -> int:
     total = 0
     for s in stmts:
-        if _kind(s) in ("Loop", "StridedLoop"):
+        if _kind(s) == "Loop":
             extent = s.axis.extent
             total += (extent.value if isinstance(extent.value, int) else (extent.hint or 512)) * _cost(s.body)
         elif _kind(s) == "Cond":
             total += _cost(s.body) + _cost(s.else_body or ())
-        elif _kind(s) == "Assign" and s.op.name in EXPENSIVE_OPS:
+        elif _kind(s) == "Assign" and any(
+            node.operation is not None and node.operation.name in EXPENSIVE_OPS for node in s.value.subterms()
+        ):
             total += 8
         else:
             total += 1
@@ -103,7 +105,7 @@ def _cost(stmts) -> int:
 def _loop_sizes(stmts) -> set[str]:
     names: set[str] = set()
     for s in stmts:
-        if _kind(s) in ("Loop", "StridedLoop") and isinstance(_ext(s), str):
+        if _kind(s) == "Loop" and isinstance(_ext(s), str):
             names.add(_ext(s))
         for attr in ("body", "else_body"):
             names |= _loop_sizes(getattr(s, attr, None) or ())
@@ -112,7 +114,7 @@ def _loop_sizes(stmts) -> set[str]:
 
 def _check_leaves(stmts) -> None:
     for s in stmts:
-        if _kind(s) not in ("Load", "Assign", "Affine", "Accum", "Write"):
+        if _kind(s) not in ("Load", "Assign", "Accum", "Write"):
             raise Unsupported(f"statement {_kind(s)}")
         if _kind(s) == "Write" and s.atomic:
             raise Unsupported("atomic write")
@@ -131,7 +133,7 @@ def _nest(body) -> _Nest:
         if len(inner) > 1:
             raise Unsupported("sibling loops")
         idx = level_body.index(inner[0])
-        if any(_kind(s) not in ("Load", "Assign", "Affine") for s in level_body[:idx]):
+        if any(_kind(s) not in ("Load", "Assign") for s in level_body[:idx]):
             raise Unsupported("statements before a nested loop")
         pre[level], post[level] = level_body[:idx], level_body[idx + 1 :]
         loops.append(inner[0])
@@ -219,7 +221,7 @@ class _Fn:
                 if otherwise is not None:
                     otherwise()
 
-    def expr(self, e):
+    def expression(self, e):
         """An index, predicate or scalar expression: i64 for integers, i1 for predicates, f32 for SSA values."""
         k = _kind(e)
         b = self.b
@@ -237,25 +239,25 @@ class _Fn:
             if e.name in self.vars:
                 return b.load(self.vars[e.name], typ=F32)
             raise Unsupported(f"unbound variable {e.name}")
-        if k == "CastExpr":
-            v = self.expr(e.expr)
+        if k == "CastExpression":
+            v = self.expression(e.expression)
             if e.dtype in ("float", "f32"):
                 return v if v.type == F32 else b.sitofp(self.integer(v), F32)
             if e.dtype == "int":
                 return b.fptosi(v, I64) if v.type == F32 else self.integer(v)
             raise Unsupported(f"cast to {e.dtype}")
-        if k == "TernaryExpr":
-            on_true, on_false = self.expr(e.if_true), self.expr(e.if_false)
+        if k == "TernaryExpression":
+            on_true, on_false = self.expression(e.if_true), self.expression(e.if_false)
             if F32 in (on_true.type, on_false.type):
                 on_true, on_false = self.real(on_true), self.real(on_false)
             else:
                 on_true, on_false = self.integer(on_true), self.integer(on_false)
             return b.select(self.pred(e.cond), on_true, on_false)
-        if k == "BinaryExpr":
+        if k == "BinaryExpression":
             op = e.op
             if op in ("&&", "||"):
                 return (b.and_ if op == "&&" else b.or_)(self.pred(e.left), self.pred(e.right))
-            left, right = self.expr(e.left), self.expr(e.right)
+            left, right = self.expression(e.left), self.expression(e.right)
             if F32 in (left.type, right.type):
                 left, right = self.real(left), self.real(right)
                 arith = {"+": b.fadd, "-": b.fsub, "*": b.fmul, "/": b.fdiv}
@@ -292,21 +294,21 @@ class _Fn:
         return v if v.type == F32 else self.b.sitofp(self.integer(v), F32)
 
     def index(self, e):
-        return self.integer(self.expr(e))
+        return self.integer(self.expression(e))
 
     def pred(self, e):
-        v = self.expr(e)
+        v = self.expression(e)
         if v.type == F32:
             return self.b.fcmp_unordered("!=", v, ir.Constant(F32, 0.0))
         return v if v.type == I1 else self.b.icmp_signed("!=", v, ir.Constant(I64, 0))
 
-    def element(self, buf, index_exprs):
+    def element(self, buf, index_expressions):
         """Row-major address of ``buf[index...]``; a runtime dimension makes the stride a runtime product."""
         shape = self.shapes[buf]
-        if len(index_exprs) not in (0, len(shape)):
-            raise Unsupported(f"{buf}: {len(index_exprs)} indices for rank {len(shape)}")
+        if len(index_expressions) not in (0, len(shape)):
+            raise Unsupported(f"{buf}: {len(index_expressions)} indices for rank {len(shape)}")
         offset, stride = ir.Constant(I64, 0), 1
-        for e, d in zip(reversed(index_exprs), reversed(shape), strict=False):
+        for e, d in zip(reversed(index_expressions), reversed(shape), strict=False):
             term = self.index(e)
             if not (isinstance(stride, int) and stride == 1):
                 term = self.b.mul(term, ir.Constant(I64, stride) if isinstance(stride, int) else stride)
@@ -353,6 +355,14 @@ class _Fn:
         except (TypeError, ValueError):
             raise Unsupported(f"operand {arg!r}") from None
 
+    def scalar(self, expression, acc_index=None):
+        """A value expression at f32: a name's slot, a literal, or an operation over its operands' values."""
+        if _kind(expression) == "Var":
+            return self.value(expression.name, acc_index)
+        if _kind(expression) == "Literal":
+            return self.value(expression.value, acc_index)
+        return self.elementwise(expression.operation.name, [self.scalar(operand, acc_index) for operand in expression.operands])
+
     def intrinsic(self, name):
         arity = 2 if name in ("llvm.maxnum", "llvm.minnum", "llvm.pow") else 1
         return self.m.declare_intrinsic(name, [F32], ir.FunctionType(F32, [F32] * arity))
@@ -366,15 +376,13 @@ class _Fn:
         b, one = self.b, ir.Constant(F32, 1.0)
         binary = {"add": b.fadd, "subtract": b.fsub, "multiply": b.fmul, "divide": b.fdiv}
         if op == "multiply":
-            # A product feeding an accumulation fuses into one FMA, as nvcc fuses it by default; ``combine`` marks
+            # A product feeding an accumulation fuses into one FMA, as the CUDA backend does by default (CONTRACT_FMA); ``combine`` marks
             # the accumulating add the same way, and nothing else is, so no other sum changes.
             return b.fmul(*args, flags=CONTRACT)
         if op in binary:
             return binary[op](*args)
         if op in ("copy", "pad"):
             return args[0]
-        if op == "next":
-            return args[1]
         if op == "where":
             return b.select(b.fcmp_unordered("!=", args[0], ir.Constant(F32, 0.0)), args[1], args[2])
         if op == "reciprocal":
@@ -500,22 +508,18 @@ class _Fn:
                 raw = self.b.load(self.element(s.input, s.index), typ=STORAGE[dt])
                 self.b.store(self.widen(raw, dt), self.slot(s.names[0]))
             elif k == "Assign":
-                result = self.elementwise(s.op.name, [self.value(a, acc_index) for a in s.args])
-                self.b.store(self.round_to(result, str(s.dtype)), self.slot(s.name))
-            elif k == "Affine":
-                # One operation at a time, the way Kernel IR spells a sum.
-                self.leaves(s.as_assigns(), acc_index, serial=serial)
+                self.b.store(self.round_to(self.scalar(s.value, acc_index), str(s.dtype)), self.slot(s.name))
             elif k == "Accum":
                 where = self.addr(s.name, acc_index)
                 cur = self.value(s.base, acc_index) if s.base is not None else self.b.load(where, typ=F32)
-                self.b.store(self.combine(s.op.name, cur, self.value(s.value, acc_index)), where)
+                self.b.store(self.combine(s.op.name, cur, self.scalar(s.value, acc_index)), where)
             elif k == "Select":
                 result = self.value(s.branches[-1].value, acc_index)
                 for branch in reversed(s.branches[:-1]):
                     result = self.b.select(self.pred(branch.select), self.value(branch.value, acc_index), result)
                 self.b.store(result, self.slot(s.name))
             elif k == "Let":
-                v = self.expr(s.value)
+                v = self.expression(s.value)
                 if v.type == F32:
                     self.b.store(v, self.slot(s.name))
                 else:
@@ -556,7 +560,17 @@ class _Fn:
                         raise Unsupported(f"accumulator {a.op.name}")
                 self.init_accs(opened)
                 self.open_accs |= {a.name for a in opened}
-                self.full(s, lambda s=s: self.serial(s.body))
+                if s.range is None:
+                    self.full(s, lambda s=s: self.serial(s.body))
+                else:
+                    # A range lies inside the extent: the whole extent is walked and the trips outside it do nothing.
+                    from emmy.compiler.ir.expression import BinaryExpression, Var  # noqa: PLC0415
+
+                    start, end = s.range
+                    inside = BinaryExpression(
+                        "&&", BinaryExpression("<=", start, Var(s.axis.name)), BinaryExpression("<", Var(s.axis.name), end)
+                    )
+                    self.full(s, lambda s=s, inside=inside: self.branch(self.pred(inside), lambda: self.serial(s.body), None))
                 self.open_accs -= {a.name for a in opened}
             elif k == "Cond":
                 self.branch(
@@ -684,7 +698,7 @@ def _observes_running_value(stmts, accums) -> bool:
     for s in stmts:
         if _kind(s) == "Write":
             return True
-        reads = {s.value} | ({s.base} - {s.name} if s.base else set()) if _kind(s) == "Accum" else set(s.deps())
+        reads = set(s.value.free_vars()) | ({s.base} - {s.name} if s.base else set()) if _kind(s) == "Accum" else set(s.deps())
         if names & reads:
             return True
     return False
@@ -702,7 +716,7 @@ def _serial(loop, buffers, shapes, dtypes, size_names):
     while split is not None and _ext(split) == 1 and len(split.body) == 1 and _kind(split.body[0]) == "Loop":
         part.axes[split.axis.name] = ir.Constant(I64, 0)
         split = split.body[0]
-    if split is None or any(_kind(s) not in ("Load", "Assign", "Affine", "Let") for s in head) or not _independent(split):
+    if split is None or any(_kind(s) not in ("Load", "Assign", "Let") for s in head) or not _independent(split):
         part.serial(body)
         part.finalize()
         return str(m), Plan("serial", "range", 1, 0, False, size_names)
@@ -712,8 +726,19 @@ def _serial(loop, buffers, shapes, dtypes, size_names):
     return str(m), Plan("serial", "range", _ext(split), 0, _cost(loop.body) >= PARALLEL_MIN_COST, size_names)
 
 
+def _ranged(stmts) -> bool:
+    """Whether a loop of ``stmts`` walks a range in place of its whole extent."""
+    return any(
+        (_kind(s) == "Loop" and s.range is not None) or any(_ranged(getattr(s, attr, None) or ()) for attr in ("body", "else_body"))
+        for s in stmts
+    )
+
+
 def _parallel(loop, buffers, shapes, dtypes, size_names, schedule=None):
     """Pick a strategy from the nest's shape. Every check runs before anything is emitted."""
+    if _ranged(loop.body):
+        # The strategies below split and vectorize whole extents; a range is walked by the serial one.
+        raise Unsupported("a loop over a range")
     parallel = _cost(loop.body) >= PARALLEL_MIN_COST
     writes = list(_writes_in(loop.body))
 
@@ -903,12 +928,11 @@ def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, co
 def _lane_body(stmts, red: str, block: str, lanes: int, lane: int, blocks: int) -> list:
     """``stmts`` with the reduce index ``red`` spelled ``lanes * block + lane`` and every expression simplified, so an
     index that is constant across a block's lanes (a block scale's) reads ``block`` alone."""
-    from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var  # noqa: PLC0415
 
-    at = BinaryExpr("+", BinaryExpr("*", Var(block), Literal(lanes, "int")), Literal(lane, "int"))
+    at = BinaryExpression("+", BinaryExpression("*", Var(block), Literal(lanes, "int")), Literal(lane, "int"))
     ctx = SimplifyCtx.empty().extend(block, Interval(0, blocks - 1))
-    return [map_exprs(s, lambda e: e.substitute({red: at}).simplify(ctx)) for s in stmts]
+    return [s.map_expressions(lambda e: e.substitute({red: at}).simplify(ctx)) for s in stmts]
 
 
 def _full_reduction(start, nest, accums, red_loop, post, buffers, shapes, dtypes, size_names, parallel):

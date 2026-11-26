@@ -2,7 +2,7 @@
 
 Parametrized over backends (numpy / loop / cuda) via the ``run_graph``
 fixture in ``conftest.py``, AND over dtypes (``f32`` / ``f16``) via the
-``dtype`` fixture. The cuda variant is skipped when nvcc+GPU are
+``dtype`` fixture. The cuda variant is skipped when ptxas+GPU are
 unavailable; the loop/fp16 cell is skipped (cppyy runner is f32-only).
 Expected values are computed with numpy directly — no torch dependency.
 """

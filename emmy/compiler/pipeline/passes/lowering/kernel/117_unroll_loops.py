@@ -1,0 +1,64 @@
+"""Unroll every loop a lowering site flagged: a loop in the body is a loop in the code.
+
+A lowering site that wants a loop unrolled says so on the statement (``unroll``; the ``UNROLL`` budget caps which
+loops a site flags). Here each flagged ``Loop`` whose trips a static number bounds becomes copies of
+its body, the axis bound to its value in each (``_unroll.unroll_where``), innermost first:
+
+- A loop of at most ``FLAGGED_WHOLE`` trips (``emmy.compiler.target``) becomes one copy per trip. A trip only some
+  threads run (a lane loop over a row its lanes do not divide) keeps the loop's bound as the guard of its copy.
+- A longer loop stays a loop that runs up to ``FLAGGED_PER_TRIP`` copies of its body per trip, and says it is
+  ``unrolled``, so the code generator keeps it a loop: the tensor-core K loop of a deep contraction, which its site
+  flags at any length.
+
+The two numbers are target facts, calibrated on NVIDIA's compilers: a 64-trip scalar reduce written out in full, a
+128-trip tensor-core loop as 32 copies per trip (all 128 copies are four times the machine code). The body's
+optimization then folds each copy's index and computes once what two copies share. A flagged loop with no static
+bound on its trips (a symbolic extent, an early stop, a start of unknown range) stays as it is. In every case the
+flag is spent: no statement carries it past this pass, so whatever generates the kernel's code unrolls nothing and is
+asked for nothing.
+
+It runs after the passes that match loops and the statements in them (the vector passes, the load pairing, the
+guards) and before ``120_explicit_conversions``, the one place that decides types: a copy reads its axis as a
+literal, and a literal is typed by the operation that reads it. It decides nothing: the flag is the decision.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from emmy.compiler.graph import Node
+from emmy.compiler.ir.kernel import KernelOp
+from emmy.compiler.ir.stmt import Body, Loop, Statement
+from emmy.compiler.pipeline import Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.lowering.kernel._unroll import unroll_where
+from emmy.compiler.target import FLAGGED_PER_TRIP, FLAGGED_WHOLE
+
+PATTERN = [Pattern("root", KernelOp)]
+
+
+def rewrite(root: Node) -> KernelOp:
+    op: KernelOp = root.op
+    if not any(isinstance(stmt, Loop) and stmt.unroll for stmt in op.body.iter()):
+        raise RuleSkipped("no loop flagged for unrolling")
+    return replace(op, body=_unflagged(unroll_where(op.body, _copies)), knobs=dict(op.knobs))
+
+
+def _copies(loop: Statement, trips: tuple[int, int] | None) -> int | None:
+    """The copies a flagged loop takes."""
+    if not loop.unroll or trips is None:
+        return None
+    every, most = trips
+    if most <= FLAGGED_WHOLE:
+        return most
+    return max((n for n in range(2, FLAGGED_PER_TRIP + 1) if most % n == 0), default=None) if every == most else None
+
+
+def _unflagged(body: Body) -> Body:
+    """``body`` with the flag cleared on the loops that stay."""
+    out: list[Statement] = []
+    for stmt in body:
+        nested = stmt.nested()
+        if nested:
+            stmt = stmt.with_bodies(tuple(_unflagged(inner) for inner in nested))
+        out.append(stmt.replace(unroll=False) if isinstance(stmt, Loop) and stmt.unroll else stmt)
+    return Body(out)

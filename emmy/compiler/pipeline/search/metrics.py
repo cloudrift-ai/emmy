@@ -108,7 +108,7 @@ def topk_pick(predicted_cost: Sequence[float], measured_us: Sequence[float], k: 
     is explicit. A group of 5 asked for its top 10 answers with its entire self — a perfect result for a
     reason that has nothing to do with the model, and indistinguishable in an aggregate from a model that
     genuinely found the optimum. A report must count the excluded groups rather than average them in; at the
-    measurement freeze's median group size of 5, ``k = 10`` excludes most of the corpus."""
+    median measured-pool size of 5 seen so far, ``k = 10`` excludes most of the corpus."""
     n = len(predicted_cost)
     if n <= k:
         return None

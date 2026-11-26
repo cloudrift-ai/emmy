@@ -10,9 +10,9 @@ CUDA-specific dispatch. Shared backend contract lives in
 ```
 cuda/
 ├── backend.py        # CudaBackend(Backend) — drives lowering + delegates execution
-├── nvcc.py           # offline `nvcc --cubin` compile into the content-addressed cubin cache
+├── ptxas.py          # each kernel's PTX assembled by ptxas into the content-addressed cubin cache
 ├── device.py         # runtime contexts cached per logical GPU selected by the host
-├── cache.py          # same-stream L2 eviction outside cold benchmark event windows
+├── cache.py          # same-stream L2 and instruction-cache eviction outside cold benchmark event windows
 ├── program.py        # the facade over the runtime: plan + cubins + host bytes in, outputs and timings out
 └── _bench_worker.py  # the SIGKILL-able child that hosts benches and the torch comparison
 ```
@@ -31,9 +31,9 @@ Context failure probes inspect only an existing context for the selected device;
 
 `CudaBackend.compile(graph)` runs
 `run_pipeline(graph, [..., "lowering/kernel", "lowering/cuda"], dump=…)`,
-producing a `Graph[CudaOp]` where every compute node carries a rendered
-`__global__` source plus its launch geometry (grid / block / smem /
-arg_order).
+producing a `Graph[CudaOp]` where every compute node carries its kernel's
+PTX, from the Kernel IR to PTX compiler (`crates/emmy-ptx`), plus its launch
+geometry (grid / block / smem / arg_order).
 
 ## Dispatch (`program.py`)
 
@@ -45,58 +45,42 @@ capacity-capped one refuses a larger extent), asks the runtime for the **layout*
 region of it, turns every input and constant into host bytes, and loads the program: the runtime validates the plan,
 adopts the regions, loads the cubins, uploads the bytes and fills the runtime constants. `CompiledProgram.build(graph)`
 is exactly `build_from_plan(plan_from_graph(graph))` — the pack path (`../pack.py`) enters at `build_from_plan` with a
-plan read from disk whose kernels reference cubins by content-addressed cache key (no codegen, no nvcc), and both paths
+plan read from disk whose kernels reference cubins by content-addressed cache key (no codegen, no ptxas), and both paths
 share every line downstream. The projection:
 
 - Classifies each node as `input` / `constant` / `output` / `scratch`
   from `graph.inputs` / `ConstantOp` membership / `graph.outputs`.
-- Compiles each unique `kernel_name` via `nvcc.compile_kernel` (`nvcc.py`):
-  offline `nvcc --cubin` into a content-addressed disk cache; the runtime loads the cubin by
-  path. Content addressing makes **cross-process source determinism a hard
-  contract**: any address- or seed-derived token in rendered source re-keys the kernel
-  every boot and silently defeats the cache (a server restart recompiles everything it
-  touches) — pinned by `tests/compiler/backend/test_source_determinism.py`, which
-  compiles in two subprocesses and asserts identical sources. A cubin loads with no driver PTX→SASS JIT, the
-  compile is ~3× faster than a cold NVRTC compile on the complex tile-search kernels that dominate a golden bench, and
-  it is GPU-free, so the cubin cache can be warmed by a parallel pool (planned). A missing or failing `nvcc` is an
-  error; there is no NVRTC fallback. Kernels are emitted with `extern "C" __global__` so nothing name-mangles them
-  (the cubin symbol loads by `kernel_name`). The compile budget is checked BETWEEN kernels
-  (`_compile_kernels`), the only boundary a Python-level check has, so a cold multi-kernel compile that outlives the
-  bench worker's wall cap raises `CompileBudgetExceeded` instead of being reported as a dead worker.
-- **Opt level** comes from `EMMY_NVCC_FLAGS` (`nvcc.effective_flags`, which
-  delegates to `config.nvcc_flags()` — `emmy/config.py` is the single owner
-  of `os.environ` for `EMMY_*` vars, incl. `EMMY_NO_NVCC` /
-  `EMMY_CUBIN_CACHE`). The CLI sets the flags via `config.set_nvcc_flags`
-  (override logic, no longer in the command layer) — `compile` and `run` both default to nvcc's own -O3, the
-  deployable regime, and `--nvcc-flags` overrides. **Tuning measures in the regime it deploys into**, so a tuned
-  latency is the deployed one.
-
-  `FAST_MATH` defaults to true and adds `--use_fast_math`; `EMMY_FAST_MATH=0` omits that flag and disables the
-  umbrella's compiler rewrites. Individual precision pins still override the umbrella. For an intermediate-rounding
-  diagnostic, pass `--nvcc-flags=--fmad=false`; custom flags follow the policy flag. Disabling contraction alone leaves
-  other fast-math transformations enabled. Combine it with `EMMY_FAST_MATH=0` for precise arithmetic checks.
-  Explicit tensor-core instructions retain their own accumulation semantics. Accuracy and latency evidence must name
-  the effective flags; a precise diagnostic does not qualify the default fast-math kernel. Persistent benchmark
-  workers receive the effective `FAST_MATH` value with every request and restore their prior value afterward, so a
-  previous request's arithmetic mode cannot leak into the next measurement.
-
-  An older sweep ranked at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
-  rationale was measured against the WMMA codegen deleted in #189 four days later; on current codegen (fragment work
-  renders as rolled loops with small `#pragma unroll` trip counts) it does not reproduce — over 4,888 nvcc compiles
-  spanning the tile inventory, -O3 compiled at a **median 0.96×** of -O1, worst case 1.17×, slowest compile 1.39 s.
-  So the lower level bought no compile time while mis-ranking by tile area, and it is no longer a measurement lane.
-  It stays reachable through `--nvcc-flags` for the test suite's compile-speed lane; a bench pinned to it warns, and
-  its rows key to that regime so no deploy reads them. Note the blowup is a property of unroll size, not of the opt
-  level as such: `EMMY_UNROLL` (below) raised far enough could bring it back.
-
-  The flags are folded into both the cubin cache key (literally) and `Context.structural_key` (split into opt level +
-  the other flags, `context.split_opt_level`), so one regime has one key however it is spelled while measurements
-  from different regimes never collide. The bench-worker subprocess inherits the env, so its compiles use the
-  same flags.
-  `EMMY_UNROLL=<n>` caps which static loops emit `#pragma unroll` (the unroll budget — declared in
-  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there). It is a
-  pin-only nvcc hint that steers cicc unrolling / register pressure / compile time; it does **not**
-  change the emitted-C listing size (the register-tile fragment grid is straight-line regardless).
+- Assembles each unique `kernel_name` via `ptxas.compile_kernel` (`ptxas.py`): the toolkit's `ptxas`, found on
+  `PATH` or under `CUDA_HOME` / `CUDA_PATH`, assembles the kernel's PTX into a content-addressed disk cache, and the
+  runtime loads the cubin by path. The key is the PTX text, the target and ptxas's version (`ptxas --version`); ptxas
+  takes no flag but the target, since the kernel's precision decisions are in its instructions. Content addressing
+  makes **cross-process text determinism a hard contract**: any address- or seed-derived token in a kernel's PTX
+  re-keys the kernel every boot and silently defeats the cache (a server restart reassembles everything it touches)
+  — pinned by `tests/compiler/backend/test_source_determinism.py`, which compiles in two subprocesses and asserts
+  identical text. A cubin loads with no driver PTX→SASS JIT, and assembling is GPU-free, so the cache can be warmed
+  off the card. A missing ptxas is an error that says what to install; there is no other assembler.
+  Everything keyed on the code reads the PTX: the cubin cache, the kernel merge (a kernel's name stands in its PTX
+  as its entry and in the parameter and shared symbols the printer derives from it, and `ir.cuda.ir.renamed`
+  renames those alone; the corpus test checks the claim on every kernel), `CudaOp.identity_key`, the plan's JSON
+  and the pack, whose key records ptxas's version. A kernel waits on the grid ahead of it only where its target has
+  the instruction (`sm_90` and later), and says so (`CudaOp.dependent_launch`). The compile budget is checked
+  BETWEEN kernels (`_compile_kernels`), the only boundary a Python-level check has, so a cold multi-kernel compile
+  that outlives the bench worker's wall cap raises `CompileBudgetExceeded` instead of being reported as a dead
+  worker.
+- **One regime.** Every compile builds the code a served model runs, so **tuning measures in the regime it deploys
+  into** and a tuned latency is the deployed one. The two precision decisions that hold for a whole kernel, flush to
+  zero (on under the default `FAST_MATH`) and multiply-add fusion (off under `EMMY_CONTRACT_FMA=0`, an
+  intermediate-rounding diagnostic), reach the PTX compiler as decisions; every approximate instruction is an
+  operation of the kernel body, picked by `lowering/kernel/130_approximate_math`. Combine `EMMY_CONTRACT_FMA=0` with
+  `EMMY_FAST_MATH=0` for precise arithmetic checks. Explicit tensor-core instructions retain their own accumulation
+  semantics. Accuracy and latency evidence must name the effective decisions; a precise diagnostic does not qualify
+  the default fast-math kernel. Persistent benchmark workers receive every effective precision decision with each
+  request and restore their prior values afterward, so a previous request's arithmetic mode cannot leak into the
+  next measurement. The context key folds in every effective precision decision.
+  `EMMY_UNROLL=<n>` caps which static loops the kernel lowering flags for unrolling (the unroll budget — declared in
+  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there). The lowering then writes the flagged
+  loops out itself (`lowering/kernel/117_unroll_loops`): the Kernel IR holds the copies. It is
+  pin-only and steers register pressure, code size and compile time.
   Unset → each site's built-in cap; `0` → keep every loop rolled.
 - Builds a static launch plan: per launch, a tuple of
   `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`. The runtime resolves total shared storage against
@@ -119,6 +103,9 @@ share every line downstream. The projection:
 On targets without native FP8 conversion, E4M3 decode constructs the exact FP16 bit pattern, then widens when the
 consumer wants FP32. Subnormals, signed zero and the NaN code follow the dtype contract; exhaustive byte tests cover
 both result widths. This removes per-element exponent arithmetic without changing the stored representation.
+A lookup into the e2m1 pair table an NVFP4 weight decodes through (`ir.base.is_f4_pair_table`) is computed the same way:
+the indexed nibble's value from its bits, so it equals the table's entry and reads nothing. The table stays a kernel
+parameter and the signature does not change.
 
 **Memory: regions the runtime derives, tensors this side lends.** The runtime's layout gives every input,
 constant and output buffer its own region (`role:name`) and packs every scratch buffer into one `scratch` slab by
@@ -195,21 +182,31 @@ event against a deadline (`_KERNEL_TIMEOUT_MS`, 2 s; `EMMY_KERNEL_TIMEOUT_MS` ov
 driver, which would hang forever on a non-terminating kernel; on overrun it raises **`HungKernelError`** (the
 extension's exception, a `RuntimeError` subclass, so callers' `except RuntimeError → bench_fail` still catch it). A
 program's FIRST `iter_once` runs under its own deadline, `EMMY_FIRST_ITER_TIMEOUT_MS`
-(`config.first_iter_timeout_ms()`, default 30× the steady one): lazy SASS upload, the smem-carveout reconfig for a big
-dynamic-smem kernel, and allocator first-touch can legitimately stall iter 0 past the steady-state cap without any
-kernel being hung. Before the knob the grace was hard-coupled at 30×, which at the 30 s steady watchdog a serving twin
-needs priced every hang at 900 s; set it alone to bound what a hang costs. The 2 s (not 1 s) default is empirical: the
+(`config.first_iter_timeout_ms()`, default the steady one plus a fixed one-minute grace): lazy SASS upload, the
+smem-carveout reconfig for a big dynamic-smem kernel, and allocator first-touch can legitimately stall iter 0 past
+the steady-state cap without any kernel being hung. Those are one-off setup costs that do not grow with the kernel's
+run time, which is why the grace is a term, not a multiple: the 30× coupling it replaced priced every hang at 600 s
+under the 20 s steady watchdog a slow program needs (900 s at a serving twin's 30 s), held the GPU lock for it, and
+let the bench worker's wall kill — which names no kernel — pre-empt the watchdog that does. Set it alone to bound
+what a hang costs. The 2 s (not 1 s) default is empirical: the
 gemma-4 post4096-global twin bench_failed 5/5 under a 1 s deadline at the first post-recalibration iteration yet runs
 clean 9/9 with no wait ≥0.2 s at any deadline ≥2 s — a deadline-correlated phantom (mechanism below the driver line
 unresolved; see the constant's note). This is the in-process timing core; both the pinned-row bench and the deployable
 comparison run it **inside the worker** (below), so a hung kernel hangs the child, not the parent.
 
-The `COLD_CACHE` measurement regime fixes every per-kernel batch at one replay. Before each launch's start event,
-`L2Eviction` queues a memset over a scratch allocation twice the live card's L2 size, on the same Torch/runtime
-stream. Allocation and eviction are outside the measured interval. Capture contains only the kernel replay;
-whole-program e2e windows are disabled because their internal reuse differs from the cold per-kernel sum. The
-worker request carries the regime on every job, including tuner candidates, so a persistent worker can switch
-between hot and cold jobs without inheriting the previous job's setting.
+The `COLD_CACHE` measurement regime fixes every per-kernel batch at one replay and measures a kernel the way serving
+finds it: its weights and its code in memory, its activations wherever the bench left them. Serving runs dozens of
+other kernels between two launches of one, and a bench that repeats one kernel keeps both cached. Before each launch's
+start event, `CacheEviction` runs one kernel on the same Torch/runtime stream, one block per SM: every thread reads its
+share of a scratch allocation twice the live card's L2 size, and the first warp on each of the SM's schedulers runs
+`EVICTED_CODE_BYTES` of straight-line code, more than the SM's instruction caches hold. A read, not a write, so L2
+holds clean lines as serving's weight reads leave it. The code is the larger effect on decode kernels: on a V100 a
+straight-line matmul piece with 33 KB of code times 15 µs with its code cached and 29 µs without, while a 10 KB piece
+moves 1 µs, so only the evicted bench ranks the two as serving does (26.6 vs 15.6 µs). That is also why the hot
+per-kernel bench cannot rank decode kernels. Allocation and eviction are outside the measured interval. Capture
+contains only the kernel replay; whole-program e2e windows are disabled because their internal reuse differs from the
+cold per-kernel sum. The worker request carries the regime on every job, including tuner candidates, so a persistent
+worker can switch between hot and cold jobs without inheriting the previous job's setting.
 
 `benchmark_program` captures each launch position's batch into a CUDA graph **by default**
 (`capture_graphs=True` → `CompiledProgram.capture_launch_graphs`, right after batch-size calibration),
@@ -255,7 +252,7 @@ emmy-only bench (`benchmark_program` — `run --bench`'s pinned golden / `--ab`
 rows; an optional `run_inputs` ndarray dict adds one pre-bench execution on those inputs with the
 outputs shipped back — the pinned-row wrong-answer gate's measurement side); otherwise it's the
 deployable eager / torch.compile / emmy comparison — `("trace_args", {code/input/adapter/layer/seq_len/dynamic})` →
-`load_or_trace` rebuilds the real module (HF id or `--code` expr) → `bench_full_model_real` (for a
+`load_or_trace` rebuilds the real module (HF id or `--code` expression) → `bench_full_model_real` (for a
 symbolic graph the torch closures run on hint-**tiled** example inputs — `commands/run._hint_sized_inputs`
 grows every symbolic input axis to its `Dim` hint by repeating the trace values, the same size the
 emmy side resolves to when benching without inputs, so the full-model table compares one shape; the
@@ -295,8 +292,11 @@ mirroring `EMMY_KERNEL_TIMEOUT_MS`): one env setting reaches every bench path un
 inherits the env, and the derived wall caps (the pinned-row cap, the comparison jobs' workload-scaled cap) recompute
 from the overridden values. Raising them is how a golden row whose recorded latency exceeds the default
 accumulated-GPU budget gets verified. The two watchdog deadlines beside them — `EMMY_KERNEL_TIMEOUT_MS` (steady) and
-`EMMY_FIRST_ITER_TIMEOUT_MS` (iter 0, default 30× the steady one) — are env-only, with no constructor policy, and
-reach the child the same way.
+`EMMY_FIRST_ITER_TIMEOUT_MS` (iter 0, default the steady one plus a one-minute grace) — are env-only, with no
+constructor policy, and reach the child the same way. Every wall cap includes the first-iteration deadline, so a
+kernel that hangs is named by the watchdog — a `bench_fail` row the next pick reads — before the parent's kill, which
+names none; the kill is left for the stalls no watchdog sees (a model load, ptxas, the Torch twin's `torch.compile`
+JIT, which the comparison cap grants a term per program node when that backend is benched).
 
 The budgets fail differently, and the differences are load-bearing. A `bench_run_timeout_s` overrun is a fact
 about the **kernel** — it compiled, it ran, it was too slow — and is recorded as a `bench_fail` at the watchdog's
@@ -359,7 +359,7 @@ during request send`. Error paths `await aclose()` (SIGKILL + reap) so the subpr
 loop closes.
 
 Three transport behaviors worth knowing: (1) the child's **stderr is drained continuously** by a background task into
-a bounded tail — a chatty child (HF shard-download progress, nvcc warnings) would otherwise fill the ~64 KB pipe and
+a bounded tail — a chatty child (HF shard-download progress, ptxas warnings) would otherwise fill the ~64 KB pipe and
 block mid-job, misread as a wall-timeout — and every failure message (timeout, EOF, in-child error) carries that tail;
 (2) an in-child failure's **traceback is logged** by `run_job` (never discarded), the raise is the typed
 `BenchWorkerJobError`, and a bare in-child `sys.exit` is reported as such with a pointer at the traceback/stderr

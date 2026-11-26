@@ -118,7 +118,8 @@ class EmmyForwardRunner:
 
         # Pack lookup: model identity (id + config hash, so a same-config fine-tune shares the
         # pack) × the serving shape. A hit skips trace + pipeline + fork resolution + codegen;
-        # any mismatch / missing cubin falls back to the full compile below.
+        # any mismatch / missing cubin, or a golden row the program's compile read moving, falls back to the full
+        # compile below.
         pack_key = {
             "kind": "embed-trunk",
             "model": model_id,
@@ -135,8 +136,8 @@ class EmmyForwardRunner:
         pack_at = pack_path(config.pack_dir(), pack_key) if config.pack_dir() is not None else None
         plan = None
         if pack_at is not None:
-            plans = load_pack(pack_at, key=pack_key)
-            plan = plans.get("trunk") if plans is not None else None
+            entries = load_pack(pack_at, key=pack_key)
+            plan = entries["trunk"].plan if entries is not None and "trunk" in entries else None
 
         # Weight sources in the traced dtype: named_buffers (NOT state_dict)
         # so non-persistent buffers — the wrapper's precomputed rotary
@@ -159,9 +160,12 @@ class EmmyForwardRunner:
                 if w.load_ops is not None and (src := assemble_source(w, sources)) is not None
             }
         else:
-            plan, const_feed = cls._trace_and_compile(wrapper, sources, max_seq_len, dtype, batch, static)
+            from emmy.compiler.pipeline.search.policy.greedy import evidence_reads
+
+            with evidence_reads() as reads:
+                plan, const_feed = cls._trace_and_compile(wrapper, sources, max_seq_len, dtype, batch, static)
             if pack_at is not None:
-                cls._save_pack(pack_at, plan, pack_key, model_id)
+                cls._save_pack(pack_at, plan, pack_key, model_id, frozenset(reads))
 
         if len(plan.inputs) != 3:
             raise RuntimeError(f"expected 3 graph inputs (input_ids, attention_mask, position_ids), got {plan.inputs}")
@@ -242,7 +246,7 @@ class EmmyForwardRunner:
         return plan_from_graph(compiled), bind_constants(compiled, sources)
 
     @staticmethod
-    def _save_pack(pack_at, plan, pack_key: dict, model_id: str) -> None:
+    def _save_pack(pack_at, plan, pack_key: dict, model_id: str, reads: frozenset[str]) -> None:
         """Best-effort pack write after a full compile — a failure costs nothing but the log
         line (the next boot recompiles). Skipped when any weight can't be expressed in the
         pack vocabulary (a pack-hit boot could then not rebind it)."""
@@ -252,7 +256,7 @@ class EmmyForwardRunner:
             logger.warning("[serving] not writing pack: a weight load-op chain is outside the pack vocabulary")
             return
         try:
-            save_pack(pack_at, {"trunk": plan}, key=pack_key, provenance={"model": model_id})
+            save_pack(pack_at, {"trunk": plan}, key=pack_key, reads={"trunk": reads}, provenance={"model": model_id})
         except Exception:  # noqa: BLE001 — the pack is an optimization, never a boot blocker
             logger.warning("[serving] pack write failed at %s", pack_at, exc_info=True)
 

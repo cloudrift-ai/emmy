@@ -28,6 +28,100 @@ _OVERRIDE: tuple[int, int] | None = None
 CPU_TARGET = "cpu"
 
 
+#: The element counts one vector access of a buffer of each dtype may hold: the 4-, 8- and 16-byte load and store
+#: widths over the element's size. A fact of the card, read by the vector passes and by whoever spells the access.
+_VECTOR_WIDTHS: dict[str, tuple[int, ...]] = {
+    "f32": (2, 4),
+    "f16": (2, 4, 8),
+    "bf16": (2, 4, 8),
+    "f8e4m3": (2, 4, 8, 16),
+    "f8e5m2": (2, 4, 8, 16),
+    "f4e2m1x2": (2, 4, 8, 16),
+}
+
+
+def vector_widths(dtype: str) -> tuple[int, ...]:
+    """The element counts a vector access of ``dtype`` elements may hold, narrowest first; empty when none."""
+    return _VECTOR_WIDTHS.get(dtype, ())
+
+
+#: The operations a half-precision value computes natively, by the abstract names the elementwise table gives them:
+#: the card rounds each once at f16. Any other operation over f16 computes in f32 and converts its result once. Not
+#: ``sigmoid``: its half spelling ``1/(1+hexp(-x))`` rounds three times, which lands up to two half-ulps from torch's
+#: compute-in-f32-round-once value and fails the strict ``rtol=1e-3`` gate.
+_NATIVE_F16_OPS: frozenset[str] = frozenset(
+    {
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "maximum",
+        "minimum",
+        "exp",
+        "log",
+        "sqrt",
+        "rsqrt",
+        "tanh",
+        "fabs",
+        "abs",
+        "negative",
+        "copy",
+        "reciprocal",
+        "relu",
+    }
+)
+
+
+def native_f16_ops() -> frozenset[str]:
+    """The operations the target computes at f16 without leaving it; the type pass promotes every other one to f32."""
+    return _NATIVE_F16_OPS
+
+
+#: How many copies of a loop's body NVIDIA's compilers wrote (CUDA 13.0, ``sm_120``), read off cicc's PTX and ptxas's
+#: machine code where they unrolled loops on their own. The unroll passes write the same copies into the Kernel IR.
+#: ``117_unroll_loops``, a loop a lowering site flagged: written out in full up to ``FLAGGED_WHOLE`` trips, else
+#: stepping ``FLAGGED_PER_TRIP`` copies a trip at most.
+FLAGGED_WHOLE, FLAGGED_PER_TRIP = 64, 32
+#: ``118_unroll_by_size``, any other loop, by the work one trip does. A static loop: the overhead of a trip, the most
+#: work it is written out in full under, the most work one trip of it holds when it steps several.
+STATIC_TRIP, STATIC_WHOLE, STATIC_PARTIAL = 2, 480, 199
+#: The copies ptxas made of each trip of a static loop cicc copied twice.
+PTXAS_AGAIN = 4
+#: A stepping static loop ptxas wrote out in full: at most this many trips, each of at most this much work.
+PTXAS_WHOLE_TRIPS, PTXAS_WHOLE_WORK = 4, 128
+#: A loop whose trips only the launch knows: the overhead of a trip, the most work of a trip of its stepping loop, its
+#: most copies, and the most work of one copy it is unrolled at.
+RUNTIME_TRIP, RUNTIME_WORK, RUNTIME_COPIES, RUNTIME_LARGEST = 7, 228, 16, 89
+#: A strided loop from a start that differs between threads: the fewest trips it is copied from.
+THREAD_START_LEAST = 24
+#: The instructions cicc writes for one call of a math function, by elementwise operation; any other operation is one.
+MATH_INSTRUCTIONS: dict[str, int] = {
+    "exp": 14,
+    "exp_fast": 2,
+    "expm1": 27,
+    "log": 28,
+    "log_fast": 2,
+    "log2": 30,
+    "log10": 29,
+    "log1p": 32,
+    "sin": 88,
+    "cos": 89,
+    "tan": 87,
+    "tanh": 17,
+    "sinh": 30,
+    "cosh": 21,
+    "arctan": 20,
+    "arcsin": 24,
+    "arccos": 27,
+    "erf": 26,
+    "pow": 113,
+    "power": 113,
+    "pow_fast": 3,
+    "sigmoid": 15,
+    "sigmoid_fast": 4,
+}
+
+
 def parse_sm(spec: str) -> tuple[int, int]:
     """Parse ``sm_NN`` / ``sm_NNN`` (with optional arch suffix) into ``(major, minor)``.
 

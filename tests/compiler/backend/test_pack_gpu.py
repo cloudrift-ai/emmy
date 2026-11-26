@@ -1,6 +1,7 @@
 """Pack save/load on a real GPU (``backend/pack.py``): a compiled program stored as a
 binary-keyed plan must load without its sources and produce identical outputs; any
-disqualifier (key mismatch, evicted cubin) must return ``None`` — the recompile fallback."""
+disqualifier (key mismatch, evicted cubin) must return ``None`` — the recompile fallback. Which entries a golden
+edit invalidates is ``test_pack.py``'s, on any machine."""
 
 import json
 
@@ -20,6 +21,7 @@ from tests.compiler.helpers import requires_cuda
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
 _KEY = {"kind": "test", "model": "test/pack-model", "max_seq_len": 32}
+_READS = {"trunk": frozenset()}
 
 
 def _plan():
@@ -44,10 +46,10 @@ def test_pack_round_trip_runs_identically(tmp_path):
     ref = _run(plan, x)
 
     pdir = pack_path(tmp_path, _KEY)
-    save_pack(pdir, {"trunk": plan}, key=_KEY)
+    save_pack(pdir, {"trunk": plan}, key=_KEY, reads=_READS)
     loaded = load_pack(pdir, key=_KEY)
     assert loaded is not None
-    stored = loaded["trunk"]
+    stored = loaded["trunk"].plan
     # The stored plan is binary-keyed with no sources — the boot that never runs codegen.
     for spec in stored.kernels.values():
         assert spec.source is None and spec.binary_key
@@ -57,7 +59,7 @@ def test_pack_round_trip_runs_identically(tmp_path):
 
 def test_pack_key_mismatch_falls_back(tmp_path):
     pdir = pack_path(tmp_path, _KEY)
-    save_pack(pdir, {"trunk": _plan()}, key=_KEY)
+    save_pack(pdir, {"trunk": _plan()}, key=_KEY, reads=_READS)
     assert load_pack(pdir, key={**_KEY, "max_seq_len": 64}) is None
 
 
@@ -75,31 +77,15 @@ def test_pack_path_separates_environments(tmp_path, monkeypatch):
     fm = pack_path(tmp_path, _KEY)
     assert std != fm, "the precision gate must reach the pack directory, not only the manifest"
     # ...and each still round-trips under its own lane.
-    save_pack(fm, {"trunk": _plan()}, key=_KEY)
+    save_pack(fm, {"trunk": _plan()}, key=_KEY, reads=_READS)
     assert load_pack(fm, key=_KEY) is not None
-
-
-def test_pack_keys_on_the_golden_rows(tmp_path, monkeypatch):
-    """Plans compiled from one set of golden rows must not serve a boot whose rows changed — the rows decide every
-    fork. Found 2026-09-19: a re-recorded Gemma 4 decode golden booted the previous image's plans from a shared pack
-    directory, and the serving run measured the old kernels."""
-    plan = _plan()
-    golden = tmp_path / "golden.json"
-    golden.write_text("rows: before\n")
-    monkeypatch.setenv("EMMY_GOLDEN_FILE", str(golden))
-    before = pack_path(tmp_path, _KEY)
-    save_pack(before, {"trunk": plan}, key=_KEY)
-    assert load_pack(before, key=_KEY) is not None
-    golden.write_text("rows: after\n")
-    assert pack_path(tmp_path, _KEY) != before, "the golden must reach the pack directory, not only the manifest"
-    assert load_pack(before, key=_KEY) is None
 
 
 def test_pack_missing_cubin_falls_back(tmp_path, monkeypatch):
     # A private cubin cache so evicting the pack's cubins can't race parallel test workers.
     monkeypatch.setenv("EMMY_CUBIN_CACHE", str(tmp_path / "cubin"))
     pdir = pack_path(tmp_path, _KEY)
-    save_pack(pdir, {"trunk": _plan()}, key=_KEY)
+    save_pack(pdir, {"trunk": _plan()}, key=_KEY, reads=_READS)
     manifest = json.loads((pdir / "manifest.json").read_text())
     assert load_pack(pdir, key=_KEY) is not None
     for f in (tmp_path / "cubin").glob("*.cubin"):

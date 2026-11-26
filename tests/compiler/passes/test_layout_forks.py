@@ -12,34 +12,32 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import TransposeOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Load, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import DeferredFork, parallel_expand
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks, reader_kernel
 from emmy.compiler.pipeline.pipeline import ForkPoint, Run, _is_structural_option
+from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, unreproducible_pin_flag
-from emmy.compiler.pipeline.search.policy.greedy import _EMPTY_MEASURED, _layout_candidates, _Measured, _route_candidates
+from emmy.compiler.pipeline.search.policy.greedy import _layout_candidates, _route_candidates
 from emmy.compiler.wire import kernel_wire
 from tests.compiler.helpers import inject_constants
+from tests.compiler.pipeline.search.helpers import kernel_row as stored_kernel
 from tests.compiler.terms import contraction
 
 
 def _graph(*, grouped: bool = False) -> Graph:
     n, k = Axis("n", 4), Axis("k", 8)
-    channels = [(Load(name="wv", input="w", index=(Var("k"), Var("n"))), "acc")]
-    if grouped:
-        channels.append((Load(name="w2v", input="w2", index=(Var("k"), Var("n"))), "acc2"))
+    xv, wv, w2v = parse_body("xv = load x[k]\nwv = load w[k, n]\nw2v = load w2[k, n]")
+    channels = [(wv, "acc"), *([(w2v, "acc2")] if grouped else [])]
     tile = TileOp(
-        op=contraction(k, Load(name="xv", input="x", index=(Var("k"),)), *channels),
-        name="y",
+        op=contraction(k, xv, *channels),
         place=Placement(free=(n,)),
         axes=(n, k),
-        output_specs=(OutputSpec(Write(output="y", index=(Var("n"),), value="acc")),)
-        + ((OutputSpec(Write(output="y2", index=(Var("n"),), value="acc2")),) if grouped else ()),
+        output_specs=(OutputSpec(*parse_body("y[n] = acc")),) + ((OutputSpec(*parse_body("y2[n] = acc2")),) if grouped else ()),
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (8,), "f32"), node_id="x")
@@ -137,7 +135,7 @@ def _two_readers() -> Graph:
 
     graph = _graph()
     first = graph.nodes["y"].op
-    second = replace(first, name="z", output_specs=(OutputSpec(Write(output="z", index=(Var("n"),), value="acc")),))
+    second = replace(first, output_specs=(OutputSpec(*parse_body("z[n] = acc")),))
     graph.add_node(second, ["x", "w"], outputs=(Tensor("z", (4,), "f32"),), node_id="z")
     graph.outputs = ["y", "z"]
     return graph
@@ -178,7 +176,6 @@ def test_a_weight_another_kernel_reads_folded_stays_folded() -> None:
 def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     from dataclasses import replace
 
-    from emmy.compiler.ir.stmt import Assign
     from emmy.compiler.pipeline.fork import leaf_knobs
     from emmy.compiler.pipeline.search.db import RoutingRow
     from emmy.compiler.pipeline.search.golden import GoldenFile
@@ -190,18 +187,18 @@ def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     root = graph.nodes["y"]
     x, weight, _ = root.op.op.operands
     # Cutting the squared operand leaves two readers of w. A flat read cannot change storage layout.
-    index = (4 * Var("k") + (Var("n") + 1) % 4,) if fixed_reader else (Var("k"), (Var("n") + 1) % 4)
-    squared = projection((Load(name="wv2", input="w", index=index),), (Assign(name="square", op="multiply", args=("wv2", "wv2")),))
+    index = "4 * k + (n + 1) % 4" if fixed_reader else "k, (n + 1) % 4"
+    squared = projection(parse_body(f"wv2 = load w[{index}]"), parse_body("square = multiply(wv2, wv2)"))
     root.op = replace(root.op, op=contraction("k", x, (weight, "acc"), (squared, "acc2")))
     root.inputs = ["x", "w"]
     del graph.nodes["w2"]
-    root.op = LoopOp(body=root.op.loop_body, name="y")
+    root.op = LoopOp(body=root.op.loop_body)
     program = graph.to_wire()
     ctx = Context.from_target((7, 0))
     graph = Pipeline.build(["tile/lift"]).run(graph, ctx=ctx, db=None)
-    target = definition(graph.nodes["y"].op.with_io(graph, graph.nodes["y"]), "y", traced=0, origins=("y",))
+    target = definition(graph.nodes["y"].op.with_io(graph, graph.nodes["y"]), traced=0, origins=("y",), ref=0)
     taken = []
-    operand_cut = {"PLACE@map.1/inner.2/map" if fixed_reader else "PLACE": "cut"}
+    operand_cut = {"PLACE@map.1/inner.3/map": "cut"}  # the squared operand's cone
 
     def decide(point):
         if not taken:
@@ -211,15 +208,15 @@ def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     inventory = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: taken.append((parent, arm, pieces)))
     Run(Pipeline.build(["tile/cut"]).with_strategies(inventory), ctx).resolve(graph, decide)
     _, cut, pieces = taken[0]
-    first, remainder = definition(pieces[0], pieces[0].name), definition(pieces[1], "y", key="y#2")
-    source = source or definition(taken[-1][2][0], "y", key="y#3")
+    first, second = definition(pieces[0], ref=1), definition(pieces[1], ref=2)
+    source = source or definition(taken[-1][2][0], ref=3)
     return GoldenFile(
         compute_cap=(7, 0),
         programs=[program],
-        kernels=[target, first, remainder, source],
+        kernels=[target, first, second, source],
         routing=[
-            RoutingRow(parent=target.ref, arm=cut, children=(first.ref, remainder.ref)),
-            RoutingRow(parent=remainder.ref, arm={"LAYOUT@w": "source"}, children=(source.ref,)),
+            RoutingRow(parent=target.ref, arm=cut, children=(first.ref, second.ref)),
+            RoutingRow(parent=second.ref, arm={"LAYOUT@w": "source"}, children=(source.ref,)),
         ],
     )
 
@@ -230,9 +227,9 @@ def test_recorded_layout_replay_keeps_undecided_siblings_compatible(fixed_reader
 
     document = _recorded_layout_after_cut()
     if fixed_reader:
-        remainder = document.kernels[2].exact_identity
+        reader = document.kernels[2].exact_identity
         document = _recorded_layout_after_cut(fixed_reader=True, source=document.kernels[-1])
-        assert document.kernels[2].exact_identity == remainder, "only the earlier reader's layout constraint changes"
+        assert document.kernels[2].exact_identity == reader, "only the earlier reader's layout constraint changes"
     taken = mint(document.kernels[0], document.routing, Context.from_target((7, 0)), document=document)
     assert len(taken) == (1 if fixed_reader else 2), "only an undecided sibling may follow the recorded source layout"
     assert [route for route, _, _ in taken] == document.routing[: len(taken)], "explicit cut and layout decisions retain precedence"
@@ -260,19 +257,19 @@ def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None
         priced_arms=lambda _ctx, kernel, **_kw: [({"LAYOUT@w": "source"}, 17.0), ({"REDUCE": "g2k"}, 20.0)] if kernel == folded else [],
         best_per_op_time=lambda *_args, **_kwargs: None,
         has_perf=lambda *_args, **_kwargs: True,
+        measured=lambda _ctx, kernel, **_kw: [({"WORK": "t128"}, 17.0)] if kernel == source_key else [],
     )
-    index = _Measured({source_key: [({"WORK": "t128"}, 17.0)]}, {})
-    prices = {option.knobs["LAYOUT@w"]: us for option, us in _layout_candidates(point, index, db)}
+    prices = {option.knobs["LAYOUT@w"]: us for option, us in _layout_candidates(point, db)}
     assert prices == {"folded": 20.0, "source": 17.0}
-    assert _route_candidates(point, _EMPTY_MEASURED, db) == []
+    assert _route_candidates(point, db) == []
     fuse = DeferredFork(lambda: bound, {"PLACE": "fuse"})
     cut = DeferredFork(lambda: graph, {"PLACE": "cut"}, structural=True)
     place_point = ForkPoint(match=match, options=[fuse, cut], root_op=bound, ctx=point.ctx)
-    assert _route_candidates(place_point, _EMPTY_MEASURED, db) == [(fuse, 17.0), (fuse, 20.0)]
+    assert _route_candidates(place_point, db) == [(fuse, 17.0), (fuse, 20.0)]
     unsplit = DeferredFork(lambda: bound, {"REDUCE": "coop"})
     split = DeferredFork(lambda: graph, {"REDUCE": "g2k"}, structural=True)
     split_point = ForkPoint(match=match, options=[unsplit, split], root_op=bound, ctx=point.ctx)
-    assert _route_candidates(split_point, _EMPTY_MEASURED, db) == [(split, 20.0)]
+    assert _route_candidates(split_point, db) == [(split, 20.0)]
 
 
 def test_a_settled_group_is_offered_as_its_joint_arm() -> None:
@@ -297,14 +294,13 @@ def test_a_layout_arm_is_priced_over_every_reader_it_settles() -> None:
     is not priced at all."""
     from dataclasses import replace
 
-    from emmy.compiler.ir.stmt import Assign
     from tests.compiler.terms import projection
 
     graph = _two_readers()
     root = graph.nodes["y"]
     other = graph.nodes["z"]
     operand, weight = other.op.op.operands  # the second reader computes its operand, so it is another kernel
-    computed = projection((operand,), (Assign(name="scaled", op="negative", args=operand.exposes),))
+    computed = projection((operand,), parse_body(f"scaled = negative({', '.join(operand.exposes)})"))
     other.op = replace(other.op, op=contraction("k", computed, (weight, "acc")))
     match = Match(graph=graph, root_node_id="y", rule=Rule(name="test", pattern=[]))
     options = layout_forks(match, root)
@@ -320,8 +316,11 @@ def test_a_layout_arm_is_priced_over_every_reader_it_settles() -> None:
     assert len({folded, source_key, other_folded, other_source}) == 4
 
     def prices(rows: dict[str, float]) -> dict[str, float]:
-        index = _Measured({kernel: [({"WORK": "t32"}, us)] for kernel, us in rows.items()}, {})
-        return {option.knobs["LAYOUT@w"]: us for option, us in _layout_candidates(point, index, None)}
+        db = SearchDB()
+        for kernel, us in rows.items():
+            db.record_kernel(stored_kernel(kernel))
+            db.record_perf(point.ctx, kernel, bindings={}, knobs={"WORK": "t32"}, status="ok", us=us)
+        return {option.knobs["LAYOUT@w"]: us for option, us in _layout_candidates(point, db)}
 
     # The root alone prefers the source layout; the program does not.
     assert prices({folded: 10.0, source_key: 7.0, other_folded: 5.0, other_source: 20.0}) == {"folded": 15.0, "source": 27.0}
@@ -330,13 +329,56 @@ def test_a_layout_arm_is_priced_over_every_reader_it_settles() -> None:
     assert prices({folded: 10.0, source_key: 7.0}) == {}
 
 
+def test_a_reader_still_to_cut_prices_a_layout_arm_by_the_cut_recorded_on_it() -> None:
+    """A reader whose placement is still open meets its cut fork before its layout fork, as it stands, so the compile
+    never forms it whole in the arm's layout: the cut recorded on it there is what prices the arm for it."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.bench_record import kernel_row
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.golden import evidence_scope
+    from emmy.compiler.pipeline.search.inventory import KernelInventory, record_routing
+    from tests.compiler.terms import projection
+
+    graph = _two_readers()
+    other = graph.nodes["z"]
+    operand, weight = other.op.op.operands  # the second reader computes its operand, so it has a cut to take
+    computed = projection((operand,), parse_body(f"scaled = negative({', '.join(operand.exposes)})"))
+    other.op = replace(other.op, op=contraction("k", computed, (weight, "acc")))
+    ctx = Context.from_target((7, 0))
+    # What a recording leaves: the second reader cut, its pieces in the source layout, every kernel measured.
+    db = SearchDB()
+    inventory = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: record_routing(db, parent, arm, pieces))
+    with evidence_scope([]), pinned_knobs({"PLACE": "cut", "LAYOUT@w": "source"}):
+        recorded = Pipeline.build(["tile/cut"]).with_strategies(inventory).run(graph.copy(), ctx=ctx)
+
+    def measure(tile) -> None:
+        kernel = kernel_row(tile)
+        db.record_kernel(kernel)
+        db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, status="ok", us=5.0)
+
+    for node in recorded.nodes.values():
+        if isinstance(node.op, TileOp):
+            measure(node.op.with_io(recorded, node))
+    root = graph.nodes["y"]
+    match = Match(graph=graph, root_node_id="y", rule=Rule(name="test", pattern=[]))
+    options = layout_forks(match, root)
+    point = ForkPoint(match=match, options=options, root_op=root.op.with_io(graph, root), ctx=ctx)
+    source = next(option for option in options if option.knobs.get("LAYOUT@w") == "source").materialize()
+    node = next(node for node in source.nodes.values() if isinstance(node.op, TileOp))
+    root_in_source = node.op.with_io(source, node).identity_key(structural=False, with_io=True)
+    db.record_kernel(stored_kernel(root_in_source))
+    db.record_perf(ctx, root_in_source, bindings={}, knobs={"WORK": "t32"}, status="ok", us=5.0)
+    # The root in the source layout and the reader's cut are measured; the root folded is not.
+    assert [(option.knobs, us) for option, us in _layout_candidates(point, db)] == [({"LAYOUT@w": "source"}, 15.0)]
+
+
 def test_strict_placement_replays_a_measured_source_layout_continuation() -> None:
     from dataclasses import replace
 
     from emmy import config
-    from emmy.compiler.ir.stmt import Assign
     from emmy.compiler.pipeline.search.bench_record import kernel_row
-    from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+    from emmy.compiler.pipeline.search.db import SearchDB
     from emmy.compiler.pipeline.search.golden import evidence_scope
     from emmy.compiler.pipeline.search.inventory import KernelInventory, record_routing
     from tests.compiler.terms import projection
@@ -344,7 +386,7 @@ def test_strict_placement_replays_a_measured_source_layout_continuation() -> Non
     graph = _graph()
     root = graph.nodes["y"]
     operand, weight = root.op.op.operands
-    computed = projection((operand,), (Assign(name="scaled", op="negative", args=operand.exposes),))
+    computed = projection((operand,), parse_body(f"scaled = negative({', '.join(operand.exposes)})"))
     root.op = replace(root.op, op=contraction("k", computed, (weight, "acc")))
     ctx = Context.from_target((7, 0))
     db = SearchDB()
@@ -353,7 +395,7 @@ def test_strict_placement_replays_a_measured_source_layout_continuation() -> Non
     with evidence_scope([]), pinned_knobs({"PLACE": "fuse", "LAYOUT@w": "source"}):
         recorded = pipeline.with_strategies(inventory).run(graph.copy(), ctx=ctx)
     node = next(node for node in recorded.nodes.values() if isinstance(node.op, TileOp))
-    kernel = kernel_row(node.op.with_io(recorded, node), node.op.name)
+    kernel = kernel_row(node.op.with_io(recorded, node))
     db.record_kernel(kernel)
     db.record_perf(
         ctx,
@@ -361,7 +403,7 @@ def test_strict_placement_replays_a_measured_source_layout_continuation() -> Non
         bindings={},
         knobs={"WORK": "t32"},
         status="ok",
-        stats=PerfStats(median=17, min=17, max=17, mean=17, variance=0, n_samples=1),
+        us=17.0,
     )
     with evidence_scope([]), config.strict_evidence_override(True):
         replayed = pipeline.run(graph.copy(), ctx=ctx, db=db)

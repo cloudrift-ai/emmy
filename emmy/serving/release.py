@@ -7,7 +7,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from emmy.compiler.pipeline.search.space import COLD_CACHE
+from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH
 from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
 from emmy.publish import model_slug
 
@@ -16,6 +16,25 @@ from emmy.publish import model_slug
 # (decode_bucket, 256] ride this twin via the prefix upload (pad-up; per-token-independent),
 # wider row sets fall to the symbolic program. Every boot with an any-width program builds it.
 EXPERT_PREFILL_M = 256
+# The grouped prefill programs' expert count: on experts sliced across ranks, a prefill step runs its experts in
+# launches of this many, each against blocks of its rows: the decode bucket's for the experts routed that many rows or
+# fewer, ``EXPERT_PREFILL_M`` for the rest. The wide program's decoded weights are the launch's transient, 2.4 MB per
+# expert for Qwen3.8-Flash-Next's slices.
+EXPERT_GROUP = 32
+
+
+def slot_widths(bucket: int) -> tuple[int, ...]:
+    """The fixed-slot program's widths past one row, on experts sliced across ranks: the decode bucket and its halvings
+    down to two rows. A decode step runs the narrowest that holds its rows, so it reads no more experts than it must."""
+    return tuple(sorted({w for i in range(bucket.bit_length()) if (w := bucket >> i) > 1}))
+
+
+#: The widest fixed-slot program that weights, sums and adds its own picks (``ExpertFFN.slots_sum``). Its down
+#: product writes one value per (output, pick), picks fastest, since the cut that parts it from the sum keeps the
+#: sum's axis order: a block of two rows' twenty picks still reads few experts' rows at a time, one of four or
+#: eight rows' reads thirty-two (Qwen3.8-Flash-Next on the V100, per layer: 71.7 us at eight rows against 41.5 us
+#: for the program that leaves the sum to the runner).
+SUMMED_SLOT_ROWS = 2
 
 _KEY = re.compile(r"[A-Z][A-Z0-9_]*")
 _HEX_REVISION = re.compile(r"[0-9a-f]{7,40}")
@@ -45,11 +64,43 @@ class ServingConfig:
     realizations: tuple[ServingRealization, ...]
     static_only: bool
     tensor_parallel_size: int = 1
-    #: The trunk's data type as a torch name: the ``--dtype`` the engine serves with, ``float16`` when absent
-    #: (``emmy serve``'s own default).
-    dtype: str = "float16"
+    #: The trunk's data type as a torch name: the ``--dtype`` the engine serves with, ``None`` when the env names none
+    #: (the plugin then serves :data:`PLUGIN_DTYPE`, native generation the checkpoint's own).
+    dtype: str | None = None
     #: Maximum adapter rank carried by the pre/post programs, when LoRA serving is enabled.
     lora_rank: int | None = None
+    #: A speculative verify step's widest request, the token it continues from and every draft token; 0 without
+    #: speculative decoding.
+    verify_width: int = 0
+    #: Whether the golden also covers native generation's programs (``SERVE_NATIVE=1``): the twins then include them.
+    native: bool = False
+    #: The width the plugin runs a one-token decode step at (``SERVE_DECODE_BUCKET`` without the M=1 tier, else 1) and
+    #: its static prefill chunk (``SERVE_PREFILL_BUCKET``, 0 for none): native generation's trunk is the plugin's
+    #: programs at these widths.
+    decode_width: int = 1
+    prefill_width: int = 0
+    #: Native generation's own prefill chunk (``SERVE_NATIVE_PREFILL``, its ``--prefill-size``) where it is wider than
+    #: the plugin's, which it keeps for a prompt's tail; 0 when it runs the plugin's. The trunk's twins at it are rows
+    #: of the server's lane.
+    native_prefill: int = 0
+    #: The decode bucket (``SERVE_DECODE_BUCKET``): on experts sliced across ranks, the fixed-slot program's width.
+    decode_bucket: int = 0
+    #: Whether the server runs the fast-math lane (``SERVE_ENV`` sets ``EMMY_FAST_MATH=1``), the one lane native
+    #: generation compiles in.
+    fast_math: bool = False
+    #: How many routed experts per MoE layer the device holds (``SERVE_EXPERTS_GPU``, the boot's
+    #: ``EMMY_GEN_EXPERTS_GPU``); ``None`` holds them all. Native generation's expert programs read them as paged inputs
+    #: below it, so its twins are traced at it.
+    experts_gpu: int | None = None
+    #: How many pages of the token-embedding table the device holds (``SERVE_EMBED_GPU``, the boot's
+    #: ``EMMY_GEN_EMBED_GPU``); ``None`` holds it whole. Below the page count the table is paged and its gather is a twin.
+    embed_gpu: int | None = None
+    #: Whether the boot answers images (``--limit-mm-per-prompt`` allows one): the twins then include the vision
+    #: tower's programs.
+    images: bool = False
+    #: The KV cache's data type (``--kv-cache-dtype``, a :data:`KV_CACHE_DTYPES` name), which native generation's
+    #: programs store and read, so its twins are traced in it.
+    kv_cache_dtype: str = "auto"
 
     @property
     def model_provenance(self) -> str:
@@ -59,29 +110,46 @@ class ServingConfig:
     def static_widths(self) -> tuple[int, ...]:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
-    def realizations_for(self, width: int | None, *, expert: bool = False, gdn: bool = False) -> tuple[ServingRealization, ...]:
+    def realizations_for(
+        self,
+        width: int | None,
+        *,
+        expert: bool = False,
+        gdn: bool = False,
+        verify: bool = False,
+        native: bool = False,
+        tower: bool = False,
+    ) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
-        rows, the any-width compile. An ``expert`` twin at width 1 carries the standard lane's M=1 row
+        rows, the any-width compile. An ``expert`` twin at width 1 carries the server's lane's M=1 row
         even when the config serves no M=1 trunk: every MoE boot compiles that expert program for the
         fixed-slot tier. One at width ``EXPERT_PREFILL_M`` carries an M=256 row per any-width lane:
         every boot with an any-width program also builds that static expert prefill program. A ``gdn``
         twin at width 1 carries an M=1 row in every lane: a gated DeltaNet layer has no any-width
-        program, so every lane builds its width-1 program."""
+        program, so every lane builds its width-1 program; so does a ``verify`` twin, a verify program every lane
+        builds at its own width, and a ``tower`` twin, a vision tower program at one of the tower's own widths.
+        A ``native`` twin carries its width's row in the server's lane only: native generation compiles every
+        program at its own width, in the one regime the server runs."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
+        [lane] = {tuple(sorted({**dict(row.pins), "FAST_MATH": self.fast_math}.items())) for row in self.realizations}
+        own = ServingRealization(name=f"m{width}.fm" if self.fast_math else f"m{width}", bindings=(("num_tokens", width),), pins=lane)
+        if native:
+            return tuple(row for row in rows if row.pins == lane) or (own,)
         if expert and width == 1 and not rows:
-            [pins] = {row.pins for row in self.realizations if not dict(row.pins).get("FAST_MATH")}
-            return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=pins),)
+            return (own,)
         if expert and width == EXPERT_PREFILL_M and not rows:
             return tuple(
                 ServingRealization(name=f"m{width}{row.name.removeprefix('dynamic')}", bindings=(("num_tokens", width),), pins=row.pins)
                 for row in self.realizations
                 if not row.bindings
             )
-        if gdn and width == 1:
+        if (gdn and (width == 1 or verify)) or tower:
             lanes = {row.pins for row in self.realizations} - {row.pins for row in rows}
             return rows + tuple(
-                ServingRealization(name="m1.fm" if dict(pins).get("FAST_MATH") else "m1", bindings=(("num_tokens", 1),), pins=pins)
+                ServingRealization(
+                    name=f"m{width}.fm" if dict(pins).get("FAST_MATH") else f"m{width}", bindings=(("num_tokens", width),), pins=pins
+                )
                 for pins in sorted(lanes)
             )
         return rows
@@ -131,18 +199,19 @@ def _integer(values: dict[str, str], field: str, *, default: int | None = None, 
     return value
 
 
-def _cache_regime(values: dict[str, str], source: Path) -> dict[str, bool]:
-    """The cache regime ``SERVE_ENV`` declares: ``serve.sh`` exports its words before the server starts, so an
-    ``EMMY_COLD_CACHE`` among them is the regime every lane compiles in and records its rows under. The value is
-    read through the knob's own parser, so the spelling is the knob's."""
+def _serve_env_flag(values: dict[str, str], source: Path, knob) -> bool:
+    """Whether ``SERVE_ENV`` sets ``knob``: ``serve.sh`` exports its words before the server starts, so an
+    ``EMMY_COLD_CACHE`` among them is the regime every lane compiles in and records its rows under, and an
+    ``EMMY_FAST_MATH`` the lane the server runs. The value is read through the knob's own parser, so the spelling is
+    the knob's."""
     for word in values.get("SERVE_ENV", "").split():
         name, _, raw = word.partition("=")
-        if name == COLD_CACHE.env:
+        if name == knob.env:
             try:
-                return {COLD_CACHE.name: True} if COLD_CACHE.parse(raw) else {}
+                return bool(knob.parse(raw))
             except ValueError as exc:
                 raise ValueError(f"{source}: SERVE_ENV: {exc}") from exc
-    return {}
+    return False
 
 
 def _root(source: Path) -> Path:
@@ -197,8 +266,11 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
     if m1_value not in {0, 1}:
         raise ValueError(f"{source}: SERVE_M1_TIER must be 0 or 1")
     m1 = bool(m1_value)
-    regime = _cache_regime(values, source)
-    lane_pins = {fast: tuple(sorted({**regime, "FAST_MATH": fast}.items())) for fast in (False, True)}
+    regime = {COLD_CACHE.name: True} if _serve_env_flag(values, source, COLD_CACHE) else {}
+    # ``serve.sh`` exports ``SERVE_ENV`` over its standard-lane default, so a server whose ``SERVE_ENV`` sets
+    # ``EMMY_FAST_MATH=1`` compiles every shape in the fast-math lane, the pinned one included.
+    server_fast = _serve_env_flag(values, source, FAST_MATH)
+    lane_pins = {fast: tuple(sorted({**regime, "FAST_MATH": fast or server_fast}.items())) for fast in (False, True)}
     lanes = [(pinned_decode, pinned_prefill, max_tokens, lane_pins[False])]
     for spec in values.get("SERVE_WARM_SHAPES", "").split():
         fields = spec.split(":")
@@ -213,6 +285,10 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
         if min(decode, prefill) < 0 or maximum <= 0:
             raise ValueError(f"{source}: warm shape {spec!r} requires non-negative buckets and positive max tokens")
         lanes.append((decode, prefill, maximum, lane_pins[lane == "fm"]))
+    # Native generation's wider chunk: the trunk's static twins at it, in the server's lane, and no any-width row.
+    native_prefill = _integer(values, "SERVE_NATIVE_PREFILL", default=0, minimum=0)
+    if native_prefill:
+        lanes.append((0, native_prefill, 0, lane_pins[False]))
 
     standard_m1 = (1, 0, 1, lane_pins[False])
     if static_only and any(lane != standard_m1 for lane in lanes):
@@ -244,8 +320,8 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         raise ValueError(f"{source}: SERVE_MODEL, SERVE_GPU, and SERVE_GOLDEN_FILE are required")
     revision = values.get("SERVE_REVISION", "").strip() or None
     static_only = values.get("SERVE_STATIC_ONLY", "0") == "1"
-    if values.get("SERVE_STATIC_ONLY", "0") not in {"0", "1"}:
-        raise ValueError(f"{source}: SERVE_STATIC_ONLY must be 0 or 1")
+    if values.get("SERVE_STATIC_ONLY", "0") not in {"0", "1"} or values.get("SERVE_NATIVE", "0") not in {"0", "1"}:
+        raise ValueError(f"{source}: SERVE_STATIC_ONLY and SERVE_NATIVE must be 0 or 1")
     if static_only:
         required = {
             "SERVE_MAX_NUM_BATCHED_TOKENS": "1",
@@ -274,7 +350,18 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         static_only=static_only,
         tensor_parallel_size=_tensor_parallel_size(values.get("SERVE_EXTRA_ARGS", ""), source),
         dtype=_trunk_dtype(values.get("SERVE_EXTRA_ARGS", ""), source),
+        verify_width=_verify_width(values.get("SERVE_EXTRA_ARGS", ""), source),
         lora_rank=_integer(values, "SERVE_LORA_RANK", minimum=1) if values.get("SERVE_LORA_RANK") else None,
+        native=values.get("SERVE_NATIVE") == "1",
+        decode_width=1 if _integer(values, "SERVE_M1_TIER", default=1) else max(1, _integer(values, "SERVE_DECODE_BUCKET", minimum=0)),
+        prefill_width=_integer(values, "SERVE_PREFILL_BUCKET", default=0, minimum=0),
+        native_prefill=_integer(values, "SERVE_NATIVE_PREFILL", default=0, minimum=0),
+        decode_bucket=_integer(values, "SERVE_DECODE_BUCKET", minimum=0),
+        fast_math=_serve_env_flag(values, source, FAST_MATH),
+        experts_gpu=_integer(values, "SERVE_EXPERTS_GPU", minimum=1) if values.get("SERVE_EXPERTS_GPU") else None,
+        embed_gpu=_integer(values, "SERVE_EMBED_GPU", minimum=0) if values.get("SERVE_EMBED_GPU") else None,
+        images=_images(values.get("SERVE_EXTRA_ARGS", ""), source),
+        kv_cache_dtype=_kv_cache_dtype(values.get("SERVE_EXTRA_ARGS", ""), source),
     )
 
 
@@ -300,18 +387,63 @@ def _tensor_parallel_size(extra_args: str, source: Path) -> int:
     return int(value)
 
 
-_TRUNK_DTYPES = {"float16": "float16", "half": "float16", "fp16": "float16", "bfloat16": "bfloat16", "bf16": "bfloat16"}
+#: The 16-bit model dtypes serving takes, by the names ``--dtype`` takes, as torch names.
+DTYPES = {"float16": "float16", "half": "float16", "fp16": "float16", "bfloat16": "bfloat16", "bf16": "bfloat16"}
+
+#: The dtype the plugin serves when ``--dtype`` names none (``emmy serve`` passes it to vLLM); native generation
+#: takes the checkpoint's instead.
+PLUGIN_DTYPE = "float16"
+
+#: The KV cache data types native generation stores, by the names vLLM's ``--kv-cache-dtype`` takes, as torch names:
+#: the model's (``None``), or FP8 e4m3.
+KV_CACHE_DTYPES = {"auto": None, "fp8": "float8_e4m3fn"}
 
 
-def _trunk_dtype(extra_args: str, source: Path) -> str:
-    """The data type ``SERVE_EXTRA_ARGS`` serves the trunk in, as a torch name: the twins are traced in it,
-    because buffer types are part of a kernel's identity."""
+def _kv_cache_dtype(extra_args: str, source: Path) -> str:
+    """The cache data type ``SERVE_EXTRA_ARGS`` serves, a :data:`KV_CACHE_DTYPES` name: native generation's programs
+    store and read it."""
+    found = _flag_value(extra_args, ("--kv-cache-dtype",))
+    if found is not None and found[1] not in KV_CACHE_DTYPES:
+        raise ValueError(f"{source}: --kv-cache-dtype must be one of {sorted(KV_CACHE_DTYPES)}, got {found[1]!r}")
+    return "auto" if found is None else found[1]
+
+
+def _trunk_dtype(extra_args: str, source: Path) -> str | None:
+    """The data type ``SERVE_EXTRA_ARGS`` serves the trunk in, as a torch name, or ``None`` when it names none: the
+    twins are traced in it, because buffer types are part of a kernel's identity."""
     found = _flag_value(extra_args, ("--dtype",))
     if found is None:
-        return "float16"
-    if found[1] not in _TRUNK_DTYPES:
-        raise ValueError(f"{source}: --dtype must be one of {sorted(_TRUNK_DTYPES)}, got {found[1]!r}")
-    return _TRUNK_DTYPES[found[1]]
+        return None
+    if found[1] not in DTYPES:
+        raise ValueError(f"{source}: --dtype must be one of {sorted(DTYPES)}, got {found[1]!r}")
+    return DTYPES[found[1]]
+
+
+def _verify_width(extra_args: str, source: Path) -> int:
+    """A verify step's widest request under ``--speculative-config``: its draft tokens plus the one it continues from."""
+    import json
+
+    found = _flag_value(extra_args, ("--speculative-config",))
+    if found is None:
+        return 0
+    try:
+        drafts = int(json.loads(found[1])["num_speculative_tokens"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"{source}: --speculative-config must be JSON naming num_speculative_tokens, got {found[1]!r}") from exc
+    return drafts + 1
+
+
+def _images(extra_args: str, source: Path) -> bool:
+    """Whether ``SERVE_EXTRA_ARGS`` lets a prompt carry an image (``--limit-mm-per-prompt``)."""
+    import json
+
+    found = _flag_value(extra_args, ("--limit-mm-per-prompt",))
+    if found is None:
+        return False
+    try:
+        return int(json.loads(found[1]).get("image", 0)) > 0
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError(f"{source}: --limit-mm-per-prompt must be a JSON object of counts, got {found[1]!r}") from exc
 
 
 def revision_matches(golden_revision: str | None, serving_revision: str | None) -> bool:

@@ -11,16 +11,20 @@ elsewhere (the scoring function in :mod:`..catboost_model`, the dataset in ``sea
 metrics in :mod:`~..metrics`, the fold harness in :mod:`.cv`).
 
 **The objective.** ``QuerySoftMax`` over one group per pool: every pinned row is a positive (label 1.0) and the
-sampled negatives are 0.0. That is the loss shape the golden dataset actually has — *verified* rows only, no
-graded labels — and it is what the deployed ranking is: an argmin over one fork's candidates, the same order
-the softmax ranks by. ``QuerySoftMax`` takes several positives per group as they are, so
-a pool with more than one verified config needs no reshaping — and those siblings are then never drawn as
-negatives against each other, which is what labelling a verified-good config 0.0 used to do.
+negatives are 0.0. That is the loss shape the golden dataset actually has — *verified* rows only, no graded labels
+— and it is what the deployed ranking is: an argmin over one fork's candidates, the same order the softmax ranks
+by. The pinned rows are the pool's fastest verified rows (``ranking.POSITIVE_WITHIN``). ``QuerySoftMax`` takes
+several positives per group as they are, so a pool with more than one verified config needs no reshaping — and
+those siblings are then never drawn as negatives against each other, which is what labelling a verified-good config
+0.0 used to do.
 
-**Why negatives are sampled.** The pools are the training set, and all of them at once is ~38 M rows / ~18 GB before
-CatBoost's own quantized copy. So each round draws ``negatives`` rows per pool, uniformly, from the rows that are NOT pinned.
-The full pool is still what :meth:`CatBoostFit.score_rows` ranks the golden within, so the *metric* never sees
-the sampling.
+**The negatives.** Two kinds. The labeled negatives (``GoldenGroup.negative_ids``) are rows measured more than
+measurement noise slower than the positives — a verified row the pool's fastest beats, or a candidate from the card's
+candidate file — and every fit includes all of them. The rest are drawn: the pools are the training set, and all of
+them at once is ~38 M rows / ~18 GB before CatBoost's own quantized copy, so each fit draws ``negatives`` rows per
+pool, uniformly, from the rows with no measurement (``GoldenGroup.measured_ids``): a measured row is a labeled
+negative or none at all, and a candidate measured within noise of the golden, or faster, is never drawn. The full
+pool is still what :meth:`CatBoostFit.score_rows` ranks the golden within, so the *metric* never sees the sampling.
 
 A further round instead mines **hard negatives** — the rows the current model ranks nearest the golden. That is
 implemented and reachable (``--rounds 2``) but OFF by default, because the one measurement of it says it hurts;
@@ -42,6 +46,7 @@ from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_rank
 from emmy.compiler.pipeline.search.prior.catboost_model import DEFAULT_SCALE, CatBoostModel, new_ranker
 from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
+from emmy.compiler.pipeline.search.progress import Progress
 
 logger = logging.getLogger(__name__)
 
@@ -52,22 +57,25 @@ DEFAULT_NEGATIVES = 500
 # Trees for the placement space, whose forks are few (a handful of arms each) and whose rare labels — a split taken
 # under fast math only — need the trees the schedule space's default stops short of. Cross-validated over the
 # repository goldens (2026-10-05, 2414 forks), 500 lifted held-out top-1 on recorded cuts from 87.5% to 89.7% and on
-# recorded splits from 76.0% to 78.7% against 200, with no fork kind lower; 1000 bought nothing more.
-PLACEMENT_ITERATIONS = 500
+# recorded splits from 76.0% to 78.7% against 200, with no fork kind lower. The shipped weights are fit with 3000: the
+# reproduction gate asks the prior to re-decide EVERY recorded fork of the repository goldens, and at 500 trees the
+# 2026-11-09 fit (8133 forks) left 71 training forks ranked second to fourth — split forks of the A100, H100 and V100
+# linear kernels whose 5090 twin records a smaller split — which the gate reports as red hardware-golden slices.
+PLACEMENT_ITERATIONS = 3000
 # Mining rounds. Round 0 is the uniform draw; each further round adds the rows the current model ranks near the
-# golden. ONE by default — mining is implemented and reachable (``--rounds 2``), but it is not on, because the
-# only measurement of it says it hurts: over the 1278-group golden dataset, round 1 moved top-1 from 545 to 517
-# and the mean log2 rank from 2.08 to 2.35, i.e. worse on the fit's own objective, scored over full pools.
+# golden. ONE by default — mining is implemented and reachable (``--rounds 2``), but it is not on, because every
+# measurement of it says it hurts. Over the 1278-group golden dataset, round 1 moved top-1 from 545 to 517 and the
+# mean log2 rank from 2.08 to 2.35, in-sample. Cross-validated over the 2098-group dataset with the candidate files'
+# labeled negatives (2026-11-18, 5 shape folds), it moved held-out top-1 from 1113 to 1081, top-5 from 1547 to 1503
+# and the mean log2 rank from 1.50 to 1.57; labeling the negatives did not change the verdict.
 #
-# The likely reason is that our negatives are UNLABELED, not known-bad. Mining selects the rows the model ranks
-# closest to the golden, which in a ~78k-row pool are exactly the rows most likely to be genuinely faster than
-# it; labelling those 0.0 teaches the model to bury good configs. That is the contamination the debiased
-# contrastive-learning bound predicts — it scales with the expected NUMBER of better-but-unlabeled rows in the
-# contrast set, and mining maximizes that number by construction. Standard hard-negative mining assumes the
-# negatives are known bad; here only the pinned rows are verified.
-#
-# The evidence is in-sample (no cross-validation run yet), so this is a default, not a verdict: re-measure
-# ``--rounds 2`` held-out before concluding mining is useless.
+# The likely reason is that most of our negatives are still UNLABELED, not known-bad: the labeled ones are a few per
+# pool against a draw of hundreds. Mining selects the rows the model ranks closest to the golden, which in a
+# ~78k-row pool are exactly the rows most likely to be genuinely faster than it; labelling those 0.0 teaches the
+# model to bury good configs. That is the contamination the debiased contrastive-learning bound predicts — it scales
+# with the expected NUMBER of better-but-unlabeled rows in the contrast set, and mining maximizes that number by
+# construction. Standard hard-negative mining assumes the negatives are known bad; here only the pinned rows and the
+# labeled negatives are measured. Re-measure ``--rounds 2`` held out once the candidate files cover far more rows.
 DEFAULT_ROUNDS = 1
 
 
@@ -84,8 +92,10 @@ class CatBoostTrainer:
 
     feature_names: tuple[str, ...]
     # A cross-validated sweep over the repository goldens (trees 100-400, depth 3-8, rate 0.05-0.5) found held-out
-    # top-1 still rising with size; 200 trees of depth 6 at 0.3 sit within noise of the best at half its file size.
-    iterations: int = 200
+    # top-1 still rising with size; depth 6 at 0.3 sits within noise of the best. 400 trees is what the shipped
+    # schedule weights are fit with (the defaults are the fit the repository ships, so a refit with no flags reproduces
+    # it); 200 halves the file size for a fit that need not pass the reproduction gate.
+    iterations: int = 400
     depth: int = 6
     learning_rate: float = 0.3
     negatives: int = DEFAULT_NEGATIVES
@@ -103,9 +113,9 @@ class CatBoostTrainer:
         rng = np.random.default_rng(self.random_state)
         cols = list(self.feature_names)
         pools = [g.matrix(cols) for g in groups]
-        # Sampled negative indices per pool, grown each round. The pinned rows are added at assembly time, so
-        # one can never be sampled in as a negative — against itself or against a verified sibling.
-        sampled = [self._uniform(len(m), g.golden_ids, rng) for m, g in zip(pools, groups, strict=True)]
+        # Sampled negative indices per pool, grown each round. The pinned rows and the labeled negatives are added at
+        # assembly time, and no measured row is drawn, so a verified row is never sampled in as a negative.
+        sampled = [self._uniform(len(m), _measured(g), rng) for m, g in zip(pools, groups, strict=True)]
         inert = sum(1 for s, m in zip(sampled, pools, strict=True) if len(s) >= len(m) - 1)
         if inert:
             logger.warning(
@@ -121,7 +131,7 @@ class CatBoostTrainer:
         logger.info("  round 0 uniform (%d rows): %s", self._n_rows(sampled, groups), topk_table(ranks))
         for r in range(1, max(1, self.rounds)):
             sampled = [
-                np.union1d(s, self._hard(model.quality_rows(m), g.golden_ids)) for s, m, g in zip(sampled, pools, groups, strict=True)
+                np.union1d(s, self._hard(model.quality_rows(m), _measured(g))) for s, m, g in zip(sampled, pools, groups, strict=True)
             ]
             model = self._fit_once(pools, groups, sampled)
             ranks = self._ranks(model, pools, groups)
@@ -131,7 +141,8 @@ class CatBoostTrainer:
 
     @staticmethod
     def _n_rows(sampled, groups: list[GoldenGroup]) -> int:
-        return sum(len(s) + len(g.golden_ids) for s, g in zip(sampled, groups, strict=True))  # each pool's pins ride along
+        # each pool's pins and labeled negatives ride along
+        return sum(len(s) + len(g.golden_ids) + len(g.negative_ids) for s, g in zip(sampled, groups, strict=True))
 
     @staticmethod
     def _ranks(model: CatBoostModel, pools, groups: list[GoldenGroup]) -> list[int]:
@@ -139,8 +150,8 @@ class CatBoostTrainer:
         (:func:`~..metrics.best_rank`)."""
         return [best_rank(model.quality_rows(m), g.golden_ids) for m, g in zip(pools, groups, strict=True)]
 
-    def _uniform(self, n: int, pinned: Sequence[int], rng) -> np.ndarray:
-        """A uniform draw of negative row indices from one pool, every pinned row excluded. Small pools
+    def _uniform(self, n: int, measured: Sequence[int], rng) -> np.ndarray:
+        """A uniform draw of negative row indices from one pool, every measured row excluded. Small pools
         contribute every row they have rather than being padded with duplicates.
 
         This is a SECOND-STAGE draw: the pool it is handed may itself already be a uniform sample of a
@@ -148,29 +159,29 @@ class CatBoostTrainer:
         from the original - so the two nest by construction and neither needs to know about the other.
         What that also means is that ``--negatives`` goes inert once it reaches the size of the pool it
         is given, which the caller reports rather than leaving to be inferred from a flat rank table."""
-        others = np.delete(np.arange(n), list(pinned))
+        others = np.delete(np.arange(n), list(measured))
         if len(others) <= self.negatives:
             return others
         return rng.choice(others, size=self.negatives, replace=False)
 
-    def _hard(self, scores: np.ndarray, pinned: Sequence[int]) -> np.ndarray:
-        """The current model's top-ranked unpinned rows — the ones it would deploy INSTEAD of a verified
+    def _hard(self, scores: np.ndarray, measured: Sequence[int]) -> np.ndarray:
+        """The current model's top-ranked unmeasured rows — the ones it would deploy INSTEAD of a verified
         config, so exactly the rows the loss needs to push down. A uniform draw over a 78k-row pool almost never
-        lands here, which is why one uniform round is not enough. The window widens by the pin count so a pool
-        whose pins all rank high still yields ``negatives`` rows."""
-        pins = set(pinned)
+        lands here, which is why one uniform round is not enough. The window widens by the measured count so a
+        pool whose measured rows all rank high still yields ``negatives`` rows."""
+        skip = set(measured)
         order = np.argsort(-scores, kind="stable")
-        return np.array([i for i in order[: self.negatives + len(pins)] if i not in pins][: self.negatives])
+        return np.array([i for i in order[: self.negatives + len(skip)] if i not in skip][: self.negatives], dtype=int)
 
     def _fit_once(self, pools, groups: list[GoldenGroup], sampled) -> CatBoostModel:
-        """One CatBoost fit over the assembled groups — the pinned rows first in each, then its sampled
-        negatives."""
+        """One CatBoost fit over the assembled groups — the pinned rows first in each, then its labeled
+        negatives, then its sampled ones."""
         from catboost import Pool  # noqa: PLC0415
 
         x, y, gid = [], [], []
         for i, (mat, g, neg) in enumerate(zip(pools, groups, sampled, strict=True)):
             pins = np.asarray(g.golden_ids, dtype=int)
-            rows = np.concatenate((pins, np.asarray(neg, dtype=int)))
+            rows = np.concatenate((pins, np.asarray(g.negative_ids, dtype=int), np.asarray(neg, dtype=int)))
             x.append(mat[rows])
             y.append(np.concatenate((np.ones(len(pins)), np.zeros(len(rows) - len(pins)))))
             gid.append(np.full(len(rows), i))
@@ -183,8 +194,26 @@ class CatBoostTrainer:
             thread_count=-1,
             nan_mode="Min",  # absent (NaN) features get their own split-off bucket — see catboost_model
         )
-        booster.fit(Pool(np.concatenate(x), np.concatenate(y), group_id=np.concatenate(gid)))
+        booster.fit(Pool(np.concatenate(x), np.concatenate(y), group_id=np.concatenate(gid)), callbacks=[_Iterations(self.iterations)])
         return CatBoostModel(booster=booster, cols=self.feature_names, scale=self.scale)
+
+
+class _Iterations:
+    """A CatBoost callback that counts the boosting iterations into a :class:`~emmy.compiler.pipeline.search.progress.Progress` line."""
+
+    def __init__(self, total: int) -> None:
+        self.progress = Progress("catboost iterations", total, "iterations")
+
+    def after_iteration(self, info) -> bool:
+        self.progress.done = info.iteration
+        self.progress.tick()
+        return True  # keep boosting
+
+
+def _measured(group: GoldenGroup) -> list[int]:
+    """The rows of ``group`` no draw takes: the measured ones, the pinned rows among them (a placement group measures
+    nothing and pins its golden's arms)."""
+    return sorted({*group.golden_ids, *group.measured_ids})
 
 
 @dataclass(frozen=True)

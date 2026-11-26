@@ -40,6 +40,7 @@ from dataclasses import replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Node
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 
@@ -69,7 +70,7 @@ def rewrite(match: Match, root: Node) -> LoopOp:
     graph = match.graph
     op: LoopOp = root.op
     meta = op.analyze()
-    taken = {name for stmt in op.body.iter() for name in stmt.defines()}
+    taken = set(op.body.defined)
     edits: dict[int, tuple[Assign, Write]] = {}
 
     for write, _scope in meta.writes:
@@ -88,8 +89,8 @@ def rewrite(match: Match, root: Node) -> LoopOp:
             name += "_"
         taken.add(name)
         edits[id(write)] = (
-            Assign(name=name, op="copy", args=(write.value,), dtype=buffer.dtype),
-            replace(write, values=(name,)),
+            Assign(name, Var(write.value), dtype=buffer.dtype),
+            write.replace(values=(name,)),
         )
 
     if not edits:

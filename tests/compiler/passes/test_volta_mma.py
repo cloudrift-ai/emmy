@@ -2,29 +2,43 @@
 
 from __future__ import annotations
 
-import re
+import math
 
 import pytest
 
-from emmy.compiler.backend.cuda import nvcc
+from emmy.compiler.backend.cuda import ptxas
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SdpaOp
+from emmy.compiler.ir.kernel.ir import (
+    CpAsyncCopy,
+    FragmentApply,
+    FragmentLoad,
+    FragmentRepack,
+    FragmentRowReduce,
+    LdmatrixLoad,
+    MmaSyncPtx,
+    RegFragment,
+    RegStore,
+    Smem,
+    Sync,
+    TmaLoad,
+)
 from emmy.compiler.ir.schedule.catalog import MAX_FRAGMENT_REGISTERS, warp_tile_moves
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
-from emmy.compiler.target import set_target
+from tests.compiler.helpers import compile_with_kernels, operations, statements, text
 
 VOLTA = "mma_m8n8k4_f16_f32"
 AMPERE = "mma_m16n8k16_f16_f32"
-
-# Every instruction a newer target has and sm_70 does not — the one list the source assertions share.
-NEWER_INSTRUCTIONS = ("ldmatrix", "cp.async", "cp.async.bulk", "m16n8k16")
 
 
 def _graph(*, m: int = 16, n: int = 16, k: int = 4, trans: bool = False) -> Graph:
@@ -82,11 +96,57 @@ def _pin_sdpa(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_RASTER", "")
 
 
-def _source(graph: Graph, ctx: Context) -> tuple[str, dict]:
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
-    kernels = [node.op for node in lowered.nodes.values() if getattr(node.op, "kernel_source", None)]
-    assert len(kernels) == 1
-    return kernels[0].kernel_source, kernels[0].knobs
+def _instructions(ptx: str) -> list[str]:
+    """The instructions of a kernel's PTX, one a line, each without its guard and past the statement comments."""
+    lines = (line.strip() for line in ptx.splitlines())
+    code = (line.split(" ", 1)[1] if line.startswith("@") else line for line in lines if line and not line.startswith(("//", ".")))
+    return [line for line in code if not line.endswith((":", "{", "}"))]
+
+
+def _count(ptx: str, opcode: str) -> int:
+    """How many instructions of ``ptx`` are ``opcode`` with any operands."""
+    return sum(line.split()[0] == opcode for line in _instructions(ptx))
+
+
+def _source(graph: Graph, ctx: Context) -> tuple:
+    """The one kernel ``graph`` compiles to: its Kernel IR, its knobs and its PTX, which only an instruction check reads."""
+    compiled, kernels = compile_with_kernels(graph, ctx=ctx)
+    ops = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(ops) == 1
+    (kernel,) = kernels.values()
+    return kernel, ops[0].knobs, ops[0].kernel_source
+
+
+def _slab_writes(kernel, slab: str, layout: str | None = None) -> list:
+    """The writes that fill ``slab``; with ``layout``, those that place their element through it (``V70A`` is the
+    crosswise layout, ``V70B`` the congruous one)."""
+    return [w for w in statements(kernel, Write) if w.output == slab and (layout is None or w.swizzle == layout)]
+
+
+def _drains(kernel, role: str) -> list:
+    """The staged fragment loads of ``role``."""
+    return [load for load in statements(kernel, FragmentLoad) if load.role == role and load.staged]
+
+
+def _assert_volta_only(kernel) -> None:
+    """Nothing in ``kernel`` asks for an instruction a newer target has and sm_70 does not: no matrix load, no
+    asynchronous copy, and every product the Volta ``m8n8k4`` of f16 into f32."""
+    assert not statements(kernel, LdmatrixLoad, CpAsyncCopy, TmaLoad)
+    assert {(tuple(mma.shape), mma.ab_dtype, mma.c_dtype) for mma in statements(kernel, MmaSyncPtx)} == {((8, 8, 4), "f16", "f32")}
+
+
+def _free_vars(index) -> set[str]:
+    return {node.name for expression in index for node in expression.subterms() if isinstance(node, Var)}
+
+
+def _register_ring_order(body) -> tuple[int, int, int, int]:
+    """Where a register-staged ring's chunk body drains, deposits the carried vectors in the free slot, publishes them
+    and issues the loads of the chunk after next: the first of each, by position."""
+    drain = next(i for i, stmt in enumerate(body) if isinstance(stmt, MmaSyncPtx))
+    deposit = next(i for i, stmt in enumerate(body) if isinstance(stmt, Write) and stmt.output in ("_a_smem", "_b_smem"))
+    barrier = next(i for i in range(deposit, len(body)) if isinstance(body[i], Sync))
+    issue = next(i for i in range(barrier, len(body)) if isinstance(body[i], Load) and body[i].carried)
+    return drain, deposit, barrier, issue
 
 
 @pytest.mark.parametrize(
@@ -115,7 +175,7 @@ def test_volta_atom_separates_logical_and_instruction_shapes() -> None:
     atom = ATOM_REGISTRY[VOLTA]
     assert atom.shape == (16, 16, 4)
     assert atom.ptx_shape == (8, 8, 4)
-    assert tuple(atom.fragment_nregs(role) for role in ("a", "b", "c")) == (2, 2, 8)
+    assert tuple(atom.fragment_registers(role) for role in ("a", "b", "c")) == (2, 2, 8)
     assert atom.fragment_layout == "m8n8k4"
     assert atom.sync_copy_staging and atom.c_to_a_repack and atom.c_to_b_repack
 
@@ -150,11 +210,14 @@ def test_volta_warp_tiles_respect_accumulator_register_budget() -> None:
 
 def test_volta_chunks_reach_the_width_the_16_deep_atoms_do() -> None:
     """Volta's k4 atom reaches a 128-element K chunk at bk 32, the chunk a k16 atom reaches at bk 8: a skinny GEMM's
-    K-contiguous rows stream in 256 B runs rather than 64 B. No other atom's chunk domain moves."""
+    K-contiguous rows stream in 256 B runs rather than 64 B. The TF32 atom's k8 reaches it at bk 16 by the same rule,
+    and no deeper atom's chunk domain moves."""
     volta = {p.bk for p in warp_tile_moves((VOLTA,))}
     assert volta == {1, 2, 4, 8, 16, 32}
     for name in ATOM_REGISTRY:
-        if ATOM_REGISTRY[name].atom_k > 4:
+        if ATOM_REGISTRY[name].atom_k == 8:
+            assert {p.bk for p in warp_tile_moves((name,))} == {1, 2, 4, 8, 16}, name
+        elif ATOM_REGISTRY[name].atom_k > 8:
             assert {p.bk for p in warp_tile_moves((name,))} == {1, 2, 4, 8}, name
 
 
@@ -163,24 +226,27 @@ def test_sm70_deep_chunk_stages_k_contiguous_b_through_the_crosswise_layout(monk
     halves of the slab."""
     _pin(monkeypatch, VOLTA, tile="f2x4/k16", stage="d2/smem")
     monkeypatch.setenv("EMMY_WORK", "w1x2")
-    src, knobs = _source(_graph(m=32, n=128, k=256, trans=True), Context(compute_capability=(7, 0)))
+    kernel, knobs, _ = _source(_graph(m=32, n=128, k=256, trans=True), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f2x4/k16"
-    assert "_b_smem[emmy_volta_crosswise(" in src
-    assert "_ks += 64" in src, "one chunk carries 64 K elements"
+    assert _slab_writes(kernel, "_b_smem", "V70A")
+    chunks = [loop for loop in statements(kernel, Loop) if loop.axis.extent == Dim(256) and loop.step == Literal(64, "int")]
+    assert chunks, "one chunk carries 64 K elements"
 
 
 @pytest.mark.parametrize("trans", [False, True])
 def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     _pin(monkeypatch, VOLTA)
-    src, knobs = _source(_graph(trans=trans), Context(compute_capability=(7, 0)))
+    kernel, knobs, src = _source(_graph(trans=trans), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
     assert family_value(knobs, "STAGE") == ""
-    assert "mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32" in src
-    assert "unsigned _a0[2]" in src and "unsigned _b0[2]" in src
-    assert "float _c0_0[8]" in src
-    assert ("emmy_mma884_load_b_gmem_trans(_b0" in src) == trans
-    for forbidden in ("ldmatrix", "cp.async", "cp.async.bulk", "m16n8k16", ".bf16", ".e4m3", ".e5m2"):
-        assert forbidden not in src
+    _assert_volta_only(kernel)
+    fragments = statements(kernel, RegFragment)
+    assert sorted(fragment.role for fragment in fragments if fragment.role in ("a", "b")) == ["a", "b"], "one A and one B fragment"
+    assert [fragment.dtype.name for fragment in fragments if fragment.role == "c"] == ["f32"], "one accumulator"
+    # A transposed B is K-contiguous in memory: its one unrolled K step starts at a literal offset, so it loads its
+    # halves two at a time, as A does. A plain B strides K by its row and loads element by element.
+    assert _count(src, "ld.global.nc.b16") == (0 if trans else 4)
+    assert _count(src, "ld.global.nc.b32") == (4 if trans else 2)
 
 
 @pytest.mark.parametrize("role,trans", [("a", False), ("b", True), ("b", False)])
@@ -191,25 +257,36 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     ids=["aligned", "offset", "stride", "k-tail"],
 )
 def test_volta_direct_vectors_require_aligned_complete_runs(role, trans, dtype, stride, offset, masked_k, aligned):
-    from emmy.compiler.ir.expr import Literal, Var
-    from emmy.compiler.ir.kernel.ir import LdmatrixLoad
-    from emmy.compiler.ir.stmt import RenderCtx
+    """A Volta fragment read from global memory takes its halves two at a time only where the run is complete and its
+    address provably aligned; anything else is read an element at a time."""
+    from emmy.emmy_ir import compile_ptx, parse_body
 
-    ctx = RenderCtx(shapes={"x": (Dim(17), Dim(stride))}, buffer_dtypes={"x": dtype}, ssa_dtypes={"r": "f16"})
-    load = LdmatrixLoad(
+    from emmy.compiler.dtype import F16
+    from emmy.compiler.dtype import get as dtype_get
+    from emmy.compiler.ir.expression import Literal, Var
+    from emmy.compiler.ir.kernel.interface import Interface, Param
+    from emmy.compiler.ir.kernel.ir import FragmentLoad
+
+    load = FragmentLoad(
         frag="r",
         src_buffer="x",
-        src_index=(Var("row"), Literal(offset, "int")),
+        src_index=(Var("t"), Literal(offset, "int")),
         role=role,
-        staged=False,
         b_trans=trans,
         ldm=stride,
         fragment_layout="m8n8k4",
-        gmem_guard=(Literal(0, "int"), Literal(17, "int")),
+        clamp=(Literal(0, "int"), Literal(17, "int")),
         k_zero=(Literal(0, "int"), Literal(3, "int")) if masked_k else None,
+        src_dtype=dtype_get(dtype),
+        dtype=F16,
     )
-    source = "\n".join(load.render(ctx))
-    assert ("load_gmem4<" in source) == (aligned and (role == "a" or trans))
+    fragment = f"RegFragment(name=r, role={role}, dtype=f16, fragment_layout=m8n8k4)"
+    body = f"Grid(axes=(t in 0..32), decode=(thread_idx.x), block_threads=32):\n    {fragment}\n    {load}"
+    interface = Interface((Param("x", "input", dtype_get(dtype), "x", shape=(17, stride)),), {}, 0)
+    ptx, _ = compile_ptx("k", parse_body(body), interface, sm=70)
+    wide = aligned and (role == "a" or trans) and dtype == "f16"
+    assert _count(ptx, "ld.global.nc.b32") == (2 if wide else 0)
+    assert _count(ptx, f"ld.global.nc.{'b16' if dtype == 'f16' else 'f32'}") == (0 if wide else 4)
 
 
 def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
@@ -219,82 +296,83 @@ def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
     it the m=1 linear falls to the scalar path with no assertion anywhere noticing.
     """
     _pin(monkeypatch, VOLTA, tile="f1x1", stage="")
-    src, knobs = _source(_graph(m=1, n=16, k=16, trans=True), Context(compute_capability=(7, 0)))
+    kernel, knobs, _ = _source(_graph(m=1, n=16, k=16, trans=True), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
     assert knobs["WORK"] == "w1x1"
-    assert "emmy_mma_m8n8k4_f16_f32" in src
-    assert "_um_b" in src and "< (1)" in src
+    _assert_volta_only(kernel)
+    # The A load clamps to the one row (its bound is the rows there are), and the stores are guarded to it.
+    a_loads = [load for load in statements(kernel, FragmentLoad) if load.role == "a"]
+    assert a_loads and all(load.clamp is not None and load.clamp[1] == Literal(1, "int") for load in a_loads)
+    stores = statements(kernel, RegStore)
+    assert stores and all(store.m_guard is not None and store.m_guard[1] == Literal(1, "int") for store in stores)
 
 
 @pytest.mark.parametrize("trans", [False, True])
 def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch, trans) -> None:
     _pin(monkeypatch, VOLTA, stage="d1/smem")
-    src, knobs = _source(_graph(k=16, trans=trans), Context(compute_capability=(7, 0)))
+    kernel, knobs, _ = _source(_graph(k=16, trans=trans), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "STAGE") == "d1/smem"
-    # Every staged slab now declares its fill-chunk alignment, so match the declaration from the
-    # dtype on — the attribute between ``__shared__`` and the type is not what this test is about.
-    assert "__half _a_smem[64]" in src
-    assert "__half _b_smem[64]" in src
-    assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
-    b_helper = "emmy_mma884_load_b_smem_trans" if trans else "emmy_mma884_load_b_smem"
-    assert f"{b_helper}(_b0, &_b_smem" in src
-    assert src.count("__syncthreads();") == 2
-    for forbidden in ("ldmatrix", "cp.async", "cp.async.bulk", "m16n8k16"):
-        assert forbidden not in src
+    slabs = {smem.name: (smem.dtype.name, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
+    assert slabs == {"_a_smem": ("f16", 64), "_b_smem": ("f16", 64)}
+    assert [(load.src_buffer, load.b_trans) for load in _drains(kernel, "a")] == [("_a_smem", False)]
+    assert [(load.src_buffer, load.b_trans) for load in _drains(kernel, "b")] == [("_b_smem", trans)]
+    assert len(statements(kernel, Sync)) == 2
+    _assert_volta_only(kernel)
 
 
 def test_sm70_contiguous_staged_fragments_use_one_wide_load(monkeypatch) -> None:
     """A and N-major B fragments are contiguous in their staged slabs, so each drains as one uint2."""
     _pin(monkeypatch, VOLTA, stage="d1/smem")
-    src, _ = _source(_graph(k=16, trans=True), Context(compute_capability=(7, 0)))
-    assert "uint2 v = *reinterpret_cast<const uint2*>(g);" in src
-    assert "emmy_mma884_load4(r, s + row * ldm);" in src
-    assert "emmy_mma884_load4(r, s + col * ldm);" in src
+    kernel, _, src = _source(_graph(k=16, trans=True), Context(compute_capability=(7, 0)))
+    # The plain gather of each staged operand, the B one transposed: A and an N-major B in their slabs, unpaired.
+    assert [(load.b_trans, load.slab_layout) for load in _drains(kernel, "a")] == [(False, "NONE")]
+    assert [(load.b_trans, load.slab_layout) for load in _drains(kernel, "b")] == [(True, "NONE")]
+    # Each drain reads its slab a word of two halves at a time.
+    assert _count(src, "ld.shared.b32") == 4 and _count(src, "ld.shared.b16") == 0
 
 
 def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> None:
     """Even Volta register tiles derive the coupled CUTLASS fill/drain layouts by default."""
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
-    src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
-    assert "_a_smem[emmy_volta_crosswise(" in src
-    assert "_b_smem[emmy_volta_b_congruous(" in src
-    assert "int row = e / ldm;" not in src
-    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
-    assert "emmy_mma884_load_b_congruous_pair(_b0, _b1" in src
-    assert src.count("emmy_mma_m8n8k4_f16_f32_brow(_c") == 4
-    assert "access ^ ((k_group >> 2) & 1)" in src
-    assert "const int _vq = _vl >> 2;" in src
-    assert "((_vq >> 1) & 1) * 8" in src
+    kernel, _, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    assert _slab_writes(kernel, "_a_smem", "V70A")
+    assert _slab_writes(kernel, "_b_smem", "V70B")
+    assert [(load.slab_layout, load.pair_frag is not None) for load in _drains(kernel, "a")] == [("V70A", True)]
+    assert [(load.slab_layout, load.pair_frag is not None) for load in _drains(kernel, "b")] == [("V70B", True)]
+    assert sum(mma.b_row_major for mma in statements(kernel, MmaSyncPtx)) == 4
+    # The interleaved accumulator map is coupled to the paired layouts.
+    assert all(store.volta_interleaved for store in statements(kernel, RegStore))
 
 
 def test_sm70_transposed_b_drains_the_crosswise_layout(monkeypatch) -> None:
     """A transposed B stages K-contiguous like A, so it reads A's crosswise layout back rather
     than falling to the plain row-major tile whose 64-byte row is bank-conflicted."""
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
-    src, _ = _source(_graph(m=32, n=32, k=16, trans=True), Context(compute_capability=(7, 0)))
-    assert "_a_smem[emmy_volta_crosswise(" in src
-    assert "_b_smem[emmy_volta_crosswise(" in src
-    assert "_b_smem[emmy_volta_b_congruous(" not in src, "the congruous layout is for an N-contiguous B"
-    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
-    assert "emmy_mma884_load_b_crosswise_pair(_b0, _b1" in src
-    assert "emmy_mma884_load_b_smem_trans(_b" not in src, "the conflicted plain gather must be gone"
-    # The B reader is A's with lane bits 2 and 3 swapped, and the row/col mma form stays.
-    assert "(lane & ~0xC) | ((lane & 4) << 1) | ((lane & 8) >> 1)" in src
-    assert src.count("emmy_mma_m8n8k4_f16_f32(_c") == 4
+    kernel, _, _ = _source(_graph(m=32, n=32, k=16, trans=True), Context(compute_capability=(7, 0)))
+    assert _slab_writes(kernel, "_a_smem", "V70A")
+    assert _slab_writes(kernel, "_b_smem", "V70A")
+    assert not _slab_writes(kernel, "_b_smem", "V70B"), "the congruous layout is for an N-contiguous B"
+    assert [(load.slab_layout, load.pair_frag is not None) for load in _drains(kernel, "a")] == [("V70A", True)]
+    # The B reader is A's crosswise one (with lane bits 2 and 3 swapped where it is spelled): the conflicted plain
+    # gather is gone.
+    assert [(load.slab_layout, load.b_trans, load.pair_frag is not None) for load in _drains(kernel, "b")] == [("V70A", True, True)]
+    # The row/col mma form stays.
+    assert [mma.b_row_major for mma in statements(kernel, MmaSyncPtx)] == [False] * 4
     # The interleaved accumulator map is unchanged: the column half still comes from lane bit 3.
-    assert "((_vq >> 1) & 1) * 8" in src
+    assert all(store.volta_interleaved for store in statements(kernel, RegStore))
 
 
 def test_sm70_pair_policy_off_retains_the_unpaired_gather(monkeypatch) -> None:
     """The existing policy override disables the coupled layout as one complete choice."""
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
     monkeypatch.setenv("EMMY_PAIR_LDMATRIX", "0")
-    src, knobs = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
-    assert "_a_smem[emmy_volta_crosswise(" not in src
-    assert "_b_smem[emmy_volta_b_congruous(" not in src
-    assert "emmy_mma884_load_a_smem(_a0" in src
-    assert "emmy_mma884_load_b_smem(_b0" in src
-    assert "emmy_mma_m8n8k4_f16_f32(_c" in src
+    kernel, knobs, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    assert not _slab_writes(kernel, "_a_smem", "V70A")
+    assert not _slab_writes(kernel, "_b_smem", "V70B")
+    drains = _drains(kernel, "a") + _drains(kernel, "b")
+    assert {load.role for load in drains} == {"a", "b"}
+    assert all(load.slab_layout == "NONE" and load.pair_frag is None and not load.b_trans for load in drains)
+    assert statements(kernel, MmaSyncPtx) and not any(mma.b_row_major for mma in statements(kernel, MmaSyncPtx))
     assert knobs["PAIR_LDMATRIX"] is False
 
 
@@ -302,48 +380,52 @@ def test_sm70_computed_tiles_use_the_same_paired_layouts(monkeypatch) -> None:
     _pin(monkeypatch, VOLTA, tile="f2x2/k4", stage="d1/smem")
     graph = _norm_linear_graph(m=32, n=32, k=32)
     graph.nodes["y"].op = MatmulOp()
-    src, _ = _source(graph, Context(compute_capability=(7, 0)))
-    assert "_a_smem[emmy_volta_crosswise(" in src
-    assert "_b_smem[emmy_volta_b_congruous(" in src
-    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
-    assert "emmy_mma884_load_b_congruous_pair(_b0, _b1" in src
+    kernel, _, _ = _source(graph, Context(compute_capability=(7, 0)))
+    assert _slab_writes(kernel, "_a_smem", "V70A")
+    assert _slab_writes(kernel, "_b_smem", "V70B")
+    assert {(load.slab_layout, load.pair_frag is not None) for load in _drains(kernel, "a")} == {("V70A", True)}
+    assert {(load.slab_layout, load.pair_frag is not None) for load in _drains(kernel, "b")} == {("V70B", True)}
 
 
 def test_sm70_gmem_direct_tile_keeps_the_ordinary_accumulator_map(monkeypatch) -> None:
     """The paired accumulator map is coupled to a staged operand layout, never used alone."""
     _pin(monkeypatch, VOLTA, tile="f2x2")
-    src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
-    assert "emmy_mma_m8n8k4_f16_f32_brow(_c" not in src
-    assert src.count("emmy_mma_m8n8k4_f16_f32(_c") == 4
-    assert "const int _vq = (_vl & 15) >> 2;" in src
+    kernel, _, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    products = statements(kernel, MmaSyncPtx)
+    assert not any(mma.b_row_major for mma in products)
+    assert len(products) == 4 * (16 // 4)  # the 2x2 register tile, at each K step
+    assert not any(store.volta_interleaved for store in statements(kernel, RegStore))
 
 
 def test_sm70_output_stores_contiguous_fragment_pairs(monkeypatch) -> None:
     """The eight Volta accumulator elements leave registers as four contiguous half2 pairs."""
     _pin(monkeypatch, VOLTA)
-    src, _ = _source(_graph(), Context(compute_capability=(7, 0)))
-    assert src.count("*reinterpret_cast<__half2*>(&c[") == 4
+    _, _, src = _source(_graph(), Context(compute_capability=(7, 0)))
+    assert _count(src, "st.global.v2.b16") == 4 and _count(src, "st.global.b16") == 0
 
 
 def test_sm70_masked_rows_keep_contiguous_fragment_pairs(monkeypatch) -> None:
     """A row guard covers both adjacent values, so it does not split their half2 store."""
     _pin(monkeypatch, VOLTA)
-    src, _ = _source(_graph(m=Dim("seq_len", hint=512)), Context(compute_capability=(7, 0)))
-    assert src.count("*reinterpret_cast<__half2*>(&c[") == 4
-    assert "< (seq_len))" in src
+    kernel, _, src = _source(_graph(m=Dim("seq_len", hint=512)), Context(compute_capability=(7, 0)))
+    (store,) = statements(kernel, RegStore)
+    assert store.m_guard is not None and store.m_guard[1] == Var("seq_len")
+    assert _count(src, "st.global.v2.b16") == 4 and _count(src, "st.global.b16") == 0
 
 
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
     _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/smem/p2")
-    src, knobs = _source(_graph(k=32), Context(compute_capability=(7, 0)))
+    kernel, knobs, _ = _source(_graph(k=32), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1/k2"
     assert family_value(knobs, "STAGE") == "d2/smem/p2"
-    assert "__half _a_smem[256]" in src
-    assert "__half _b_smem[256]" in src
-    for fragment in ("_a0_s0", "_a0_s1", "_b0_s0", "_b0_s1"):
-        assert fragment in src
-    assert src.count("emmy_mma_m8n8k4_f16_f32(_c0_0") == 2
-    assert "cp.async" not in src and "ldmatrix" not in src
+    slabs = {smem.name: (smem.dtype.name, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
+    assert slabs == {"_a_smem": ("f16", 256), "_b_smem": ("f16", 256)}
+    operands = [fragment for fragment in statements(kernel, RegFragment) if fragment.role in ("a", "b")]
+    assert len(operands) == 4, "two register slots of the A and the B fragment"
+    calls = [(mma.c_frag, mma.a_frag, mma.b_frag) for mma in statements(kernel, MmaSyncPtx)]
+    assert len(calls) == 2 and len({c for c, _, _ in calls}) == 1, "both slots accumulate into the one C fragment"
+    assert len({(a, b) for _, a, b in calls}) == 2, "each call reads its own slot pair"
+    _assert_volta_only(kernel)
 
 
 def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> None:
@@ -358,27 +440,34 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     monkeypatch.setenv("EMMY_WORK", "w2x2")  # 128 threads: the slabs stripe evenly, so the split engages
     monkeypatch.setenv("EMMY_STAGE", "d2/smem")
     monkeypatch.setenv("EMMY_REDUCE", "")
-    src, knobs = _source(_graph(m=64, n=64, k=64), Context(compute_capability=(7, 0)))
+    kernel, knobs, _ = _source(_graph(m=64, n=64, k=64), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "STAGE") == "d2/smem"
-    prologue, _, body = src.partition("for (int _ks")
-    drain = body.index("emmy_mma_m8n8k4_f16_f32")
-    unpack = body.index("_a_stage0_0 = _v__a_stage0_0_h[0];")  # the carried vector spreads to the staged names
-    deposit = body.index("*reinterpret_cast<uint2*>(&_a_smem[_a_smem_store")
-    barrier = body.index("__syncthreads();")
-    issue = body.index("_v__a_stage0_0 = __ldg(")  # the gmem load of the chunk after next, past the barrier
-    assert drain < unpack < deposit < barrier < issue, "the loads issue past the barrier that publishes the deposit"
-    assert "uint4 _v__a_stage0_0 = *reinterpret_cast" in prologue, "the prime declares the carried registers"
-    assert prologue.index("_v__a_stage0_0 = __ldg(") > prologue.rindex("__syncthreads();"), "chunk 1 issues past the prime's barrier"
-    assert "int _a_smem_store = emmy_volta_crosswise(" in prologue
-    assert "int _b_smem_store = emmy_volta_b_congruous(" in prologue
-    assert "auto _a_gmem_stride" in prologue and "auto _a_gmem0" in prologue
-    assert "auto _b_gmem_stride" in prologue and "auto _b_gmem0" in prologue
-    assert "_a_gmem0 +" in body and "_b_gmem0 +" in body
-    assert "emmy_volta_crosswise(" not in body and "emmy_volta_b_congruous(" not in body
-    assert body.count("__syncthreads();") == 1, "the deposit's barrier is the whole per-chunk handshake"
-    assert prologue.count("__syncthreads();") == 1, "the primed slot is published once before the loop"
-    for forbidden in NEWER_INSTRUCTIONS:
-        assert forbidden not in src
+    ((grid,),) = [kernel.body]
+    (at,) = [i for i, stmt in enumerate(grid.body) if isinstance(stmt, Loop) and stmt.axis.extent == Dim(64)]
+    (chunk,) = [grid.body[at]]
+    assert chunk.step == Literal(32, "int")
+    prologue, body = grid.body[:at], list(chunk.body)
+    drain, deposit, barrier, issue = _register_ring_order(body)
+    assert drain < deposit < barrier < issue, "the loads issue past the barrier that publishes the deposit"
+    # The deposit reads the carried vectors where they stand: nothing copies them into names of their own.
+    carried = {name for load in statements(kernel, Load) if load.carried for name in load.names}
+    assert not any(isinstance(stmt, Assign) and set(stmt.deps()) & carried for stmt in body)
+    primes = [i for i, stmt in enumerate(prologue) if isinstance(stmt, Load) and stmt.carried]
+    assert primes, "the prime declares the carried registers"
+    assert min(primes) > max(i for i, stmt in enumerate(prologue) if isinstance(stmt, Sync)), "chunk 1 issues past the prime's barrier"
+    lets = {stmt.name: stmt for stmt in prologue if isinstance(stmt, Let)}
+    calls = " ".join(str(stmt.value) for stmt in lets.values())
+    assert "emmy_volta_crosswise(" in calls and "emmy_volta_b_congruous(" in calls
+    # The global addresses — a base per staged copy — are computed once ahead of the loop, and every load of the
+    # loop reads nothing else: an operand's stride along K is a constant of its flat index.
+    addresses = {name for name, stmt in lets.items() if stmt.dtype is None}
+    assert len(addresses) == 4
+    issued = [stmt for stmt in body if isinstance(stmt, Load) and stmt.input in ("a", "b")]
+    assert len(issued) == 4 and all(_free_vars(stmt.index) <= addresses for stmt in issued)
+    assert "emmy_volta" not in text(Body(tuple(body)))
+    assert sum(isinstance(stmt, Sync) for stmt in body) == 1, "the deposit's barrier is the whole per-chunk handshake"
+    assert sum(isinstance(stmt, Sync) for stmt in prologue) == 1, "the primed slot is published once before the loop"
+    _assert_volta_only(kernel)
 
 
 def test_sm70_depth_two_single_chunk_keeps_the_blocking_copy_before_the_drain(monkeypatch) -> None:
@@ -395,12 +484,12 @@ def test_sm70_depth_two_single_chunk_keeps_the_blocking_copy_before_the_drain(mo
     ctx = Context(compute_capability=(7, 0))
 
     monkeypatch.setenv("EMMY_STAGE", "d1/smem")
-    depth_one, _ = _source(_graph(m=64, n=64, k=32), ctx)
+    depth_one, _, _ = _source(_graph(m=64, n=64, k=32), ctx)
     monkeypatch.setenv("EMMY_STAGE", "d2/smem")
-    depth_two, knobs = _source(_graph(m=64, n=64, k=32), ctx)
+    depth_two, knobs, _ = _source(_graph(m=64, n=64, k=32), ctx)
 
     assert family_value(knobs, "STAGE") == "d2/smem"
-    assert depth_two == depth_one
+    assert text(depth_two) == text(depth_one)
 
 
 def test_sm70_shallow_k_tile_keeps_store_addresses_near_the_deposit(monkeypatch) -> None:
@@ -409,77 +498,69 @@ def test_sm70_shallow_k_tile_keeps_store_addresses_near_the_deposit(monkeypatch)
     monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_STAGE", "d2/smem")
     monkeypatch.setenv("EMMY_REDUCE", "")
-    src, _ = _source(_graph(m=64, n=64, k=32), Context(compute_capability=(7, 0)))
-    assert "int _a_smem_store" not in src and "int _b_smem_store" not in src
-    assert "_a_gmem_stride" not in src and "_b_gmem_stride" not in src
-    assert "*reinterpret_cast<uint2*>(&_a_smem[emmy_volta_crosswise(" in src
-
-
-def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:
-    """A register tile wide enough to ROLL back into a loop still drains and stores as Volta.
-
-    The rolled form rebuilds every stmt through ``Stmt.rewrite``; dropping ``fragment_layout``
-    there re-defaulted the drain to the modern ``ldmatrix`` and the store to the m16n8k16 C map —
-    an uncompilable, wrong-layout sm_70 kernel that the ``f1x1`` cases above cannot see."""
-    _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
-    monkeypatch.setenv("EMMY_LOOPIFY", "2")
-    src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
-    assert "unsigned _b[2][2]" in src  # the ROLLED fragment family (count > 1)
-    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
-    assert "emmy_mma884_load_b_congruous_pair(_b[0], _b[1]" in src
-    assert "emmy_mma_m8n8k4_f16_f32_brow(_c" in src
-    assert "const int _vr = " in src and "const int _vc = " in src  # the m8n8k4 C-fragment store map
-    for forbidden in NEWER_INSTRUCTIONS:
-        assert forbidden not in src
+    kernel, _, _ = _source(_graph(m=64, n=64, k=32), Context(compute_capability=(7, 0)))
+    assert not statements(kernel, Let), "no slab store address, no global stride, is hoisted ahead of the loop"
+    assert any(write.width > 1 for write in _slab_writes(kernel, "_a_smem", "V70A")), "the deposit places its vector itself"
 
 
 def test_sm70_attention_uses_the_volta_fragment_layout(monkeypatch) -> None:
     """The softmax algebra and its P-to-A handoff use all eight Volta C registers and the lane
     butterflies that join one logical row."""
     _pin_sdpa(monkeypatch)
-    src, _ = _source(_sdpa_graph(), Context(compute_capability=(7, 0)))
-    assert "emmy_c_to_a_f16_m8n8k4<0>" in src
-    assert "for (int _e = 0; _e < 8; _e++)" in src
-    assert "__shfl_xor_sync(0xffffffff" in src
-    assert ", 4)" in src and ", 2)" in src
-    for forbidden in NEWER_INSTRUCTIONS:
-        assert forbidden not in src
+    kernel, _, src = _source(_sdpa_graph(), Context(compute_capability=(7, 0)))
+    repacks = statements(kernel, FragmentRepack)
+    assert repacks and all(repack.fragment_layout == "m8n8k4" for repack in repacks)
+    assert any(repack.part in (None, 0) for repack in repacks)
+    applies = statements(kernel, FragmentApply)
+    assert applies and all(apply.layout == "m8n8k4" for apply in applies)
+    reduces = statements(kernel, FragmentRowReduce)
+    assert reduces and all(reduce.layout == "m8n8k4" for reduce in reduces)
+    _assert_volta_only(kernel)
+    # The lanes that share a row join through the butterflies of lane distance 4 and 2.
+    butterflies = {line.split(",")[2].strip() for line in _instructions(src) if line.startswith("shfl.sync.bfly.b32")}
+    assert {"4", "2"} <= butterflies, butterflies
 
 
 def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch) -> None:
     _pin_sdpa(monkeypatch)
-    src, _ = _source(_sdpa_graph(d=256, causal=True, dynamic=True), Context(compute_capability=(7, 0)))
-    (fragment,) = re.findall(r"(_w0_0_v\d+)\[_e\] = _w0_0_v\d+(?:__t\d+)?\[_e\] \+ __half2float\(in1\);", src)
-    assert f"float {fragment}[8]" in src
-    assert f"{fragment}[0] = ((a0_b * 16 + a0_u * 16 + 0 + _vr < a1__ck + 0 + _vc) ? (-1e+30f) : ({fragment}[0]));" in src
-    assert f"{fragment}[0] = ((a1__ck + 0 + _vc >= seq_len) ? (-1e+30f) : ({fragment}[0]));" in src
-    assert "__frow" not in src and "__fcol" not in src
-    assert "emmy_c_to_a_f16_m8n8k4" in src
+    kernel, _, src = _source(_sdpa_graph(d=256, causal=True, dynamic=True), Context(compute_capability=(7, 0)))
+    # The tier reads the carrier's range: no zero is added to the score first, the mask is the whole of it.
+    assert not [apply for apply in statements(kernel, FragmentApply) if apply.op.name == "add"]
+    # The causal mask compares the fragment element's query row with its key column; the key's bound masks it too.
+    masks = {str(apply.args[0].expressions[0]): apply for apply in statements(kernel, FragmentApply) if apply.op.name == "where"}
+    assert set(masks) == {"__frow < __fcol", "seq_len <= __fcol"}
+    (fragment,) = {mask.out for mask in masks.values()}
+    assert all(mask.layout == "m8n8k4" for mask in masks.values())
+    causal, bound = masks["__frow < __fcol"], masks["seq_len <= __fcol"]
+    assert causal.row_base is not None and causal.col_base == bound.col_base, "both read the same key column"
+    assert {repack.fragment_layout for repack in statements(kernel, FragmentRepack)} == {"m8n8k4"}
+    # The coordinates resolve to the lane's row and column: no instruction reads them by name.
+    assert not any("__frow" in line or "__fcol" in line for line in _instructions(src))
 
 
 def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -> None:
     """A two-slot ring on the Volta chunk tier is the register-staged split: the next chunk's key
     and value load into packed registers past the barrier, the softmax and expectation of this
-    chunk run, and the unpack and deposit land them in the free slot. The loads stay behind the
-    barrier — a load moved above it would refill the vectors the unpack has not read yet."""
+    chunk run, and the deposit lands them in the free slot, reading the vectors where it stands. The
+    loads stay behind the barrier — a load moved above it would refill vectors the deposit has not
+    read yet."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_WORK", "w4x1")
     monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", f"{VOLTA}/f1x2/k2")
     monkeypatch.setenv("EMMY_TILE@map.1/twist", f"{VOLTA}/f1x8/k8")
-    monkeypatch.setenv("EMMY_STAGE@map.1/twist.1/inner", "d2/smem")
+    monkeypatch.setenv("EMMY_STAGE@map.1/twist.1/inner", "")
     monkeypatch.setenv("EMMY_STAGE@map.1/twist", "d2/smem")
     monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_RASTER", "")
-    src, knobs = _source(_sdpa_graph(d=128, causal=True), Context(compute_capability=(7, 0)))
+    kernel, knobs, _ = _source(_sdpa_graph(d=128, causal=True), Context(compute_capability=(7, 0)))
     assert knobs["STAGE@map.1/twist"] == "d2/smem"
-    _, _, body = src.partition("for (int a")
-    drain = body.index("emmy_mma_m8n8k4_f16_f32")
-    unpack = body.index("_a_stage0_0 = _v__a_stage0_0_h[0];")
-    barrier = body.index("__syncthreads();", unpack)
-    issue = body.index("_v__a_stage0_0 = __ldg(")
-    assert drain < unpack < barrier < issue, "the key and value of the chunk after next issue past the barrier"
-    for forbidden in NEWER_INSTRUCTIONS:
-        assert forbidden not in src
+    (chunk,) = [loop for loop in statements(kernel, Loop) if loop.axis.name.endswith("__ck")]
+    body = list(chunk.body)
+    drain, deposit, barrier, issue = _register_ring_order(body)
+    assert drain < deposit < barrier < issue, "the key and value of the chunk after next issue past the barrier"
+    carried = {name for load in statements(kernel, Load) if load.carried for name in load.names}
+    assert not any(isinstance(stmt, Assign) and set(stmt.deps()) & carried for stmt in body), "nothing copies a carried vector"
+    _assert_volta_only(kernel)
 
 
 def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch) -> None:
@@ -489,15 +570,14 @@ def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch) 
     at depth 1 only here."""
     _pin(monkeypatch, VOLTA, tile="f1x1", stage="d1/smem")
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    src, knobs = _source(_norm_linear_graph(), Context(compute_capability=(7, 0)))
+    kernel, knobs, _ = _source(_norm_linear_graph(), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
     assert family_value(knobs, "STAGE") == "d1/smem"
-    assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
-    assert "emmy_mma884_load_b_smem_trans(_b0, &_b_smem" in src
-    assert "rsqrtf" in src  # the norm cone itself, evaluated into the A slab
-    assert "_b_copy0" in src  # the peer's blocking vector load/store
-    for forbidden in NEWER_INSTRUCTIONS:
-        assert forbidden not in src
+    assert [(load.src_buffer, load.b_trans) for load in _drains(kernel, "a")] == [("_a_smem", False)]
+    assert [(load.src_buffer, load.b_trans) for load in _drains(kernel, "b")] == [("_b_smem", True)]
+    assert "rsqrt" in operations(kernel)  # the norm cone itself, evaluated into the A slab
+    assert any(write.width > 1 for write in _slab_writes(kernel, "_b_smem")), "the peer's blocking vector load/store"
+    _assert_volta_only(kernel)
 
 
 def test_modern_computed_a_edge_keeps_the_cp_async_peer_copy(monkeypatch) -> None:
@@ -505,17 +585,19 @@ def test_modern_computed_a_edge_keeps_the_cp_async_peer_copy(monkeypatch) -> Non
     blocking copy is the sm_70 fallback, not a new default."""
     _pin(monkeypatch, AMPERE, tile="f1x1", stage="d1/smem")
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    src, _ = _source(_norm_linear_graph(k=32), Context(compute_capability=(8, 0)))
-    assert "emmy_cp_async" in src
-    assert "ldmatrix" in src and "rsqrtf" in src
-    assert "emmy_mma884" not in src
+    kernel, _, src = _source(_norm_linear_graph(k=32), Context(compute_capability=(8, 0)))
+    assert statements(kernel, CpAsyncCopy)
+    assert statements(kernel, LdmatrixLoad) and "rsqrt" in operations(kernel)
+    assert not any(load.fragment_layout == "m8n8k4" for load in statements(kernel, FragmentLoad))
+    assert not any(line.startswith("mma.sync.aligned.m8n8k4") for line in _instructions(src))
 
 
-def test_modern_mma_source_does_not_gain_the_volta_prelude(monkeypatch) -> None:
+def test_modern_mma_source_holds_no_volta_product(monkeypatch) -> None:
     _pin(monkeypatch, AMPERE)
-    src, _ = _source(_graph(k=16), Context(compute_capability=(8, 0)))
-    assert "mma.sync.aligned.m16n8k16" in src
-    assert "emmy_mma884" not in src and "mma.sync.aligned.m8n8k4" not in src
+    kernel, _, src = _source(_graph(k=16), Context(compute_capability=(8, 0)))
+    assert {tuple(mma.shape) for mma in statements(kernel, MmaSyncPtx)} == {(16, 8, 16)}
+    products = [line for line in _instructions(src) if line.startswith("mma.sync.aligned")]
+    assert products and not any(".m8n8k4." in line for line in products)
 
 
 def test_sm70_modern_atom_pin_restricts_the_schedule_to_empty(monkeypatch) -> None:
@@ -533,17 +615,8 @@ def test_sm70_newer_stage_pin_refuses(monkeypatch, stage) -> None:
         Pipeline.build(TILE_PASSES).run(_graph(), ctx=Context(compute_capability=(7, 0)))
 
 
-def test_requested_target_reaches_nvcc_arch_and_cubin_key(monkeypatch) -> None:
-    monkeypatch.setattr(nvcc, "_toolkit_tag", lambda: "toolkit")
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
-    try:
-        set_target((7, 0))
-        arch70 = nvcc.device_arch(False)
-        key70 = nvcc._cubin_key("source", "kernel", arch70)
-        set_target((8, 0))
-        arch80 = nvcc.device_arch(False)
-        key80 = nvcc._cubin_key("source", "kernel", arch80)
-    finally:
-        set_target(None)
+def test_the_text_s_target_reaches_the_ptxas_arch_and_cubin_key(monkeypatch) -> None:
+    monkeypatch.setattr(ptxas, "version", lambda: "ptxas")
+    arch70, arch80 = (ptxas._target(f".version 7.8\n.target sm_{sm}\n") for sm in (70, 80))
     assert (arch70, arch80) == ("sm_70", "sm_80")
-    assert key70 != key80
+    assert ptxas._cubin_key("source", arch70) != ptxas._cubin_key("source", arch80)

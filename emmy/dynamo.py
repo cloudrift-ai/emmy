@@ -3,8 +3,8 @@
 The program is a pure function. When the graph writes into an input, the program returns the input's new value
 as an extra output, and the runtime writes that output straight into the input's memory after the last kernel.
 
-``options`` takes the settings ``emmy compile`` takes: ``tune_db``, ``golden``, ``strict_evidence``, ``knobs``
-and ``nvcc_flags``. ``trace`` names a working golden each graph is added to, for ``emmy run --golden PATH --bench``.
+``options`` takes the settings ``emmy compile`` takes: ``tune_db``, ``golden``, ``strict_evidence`` and ``knobs``.
+``trace`` names a working golden each graph is added to, for ``emmy run --golden PATH --bench``.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from emmy.compiler.pipeline.search.golden.working import append_trace_inventory,
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.trace.torch import trace_module_functional
 
-OPTIONS = frozenset({"tune_db", "golden", "strict_evidence", "knobs", "nvcc_flags", "trace"})
+OPTIONS = frozenset({"tune_db", "golden", "strict_evidence", "knobs", "trace"})
 
 
 def emmy_backend(gm: torch.fx.GraphModule, example_inputs: list, *, options: dict | None = None):
@@ -40,7 +40,6 @@ def emmy_backend(gm: torch.fx.GraphModule, example_inputs: list, *, options: dic
     with (  # the build compiles the kernels, so it runs under the same settings as the pipeline
         config.golden_file_override(options.get("golden")),
         config.strict_evidence_override(options.get("strict_evidence")),
-        config.nvcc_flags_override(options.get("nvcc_flags")),
         pinned_knobs(options.get("knobs", {})),
     ):
         # The example inputs are the program's input memory, so it allocates and fills none of its own: every call

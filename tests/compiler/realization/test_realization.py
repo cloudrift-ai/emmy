@@ -10,22 +10,20 @@ asks the compile with the case as its only evidence and no hand pin — the sche
 way it reaches a deploy.
 
 ``realized`` is GPU-free and runs at the case's DECLARED capability, so an sm_70 lockout is exercised
-on any box. ``built`` and ``correct`` need the card itself and run only when the live capability
-equals the declared one — a pinned schedule is a claim about one capability, never about a merely
-newer card.
+on any box. ``built`` assembles that code with ptxas for the declared card, on any box whose ptxas
+takes the target (CUDA 13's no longer takes ``sm_70``). ``correct`` needs the card itself and runs
+only when the live capability equals the declared one — a pinned schedule is a claim about one
+capability, never about a merely newer card.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from emmy.compiler.backend.cuda import ptxas
 from tests.compiler.helpers import device_compute_capability, requires_cuda
 from tests.compiler.realization import helpers
 from tests.compiler.realization.helpers import STAGES, CaseError
-
-#: ``built`` hands its compiled graph to ``correct`` so one nvcc invocation serves both nodes when
-#: they run on the same worker — which they do, since the root conftest routes CUDA onto one chain.
-_COMPILED: dict[str, object] = {}
 
 
 def _parameters():
@@ -43,10 +41,10 @@ def _parameters():
             parameters.append(pytest.param(str(exc), "unusable", id=f"{case_id}-unusable"))
             continue
         for stage in STAGES:
-            # `built` and `correct` issue in-process CUDA work, so they must carry the marker the
-            # root conftest routes on: without it they scatter across xdist workers, each opening
-            # its own context, which is the OOM-and-cascade the serial chain exists to prevent.
-            marks = [requires_cuda] if stage in ("built", "correct") else []
+            # `correct` issues in-process CUDA work, so it must carry the marker the root conftest
+            # routes on: without it it scatters across xdist workers, each opening its own context,
+            # which is the OOM-and-cascade the serial chain exists to prevent.
+            marks = [requires_cuda] if stage == "correct" else []
             if case.xfail_stage == stage:
                 marks.append(pytest.mark.xfail(strict=True, reason=f"known gap — {helpers.evidence_line(case.document)}"))
             elif case.xfail_stage is not None and STAGES.index(stage) > STAGES.index(case.xfail_stage):
@@ -64,14 +62,17 @@ def test_realization(case, stage):
     if stage == "realized":
         assert (reason := helpers.realized(case)) is None, reason
         return
+    if stage == "built":
+        if ptxas.ptxas_path() is None:
+            pytest.skip("ptxas is not installed")
+        if not helpers.assembles(case.compute_cap):
+            pytest.skip(f"this ptxas does not assemble sm_{_spell(case.compute_cap)}")
+        helpers.built(case)
+        return
     live = device_compute_capability()
     if live != case.compute_cap:
         pytest.skip(f"case declares sm_{_spell(case.compute_cap)}; this card is sm_{_spell(live)}")
-    if stage == "built":
-        _COMPILED[case.id] = helpers.built(case)
-        return
-    compiled = _COMPILED.pop(case.id, None)
-    helpers.correct(case, helpers.built(case) if compiled is None else compiled)
+    helpers.correct(case)
 
 
 def _spell(cap: tuple[int, int]) -> str:

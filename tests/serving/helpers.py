@@ -43,16 +43,17 @@ def golden_path(compute_capability: tuple[int, int] | None = None) -> Path:
 
 def per_expert(run_expert):
     """``combine_routed_experts``'s batch callback from a per-expert ``run_expert(e, rows)``: each hit
-    expert runs on its own block of rows, and the outputs come back concatenated in the same order."""
+    expert runs on its own block of the rows ``take`` lists, and the outputs come back concatenated in the same
+    order, one row per entry of ``take``."""
     import torch
 
-    def run(rows, counts):
-        outputs, start = [], 0
+    def run(xn, take, counts):
+        rows, outputs, start = xn[take], [], 0
         for e, count in enumerate(counts):
             if count:
                 outputs.append(run_expert(e, rows[start : start + count]))
             start += count
-        return torch.cat(outputs)
+        return torch.cat(outputs), torch.arange(len(take), device=take.device)
 
     return run
 
@@ -133,6 +134,70 @@ QWEN4_EXP_TINY = dict(
 )  # fmt: skip
 
 
+def save_tiny_qwen4_exp(path, layer_types) -> None:
+    """A bfloat16 Qwen3.8-Flash-Next checkpoint at ``path`` with the published sparse-attention and Gated DeltaNet
+    geometry, everything else shrunk, for the 1Cat fork's kernels on the card. Its layers are ``layer_types``, written
+    the way the published file spells them: Transformers saves its internal ``indexed_attention``, which the fork's
+    config does not read. Layer 2 reads the n-gram PLE, as in the published model. Transformers writes its table as
+    BF16 row shards; they are stored the published way, FP8 with one scale, the only form the fork takes on a card
+    older than Ampere."""
+    import json
+
+    import torch
+    import transformers
+    from safetensors.torch import load_file, save_file
+
+    text = dict(
+        hidden_size=512, hc_count=4, hc_lowrank=64, num_attention_heads=24, num_key_value_heads=2, head_dim=256,
+        indexer_n_heads=4, indexer_kv_heads=1, indexer_head_dim=128, indexer_budget=2048, indexer_compress_ratio=4,
+        linear_num_key_heads=4, linear_num_value_heads=12, linear_key_head_dim=128, linear_value_head_dim=128,
+        linear_conv_kernel_dim=4, output_gate_type="sigmoid",
+        partial_rotary_factor=0.25, rope_parameters={"mrope_interleaved": True, "mrope_section": [11, 11, 10],
+                                                     "partial_rotary_factor": 0.25, "rope_theta": 10000000,
+                                                     "rope_type": "default"},
+        num_experts=4, num_experts_per_tok=2, moe_intermediate_size=128, shared_expert_intermediate_size=128,
+        vocab_size=1024, max_position_embeddings=4096, mtp_num_hidden_layers=0, ple_layer_ids=[2],
+        ngram_vocab_size_base=1000, split_ngram_parts=4, eos_token_id=1,
+        num_hidden_layers=len(layer_types), layer_types=list(layer_types), tie_word_embeddings=False,
+    )  # fmt: skip
+    vision = dict(depth=1, hidden_size=64, intermediate_size=128, num_heads=2, out_hidden_size=text["hidden_size"])
+    config = transformers.Qwen4ExpConfig(text_config=text, vision_config=vision, tie_word_embeddings=False)
+    torch.manual_seed(0)
+    transformers.Qwen4ExpForConditionalGeneration(config).eval().to(torch.bfloat16).save_pretrained(path)
+    config_path = Path(path) / "config.json"
+    saved = json.loads(config_path.read_text())
+    saved["text_config"]["layer_types"] = text["layer_types"]
+    saved["text_config"]["ple_embedding_dtype"] = "float8_e4m3fn"
+    config_path.write_text(json.dumps(saved))
+    weights_path = Path(path) / "model.safetensors"
+    tensors = load_file(weights_path)
+    site = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding."
+    shards = [key for key in tensors if key.startswith(f"{site}shard_")]
+    scale = max(tensors[key].float().abs().max() for key in shards) / torch.finfo(torch.float8_e4m3fn).max
+    for key in shards:
+        tensors[key] = (tensors[key].float() / scale).to(torch.float8_e4m3fn)
+    tensors[f"{site}weight_scale"] = scale.reshape(1).to(torch.bfloat16)
+    save_file(tensors, weights_path, metadata={"format": "pt"})
+
+
+#: The tiny hybrid the plugin's Gated DeltaNet engine tests serve (``generation/test_vllm_plugin_gdn*_gpu.py``,
+#: ``test_vllm_plugin_mtp_gpu.py``): :data:`QWEN3_5_TINY` with the tokenizer's 32,000-token vocabulary, a wider
+#: attention head and Qwen3.8's rotary scheme, a quarter of each head rotating on three M-RoPE axes, so vLLM hands
+#: the model ``[3, T]`` positions and asks it for them per request. Overrides for :func:`qwen3_5_model`.
+QWEN3_5_HYBRID = dict(
+    vocab_size=32000,
+    max_position_embeddings=512,
+    head_dim=64,
+    rope_parameters={
+        "rope_type": "default",
+        "rope_theta": 1e7,
+        "partial_rotary_factor": 0.25,
+        "mrope_section": [3, 3, 2],
+        "mrope_interleaved": True,
+    },
+)
+
+
 def qwen3_5_model(**overrides):
     import torch
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
@@ -140,6 +205,60 @@ def qwen3_5_model(**overrides):
 
     torch.manual_seed(0)
     return Qwen3_5ForCausalLM(Qwen3_5TextConfig(**(QWEN3_5_TINY | overrides))).eval()
+
+
+def qwen3_5_moe_model(**overrides):
+    """The tiny Qwen3.5 geometry with routed experts and the gated shared expert in every layer. Its
+    router weights are ten times the initializer's, which widens the gaps between router logits, so
+    two implementations' rounding does not flip a pick."""
+    import torch
+    from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
+
+    torch.manual_seed(0)
+    experts = dict(num_experts=8, num_experts_per_tok=2, moe_intermediate_size=32, shared_expert_intermediate_size=32)
+    model = Qwen3_5MoeForCausalLM(Qwen3_5MoeTextConfig(**(QWEN3_5_TINY | experts | overrides))).eval()
+    with torch.no_grad():
+        for layer in model.model.layers:
+            layer.mlp.gate.weight.mul_(10)
+    return model
+
+
+def add_mtp_head(path, *, repeats=False):
+    """Write a random one-layer multi-token-prediction head into the Qwen3.5 checkpoint at ``path``, text-only or
+    vision-language, under the names a Qwen3.5 checkpoint gives it, in the dtype of its other tensors. With ``repeats``
+    the head drafts the target's own pick again: its layer adds nothing (zero output projections), its prologue passes
+    the target's normalized row on and its norms are plain, so every draft a target repeating one token is checked
+    against stands."""
+    import json
+
+    import torch
+    from safetensors.torch import load_file, save_file
+    from transformers import AutoConfig, AutoModel
+
+    config_path = path / "config.json"
+    raw = json.loads(config_path.read_text())
+    text = raw.get("text_config", raw)
+    weights = path / "model.safetensors"
+    stored = load_file(weights)
+    dtype = next(iter(stored.values())).dtype
+    config = AutoConfig.for_model(**(text | {"num_hidden_layers": 1, "layer_types": ["full_attention"]}))
+    torch.manual_seed(1)
+    head = AutoModel.from_config(config).to(dtype)
+    hidden = config.hidden_size
+    tensors = {f"mtp.layers.0.{name}": value for name, value in head.layers[0].state_dict().items()}
+    tensors["mtp.norm.weight"] = torch.randn(hidden, dtype=dtype) * 0.1
+    tensors["mtp.pre_fc_norm_embedding.weight"] = torch.randn(hidden, dtype=dtype) * 0.1
+    tensors["mtp.pre_fc_norm_hidden.weight"] = torch.randn(hidden, dtype=dtype) * 0.1
+    tensors["mtp.fc.weight"] = torch.randn(hidden, 2 * hidden, dtype=dtype) * (2 * hidden) ** -0.5
+    if repeats:
+        for name, value in tensors.items():
+            if name.endswith(("o_proj.weight", "down_proj.weight")) or "norm" in name:
+                tensors[name] = torch.zeros_like(value)
+        tensors["mtp.fc.weight"] = torch.cat([torch.zeros(hidden, hidden), torch.eye(hidden)], dim=1).to(dtype)
+    save_file(stored | {name: value.contiguous() for name, value in tensors.items()}, weights, metadata={"format": "pt"})
+    text["mtp_num_hidden_layers"] = 1
+    config_path.write_text(json.dumps(raw))
 
 
 #: The re-minted width of layer 1's experts in the mixed-shape model — EXL3's per-layer bit
@@ -240,6 +359,25 @@ RUNNERS: dict[str, tuple] = {
         lambda: qwen3_5_gdn_model(2, dtype="bfloat16"),
         {"dtype_str": "bfloat16", "decode_bucket": 4, "max_tokens": 64, "prefill_bucket": 16},
     ),
+    # The plugin's hybrid engines (:data:`QWEN3_5_HYBRID`), built as vLLM builds them: decode steps of up to 4
+    # requests, a step of up to 4,096 tokens, prefill chunks of 16, or of 4 with two drafts verified in a step.
+    "qwen3_5.hybrid.f16": (
+        lambda: qwen3_5_model(**QWEN3_5_HYBRID).half(),
+        {"dtype_str": "float16", "decode_bucket": 4, "max_tokens": 4096, "prefill_bucket": 16},
+    ),
+    "qwen3_5.hybrid.f16.verify3": (
+        lambda: qwen3_5_model(**QWEN3_5_HYBRID).half(),
+        {"dtype_str": "float16", "decode_bucket": 4, "max_tokens": 4096, "prefill_bucket": 4, "verify_width": 3},
+    ),
+}
+
+#: The pins the regen records a runner's programs under, where the prior alone picks kernels that stall the lane: on
+#: these Gated DeltaNet shapes it keeps each program one kernel, which runs as one thread block and recomputes the
+#: chunk's triangular solve per output element. A bare ``PLACE=cut`` cuts each program's kernel at its root-most seam,
+#: once; the pieces take the prior's picks, and the golden's routing rows record those decisions.
+CUTS: dict[str, dict[str, str]] = {
+    runner_id: {"PLACE": "cut"}
+    for runner_id in ("qwen3_5.gdn.l2", "qwen3_5.gdn.l2.bf16", "qwen3_5.hybrid.f16", "qwen3_5.hybrid.f16.verify3")
 }
 
 
@@ -322,6 +460,17 @@ def on_volta() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (7, 0)
 
 
+def skip_without_gdn_verify_counts() -> None:
+    """Skip a test of speculative decoding on GDN layers on vLLM < 0.25. There no builder class receives a verify
+    step's accepted-token counts, so the GDN serving check refuses speculative decoding."""
+    import pytest
+
+    from emmy.serving import vllm_model_gen
+
+    if vllm_model_gen._CountingLinearBuilder is vllm_model_gen.LinearAttentionMetadataBuilder:
+        pytest.skip("this vLLM passes no GDN verify counts (< 0.25), so speculative decoding on GDN layers is refused")
+
+
 def assert_same_schedule(actual, expected, context: str = "") -> None:
     """Two runs of one schedule agree to a few units in the last place of their dtype. Not bit for bit: a
     cross-CTA ``atomicAdd`` split (``g<n>a``, which the V100 golden picks on several of these shapes) adds its
@@ -365,14 +514,16 @@ def build(runner_id: str, *, model=None, plan_cache=None, **overrides):
 
 
 @contextmanager
-def evidence_scope():
-    """The lane's golden as the compile's only evidence, strictly (:func:`golden.sole_evidence`), picked from a tune
-    DB of this process's own (:func:`_lane_tune_db`)."""
-    from emmy.compiler.pipeline.search.golden import sole_evidence
+def evidence_scope(*, strict: bool = True):
+    """The lane's golden as the compile's evidence, picked from a tune DB of this process's own (:func:`_lane_tune_db`):
+    its only evidence, strictly (:func:`golden.sole_evidence`), or with ``strict=False`` beside the prior, for a test
+    that also compiles programs no :data:`RUNNERS` shape covers (native generation's own programs, an MTP head)."""
+    from emmy.compiler.pipeline.search import golden
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     document = golden_document()
-    with pinned_knobs(document.shared_regime()), sole_evidence([document]), _lane_tune_db():
+    scope = golden.sole_evidence if strict else golden.evidence_scope
+    with pinned_knobs(document.shared_regime()), scope([document]), _lane_tune_db():
         yield
 
 
@@ -409,7 +560,8 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     """Write ``model`` as a dynamic block-FP8 checkpoint — the form Qwen ships: e4m3 codes beside
     one ``weight_scale_inv`` per block, no activation scale — and leave the model holding the
     values the checkpoint stores, so it is the eager reference of what a coded program computes.
-    Every linear but the output head is quantized."""
+    Every linear the block tiles but the output head is quantized, so the small gates stay as Qwen
+    publishes them; routed experts are stored one module per expert, as Qwen publishes them too."""
     import json
 
     import torch
@@ -421,6 +573,7 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     path = Path(path)
     model.config.save_pretrained(path)
     document = json.loads((path / "config.json").read_text())
+    document["dtype"] = str(model.dtype).removeprefix("torch.")  # as ``save_pretrained`` declares it
     document["quantization_config"] = {
         "quant_method": "fp8",
         "activation_scheme": "dynamic",
@@ -429,14 +582,73 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     }
     (path / "config.json").write_text(json.dumps(document, indent=1))
     tensors = {}
+
+    def quantize(name, weight):
+        bits, scale = _quantize_fp8_block(weight.detach().float().numpy(), block)
+        tensors[f"{name}.weight"] = torch.from_numpy(bits).view(torch.float8_e4m3fn)
+        tensors[f"{name}.weight_scale_inv"] = torch.from_numpy(scale)
+        return torch.from_numpy(dequantize(decode_f8(bits, "f8e4m3"), scale)).to(weight.dtype)
+
+    stacked = set()
     for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear) and name != "lm_head":
-            bits, scale = _quantize_fp8_block(module.weight.detach().float().numpy(), block)
-            tensors[f"{name}.weight"] = torch.from_numpy(bits).view(torch.float8_e4m3fn)
-            tensors[f"{name}.weight_scale_inv"] = torch.from_numpy(scale)
-            module.weight.data = torch.from_numpy(dequantize(decode_f8(bits, "f8e4m3"), scale)).to(module.weight.dtype)
+        if isinstance(module, torch.nn.Linear) and name != "lm_head" and not any(d % block for d in module.weight.shape):
+            module.weight.data = quantize(name, module.weight)
+        if isinstance(getattr(module, "gate_up_proj", None), torch.nn.Parameter):  # E-stacked routed experts
+            half = module.gate_up_proj.shape[1] // 2
+            for e, (gate_up, down) in enumerate(zip(module.gate_up_proj.data, module.down_proj.data, strict=True)):
+                gate, up = gate_up.split(half)
+                gate_up.copy_(torch.cat([quantize(f"{name}.{e}.gate_proj", gate), quantize(f"{name}.{e}.up_proj", up)]))
+                down.copy_(quantize(f"{name}.{e}.down_proj", down))
+            stacked |= {f"{name}.gate_up_proj", f"{name}.down_proj"}
     for key, tensor in model.state_dict().items():
-        tensors.setdefault(key, tensor.contiguous())
+        if key not in stacked:
+            tensors.setdefault(key, tensor.contiguous())
     if model.config.tie_word_embeddings:
         del tensors["lm_head.weight"]  # one storage; safetensors refuses to write it twice
     save_file(tensors, str(path / "model.safetensors"))
+
+
+def static_fp4(x, input_scale):
+    """modelopt's static 4-bit activation round trip, in f32: an e4m3 scale per 16 values relative to ``input_scale``,
+    the values coded e2m1 against it, and decoded against its f16 rounding (the trunk speller's order of operations)."""
+    import numpy as np
+
+    from emmy.compiler.dtype import decode_f4, decode_f8, encode_f4, encode_f8
+
+    blocks = np.asarray(x, dtype=np.float32).reshape(*np.shape(x)[:-1], -1, 16)
+    amax = np.abs(blocks).max(axis=-1, keepdims=True)
+    ratio = amax * np.float32(1 / 6) * (np.float32(1) / np.float32(input_scale))
+    scale = decode_f8(encode_f8(ratio, "f8e4m3"), "f8e4m3").astype(np.float32) * np.float32(input_scale)
+    codes = decode_f4(encode_f4(blocks / np.maximum(scale, np.float32(1e-12))))
+    return (codes * scale.astype(np.float16).astype(np.float32)).reshape(np.shape(x))
+
+
+def nvfp4_head_checkpoint(model, path, *, input_scale: float) -> None:
+    """Rewrite the output head of the checkpoint ``model`` was saved to at ``path`` as NVFP4 run W4A4 — its codes,
+    block scales and global scale beside the activation's calibrated ``input_scale``, as NVIDIA's Qwen3.8-27B stores
+    it — and leave the head of ``model`` holding the decoded weights: a W4A4 head's logits are those weights times its
+    input's static 4-bit round trip (:func:`static_fp4`)."""
+    import json
+
+    import numpy as np
+    import torch
+    from safetensors.torch import load_file, save_file
+
+    from emmy.compiler.loader.quant import dequantize_nvfp4, quantize_nvfp4
+    from emmy.compiler.loader.synthesize import _NVFP4_CONFIG
+
+    path = Path(path)
+    head = model.lm_head
+    packed, scale_bits, scale_2 = quantize_nvfp4(head.weight.detach().float().numpy())
+    stored = load_file(path / "model.safetensors")
+    stored |= {
+        "lm_head.weight": torch.from_numpy(packed),
+        "lm_head.weight_scale": torch.from_numpy(np.ascontiguousarray(scale_bits)).view(torch.float8_e4m3fn),
+        "lm_head.weight_scale_2": torch.from_numpy(scale_2.reshape(())),
+        "lm_head.input_scale": torch.tensor(input_scale, dtype=torch.float32),
+    }
+    save_file(stored, str(path / "model.safetensors"), metadata={"format": "pt"})
+    document = json.loads((path / "config.json").read_text())
+    document["quantization_config"] = _NVFP4_CONFIG
+    (path / "config.json").write_text(json.dumps(document, indent=1))
+    head.weight.data = torch.from_numpy(dequantize_nvfp4(packed, scale_bits, scale_2)).to(head.weight.dtype)

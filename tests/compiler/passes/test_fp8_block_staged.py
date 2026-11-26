@@ -10,18 +10,18 @@ each 128-wide K group, which a staged chunk inside that group evaluates once per
 
 from __future__ import annotations
 
-import re
+import math
 
 import numpy as np
 import pytest
 
-from emmy.compiler.dtype import F8E4M3, F32
+from emmy.compiler.dtype import BF16, F8E4M3, F32
 from emmy.compiler.graph import Tensor
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.kernel.ir import FragmentLoad, Smem, WarpShuffle
 from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 from emmy.compiler.ir.schedule.views import cone_seam
-from emmy.compiler.ir.stmt import Assign, Load
-from tests.compiler.helpers import requires_cuda, requires_sm
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write, parse_body
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 
 pytest.importorskip("torch")
 
@@ -43,61 +43,78 @@ def _linear(tmp_path, *, m=16, k=256, n=256, dtype="bfloat16"):
 
 
 def _pins(place: str, stage: str, *, atom: str = K16_BF16, chunk: str = "k8") -> dict:
-    # The reduction is pinned unsplit: a split is the kernel-set pick's call, which a prior refit moves.
-    return {"PLACE": place, "REDUCE": "", "WORK": "w1x4", "TILE": f"{atom}/f1x1/{chunk}", "STAGE": stage}
+    # The reduction is pinned unsplit: a split is the kernel-set pick's call, which a prior refit moves. The bare cut
+    # cuts the root-most seam once, the one at the frontier.
+    return {
+        "PLACE": place,
+        "REDUCE": "",
+        "WORK": "w1x4",
+        "TILE": f"{atom}/f1x1/{chunk}",
+        "STAGE": stage,
+    }
 
 
 def _lower(graph, pins):
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     with pinned_knobs(pins):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
-    return [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+        return compile_with_kernels(graph, ctx=Context.from_target((12, 0)))[1]
 
 
 @pytest.mark.parametrize(
     ("scale_index", "block"),
-    [((Var("n"),), None), ((BinaryExpr("/", Var("n"), Literal(128, "int")), BinaryExpr("/", Var("k"), Literal(128, "int"))), 128)],
+    [("n", None), ("n / 128, k / 128", 128)],
 )
 def test_an_fp8_weight_reads_as_one_value_bytes_only_under_a_k_block_scale(scale_index, block):
     """The decode cast of a stored fp8 byte times its scale: a scale that changes along K is a
     128-block reading one byte per element; one constant along K is not — it moves onto the
     epilogue instead."""
-    cone = [
-        Load(name="in0", input="w_scale", index=scale_index, dtype=None),
-        Load(name="in1", input="w_bits", index=(Var("n"), Var("k")), dtype=None),
-        Assign(name="v0", op="from_f8e4m3", args=("in1",)),
-        Assign(name="v1", op="multiply", args=("in0", "v0")),
-    ]
+    cone = list(
+        parse_body(
+            f"""
+            in0 = load w_scale[{scale_index}]
+            in1 = load w_bits[n, k]
+            v0 = from_f8e4m3(in1)
+            v1 = multiply(in0, v0)
+            """
+        )
+    )
     inputs = {"w_bits": Tensor("w_bits", (256, 256), F8E4M3), "w_scale": Tensor("w_scale", (2, 2) if block else (256,), F32)}
     read = match_packed_kblock_b(cone, "k", inputs)
     if block is None:
         assert read is None
     else:
-        assert (read.per_byte, read.block, read.bits.input, read.factor) == (1, 128, "w_bits", "in0")
+        assert (read.per_byte, read.block, read.bits.input, str(read.factor)) == (1, 128, "w_bits", "in0")
 
 
 def test_the_cut_linear_lowers_to_the_fp8_byte_slab(tmp_path):
     """Under a copy stage the weight stages as raw e4m3 bytes in padded rows beside an f32 scale
     slab, and one drain reads both; no 16-bit weight tile and no packed-pair table appear."""
     graph, _, _ = _linear(tmp_path)
-    src = "\n".join(_lower(graph, _pins("cut", "d2/smem-async")))
-    assert "emmy_mma_load_b_smem_trans_f8s_bf16" in src
+    kernels = _lower(graph, _pins("cut", "d2/smem-async"))
+    b_loads = [load for load in statements(kernels, FragmentLoad) if load.role == "b"]
+    assert b_loads and all(
+        load.staged and load.b_trans and (load.src_dtype, load.dtype) == (F8E4M3, BF16) and load.scale_buffer == "_bs_smem"
+        for load in b_loads
+    ), "one drain reads the e4m3 bytes and their scale"
     # tile_n = 32 rows of (128 bytes + the 16 B pad), two ring slots; one f32 scale per row.
-    assert "__nv_fp8_e4m3 _b_smem[9216]" in src and "float _bs_smem[32]" in src
-    assert "EMMY_F4_LUT" not in src
+    slabs = {smem.name: (smem.dtype.name, math.prod(smem.extents)) for smem in statements(kernels, Smem)}
+    assert slabs["_b_smem"] == ("f8e4m3", 9216) and slabs["_bs_smem"] == ("f32", 32)
+    assert not [load for load in statements(kernels, FragmentLoad) if load.src_dtype.name.startswith("f4")], "no packed-pair table"
 
 
 def test_the_fused_quantize_refills_its_group_statistic_every_chunk(tmp_path):
     """Fused into the matmul, the activation's group maximum is a warp reduce at the head of each
     chunk's fill rather than a 128-element scan per slab cell."""
     graph, _, _ = _linear(tmp_path)
-    (src,) = _lower(graph, _pins("fuse", "d2/smem-async"))
-    loop = src.index("for (int _ks")
-    (state,) = re.findall(r"__shared__ float _a_stat_(acc\d+)\[16\];", src[:loop])
-    assert "__shfl_xor_sync" in src[loop:] and f"_a_stat_{state}[_sr] = {state}" in src[loop:]
+    ((grid,),) = [kernel.body for kernel in _lower(graph, _pins("fuse", "d2/smem-async")).values()]
+    loop = next(i for i, stmt in enumerate(grid.body) if isinstance(stmt, Loop) and stmt.axis.name == "_ks")
+    head, chunk = list(Body(grid.body[:loop]).iter()), list(Body((grid.body[loop],)).iter())
+    ((state, extents),) = [(smem.name, smem.extents) for smem in head if isinstance(smem, Smem) and smem.name.startswith("_a_stat_")]
+    assert extents == (16,)
+    assert any(isinstance(stmt, WarpShuffle) for stmt in chunk), "a warp reduce at the head of each chunk's fill"
+    assert any(isinstance(stmt, Write) and stmt.output == state for stmt in chunk), "the chunk refills the statistic"
 
 
 def test_the_seam_reads_the_group_maximum_as_a_per_chunk_statistic(tmp_path):
@@ -127,7 +144,6 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.context import Context
     from emmy.compiler.loader.synthesize import quantize_and_spell
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     code = (
@@ -137,16 +153,20 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
     )
     graph, _, bundle = graph_from_code(code)
     quantize_and_spell(graph, bundle, tmp_path / "ckpt", scheme="fp8-block")
-    # The claim is about the staged compute fill's chunk body, so the three contraction sites are pinned to it
-    # and the reduction unsplit: a cold pool this size is one seeded descent, not a choice of tier.
-    staged = {f"STAGE@{site}": "d1/smem" for site in ("inner", "inner.1/map.1/inner", "inner.1/map.2/reduce.1/inner")}
+    # The claim is about the staged compute fill's chunk body, so the root is pinned to it and the reduction
+    # unsplit: a cold pool this size is one seeded descent, not a choice of tier. The gate and up contractions
+    # nested in the fill take no transport of their own.
+    staged = {"STAGE@inner": "d1/smem", "STAGE@inner.1/map.1/inner": "", "STAGE@inner.1/map.2/reduce.1/inner": ""}
     with pinned_knobs({"PLACE": "fuse", "REDUCE": "", **staged}):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((7, 0)))
-    (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    chunk = src[src.index("for (int _ks") :]
-    chunk = chunk[: chunk.index("for (int a")]
-    declared = re.findall(r"^\s*(?:float|__half|int) (\w+) = ", chunk, flags=re.M)
-    assert "_a_stat_" in src and len(declared) == len(set(declared))
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target((7, 0)))
+    (kernel,) = kernels.values()
+    assert any(smem.name.startswith("_a_stat_") for smem in statements(kernel, Smem))
+    (chunk,) = [loop for loop in statements(kernel, Loop) if loop.axis.name == "_ks"]
+    # Every scope of the chunk binds each value once (a fragment is a register set its loads refill, not a binding).
+    for stmt in (chunk, *Body((chunk,)).iter()):
+        for scope in stmt.nested():
+            declared = [name for inner in scope if isinstance(inner, (Assign, Load, Let)) for name in inner.defines()]
+            assert len(declared) == len(set(declared)), sorted(name for name in declared if declared.count(name) > 1)
 
 
 def _run(graph, bundle, ckpt, pins):
@@ -196,3 +216,45 @@ def test_the_fused_quantize_matches_the_cut_one_bit_for_bit(tmp_path):
     fused = _run(graph.copy(), bundle, ckpt, _pins("fuse", "d2/smem-async"))
     cut = _run(graph.copy(), bundle, ckpt, _pins("cut", "d2/smem-async"))
     assert np.array_equal(fused, cut)
+
+
+def _block_fp8_node(a_index: str, a_shape: tuple, *, n: int = 256, k: int = 256):
+    """``x @ decode(w)`` over a 128x128 block-scaled fp8 weight, the activation ``x`` read at ``a_index``."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import BF16
+    from emmy.compiler.ir.axis import Axis
+    from tests.compiler.terms import contraction, projection
+
+    cone = projection(
+        body=parse_body(
+            """
+            in0 = load w_scale[n / 128, k / 128]
+            in1 = load w_bits[n, k]
+            v0 = from_f8e4m3(in1)
+            v1 = multiply(in0, v0)
+            """
+        )
+    )
+    ka = Axis("k", Dim(k))
+    [a] = parse_body(f"bf16 a = load x[{a_index}]")
+    node = contraction(ka, a, (cone, "acc"))
+    inputs = {
+        "x": Tensor("x", a_shape, BF16),
+        "w_bits": Tensor("w_bits", (n, k), F8E4M3),
+        "w_scale": Tensor("w_scale", (n // 128, k // 128), F32),
+    }
+    return node, inputs, (Axis("m", Dim(16)), Axis("n", Dim(n))), ka
+
+
+@pytest.mark.parametrize(("a_index", "a_shape", "tma"), [("m, k", (16, 256), True), ("k", (256,), False)])
+def test_a_row_less_activation_declines_the_tma_byte_slab(a_index, a_shape, tma):
+    """A TMA box copies rows of each operand's gmem tensor. A width-1 product reads its activation as a bare vector,
+    which no box of rows can address, so the byte-slab stage never offers TMA there (the descriptor refused it at
+    launch: "shape [5120] cannot be collapsed to match box [16, 2, 64]"); cp.async copies the vector and resolves."""
+    from emmy.compiler.ir.schedule import Stage, Tile, Work
+    from emmy.compiler.ir.schedule.staging import resolve_warp_stage
+
+    node, inputs, mn, ka = _block_fp8_node(a_index, a_shape)
+    tile = Tile.parse(f"{K16_BF16}/f1x2/k8", Work.parse("w1x1")).at(*mn)
+    assert (resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 100 * 1024, inputs, k_axis=ka) is not None) == tma
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is not None

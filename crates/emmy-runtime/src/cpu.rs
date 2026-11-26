@@ -393,6 +393,10 @@ impl Executor {
         for (name, data) in &artifact.bindings {
             executor.upload(name, data)?;
         }
+        // A pack's bindings, one file at a time: its bytes go before the next is read.
+        for (name, path) in &artifact.files {
+            executor.upload(name, &std::fs::read(path)?)?;
+        }
         executor.apply_runtime_constants()?;
         executor.load_times_ms = BTreeMap::from([
             ("module_ms", module_ms),
@@ -654,6 +658,9 @@ impl Executor {
         let Some(cpu) = launch.cpu.as_ref() else {
             bail!("a cpu plan launch without a cpu section")
         };
+        if !launch.runs_at(&self.env)? {
+            return Ok(());
+        }
         for name in &launch.zero_outputs {
             let bytes = self.placement(name)?.bytes;
             // SAFETY: the buffer has `bytes` bytes in its region.

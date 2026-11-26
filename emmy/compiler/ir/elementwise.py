@@ -11,8 +11,8 @@ Construction resolves the callable from the op's ``name`` via
 ``getattr(np, name)`` otherwise. Unknown names raise. Arity is read
 from the callable's ufunc ``nin`` or the explicit table for non-ufunc multi-input intrinsics.
 
-This module intentionally doesn't depend on the ``Expr`` AST in
-``ir/expr.py`` — that's the coordinate / predicate sublanguage for
+This module intentionally doesn't depend on the ``Expression`` AST in
+``ir/expression.py`` — that's the coordinate / predicate sublanguage for
 indices, a separate layer.
 """
 
@@ -25,6 +25,7 @@ import numpy as np
 
 from emmy.compiler.dtype import decode_f4, decode_f8, encode_f4, encode_f8
 from emmy.compiler.wire import Wire
+from emmy.emmy_ir import ASSOCIATIVE_OPS, COMMUTATIVE_OPS, OP_ALIASES, OP_CLUSTERS, OP_IDENTITY, SELECTING_OPS
 
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
@@ -51,7 +52,18 @@ def _arange(x):
 
 
 _NAME_TO_FN: dict[str, object] = {
-    "exp_fast": np.exp,  # the FAST_EXP-lowered exp — host semantics identical, CUDA renders __expf
+    # The approximate forms a kernel pass picks under the precision knobs (``lowering/kernel/130``): on a host each is
+    # the exact operation; only a device spells the approximate instruction.
+    "exp_fast": np.exp,
+    "divide_fast": np.divide,
+    "reciprocal_fast": np.reciprocal,
+    "sqrt_fast": np.sqrt,
+    "log_fast": np.log,
+    "sin_fast": np.sin,
+    "cos_fast": np.cos,
+    "tanh_fast": np.tanh,
+    "pow_fast": np.power,
+    "sigmoid_fast": lambda x: 1.0 / (1.0 + np.exp(-x)),
     "divide_rn_f32": np.divide,  # f32 reference division; CUDA keeps round-to-nearest under fast math
     "arange": _arange,
     "rsqrt": lambda x: 1.0 / np.sqrt(x),
@@ -63,10 +75,6 @@ _NAME_TO_FN: dict[str, object] = {
     "gelu": lambda x: 0.5 * x * (1.0 + _erf(x / np.sqrt(2.0))),
     "gelu_tanh": lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
     "copy": lambda x: x,
-    # The ACTION of a carried state's step: the state becomes what the step computed. A fold whose
-    # ⊕ is this folds the free monoid of step maps under composition, so it has no identity and no
-    # partition arm; every gate that asks ``has_identity`` refuses it by that alone.
-    "next": lambda x, y: y,
     # ``aten.pad`` reaches the generic elementwise spelling only when every pad width is zero.
     # The tracer rejects every non-empty pad before this point, so the stored unary op is an
     # identity (kept distinct from ``copy`` for frontend provenance).
@@ -110,15 +118,11 @@ _NAME_TO_FN: dict[str, object] = {
 # int4 or trellis decode cone could be written as a traced expression at all -- which meant a
 # miscompilation reachable only through such a cone could not be minimized outside a real
 # checkpoint.
-_ALIASES: dict[str, str] = {
-    "__rshift__": "right_shift",
-    "bitwise_right_shift": "right_shift",
-}
+_ALIASES: dict[str, str] = dict(OP_ALIASES)
 
 _ARITY: dict[str, int] = {
     # ``np.where`` is a regular function rather than a ufunc, so it has no ``nin`` metadata.
     "where": 3,
-    "next": 2,
 }
 
 
@@ -154,29 +158,21 @@ class ElementwiseImpl(Wire):
         return cls(value)
 
     # Commutative ops — binary combines where ``op(a, b) == op(b, a)``.
-    _COMMUTATIVE: frozenset[str] = frozenset({"add", "multiply", "maximum", "minimum", "amax", "sum", "prod"})
+    _COMMUTATIVE: frozenset[str] = COMMUTATIVE_OPS
     # Associative ops — binary combines where ``op(op(a, b), c) == op(a, op(b, c))``.
     # The reassociable reduce combines: a reduction over one of these may be
     # split / reordered (split-K, cooperative tree-combine) without changing
     # the result. ``subtract`` / ``divide`` are deliberately absent.
-    _ASSOCIATIVE: frozenset[str] = frozenset({"add", "multiply", "maximum", "minimum", "amax", "sum", "prod"})
+    _ASSOCIATIVE: frozenset[str] = ASSOCIATIVE_OPS
     # Reducer neutral elements — only meaningful when used as an Accum
     # combine or a ReduceOp.
-    _IDENTITY: dict[str, float] = {
-        "add": 0.0,
-        "sum": 0.0,
-        "multiply": 1.0,
-        "prod": 1.0,
-        "maximum": -1e30,
-        "amax": -1e30,
-        "minimum": 1e30,
-    }
+    _IDENTITY: dict[str, float] = dict(OP_IDENTITY)
     # Selecting ops *choose* an existing input value (max/min family) rather
     # than accumulate magnitude — so an Accum over one may stay in the input
-    # dtype, and the flash recognizer's rowmax keys off it. The single source
-    # for the per-op ``selecting`` trait (was a ``_SELECTING_OPS`` frozenset in
-    # ``020_place_inits``).
-    _SELECTING: frozenset[str] = frozenset({"maximum", "amax", "minimum", "max", "min"})
+    # dtype, and the flash recognizer's rowmax keys off it. The property is the
+    # operation table's; ``max`` and ``min`` are numpy spellings this side alone
+    # resolves, so they join here.
+    _SELECTING: frozenset[str] = SELECTING_OPS | frozenset({"max", "min"})
     # semiring pairing — a reduce combine ``⊕`` mapped to the products ``⊗``
     # that distribute over it (``a·(b⊕c) == a·b ⊕ a·c``), so a contraction
     # ``Σ_k a⊗b`` is a matmul over ``⊕``. Only ``(+, ×)`` is exercised today;
@@ -309,18 +305,17 @@ def _op_name(op) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Reduce render-spelling registry — the single op-keyed table behind the four
-# sites that used to switch on the reduce op name: ``Accum.render`` (CUDA
-# ``+=`` / ``*=`` / ``fmax`` / ``fmin``), ``kernel/ir._binary_combine_expr``
-# (the tree-combine binary expr), and ``ReduceOp.forward`` / ``ScanOp.forward``
-# (the numpy interpreter reductions). Keyed by canonical combine name.
+# Reduce spelling registry — the single op-keyed table behind the sites that
+# switch on the reduce op name: ``Accum``'s host C++ render (``+=`` / ``*=`` /
+# ``fmax`` / ``fmin``) and ``ReduceOp.forward`` / ``ScanOp.forward`` (the numpy
+# interpreter reductions). Keyed by canonical combine name.
 # ---------------------------------------------------------------------------
 
 
 class ReduceSpelling(NamedTuple):
-    infix: str | None  # binary-expr operator (``a + b``), or None for a call form
+    infix: str | None  # binary-expression operator (``a + b``), or None for a call form
     compound: str | None  # compound assignment (``name += rhs``), or None
-    intrinsic: str | None  # CUDA/abstract intrinsic (``fmax`` / ``fmin``), or None
+    intrinsic: str | None  # abstract intrinsic (``fmax`` / ``fmin``), or None
     np_reduce: Callable  # numpy axis reduction (keepdims)
     np_scan: Callable | None  # numpy cumulative (scan), or None if scan is undefined
 
@@ -335,7 +330,7 @@ _REDUCE_SPELLING: dict[str, ReduceSpelling] = {
 
 def reduce_spelling(op) -> ReduceSpelling:
     """The render data for a reduce combine, defaulting to additive (``+=``)
-    for non-reduce / unknown ops — matches ``Accum.render``'s legacy fallback.
+    for non-reduce / unknown ops — matches ``Accum``'s render's legacy fallback.
     Accepts an op name or ``ElementwiseImpl``."""
     return _REDUCE_SPELLING.get(reduce_canon(_op_name(op)), _REDUCE_SPELLING["add"])
 
@@ -369,53 +364,7 @@ def reduce_spelling(op) -> ReduceSpelling:
 #   information for the search.)
 # - **copy** (rep ``copy``) — passthrough; its own bucket so a no-op
 #   doesn't get collapsed with arithmetic.
-_OP_CLUSTERS: dict[str, str] = {
-    # fma — the representative is the product: a sum would fold with its neighbours into one flat sum under
-    # normalization and lose the tree the exact body had, while a product of two values folds with nothing.
-    "add": "multiply",
-    "sum": "multiply",
-    "subtract": "multiply",
-    "sub": "multiply",
-    "negative": "multiply",
-    "multiply": "multiply",
-    "prod": "multiply",
-    "abs": "multiply",
-    "fma": "multiply",
-    # compare
-    "maximum": "maximum",
-    "minimum": "maximum",
-    "amax": "maximum",
-    "sign": "maximum",
-    # sfu_div
-    "divide": "divide",
-    "divide_rn_f32": "divide",
-    "true_divide": "divide",
-    "floor_divide": "divide",
-    "remainder": "divide",
-    "mod": "divide",
-    "reciprocal": "divide",
-    # sfu_trans
-    "sqrt": "exp",
-    "rsqrt": "exp",
-    "exp": "exp",
-    "log": "exp",
-    "log2": "exp",
-    "log10": "exp",
-    "sin": "exp",
-    "cos": "exp",
-    "tan": "exp",
-    "tanh": "exp",
-    "sigmoid": "exp",
-    "silu": "exp",
-    "softplus": "exp",
-    "erf": "exp",
-    "gelu": "exp",
-    "gelu_tanh": "exp",
-    "pow": "exp",
-    "relu": "exp",
-    # passthrough
-    "copy": "copy",
-}
+_OP_CLUSTERS: dict[str, str] = dict(OP_CLUSTERS)
 
 
 def cluster_representative(op: ElementwiseImpl) -> ElementwiseImpl:

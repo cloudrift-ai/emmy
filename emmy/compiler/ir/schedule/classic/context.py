@@ -27,6 +27,7 @@ from .schedule import (
     classic_node_key,
     classic_stage_key,
     edge_site_spelling,
+    holds_state,
     node_id_spelling,
     output_sweep_works,
     packed_works,
@@ -326,9 +327,13 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         ):
             self._refuse("pick is incompatible with the classic kernel position")
         work = self._relation.work or Work()
+        # Registers evaluate the whole step in their own fragments, so the step's sites take no choice.
+        if pick.kernel.state.transport == "reg":
+            if not self._step_off:
+                self._refuse("a state in registers leaves the step's sites no choice")
         # Same rule as :meth:`_kernel_composes`: serial node choices leave output sweeps free to
         # take one of their own offered worker inventories.
-        if (pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units) and not (
+        elif (pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units) and not (
             self._output_sweeps_take(pick.kernel.work) or self._packs(pick.kernel.work)
         ):
             self._refuse("kernel WORK does not realize the node choices")
@@ -336,6 +341,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._refuse("RASTER requires a tiled contraction site")
         if pick.kernel.work.producer and not self._producer_eligible:
             self._refuse("producer band is incompatible with the selected transport")
+        shared = pick.kernel.state.transport == "smem"
+        if shared and not (self.tile_op.state_routes and holds_state(pick.kernel.work, pick.kernel.raster)):
+            self._refuse("a carried state is kept in shared memory by a one-dimensional cooperative thread tile only")
         schedule = Schedule(pick.kernel, self.schedule.nodes, self.schedule.edges)
         self._require_kernel_prefix(schedule)
         if self.problem is not None and (why := self.problem.unrealized_bare_pin(schedule)):
@@ -416,7 +424,17 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             and all(choice.stage.is_direct for choice in self.schedule.edges.values())
         )
 
+    @property
+    def _step_off(self) -> bool:
+        """Whether every site of this prefix took its off value: no tile, a serial fold, direct operands."""
+        return all(
+            not node.tile.spell() and not (isinstance(node, ReductionSchedule) and node.reduce.spell())
+            for node in self.schedule.nodes.values()
+        ) and all(edge.stage.is_direct for edge in self.schedule.edges.values())
+
     def _kernel_composes(self, kernel: KernelSchedule) -> bool:
+        if kernel.state.transport == "reg":
+            return self._step_off
         work = self._relation.work or Work()
         # Serial node choices do not constrain a worker inventory used only to stripe output
         # sweeps; a node-owned inventory still follows the ordinary equality relation, or packs

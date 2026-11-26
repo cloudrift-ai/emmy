@@ -19,7 +19,7 @@ _STAMP = {"S_ext_n_symbolic_axis": 0.0}
 def _dataset() -> Dataset:
     """One golden group over one pool (a second row lacking a feature, so the matrix carries the NaN fill) and one
     measured group, with the bookkeeping an export writes beside them."""
-    pool = GoldenPool("gpuA", (12, 0), "", kernel_row("k1", name="k_one"), {"m": 512}, (GoldenRow({"TILE": "a"}, 1.5, "golden:x"),))
+    pool = GoldenPool("gpuA", (12, 0), "", kernel_row("k1"), {"m": 512}, (GoldenRow({"TILE": "a"}, 1.5, "golden:x"),))
     golden = GoldenGroup.over(
         "gpuA/k_one",
         "k_one",
@@ -30,10 +30,10 @@ def _dataset() -> Dataset:
         1,
         10,
         pools=(pool,),
+        negatives=(0,),
+        measured=(0, 1),
     )
-    measured = MeasuredGroup.from_measured(
-        "gpuA/sig@O3", "gpuA", "sig", 3.0, [10.0, 20.0], [{"D_a": 1.0, **_STAMP}, {"D_a": 2.0, **_STAMP}]
-    )
+    measured = MeasuredGroup.from_measured("gpuA/sig", "gpuA", "sig", [10.0, 20.0], [{"D_a": 1.0, **_STAMP}, {"D_a": 2.0, **_STAMP}])
     provenance = {
         "source": "test.db",
         "sources": {"golden:x": 1},
@@ -42,7 +42,8 @@ def _dataset() -> Dataset:
         "feat_ver": features.FEATURIZER_VERSION,
         "compiler": "abc",
     }
-    return Dataset([golden], [measured], [("gpuA", "k_two", "did not lower")], {"golden": {"bench_fail": 1}, "measured": {}}, provenance)
+    dropped = {"golden": {"bench_fail": 1}, "measured": {}}
+    return Dataset([golden], [measured], [("gpuA", "k_two", "did not lower")], dropped, provenance, [("gpuA", "k_one", 1.2, 1.5)])
 
 
 def test_a_dataset_round_trips_through_its_directory(tmp_path):
@@ -56,6 +57,7 @@ def test_a_dataset_round_trips_through_its_directory(tmp_path):
     back = Dataset.load(out)
     [g], [m] = back.golden, back.measured
     want = dataset.golden[0]
+    assert (g.golden_ids, g.negative_ids, g.measured_ids) == ((1,), (0,), (0, 1))
     assert (g.key, g.name, g.tier, g.gpu, g.shape, g.dynamic, g.feat_names, g.total, g.golden_ids) == (
         want.key,
         want.name,
@@ -68,8 +70,9 @@ def test_a_dataset_round_trips_through_its_directory(tmp_path):
         want.golden_ids,
     )
     assert np.array_equal(g.feats, want.feats, equal_nan=True) and g.pools == want.pools
-    assert m.latency_us.tolist() == [10.0, 20.0] and m.h_opt == 3.0 and m.key == "gpuA/sig@O3"
-    assert (back.skipped, back.dropped, back.provenance) == (dataset.skipped, dataset.dropped, dataset.provenance)
+    assert m.latency_us.tolist() == [10.0, 20.0] and m.key == "gpuA/sig"
+    assert (back.skipped, back.dropped, back.stale) == (dataset.skipped, dataset.dropped, dataset.stale)
+    assert back.provenance == dataset.provenance
     manifest = json.loads((out / "manifest.json").read_text())
     assert len(manifest["kernels"]) == 1 and manifest["golden"][0]["pools"][0]["kernel"] == 0  # interned by identity
 
@@ -91,8 +94,8 @@ def test_a_directory_that_is_no_dataset_is_refused(tmp_path):
         Dataset.load(tmp_path / "notes")
 
 
-@pytest.mark.parametrize("version", [2, 4])
-def test_an_export_with_old_labels_or_merged_regimes_is_refused(tmp_path, version):
+@pytest.mark.parametrize("version", [2, 4, 6])
+def test_an_export_with_old_labels_or_merged_regimes_or_no_negatives_is_refused(tmp_path, version):
     out = _dataset().dump(tmp_path / "old-labels")
     manifest = json.loads((out / "manifest.json").read_text())
     manifest["version"] = version

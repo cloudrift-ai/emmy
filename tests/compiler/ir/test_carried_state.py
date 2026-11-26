@@ -3,24 +3,21 @@
 A scalar ``Accum`` lives inside the loops over the cells, so a step sees only its own cell. A delta
 rule's step contracts over the previous state (``k @ S``), which needs the loop over the steps
 OUTSIDE the cells and the state kept across them. ``Carry`` spells that: the statement defines
-the next value of one cell, a ``Pre`` read sees what the previous step left at any cell, and the
+the next value of one cell, a load one step back sees what the previous step left at any cell, and the
 loop that carries it is read off the body.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import numpy as np
 import pytest
 
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Pre, Write
+from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.stmt import Body, Load, Loop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ir import loaded_buffers
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -28,33 +25,31 @@ from emmy.compiler.wire import decode, encode
 from tests.compiler.helpers import requires_cuda
 
 STEPS, N = 3, 4
-c, i, j, k = Var("c"), Var("i"), Var("j"), Var("k")
-ZERO = Literal(0, "int")
 
 
-def _step(out_index: tuple, seed: float | str = 0.0, u_index: tuple = (c, i, j), steps: int = STEPS) -> Body:
-    """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, storing the state each step READ, from ``seed``."""
-    mix = Loop(
-        axis=Axis("k", N),
-        body=(
-            Load(name="w", input="W", index=(i, k)),
-            Pre(name="other", carrier="S", index=(k, j)),
-            Assign(name="p", op="multiply", args=("w", "other")),
-            Accum(name="mixed", value="p"),
-        ),
+def _step(out_index: str, seed: float | str = 0.0, u_index: str = "c, i, j", steps: int = STEPS, stored: str = "own") -> Body:
+    """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, from ``seed``, storing each step the state it READ
+    (``own``) or the one it defined (``next``, the roll's store)."""
+    return parse_body(
+        f"""
+        for c in 0..{steps}:
+            decay = load D[c]
+            for i in 0..{N}:
+                for j in 0..{N}:
+                    for k in 0..{N}:
+                        w = load W[i, k]
+                        other = load S[c - 1, k, j]
+                        p = multiply(w, other)
+                        mixed <- add(mixed, p)
+                    u = load U[{u_index}]
+                    own = load S[c - 1, i, j]
+                    kept = multiply(own, decay)
+                    moved = add(kept, mixed)
+                    next = add(moved, u)
+                    S[c, i, j] <- next seed {seed}
+                    out[{out_index}] = {stored}
+        """
     )
-    cell = (
-        mix,
-        Load(name="u", input="U", index=u_index),
-        Pre(name="own", carrier="S", index=(i, j)),
-        Assign(name="kept", op="multiply", args=("own", "decay")),
-        Assign(name="moved", op="add", args=("kept", "mixed")),
-        Assign(name="next", op="add", args=("moved", "u")),
-        Carry(name="S", value="next", index=(i, j), seed=seed),
-        Write(output="out", index=out_index, value="own"),
-    )
-    cells = Loop(axis=Axis("i", N), body=(Loop(axis=Axis("j", N), body=cell),))
-    return Body((Loop(axis=Axis("c", steps), body=(Load(name="decay", input="D", index=(c,)), cells)),))
 
 
 def _loops(body: Body) -> list[Loop]:
@@ -73,15 +68,18 @@ def _inputs(seed: float | str = 0.0, batch: int | None = None, steps: int = STEP
     return arrays
 
 
-def _reference(arrays: dict[str, np.ndarray], seed: float | str = 0.0) -> np.ndarray:
+def _reference(arrays: dict[str, np.ndarray], seed: float | str = 0.0, stored: str = "own") -> np.ndarray:
     if arrays["U"].ndim == 4:  # a batch of recurrences, one per leading row of U
-        return np.stack([_reference({**arrays, "U": u}, seed) for u in arrays["U"]])
+        return np.stack([_reference({**arrays, "U": u}, seed, stored) for u in arrays["U"]])
     state = arrays[seed].copy() if isinstance(seed, str) else np.full((N, N), seed, np.float32)
     steps = arrays["U"].shape[0]
     want = np.zeros((steps, N, N), np.float32)
     for step in range(steps):
-        want[step] = state
+        if stored == "own":
+            want[step] = state
         state = arrays["D"][step] * state + arrays["W"] @ state + arrays["U"][step]
+        if stored == "next":
+            want[step] = state
     return want
 
 
@@ -89,7 +87,7 @@ def _reference(arrays: dict[str, np.ndarray], seed: float | str = 0.0) -> np.nda
 def test_a_step_reads_other_cells_of_its_own_state(step_major: bool) -> None:
     """Both output layouts: storage order sorts the FREE loops, and sorting the loop over the steps
     under the cells would hand a step cells the previous step has not stored yet."""
-    op = LoopOp(body=_step((c, i, j) if step_major else (i, j, c)))
+    op = LoopOp(body=_step("c, i, j" if step_major else "i, j, c"))
 
     outer = op.body[0]
     assert outer.is_reduce and list(outer.carries) == [carry.name for carry in op.body.carries]
@@ -101,7 +99,7 @@ def test_a_step_reads_other_cells_of_its_own_state(step_major: bool) -> None:
     np.testing.assert_allclose(got if step_major else np.moveaxis(got, -1, 0), _reference(arrays), rtol=1e-5, atol=1e-6)
 
 
-def _graph(seed: float | str = 0.0, steps: int = STEPS) -> Graph:
+def _graph(seed: float | str = 0.0, steps: int = STEPS, stored: str = "own") -> Graph:
     """The step as a graph; a named ``seed`` is an input tensor of the state's shape the loop starts from."""
     graph = Graph()
     inputs = [("D", (steps,)), ("W", (N, N)), ("U", (steps, N, N)), *([(seed, (N, N))] if isinstance(seed, str) else [])]
@@ -109,7 +107,10 @@ def _graph(seed: float | str = 0.0, steps: int = STEPS) -> Graph:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
     names = [name for name, _ in inputs]
     graph.add_node(
-        LoopOp(body=_step((c, i, j), seed, steps=steps), name="k_step"), names, Tensor("out", (steps, N, N), "f32"), node_id="out"
+        LoopOp(body=_step("c, i, j", seed, steps=steps, stored=stored)),
+        names,
+        Tensor("out", (steps, N, N), "f32"),
+        node_id="out",
     )
     graph.inputs, graph.outputs = names, ["out"]
     return graph
@@ -119,12 +120,12 @@ def _batched_graph(batch: int = 2, steps: int = STEPS) -> Graph:
     """The step under a FREE loop outside the carrying one — one recurrence per row of the batch,
     ``U`` and ``out`` carrying the batch coordinate first. The roll never makes this shape (its
     batch loops sit inside the step, as cells); the lift takes it all the same."""
-    b = Var("b")
     graph = Graph()
     for name, shape in (("D", (steps,)), ("W", (N, N)), ("U", (batch, steps, N, N))):
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
-    body = Body((Loop(axis=Axis("b", batch), body=_step((b, c, i, j), u_index=(b, c, i, j), steps=steps)),))
-    graph.add_node(LoopOp(body=body, name="k_step"), ["D", "W", "U"], Tensor("out", (batch, steps, N, N), "f32"), node_id="out")
+    step = _step("b, c, i, j", u_index="b, c, i, j", steps=steps)
+    body = parse_body(f"for b in 0..{batch}:\n" + "\n".join("    " + line for line in str(step).splitlines()))
+    graph.add_node(LoopOp(body=body), ["D", "W", "U"], Tensor("out", (batch, steps, N, N), "f32"), node_id="out")
     graph.inputs, graph.outputs = ["D", "W", "U"], ["out"]
     return graph
 
@@ -140,14 +141,14 @@ def test_a_carrying_loop_under_an_outer_loop_keeps_that_coordinate_in_its_port()
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
-    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2] and tile.register_program is None
+    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2, N, N]
     (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
     assert tuple(dim.as_static() for dim in state.shape) == (STEPS, 2, N, N)
     serial = serial_form(tile, node.id)
     assert serial.inputs == tile.inputs and serial.outputs == tile.outputs
     (spec,) = (spec for spec in serial.output_specs if spec.write.output == state.name)
-    (carrying,) = (site.node for site in tile.sites if site.node.carries)
-    assert len(spec.write.index) == len(state.shape) and [axis.name for axis in serial.place.serial] == [carrying.axis]
+    assert len(spec.write.index) == len(state.shape)
+    assert [axis.extent for axis in serial.place.serial] == [axis.extent for axis in tile.place.serial]
 
     arrays = _inputs(batch=2)
     for closed in (LoopOp(body=tile.loop_body), LoopOp(body=serial.loop_body)):
@@ -161,16 +162,12 @@ def _unit_seeded_graph() -> Graph:
     """The step over a state with a size-one leading dim, started from a seed tensor of that shape: the
     Loop IR spells that dim's coordinate 0 in every index over the state, as the Sinkhorn loop of
     DeepSeek V4's hyper-connections does."""
-
-    def lead(stmt):
-        return replace(stmt, index=(ZERO, *stmt.index)) if isinstance(stmt, (Pre, Carry)) else stmt
-
     graph = Graph()
     inputs = [("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N)), ("S0", (1, N, N))]
     for name, shape in inputs:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
     names = [name for name, _ in inputs]
-    step = LoopOp(body=_step((c, i, j), "S0").map(lead), name="k_step")
+    step = LoopOp(body=parse_body(str(_step("c, i, j", "S0")).replace("S[c - 1, ", "S[c - 1, 0, ").replace("S[c, ", "S[c, 0, ")))
     graph.add_node(step, names, Tensor("out", (STEPS, N, N), "f32"), node_id="out")
     graph.inputs, graph.outputs = names, ["out"]
     return graph
@@ -195,26 +192,73 @@ def test_the_serial_form_reads_a_seed_at_every_dim_the_seed_has() -> None:
     np.testing.assert_allclose(np.asarray(got), _reference({**arrays, "S0": arrays["S0"][0]}, "S0"), rtol=1e-5, atol=1e-6)
 
 
+def test_a_state_the_term_stores_every_step_needs_no_port() -> None:
+    """The roll stores a rolled recurrence's state at every step beside its ``Carry``, so that output holds
+    every step: the lift adds no buffer for the state, and the serial form reads the output one step back,
+    the seed before the first step. A step storing the state it READ keeps the port (the tests above)."""
+    from importlib import import_module
+
+    serial_form = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").serial_form
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph(stored="next"))
+    (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    assert node.op.carries and [tensor.name for tensor in node.outputs] == ["out"]
+    serial = serial_form(node.op, node.id)
+    assert {load.input for load in serial.loop_body.iter() if isinstance(load, Load)} == {"D", "W", "U", "out"}
+    assert {write.output for write in serial.loop_body.iter() if isinstance(write, Write)} == {"out"}
+
+    arrays = _inputs()
+    got = execute_loop_op_cpp(LoopOp(body=serial.loop_body), arrays, {"out": (STEPS, N, N)})
+    np.testing.assert_allclose(np.asarray(got), _reference(arrays, stored="next"), rtol=1e-5, atol=1e-6)
+
+
+def test_a_store_under_a_size_one_axis_is_still_the_states_own() -> None:
+    """A size-one dim of the output is a ``0`` in the store, or an extent-one axis where the lift bound it back.
+    Either way it holds one position and is no coordinate of the state, so the store still holds every step of the
+    state and the kernel keeps no second buffer for it."""
+    from emmy.compiler.pipeline.passes.tile._fromloop import stored_states
+
+    def stored(unit: str, head: str = "") -> set[str]:
+        (loop,) = parse_body(
+            f"""
+            for c in 0..{STEPS}:
+                {head}
+                for i in 0..{N}:
+                    for j in 0..{N}:
+                        own = load S[c - 1, i, j]
+                        next = multiply(own, 2.0)
+                        S[c, i, j] <- next seed 0
+                        out[c, {unit}, i, j] = next
+            """
+        )
+        return set(stored_states(loop, ()))
+
+    assert stored("0") == {"S"}
+    assert stored("_row", "for _row in 0..1:") == {"S"}
+    assert stored("b", "for b in 0..2:") == set(), "a coordinate of two positions the state does not have"
+
+
 def test_the_lift_carries_the_state_in_the_term() -> None:
-    """The term carries the state: the kernel root folds the action ``next`` over the steps, its
-    cells the two free coordinates the block is indexed by, its seed the loop's; the step's ``W @ S``
-    stays a contraction, its B a read of the carrier one step back. The node gains the state's port
-    for the classic realization, and the closed program spells the carrying loop outside the cells."""
+    """The kernel's term is one step and the loop that carries the state its serial axis: the state is a store of
+    the kernel into a buffer of its own, over the two free coordinates the block is indexed by, with the loop's
+    seed; the step's ``W @ S`` stays a contraction, its B a slab over the state one step back. The node gains the
+    state's port for the classic realization, and the closed program spells the carrying loop outside the cells."""
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph())
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
-    assert tile.carries and not tile.place.serial and not tile.place.free
-    (root,) = (site.node for site in tile.sites if site.node.carries)  # under the projection passing its streamed value on
-    assert root.init == (0.0,) and len(root.cells) == 2
-    assert tile.axis_of(root.axis).extent.as_static() == STEPS and all(tile.axis_of(cell).extent.as_static() == N for cell in root.cells)
+    assert tile.carries and [axis.extent.as_static() for axis in tile.place.serial] == [STEPS]
+    carry = tile.states[0].write
+    assert carry.seed == 0.0 and [tile.axis_of(cell).extent.as_static() for cell in carry.cells] == [N, N]
+    assert {axis.name for axis in tile.place.free} == set(carry.cells)
     (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
     assert tuple(dim.as_static() for dim in state.shape) == (STEPS, N, N) and lifted.outputs == ["out"]
-    assert not [load for load in loaded_buffers(root) if load.input == state.name], "the term reads no buffer of its own"
-    (mix,) = (edge for edge in root.operands if edge.axis is not None)
-    assert mix.as_contraction() is not None and any(edge.as_carrier_read() is not None for edge in mix.operands)
+    assert not [load for load in loaded_buffers(tile.op) if load.input == state.name], "the term reads no buffer of the node"
+    (mix,) = (site.node for site in tile.sites if site.node.axis is not None)
+    assert mix.as_contraction() is not None and any(
+        slab is not None and slab.load.input == carry.name for slab in map(Fold.as_slab, mix.operands)
+    )
     (carrying,) = (loop for loop in tile.loop_body if isinstance(loop, Loop))
-    assert list(carrying.carries) == list(root.base.results)
+    assert list(carrying.carries) == [carry.name]
 
     arrays = _inputs()
     closed = LoopOp(body=tile.loop_body)
@@ -242,54 +286,43 @@ def test_the_classic_realization_is_filed_under_the_kernel_its_fork_was_offered(
     identity = tile.identity_key(structural=False, with_io=True)
     assert scheduled.identity_key(structural=False, with_io=True) != identity, "the serial form is another term"
     assert kernel_tile(op).schedule is None and kernel_identity(op) == kernel_identity(scheduled) == identity
-    row = kernel_row(kernel_tile(op), op.kernel_name)
-    assert KernelDef(loop_ir=row.loop_ir, name=row.name, formed=row.formed).exact_identity == identity
+    row = kernel_row(kernel_tile(op))
+    assert KernelDef(loop_ir=row.loop_ir, formed=row.formed).exact_identity == identity
 
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.parametrize("batched", [False, True], ids=["root", "under-an-outer-loop"])
-def test_the_lifted_step_runs_one_launch_per_step_on_the_gpu(batched: bool) -> None:
+@pytest.mark.parametrize(
+    ("batched", "stored"), [(False, "own"), (True, "own"), (False, "next")], ids=["root", "under-an-outer-loop", "no-port"]
+)
+def test_the_lifted_step_runs_one_launch_per_step_on_the_gpu(batched: bool, stored: str) -> None:
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
 
     arrays = _inputs(batch=2 if batched else None)
-    result, _ = run_program(Pipeline.build(CUDA_PASSES).run(_batched_graph() if batched else _graph()), arrays)
+    result, _ = run_program(Pipeline.build(CUDA_PASSES).run(_batched_graph() if batched else _graph(stored=stored)), arrays)
 
-    want = _reference(arrays)
+    want = _reference(arrays, stored=stored)
     np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=1e-5, atol=1e-6)
-
-
-def test_a_loop_over_the_cells_carries_nothing() -> None:
-    """One rule places every carrier — the nearest enclosing loop its index does not read — so a
-    scalar fold is carried by its own loop and a state by the loop outside its cells."""
-    outer = _step((c, i, j))[0]
-    over_i, over_j, over_k = _loops(outer.body)
-
-    assert list(outer.carries) == ["S"] and outer.carries["S"] == (over_i.axis, over_j.axis)
-    assert not over_i.is_reduce and not over_j.is_reduce
-    assert over_k.is_reduce and not over_k.carries
 
 
 def _fold_then_read() -> LoopOp:
     """``S`` summed over the steps, then a tail loop reading what the last step left — the smallest
     body with one carrying loop and one loop that carries nothing."""
-    fold = Loop(
-        axis=Axis("c", STEPS),
-        body=(
-            Loop(
-                axis=Axis("i", N),
-                body=(
-                    Load(name="u", input="U", index=(c, i)),
-                    Pre(name="own", carrier="S", index=(i,)),
-                    Assign(name="next", op="add", args=("own", "u")),
-                    Carry(name="S", value="next", index=(i,), seed=0.0),
-                ),
-            ),
-        ),
+    return LoopOp(
+        body=parse_body(
+            """
+            for c in 0..3:
+                for i in 0..4:
+                    u = load U[c, i]
+                    own = load S[c - 1, i]
+                    next = add(own, u)
+                    S[c, i] <- next seed 0
+            for r in 0..4:
+                last = load S[2, r]
+                out[r] = last
+            """
+        )
     )
-    r = Var("r")
-    after = Loop(axis=Axis("r", N), body=(Pre(name="last", carrier="S", index=(r,)), Write(output="out", index=(r,), value="last")))
-    return LoopOp(body=Body((fold, after)))
 
 
 def test_the_last_step_is_what_a_read_sees_after_the_loop_closes() -> None:
@@ -302,58 +335,26 @@ def test_the_last_step_is_what_a_read_sees_after_the_loop_closes() -> None:
 
 
 def test_a_carried_state_round_trips_the_wire() -> None:
-    body = LoopOp(body=_step((c, i, j))).body
+    body = LoopOp(body=_step("c, i, j")).body
 
     assert decode(encode(body)) == body
 
 
-def _define() -> Carry:
-    return Carry(name="S", value="u", index=(i,), seed=0.0)
+_DEFINE = "S[c, i] <- u seed 0"
 
 
 @pytest.mark.parametrize(
     ("stmts", "message"),
     [
-        ((_define(),), "no loop carries its cells"),  # every enclosing loop is a cell loop
-        (
-            (_define(), Assign(name="bad", op="exp", args=("S",)), Write(output="bad_out", index=(c, i), value="bad")),
-            "read one cell with Pre",
-        ),
-        ((_define(), Pre(name="bad", carrier="S", index=(i, ZERO))), "no state with 2 cell axes"),
-        ((_define(), _define()), "one statement defines a carried state"),
+        ((_DEFINE,), "no loop carries it"),  # no loop over the step it names stands around it
+        ((_DEFINE, "bad = exp(S)", "bad_out[c, i] = bad"), "'S' not defined"),  # a state is a buffer: a load reads a cell
+        ((_DEFINE, "bad = load S[c - 1, i, 0]", "bad_out[c, i] = bad"), "is read at a step and 1 cell axes"),
+        ((_DEFINE, _DEFINE), "one statement defines a carried state"),
     ],
 )
-def test_validation_refuses(stmts: tuple, message: str) -> None:
-    cell = Loop(axis=Axis("i", N), body=(Load(name="u", input="U", index=(c, i)), *stmts, Write(output="out", index=(c, i), value="u")))
-    body = Body((cell,)) if message.startswith("no loop") else Body((Loop(axis=Axis("c", STEPS), body=(cell,)),))
+def test_validation_refuses(stmts: tuple[str, ...], message: str) -> None:
+    cell = "\n".join(("for i in 0..4:", "    u = load U[c, i]", *(f"    {stmt}" for stmt in stmts), "    out[c, i] = u"))
+    text = cell if message.startswith("no loop") else "for c in 0..3:\n" + "\n".join(f"    {line}" for line in cell.splitlines())
 
     with pytest.raises(ValueError, match=message):
-        LoopOp(body=body)
-
-
-def _plain_fold() -> LoopOp:
-    """The same shape with a scalar ``Accum`` in place of the carried state: a reduce loop with
-    nothing to outline."""
-    over_i = Loop(axis=Axis("i", N), body=(Load(name="u", input="U", index=(c, i)), Accum(name="total", value="u")))
-    return LoopOp(body=Body((Loop(axis=Axis("c", STEPS), body=(over_i, Write(output="out", index=(c,), value="total"))),)))
-
-
-def test_a_dump_outlines_the_loop_that_carries_the_state() -> None:
-    """The dump says where a state lives: the header names it with its cell extents, a bar runs down
-    the carrying loop's column, and the commit closes the section."""
-    carrying, tail = (stmt.pretty() for stmt in _fold_then_read().body)
-
-    assert carrying[0].endswith("  # carries acc0[4]")
-    assert all(line.startswith("|") for line in carrying[1:])
-    assert carrying[-1] == "|   # commit acc0"
-    assert tail == ["for a2 in 0..4", "    v2 = pre acc0[a2]", "    out[a2] = v2"]
-
-
-def test_a_loop_that_carries_nothing_prints_unchanged() -> None:
-    assert _plain_fold().pretty_body() == (
-        "    for a0 in 0..3\n"
-        "        for a1 in 0..4\n"
-        "            in0 = load U[a0, a1]\n"
-        "            acc0 <- add(acc0, in0)\n"
-        "        out[a0] = acc0"
-    )
+        LoopOp(body=parse_body(text))

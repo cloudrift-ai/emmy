@@ -1,11 +1,58 @@
 {"compute_cap": [12, 0],
  "note": "Qwen3-Embedding-0.6B decoder layer 0, kernels 6 and 7: causal GQA attention. hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 512. One of the twelve layer-0 kernels the perf suite curated before the corpus became its case source.\n\nThe schedule is SITE-SCOPED (TILE@map.1/twist.1/inner is the score, TILE@map.1/twist the weighted sum) because a flash tree decides per site. The carrier's scalar register tile is the schedule this case is about: the tier folds the term's own step, so the recipe's three states each get a cell copy and the fp32 target needs no mma atom for them.",
  "programs": [
-  {"inputs":["q","k","v"],"outputs":["o"],"nodes":[{"id":"k","op":"input","outputs":[["k","f32",[1,8,512,128]]]},{"id":"q","op":"input","outputs":[["q","f32",[1,16,512,128]]]},{"id":"v","op":"input","outputs":[["v","f32",[1,8,512,128]]]},{"id":"o","op":"torch.sdpa","attrs":{"is_causal":true},"inputs":["q","k","v"],"outputs":[["o","f32",[1,16,512,128]]]}]}
+  {"inputs":["q","k","v"],"outputs":["o"],"nodes":[
+   {"id":"k","op":"input","outputs":[["k","f32",[1,8,512,128]]]},
+   {"id":"q","op":"input","outputs":[["q","f32",[1,16,512,128]]]},
+   {"id":"v","op":"input","outputs":[["v","f32",[1,8,512,128]]]},
+   {"id":"o","op":"torch.sdpa","attrs":{"is_causal":true},"inputs":["q","k","v"],"outputs":[["o","f32",[1,16,512,128]]]}
+  ]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["k","q","v"],"outputs":["o"],"nodes":[{"id":"k","op":"input","outputs":[["k","f32",[1,8,512,128]]]},{"id":"q","op":"input","outputs":[["q","f32",[1,16,512,128]]]},{"id":"v","op":"input","outputs":[["v","f32",[1,8,512,128]]]},{"id":"o","op":"loop","attrs":{"body":[{"Let":{"name":"v0","value":"-1000000000.0","dtype":"f32"}},{"Let":{"name":"v1","value":"0.0","dtype":"f32"}},{"Let":{"name":"v2","value":"0.0883883461356163","dtype":"f32"}},{"Loop":{"axis":{"name":"a0","extent":16},"body":[{"Loop":{"axis":{"name":"a1","extent":512},"body":[{"Loop":{"axis":{"name":"a2","extent":512},"body":[{"Loop":{"axis":{"name":"a3","extent":128},"body":[{"Load":{"names":["in0"],"input":"k","index":["0","a0 / 2","a2","a3"]}},{"Load":{"names":["in1"],"input":"q","index":["0","a0","a1","a3"]}},{"Assign":{"name":"v3","op":"multiply","args":["in0","in1"]}},{"Accum":{"name":"acc1","value":"v3","axes":["a3"]}}]}},{"Assign":{"name":"v4","op":"multiply","args":["acc1","v2"]}},{"Select":{"name":"v5","branches":[{"value":"v1","select":"a2 <= a1"},{"value":"v0","select":"a1 < a2"}]}},{"Assign":{"name":"v6","op":"add","args":["v5","v4"]}},{"Accum":{"name":"acc0","value":"v6","op":"maximum","axes":["a2"]}}]}},{"Loop":{"axis":{"name":"a2","extent":512},"body":[{"Loop":{"axis":{"name":"a5","extent":128},"body":[{"Load":{"names":["in2"],"input":"k","index":["0","a0 / 2","a2","a5"]}},{"Load":{"names":["in3"],"input":"q","index":["0","a0","a1","a5"]}},{"Assign":{"name":"v7","op":"multiply","args":["in2","in3"]}},{"Accum":{"name":"acc3","value":"v7","axes":["a5"]}}]}},{"Assign":{"name":"v8","op":"multiply","args":["acc3","v2"]}},{"Select":{"name":"v9","branches":[{"value":"v1","select":"a2 <= a1"},{"value":"v0","select":"a1 < a2"}]}},{"Assign":{"name":"v10","op":"add","args":["v9","v8"]}},{"Assign":{"name":"v11","op":"subtract","args":["v10","acc0"]}},{"Assign":{"name":"v12","op":"exp","args":["v11"]}},{"Accum":{"name":"acc2","value":"v12","axes":["a2"]}}]}},{"Loop":{"axis":{"name":"a6","extent":128},"body":[{"Loop":{"axis":{"name":"a7","extent":512},"body":[{"Loop":{"axis":{"name":"a8","extent":128},"body":[{"Load":{"names":["in4"],"input":"k","index":["0","a0 / 2","a7","a8"]}},{"Load":{"names":["in5"],"input":"q","index":["0","a0","a1","a8"]}},{"Assign":{"name":"v13","op":"multiply","args":["in4","in5"]}},{"Accum":{"name":"acc5","value":"v13","axes":["a8"]}}]}},{"Assign":{"name":"v14","op":"multiply","args":["acc5","v2"]}},{"Load":{"names":["in6"],"input":"v","index":["0","a0 / 2","a7","a6"]}},{"Select":{"name":"v15","branches":[{"value":"v1","select":"a7 <= a1"},{"value":"v0","select":"a1 < a7"}]}},{"Assign":{"name":"v16","op":"add","args":["v15","v14"]}},{"Assign":{"name":"v17","op":"subtract","args":["v16","acc0"]}},{"Assign":{"name":"v18","op":"exp","args":["v17"]}},{"Assign":{"name":"v19","op":"divide","args":["v18","acc2"]}},{"Assign":{"name":"v20","op":"multiply","args":["in6","v19"]}},{"Accum":{"name":"acc4","value":"v20","axes":["a7"]}}]}},{"Write":{"output":"o","index":["0","a0","a1","a6"],"values":["acc4"]}}]}}]}}]}}],"name":"k_sdpa_6f4673"},"inputs":["k","q","v"],"outputs":[["o","f32",[1,16,512,128]]]}]},"name":"k_sdpa_6f4673","formed":true,"traced":0,"origins":["o"]}
+  {"loop_ir":{"inputs":["k","q","v"],"outputs":["o"],"nodes":[
+   {"id":"k","op":"input","outputs":[["k","f32",[1,8,512,128]]]},
+   {"id":"q","op":"input","outputs":[["q","f32",[1,16,512,128]]]},
+   {"id":"v","op":"input","outputs":[["v","f32",[1,8,512,128]]]},
+   {"id":"o","op":"loop","attrs":{"body":[
+    "for a0 in 0..16:",
+    "  for a1 in 0..512:",
+    "    for a2 in 0..a1 + 1 of 512:",
+    "      for a3 in 0..128:",
+    "        in0 = load k[0, a0 / 2, a2, a3]",
+    "        in1 = load q[0, a0, a1, a3]",
+    "        v0 = in0 * in1",
+    "        acc1 <- add(acc1, v0) over a3",
+    "      v1 = 0.0883883461356163 * acc1",
+    "      acc0 <- maximum(acc0, v1) over a2",
+    "    for a2 in 0..a1 + 1 of 512:",
+    "      for a5 in 0..128:",
+    "        in2 = load k[0, a0 / 2, a2, a5]",
+    "        in3 = load q[0, a0, a1, a5]",
+    "        v2 = in2 * in3",
+    "        acc3 <- add(acc3, v2) over a5",
+    "      v3 = 0.0883883461356163 * acc3 - acc0",
+    "      v4 = exp(v3)",
+    "      acc2 <- add(acc2, v4) over a2",
+    "    for a6 in 0..128:",
+    "      for a7 in 0..a1 + 1 of 512:",
+    "        for a8 in 0..128:",
+    "          in4 = load k[0, a0 / 2, a7, a8]",
+    "          in5 = load q[0, a0, a1, a8]",
+    "          v5 = in4 * in5",
+    "          acc5 <- add(acc5, v5) over a8",
+    "        v6 = 0.0883883461356163 * acc5 - acc0",
+    "        v7 = exp(v6)",
+    "        v8 = v7 / acc2",
+    "        in6 = load v[0, a0 / 2, a7, a6]",
+    "        v9 = in6 * v8",
+    "        acc4 <- add(acc4, v9) over a7",
+    "      o[0, a0, a1, a6] = acc4"
+   ]},"inputs":["k","q","v"],"outputs":[["o","f32",[1,16,512,128]]]}
+  ]},"formed":true,"traced":0,"origins":["o"]}
  ],
  "rows": [
-  {"name":"k_sdpa_65c6b3","kernel":"k_sdpa_6f4673","pins":{"FAST_MATH":false},"knobs":{"TILE@map.1/twist":"f1","TILE@map.1/twist.1/inner":"","WORK":"t32x8","REDUCE":"","STAGE":"","RASTER":""}}
+  {"name":"k_sdpa_65c6b3",
+   "kernel":0,
+   "pins":{"FAST_MATH":false},
+   "knobs":{"TILE@map.1/twist":"f1","TILE@map.1/twist.1/inner":"","WORK":"t32x8","REDUCE":"","STAGE":"","RASTER":""}}
  ]}

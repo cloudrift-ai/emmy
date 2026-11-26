@@ -12,11 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile.path import MissingSiteError, canonical, family_sites, kind, parse_key, primary, resolve, sites, spell
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from tests.compiler.terms import contraction, projection, slab
@@ -24,24 +21,25 @@ from tests.compiler.terms import contraction, projection, slab
 
 def _row_stat(k_name: str = "k", *, load: str = "x", acc: str = "acc0", val: str = "v1") -> Fold:
     """``Σ_k x[m,k]²`` — a planar reduce formed by the lift, its load a slab operand."""
-    body = Body(
-        (
-            Load(name=f"{load}_e", input=load, index=(Var("m"), Var(k_name))),
-            Assign(name=val, op="multiply", args=(f"{load}_e", f"{load}_e")),
-            Accum(name=acc, value=val, op=ElementwiseImpl("add"), axes=(k_name,)),
-        )
+    (loop,) = parse_body(
+        f"""
+        for {k_name} in 0..512:
+            {load}_e = load {load}[m, {k_name}]
+            {val} = multiply({load}_e, {load}_e)
+            {acc} <- add({acc}, {val}) over {k_name}
+        """
     )
-    return fold_from_loop(Loop(axis=Axis(k_name, 512), body=body))
+    return fold_from_loop(loop)
 
 
 def _norm_linear_tree() -> tuple[Fold, Fold, Fold]:
     """``root map → inner`` whose A is the normalize cone ``x · rsqrt(stat)`` and whose B is a slab:
     the norm→linear shape. Returns ``(root, product, stat)``."""
     stat = _row_stat("k")
-    pro = projection((stat,), (Assign(name="rr", op="rsqrt", args=(stat.exposes[0],)),))
-    cone = projection((pro, slab("xc", "x", "m", "k")), (Assign(name="xn", op="multiply", args=("xc", "rr")),))
+    pro = projection((stat,), parse_body(f"rr = rsqrt({stat.exposes[0]})"))
+    cone = projection((pro, slab("xc", "x", "m", "k")), parse_body("xn = multiply(xc, rr)"))
     product = contraction("k", cone, (slab("b_e", "W", "k", "n"), "acc"))
-    root = projection((product,), (Assign(name="o", op="relu", args=("acc",)),))
+    root = projection((product,), parse_body("o = relu(acc)"))
     return root, product, stat
 
 
@@ -95,9 +93,9 @@ def test_the_walker_routes_by_kind_and_stored_position() -> None:
 
 def test_a_shared_subterm_is_one_site_at_its_first_position() -> None:
     stat = _row_stat("k")
-    left = projection((stat,), (Assign(name="l", op="rsqrt", args=(stat.exposes[0],)),))
-    right = projection((stat,), (Assign(name="r", op="exp", args=(stat.exposes[0],)),))
-    root = projection((left, right), (Assign(name="o", op="add", args=("l", "r")),))
+    left = projection((stat,), parse_body(f"l = rsqrt({stat.exposes[0]})"))
+    right = projection((stat,), parse_body(f"r = exp({stat.exposes[0]})"))
+    root = projection((left, right), parse_body("o = add(l, r)"))
     routes = [s.path for s in sites(root) if s.node is stat]
     assert routes == ["map.1/map.1/reduce"]
 
@@ -117,7 +115,7 @@ def test_a_familys_one_site_spells_bare_and_several_spell_their_routes() -> None
     cone = product.operands[0]
     assert spell(root, "PLACE", product) == "PLACE@map.1/inner"
     assert spell(root, "PLACE", cone) == "PLACE@map.1/inner.1/map"
-    lone = projection((_row_stat("k"),), (Assign(name="o", op="rsqrt", args=("acc0",)),))
+    lone = projection((_row_stat("k"),), parse_body("o = rsqrt(acc0)"))
     assert spell(lone, "PLACE", lone.operands[0]) == "PLACE"
 
 
@@ -129,7 +127,7 @@ def test_resolution_round_trips_and_a_bare_key_names_the_primary() -> None:
         assert canonical(root, spell(root, "PLACE", site.node)) == spell(root, "PLACE", site.node)
     assert primary("PLACE", family_sites("PLACE", all_sites)).node is product
     assert resolve(root, "PLACE").node is product
-    assert resolve(projection((), (Assign(name="y", op="relu", args=("x",)),)), "PLACE") is None
+    assert resolve(projection((), parse_body("y = relu(x)")), "PLACE") is None
 
 
 def test_a_stale_key_fails_at_the_segment_that_no_longer_stands() -> None:
@@ -148,9 +146,9 @@ def test_a_stale_key_fails_at_the_segment_that_no_longer_stands() -> None:
 
 def test_a_bare_key_over_tied_shallowest_sites_is_ambiguous() -> None:
     stat = _row_stat("k")
-    left = projection((stat,), (Assign(name="l", op="rsqrt", args=(stat.exposes[0],)),))
-    right = projection((_row_stat("k", load="y", acc="acc1", val="v2"),), (Assign(name="r", op="exp", args=("acc1",)),))
-    root = projection((left, right), (Assign(name="o", op="add", args=("l", "r")),))
+    left = projection((stat,), parse_body(f"l = rsqrt({stat.exposes[0]})"))
+    right = projection((_row_stat("k", load="y", acc="acc1", val="v2"),), parse_body("r = exp(acc1)"))
+    root = projection((left, right), parse_body("o = add(l, r)"))
     with pytest.raises(ValueError, match="PLACE is ambiguous: use PLACE@map.1/map or PLACE@map.2/map"):
         resolve(root, "PLACE")
 

@@ -1,0 +1,1077 @@
+//! `Body`, `Subroutine` and `Cone` as Python classes, and the module's functions over bodies and statements.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use emmy_ir::Name;
+use emmy_ir::body::{Body, StmtRef, Subroutine, exposed_defines, free_names};
+use emmy_ir::statement::Statement;
+use emmy_ir::text::{body_lines, body_text, parse_body as parse_body_text};
+use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyFrozenSet, PyList, PySet, PySlice, PyString, PyTuple, PyType};
+
+use crate::convert::{
+    IntoPyErr, PyField, Slots, cached, located, name_from_py, slots, statement_from_py, str_tuple,
+    translate,
+};
+use crate::expression::renames_from_py;
+use crate::statement::{PyStatement, statement_type_of, statements_from_py, wrap_statement};
+
+/// The wrappers a body's statements hand back, so a statement read twice is one object however many wrappers the body
+/// has. The table is keyed by the body's shared allocation and lives on this side of the boundary: the crate holds no
+/// Python object. An entry outlives its body only until the next purge.
+type Wrappers = Arc<[OnceLock<Py<PyAny>>]>;
+
+/// The fewest inserts between two purges of a table's dead entries.
+const PURGE_EVERY: usize = 1024;
+
+/// A table of per-object state on this side of the boundary, keyed by the shared object's address while it lives:
+/// a body's statement wrappers, a subroutine's one Python object. An entry outlives its object only until the next
+/// purge; the table is not bounded (a live object keeps its one wrapper). A purge walks every entry, so the next one
+/// waits for as many inserts as the purge left entries alive, never fewer than `PURGE_EVERY`: an insert costs a
+/// constant share of the walks whatever the table holds. (A purge due at every length that was a multiple of
+/// `PURGE_EVERY` walked the whole table on every insert that took a dead object's address, which a body made and
+/// dropped in a loop does every time.)
+pub(crate) struct Tables<T, V> {
+    entries: HashMap<usize, (std::sync::Weak<T>, V)>,
+    /// Inserts since the last purge.
+    inserts: usize,
+    /// Inserts the next purge waits for.
+    budget: usize,
+}
+
+impl<T, V> Tables<T, V> {
+    fn new() -> Tables<T, V> {
+        Tables {
+            entries: HashMap::new(),
+            inserts: 0,
+            budget: PURGE_EVERY,
+        }
+    }
+
+    pub(crate) fn get<R>(&mut self, object: &Arc<T>, read: impl FnOnce(&V) -> R) -> Option<R> {
+        self.entries
+            .get(&(Arc::as_ptr(object) as usize))
+            .and_then(|(alive, value)| {
+                alive
+                    .upgrade()
+                    .filter(|found| Arc::ptr_eq(found, object))
+                    .map(|_| read(value))
+            })
+    }
+
+    /// Remember `value` for `object`: the value a dead object at the same address left, for the caller to drop
+    /// outside the lock, and whether the table is due for a purge.
+    pub(crate) fn insert(&mut self, object: &Arc<T>, value: V) -> (Option<V>, bool) {
+        let old = self
+            .entries
+            .insert(
+                Arc::as_ptr(object) as usize,
+                (Arc::downgrade(object), value),
+            )
+            .map(|(_, old)| old);
+        self.inserts += 1;
+        let due = self.inserts >= self.budget;
+        if due {
+            self.inserts = 0;
+        }
+        (old, due)
+    }
+
+    /// The values of every entry whose object is gone, removed from the table.
+    fn dead(&mut self) -> Vec<V> {
+        let dead = self
+            .entries
+            .extract_if(|_, (alive, _)| alive.strong_count() == 0)
+            .map(|(_, (_, value))| value)
+            .collect();
+        self.budget = self.entries.len().max(PURGE_EVERY);
+        dead
+    }
+}
+
+/// Drop the dead entries of `tables`, outside its lock: a value may hold Python objects whose finalizers come back
+/// here, and the objects it held may have kept other entries alive, so the purge runs again while it frees any.
+pub(crate) fn purge<T, V>(table: &Table<T, V>) {
+    loop {
+        let dead = table.lock().dead();
+        if dead.is_empty() {
+            return;
+        }
+        drop(dead);
+    }
+}
+
+/// A table behind its lock: what the statics hold.
+pub(crate) struct Table<T, V>(Mutex<Tables<T, V>>);
+
+impl<T, V> Table<T, V> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Tables<T, V>> {
+        emmy_ir::locked(&self.0)
+    }
+}
+
+/// The one table under `cell`, built on first use.
+pub(crate) fn tables<T: Send + Sync + 'static, V: Send + 'static>(
+    cell: &'static OnceLock<Table<T, V>>,
+) -> &'static Table<T, V> {
+    cell.get_or_init(|| Table(Mutex::new(Tables::new())))
+}
+
+static WRAPPERS: OnceLock<Table<emmy_ir::body::BodyData, Wrappers>> = OnceLock::new();
+
+fn wrapper_tables() -> &'static Table<emmy_ir::body::BodyData, Wrappers> {
+    tables(&WRAPPERS)
+}
+
+fn wrappers(body: &Body) -> Wrappers {
+    let mut tables = wrapper_tables().lock();
+    if let Some(table) = tables.get(&body.0, Wrappers::clone) {
+        return table;
+    }
+    let table: Wrappers = (0..body.len()).map(|_| OnceLock::new()).collect();
+    let (old, due) = tables.insert(&body.0, table.clone());
+    drop(tables);
+    drop(old);
+    if due {
+        purge(wrapper_tables());
+    }
+    table
+}
+
+/// An immutable sequence of statements, built from any iterable.
+#[pyclass(frozen, module = "emmy.compiler.ir.stmt", name = "Body")]
+pub struct PyBody {
+    pub body: Body,
+}
+
+impl PyBody {
+    pub fn wrap<'py>(py: Python<'py>, body: &Body) -> PyResult<Bound<'py, PyBody>> {
+        Bound::new(py, PyBody { body: body.clone() })
+    }
+
+    /// The statements of a Python iterable as a body; the wrappers given become the ones the body hands back.
+    pub fn from_iterable(value: &Bound<'_, PyAny>) -> PyResult<Body> {
+        if let Ok(body) = value.cast::<PyBody>() {
+            return Ok(body.get().body.clone());
+        }
+        if value.is_instance_of::<PyString>() {
+            return Err(PyTypeError::new_err(
+                "Body holds non-statement member(s) ['str']; a term composes through operand edges",
+            ));
+        }
+        let items: PyResult<Vec<Bound<'_, PyAny>>> = value.try_iter()?.collect();
+        let items = items?;
+        let stmts: PyResult<Vec<Arc<Statement>>> = items.iter().map(statement_from_py).collect();
+        let body = Body::new(stmts?);
+        let table = wrappers(&body);
+        if table.len() == items.len() {
+            for (slot, item) in table.iter().zip(items) {
+                let _ = slot.set(item.unbind());
+            }
+        }
+        Ok(body)
+    }
+
+    /// The statement at `index`, the same object every time.
+    pub fn item<'py>(py: Python<'py>, body: &Body, index: usize) -> PyResult<Bound<'py, PyAny>> {
+        let table = wrappers(body);
+        match table.get(index) {
+            Some(slot) => cached(py, slot, || wrap_statement(py, &body.stmts()[index])),
+            None => Ok(wrap_statement(py, &body.stmts()[index])?.into_bound(py)),
+        }
+    }
+
+    fn items<'py>(py: Python<'py>, body: &Body) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        (0..body.len())
+            .map(|index| PyBody::item(py, body, index))
+            .collect()
+    }
+}
+
+pub fn wrap_ref<'py>(py: Python<'py>, here: &StmtRef) -> PyResult<Bound<'py, PyAny>> {
+    match here.body() {
+        Some(body) => PyBody::item(py, &body, here.index),
+        None => Ok(wrap_statement(py, here.stmt())?.into_bound(py)),
+    }
+}
+
+fn frozenset<'py>(
+    py: Python<'py>,
+    names: impl IntoIterator<Item = Name>,
+) -> PyResult<Bound<'py, PyFrozenSet>> {
+    let names: Vec<Name> = names.into_iter().collect();
+    PyFrozenSet::new(py, names.iter().map(|name| PyString::new(py, name)))
+}
+
+#[pymethods]
+impl PyBody {
+    #[new]
+    #[pyo3(signature = (stmts = None))]
+    fn new(stmts: Option<&Bound<'_, PyAny>>) -> PyResult<PyBody> {
+        match stmts {
+            None => Ok(PyBody {
+                body: Body::empty(),
+            }),
+            Some(value) => Ok(PyBody {
+                body: PyBody::from_iterable(value)?,
+            }),
+        }
+    }
+
+    #[classattr]
+    fn wire_tag() -> &'static str {
+        "body"
+    }
+
+    /// Wrap if not already a Body.
+    #[staticmethod]
+    fn coerce<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+        if let Ok(body) = value.cast::<PyBody>() {
+            return Ok(body.clone());
+        }
+        PyBody::wrap(value.py(), &PyBody::from_iterable(value)?)
+    }
+
+    fn __len__(&self) -> usize {
+        self.body.len()
+    }
+
+    fn __reversed__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let mut items = PyBody::items(py, &self.body)?;
+        items.reverse();
+        Ok(PyList::new(py, items)?.into_any().try_iter()?.into_any())
+    }
+
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(PyList::new(py, PyBody::items(py, &self.body)?)?
+            .into_any()
+            .try_iter()?
+            .into_any())
+    }
+
+    fn __getitem__<'py>(
+        &self,
+        py: Python<'py>,
+        key: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if let Ok(slice) = key.cast::<PySlice>() {
+            let indices = slice.indices(self.body.len() as isize)?;
+            let picked: Vec<Arc<Statement>> = (0..indices.slicelength)
+                .map(|step| {
+                    self.body.stmts()[(indices.start + step as isize * indices.step) as usize]
+                        .clone()
+                })
+                .collect();
+            return Ok(PyBody::wrap(py, &Body::new(picked))?.into_any());
+        }
+        let index: isize = key.extract()?;
+        let len = self.body.len() as isize;
+        let index = if index < 0 { index + len } else { index };
+        if index < 0 || index >= len {
+            return Err(PyIndexError::new_err("Body index out of range"));
+        }
+        PyBody::item(py, &self.body, index as usize)
+    }
+
+    fn __contains__(&self, item: &Bound<'_, PyAny>) -> bool {
+        item.cast::<PyStatement>().is_ok_and(|stmt| {
+            self.body
+                .stmts()
+                .iter()
+                .any(|s| Arc::ptr_eq(s, &stmt.get().stmt) || **s == *stmt.get().stmt)
+        })
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyBody>()
+            .is_ok_and(|other| other.get().body == self.body)
+    }
+
+    fn __hash__(&self) -> u64 {
+        self.body.content_hash()
+    }
+
+    /// The body's text, which `parse_body` reads back to an equal body.
+    fn __str__(&self) -> PyResult<String> {
+        body_text(&self.body).py()
+    }
+
+    fn __add__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let others = statements_from_py(other)?;
+        PyBody::wrap(py, &self.body.concat(&others))
+    }
+
+    fn __radd__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let mut stmts = statements_from_py(other)?;
+        stmts.extend(self.body.stmts().iter().cloned());
+        PyBody::wrap(py, &Body::new(stmts))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<(Bound<'py, PyAny>, (String,))> {
+        let module = slf.py().import("emmy.emmy_ir")?;
+        Ok((
+            module.getattr("parse_body")?,
+            (body_text(&slf.get().body).py()?,),
+        ))
+    }
+
+    fn to_wire(&self) -> PyResult<String> {
+        body_text(&self.body).py()
+    }
+
+    #[classmethod]
+    #[pyo3(signature = (value, where_ = "body"))]
+    fn from_wire<'py>(
+        _cls: &Bound<'py, PyType>,
+        value: &Bound<'py, PyAny>,
+        where_: &str,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let Ok(text) = value.cast::<PyString>() else {
+            return Err(PyValueError::new_err(format!(
+                "{where_} must be a body's text"
+            )));
+        };
+        let body = parse_body_text(text.to_str()?)
+            .map_err(|err| located(value.py(), where_, translate(err)))?;
+        PyBody::wrap(value.py(), &body)
+    }
+
+    fn wire_parts(&self) -> Option<()> {
+        None
+    }
+
+    /// Operation, as a sequence renders.
+    fn structural_form<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, PyBody::items(py, &self.body)?)
+    }
+
+    /// Pre-order iteration over this body and every nested body.
+    fn iter<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let items: PyResult<Vec<Bound<'py, PyAny>>> = self
+            .body
+            .iter_refs()
+            .iter()
+            .map(|here| wrap_ref(py, here))
+            .collect();
+        Ok(PyList::new(py, items?)?.into_any().try_iter()?.into_any())
+    }
+
+    /// This body with every external buffer renamed through `rename`.
+    fn rename_buffers<'py>(
+        slf: &Bound<'py, Self>,
+        rename: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let mapping = renames_from_py(rename)?;
+        let result = slf.get().body.rename_buffers(&mapping);
+        if result.ptr_eq(&slf.get().body) {
+            return Ok(slf.clone());
+        }
+        PyBody::wrap(slf.py(), &result)
+    }
+
+    /// Shared SSA definitions assembled once and adjacent independent reduction loops merged.
+    fn coalesce<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBody>> {
+        PyBody::wrap(py, &self.body.coalesce())
+    }
+
+    /// Every SSA name produced anywhere inside this body to its defining statement.
+    #[getter]
+    fn definitions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        let mut entries: Vec<(&Name, &StmtRef)> = self.body.definitions().iter().collect();
+        entries.sort_by_key(|entry| entry.0);
+        for (name, here) in entries {
+            out.set_item(&**name, wrap_ref(py, here)?)?;
+        }
+        Ok(out)
+    }
+
+    /// Accumulator and carried-state names, each once, in structural order.
+    #[getter]
+    fn _defined_states<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        str_tuple(py, self.body.defined_states())
+    }
+
+    /// Bindings at this scope, including states exported by nested statements.
+    #[getter]
+    fn _local_defs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.local_defs().iter().cloned())
+    }
+
+    #[getter]
+    fn axis_names<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.axis_names().iter().cloned())
+    }
+
+    #[getter]
+    fn ssa_uses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.ssa_uses().iter().cloned())
+    }
+
+    /// Every name a statement of this body defines, at any depth.
+    #[getter]
+    fn defined<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.defined().iter().copied())
+    }
+
+    /// Every name this body reads from the scope around it, less what it defines or binds.
+    #[getter]
+    fn free<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.free().iter().copied())
+    }
+
+    /// ``(reads, writes)``: the external buffers this body reads and writes, first use order, less its kernel-local
+    /// declarations.
+    #[getter]
+    fn buffers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let (reads, writes) = self.body.buffers();
+        PyTuple::new(py, [str_tuple(py, reads)?, str_tuple(py, writes)?])
+    }
+
+    /// This body cut to what ``roots`` need, nested bodies cut too; a statement that writes a buffer stays.
+    fn pruned<'py>(
+        &self,
+        py: Python<'py>,
+        roots: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let roots: PyResult<Vec<Name>> =
+            roots.try_iter()?.map(|item| name_from_py(&item?)).collect();
+        let result = self.body.pruned(&roots?).py()?;
+        PyBody::wrap(py, &result)
+    }
+
+    /// Each SSA definition to the axes its value depends on.
+    #[getter]
+    fn axis_dependencies<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        for (name, axes) in self.body.axis_dependencies() {
+            out.set_item(&*name, frozenset(py, axes)?)?;
+        }
+        Ok(out)
+    }
+
+    /// The backward dependence cone of `roots` over this body's immediate statements.
+    fn backward_cone(&self, py: Python<'_>, roots: &Bound<'_, PyAny>) -> PyResult<PyCone> {
+        let roots: PyResult<Vec<Name>> =
+            roots.try_iter()?.map(|item| name_from_py(&item?)).collect();
+        let (members, external) = self.body.backward_cone(&roots?);
+        let members: PyResult<Vec<Bound<'_, PyAny>>> =
+            members.iter().map(|here| wrap_ref(py, here)).collect();
+        Ok(PyCone {
+            members: PyTuple::new(py, members?)?.unbind(),
+            external_reads: frozenset(py, external)?.unbind(),
+        })
+    }
+
+    /// Recursive 1:N body transformer. Post-order: each block statement's nested bodies are mapped first, then
+    /// `function` is applied to the children-rewritten statement, which it keeps (a statement), drops (`None`) or
+    /// replaces (an iterable of statements, spliced in as they are). A statement the walk did not rebuild is handed
+    /// over as the object this body hands out, and the objects `function` returns are the ones the result hands out.
+    fn map<'py>(
+        &self,
+        py: Python<'py>,
+        function: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let placed: HashMap<usize, StmtRef> = self
+            .body
+            .iter_refs()
+            .into_iter()
+            .map(|here| (Arc::as_ptr(here.stmt()) as usize, here))
+            .collect();
+        let mut returned: HashMap<usize, Py<PyAny>> = HashMap::new();
+        let mapped = self
+            .body
+            .try_map(&mut |stmt| -> PyResult<Option<Vec<Arc<Statement>>>> {
+                let given = match placed.get(&(Arc::as_ptr(stmt) as usize)) {
+                    Some(here) => wrap_ref(py, here)?,
+                    None => wrap_statement(py, stmt)?.into_bound(py),
+                };
+                let result = function.call1((given,))?;
+                if result.is_none() {
+                    return Ok(None);
+                }
+                let items: Vec<Bound<'py, PyAny>> = if result.is_instance_of::<PyStatement>() {
+                    vec![result]
+                } else {
+                    result.try_iter()?.collect::<PyResult<_>>()?
+                };
+                let stmts: PyResult<Vec<Arc<Statement>>> =
+                    items.iter().map(statement_from_py).collect();
+                let stmts = stmts?;
+                for (stmt, item) in stmts.iter().zip(items) {
+                    returned.insert(Arc::as_ptr(stmt) as usize, item.unbind());
+                }
+                Ok(Some(stmts))
+            })?;
+        for here in mapped.iter_refs() {
+            if let Some(item) = returned.get(&(Arc::as_ptr(here.stmt()) as usize))
+                && let Some(holder) = here.body()
+                && let Some(slot) = wrappers(&holder).get(here.index)
+            {
+                let _ = slot.set(item.clone_ref(py));
+            }
+        }
+        PyBody::wrap(py, &mapped)
+    }
+
+    /// Matching statements in pre-order.
+    #[pyo3(signature = (*types))]
+    fn iter_of_type<'py>(
+        &self,
+        py: Python<'py>,
+        types: &Bound<'py, PyTuple>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let mut statement_types: Vec<emmy_ir::statement::StatementType> = Vec::new();
+        for item in types.iter() {
+            let cls = item
+                .cast::<PyType>()
+                .map_err(|_| PyTypeError::new_err("iter_of_type takes statement classes"))?;
+            match statement_type_of(cls) {
+                Some(ty) => statement_types.push(ty),
+                None if cls.is(py.get_type::<PyStatement>()) => {
+                    statement_types.extend(emmy_ir::statement::StatementType::ALL.iter().copied())
+                }
+                None => {
+                    return Err(PyTypeError::new_err(format!(
+                        "{} is no statement type",
+                        cls.name()?
+                    )));
+                }
+            }
+        }
+        let items: PyResult<Vec<Bound<'py, PyAny>>> = self
+            .body
+            .of_types(&statement_types)
+            .iter()
+            .map(|here| wrap_ref(py, here))
+            .collect();
+        PyTuple::new(py, items?)
+    }
+
+    #[getter]
+    fn loads<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let items: PyResult<Vec<Bound<'py, PyAny>>> = self
+            .body
+            .loads()
+            .iter()
+            .map(|here| wrap_ref(py, here))
+            .collect();
+        PyTuple::new(py, items?)
+    }
+
+    #[getter]
+    fn writes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let items: PyResult<Vec<Bound<'py, PyAny>>> = self
+            .body
+            .writes()
+            .iter()
+            .map(|here| wrap_ref(py, here))
+            .collect();
+        PyTuple::new(py, items?)
+    }
+
+    #[getter]
+    fn carries<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let items: PyResult<Vec<Bound<'py, PyAny>>> = self
+            .body
+            .carries()
+            .iter()
+            .map(|here| wrap_ref(py, here))
+            .collect();
+        PyTuple::new(py, items?)
+    }
+
+    #[getter]
+    fn accums<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let items: PyResult<Vec<Bound<'py, PyAny>>> = self
+            .body
+            .accums()
+            .iter()
+            .map(|here| wrap_ref(py, here))
+            .collect();
+        PyTuple::new(py, items?)
+    }
+
+    #[getter]
+    fn loops<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let items: PyResult<Vec<Bound<'py, PyAny>>> = self
+            .body
+            .loops()
+            .iter()
+            .map(|here| wrap_ref(py, here))
+            .collect();
+        PyTuple::new(py, items?)
+    }
+
+    /// The identity key and the buffers in role order, under the clustered or exact reading and the given colors.
+    #[pyo3(signature = (cluster, colors = None))]
+    fn _identity<'py>(
+        &self,
+        py: Python<'py>,
+        cluster: bool,
+        colors: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<(String, Bound<'py, PyTuple>)> {
+        let colors: Option<HashMap<Name, String>> = colors
+            .map(|dict| {
+                dict.iter()
+                    .map(|(k, v)| Ok((name_from_py(&k)?, v.extract::<String>()?)))
+                    .collect::<PyResult<_>>()
+            })
+            .transpose()?;
+        let identity =
+            emmy_ir::identity::canonicalize_identity(&self.body, cluster, colors.as_ref()).py()?;
+        Ok((identity.key, str_tuple(py, &identity.arguments)?))
+    }
+
+    /// The key this body shares with the same computation at other offsets, bounds and static extents: its exact
+    /// identity with the integer of every affine coordinate expression and every static loop extent left out.
+    /// Bodies with one such key are candidates for the copies of one step, which `prove_steps` decides. It is no
+    /// kernel's identity: nothing is keyed by it and nothing stores it.
+    fn identity_apart(&self) -> PyResult<String> {
+        emmy_ir::identity::identity_apart(&self.body).py()
+    }
+}
+
+/// A dependence cone over one scope level: the members, in body order, and the names read from outside them.
+#[pyclass(frozen, module = "emmy.compiler.ir.stmt", name = "Cone")]
+pub struct PyCone {
+    #[pyo3(get)]
+    members: Py<PyTuple>,
+    #[pyo3(get)]
+    external_reads: Py<PyFrozenSet>,
+}
+
+#[pymethods]
+impl PyCone {
+    /// Every `Load` in the members, nested included, body order.
+    #[getter]
+    fn loads<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let stmts: PyResult<Vec<Arc<Statement>>> = self
+            .members
+            .bind(py)
+            .iter()
+            .map(|item| statement_from_py(&item))
+            .collect();
+        let body = Body::new(stmts?);
+        let items: PyResult<Vec<Bound<'py, PyAny>>> =
+            body.loads().iter().map(|here| wrap_ref(py, here)).collect();
+        PyTuple::new(py, items?)
+    }
+}
+
+/// One shared, read-only reduction cone with explicit coordinate parameters. Compared by object.
+#[pyclass(frozen, weakref, module = "emmy.compiler.ir.stmt", name = "Subroutine")]
+pub struct PySubroutine {
+    pub sub: Arc<Subroutine>,
+    slots: Slots,
+}
+
+/// The weak reference to each subroutine's one Python object, keyed by the subroutine's address while it lives.
+static SUBROUTINES: OnceLock<Table<Subroutine, Py<PyAny>>> = OnceLock::new();
+
+fn subroutines() -> &'static Table<Subroutine, Py<PyAny>> {
+    tables(&SUBROUTINES)
+}
+
+impl PySubroutine {
+    /// The one Python object of `sub` while any reference to it lives.
+    pub fn wrap<'py>(py: Python<'py>, sub: &Arc<Subroutine>) -> PyResult<Bound<'py, PySubroutine>> {
+        let remembered = subroutines()
+            .lock()
+            .get(sub, |reference| reference.clone_ref(py));
+        if let Some(reference) = remembered {
+            let alive = reference.bind(py).call0()?;
+            if let Ok(found) = alive.cast::<PySubroutine>() {
+                return Ok(found.clone());
+            }
+        }
+        let wrapper = Bound::new(
+            py,
+            PySubroutine {
+                sub: sub.clone(),
+                slots: slots(4),
+            },
+        )?;
+        let reference = py.import("weakref")?.getattr("ref")?.call1((&wrapper,))?;
+        let (old, due) = subroutines().lock().insert(sub, reference.unbind());
+        drop(old);
+        if due {
+            purge(subroutines());
+        }
+        Ok(wrapper)
+    }
+}
+
+#[pymethods]
+impl PySubroutine {
+    #[new]
+    fn new(
+        name: &str,
+        axes: &Bound<'_, PyAny>,
+        body: &Bound<'_, PyAny>,
+        result: &str,
+    ) -> PyResult<PySubroutine> {
+        let (axes, _) = <emmy_ir::field::Axes as PyField>::from_py(axes)?;
+        let body = PyBody::from_iterable(body)?;
+        let sub = Subroutine::new(name.into(), axes, body, result.into()).py()?;
+        Ok(PySubroutine {
+            sub,
+            slots: slots(4),
+        })
+    }
+
+    #[getter]
+    fn name<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        cached(py, &self.slots[0], || {
+            Ok(PyString::new(py, &self.sub.name).into_any().unbind())
+        })
+    }
+
+    #[getter]
+    fn axes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        cached(py, &self.slots[1], || self.sub.axes.to_py(py))
+    }
+
+    #[getter]
+    fn body<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        cached(py, &self.slots[2], || {
+            Ok(PyBody::wrap(py, &self.sub.body)?.into_any().unbind())
+        })
+    }
+
+    #[getter]
+    fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        cached(py, &self.slots[3], || {
+            Ok(PyString::new(py, &self.sub.result).into_any().unbind())
+        })
+    }
+
+    /// The buffers the body reads, each once.
+    #[getter]
+    fn buffers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        str_tuple(py, &self.sub.buffers)
+    }
+
+    #[getter]
+    fn params<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        str_tuple(py, &self.sub.params())
+    }
+
+    /// Rebind the captured buffers once for all calls sharing this definition.
+    fn with_buffers<'py>(
+        &self,
+        py: Python<'py>,
+        buffers: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PySubroutine>> {
+        let (buffers, _) = <emmy_ir::field::Names as PyField>::from_py(buffers)?;
+        if buffers.len() != self.sub.buffers.len() {
+            return Err(PyValueError::new_err(format!(
+                "{} buffers for {} captured",
+                buffers.len(),
+                self.sub.buffers.len()
+            )));
+        }
+        PySubroutine::wrap(py, &self.sub.with_buffers(buffers))
+    }
+
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyType>, Bound<'py, PyTuple>)> {
+        let this = slf.get();
+        let parts = [
+            this.name(slf.py())?,
+            this.axes(slf.py())?,
+            this.body(slf.py())?,
+            this.result(slf.py())?,
+        ];
+        Ok((slf.get_type(), PyTuple::new(slf.py(), parts)?))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Subroutine({:?})", &*self.sub.name)
+    }
+}
+
+// --- functions ------------------------------------------------------------------------------------
+
+/// The body `text` spells.
+#[pyfunction]
+pub fn parse_body<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyBody>> {
+    PyBody::wrap(py, &parse_body_text(text).py()?)
+}
+
+/// The lines of a body's text, each starting with `indent`.
+#[pyfunction]
+#[pyo3(signature = (body, indent = ""))]
+pub fn pretty_body(body: &Bound<'_, PyAny>, indent: &str) -> PyResult<Vec<String>> {
+    let body = PyBody::from_iterable(body)?;
+    let mut out = Vec::new();
+    body_lines(&body, indent, &mut out).py()?;
+    Ok(out)
+}
+
+/// The executable normal form of a body: the body itself when it is its own normal form.
+#[pyfunction]
+pub fn normalize_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    let normal = emmy_ir::normalize::normalize_body(&PyBody::from_iterable(body)?).py()?;
+    match body.cast::<PyBody>() {
+        Ok(given) if given.get().body.ptr_eq(&normal) => Ok(given.clone()),
+        _ => PyBody::wrap(body.py(), &normal),
+    }
+}
+
+/// The optimizing half of the normal form, with the order and the names as they stand.
+#[pyfunction]
+pub fn optimize_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    let optimized = emmy_ir::normalize::optimize_body(&PyBody::from_iterable(body)?).py()?;
+    match body.cast::<PyBody>() {
+        Ok(given) if given.get().body.ptr_eq(&optimized) => Ok(given.clone()),
+        _ => PyBody::wrap(body.py(), &optimized),
+    }
+}
+
+/// Check that a body is typed in full (`emmy_ir::types`): `buffers` maps each buffer the body reads or writes by
+/// name to its element dtype. Raises `TypeError` naming the first statement that leaves a type or a conversion out.
+#[pyfunction]
+pub fn check_types(body: &Bound<'_, PyAny>, buffers: HashMap<String, String>) -> PyResult<()> {
+    let buffers: emmy_ir::Result<HashMap<Name, emmy_ir::dtype::DType>> = buffers
+        .iter()
+        .map(|(name, dtype)| Ok((Name::new(name), dtype.parse()?)))
+        .collect();
+    emmy_ir::types::check_types(&PyBody::from_iterable(body)?, &buffers.py()?).py()
+}
+
+/// Check that a body is a code generator's input (`emmy_ir::input`): typed in full as `check_types` holds it, every
+/// access of a buffer outside `paged` one flat index, and no loop left asking for unrolling. Raises naming the first
+/// statement that fails.
+#[pyfunction]
+#[pyo3(signature = (body, buffers, paged=Vec::new()))]
+pub fn check_input(
+    body: &Bound<'_, PyAny>,
+    buffers: HashMap<String, String>,
+    paged: Vec<String>,
+) -> PyResult<()> {
+    let buffers: emmy_ir::Result<HashMap<Name, emmy_ir::dtype::DType>> = buffers
+        .iter()
+        .map(|(name, dtype)| Ok((Name::new(name), dtype.parse()?)))
+        .collect();
+    let paged = paged.iter().map(|name| Name::new(name)).collect();
+    emmy_ir::input::check_input(&PyBody::from_iterable(body)?, &buffers.py()?, &paged).py()
+}
+
+#[pyfunction]
+pub fn prepare_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    PyBody::wrap(
+        body.py(),
+        &emmy_ir::normalize::prepare_body(&PyBody::from_iterable(body)?).py()?,
+    )
+}
+
+#[pyfunction]
+pub fn simplify_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    PyBody::wrap(
+        body.py(),
+        &emmy_ir::normalize::simplify_body(&PyBody::from_iterable(body)?).py()?,
+    )
+}
+
+/// Every definition one operation over names and literals, nested nodes defined ahead of their reader and an affine
+/// region one node; `exposed` names keep their statements.
+#[pyfunction]
+#[pyo3(signature = (body, exposed = None))]
+pub fn one_operation_per_definition<'py>(
+    body: &Bound<'py, PyAny>,
+    exposed: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyBody>> {
+    let exposed: HashSet<Name> = match exposed {
+        Some(names) => names
+            .try_iter()?
+            .map(|item| name_from_py(&item?))
+            .collect::<PyResult<_>>()?,
+        None => HashSet::new(),
+    };
+    PyBody::wrap(
+        body.py(),
+        &emmy_ir::normalize::one_operation_per_definition(&PyBody::from_iterable(body)?, &exposed),
+    )
+}
+
+/// Lambda normalization: a pure body's statements in the canonical order with its names as they stand (a read of a
+/// `params` name ahead of its first binding reading the parameter; an error when the statements wait on each other),
+/// then every value expression in its canonical spelling under those names.
+#[pyfunction]
+#[pyo3(signature = (body, params=None))]
+pub fn normalize_lambda_body<'py>(
+    body: &Bound<'py, PyAny>,
+    params: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyBody>> {
+    let params: HashSet<Name> = match params {
+        Some(names) => names
+            .try_iter()?
+            .map(|item| name_from_py(&item?))
+            .collect::<PyResult<_>>()?,
+        None => HashSet::new(),
+    };
+    let py = body.py();
+    let body = PyBody::from_iterable(body)?;
+    let ordered = if body.len() > 1 {
+        emmy_ir::normalize::fragment_order(&body, &params).py()?
+    } else {
+        body
+    };
+    PyBody::wrap(py, &emmy_ir::normalize::canonical_values(&ordered))
+}
+
+/// A kernel body with its index divisions and remainders by a power of two over a non-negative dividend as shifts and
+/// masks (`emmy_ir::strength::reduce_strength`): the spelling an emitter gives the body it is about to render.
+#[pyfunction]
+pub fn reduce_strength<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    let out = emmy_ir::strength::reduce_strength(&PyBody::from_iterable(body)?);
+    PyBody::wrap(body.py(), &out.py()?)
+}
+
+/// Every name the whole subtree of `stmt` reads from its enclosing scope.
+#[pyfunction]
+#[pyo3(name = "free_names")]
+pub fn free_names_py<'py>(
+    py: Python<'py>,
+    stmt: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyFrozenSet>> {
+    frozenset(py, free_names(&*statement_from_py(stmt)?))
+}
+
+/// SSA names `stmt` makes visible at its own scope level.
+#[pyfunction]
+#[pyo3(name = "exposed_defines")]
+pub fn exposed_defines_py<'py>(
+    py: Python<'py>,
+    stmt: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PySet>> {
+    let names = exposed_defines(&*statement_from_py(stmt)?);
+    PySet::new(py, names.iter().map(|name| PyString::new(py, name)))
+}
+
+/// Dependency and, when requested, effect predecessors for one lexical scope.
+#[pyfunction]
+#[pyo3(signature = (body, *, effects))]
+pub fn ordering_constraints<'py>(
+    py: Python<'py>,
+    body: &Bound<'py, PyAny>,
+    effects: bool,
+) -> PyResult<Bound<'py, PyList>> {
+    let body = PyBody::from_iterable(body)?;
+    let sets: PyResult<Vec<Bound<'py, PySet>>> =
+        emmy_ir::order::ordering_constraints(&body, effects)
+            .iter()
+            .map(|sources| PySet::new(py, sources.iter()))
+            .collect();
+    PyList::new(py, sets?)
+}
+
+/// Promote an elementwise op's argument dtypes to one result dtype.
+#[pyfunction]
+pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> PyResult<String> {
+    let dtypes: Vec<emmy_ir::dtype::DType> = arg_dtypes
+        .iter()
+        .map(|d| d.parse().py())
+        .collect::<PyResult<_>>()?;
+    let promoted = emmy_ir::dtype::promote(
+        emmy_ir::elementwise::ElementwiseOp::new(op_name).known(),
+        &dtypes,
+    );
+    Ok(promoted.text().to_string())
+}
+
+/// The proof that bodies are one step taken again and again (`emmy_ir::numbering::Proved`), and that step at any
+/// place in the walk.
+#[pyclass(frozen, module = "emmy.compiler.ir.stmt", name = "Advance")]
+pub struct PyAdvance {
+    proved: emmy_ir::numbering::Proved,
+}
+
+#[pymethods]
+impl PyAdvance {
+    /// How many of the bodies, from the first, are the step: at least two.
+    #[getter]
+    fn steps(&self) -> usize {
+        self.proved.steps
+    }
+
+    /// Why the body after those is no such step, where there is one.
+    #[getter]
+    fn stopped(&self) -> Option<String> {
+        self.proved.stopped.clone()
+    }
+
+    /// Every integer that moves: its value in the first body and its move per step.
+    #[getter]
+    fn moving(&self) -> Vec<(i64, i64)> {
+        self.proved.moving()
+    }
+
+    /// The step at `by`: a step number, or the name of the axis of the loop that walks the steps, which then
+    /// takes `steps` of them.
+    #[pyo3(signature = (by, steps = 1))]
+    fn at<'py>(
+        &self,
+        py: Python<'py>,
+        by: &Bound<'py, PyAny>,
+        steps: usize,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let by = match by.extract::<i64>() {
+            Ok(step) => emmy_ir::numbering::By::Step(step),
+            Err(_) => emmy_ir::numbering::By::Axis(by.extract::<String>()?.as_str().into()),
+        };
+        let body = self.proved.at(&by, steps).map_err(PyValueError::new_err)?;
+        PyBody::wrap(py, &body)
+    }
+}
+
+/// The proof that `bodies` are one step taken again and again, as far as they are (`emmy_ir::numbering::prove`).
+/// A `ValueError` says why the second body is not the first a step later.
+#[pyfunction]
+pub fn prove_steps(bodies: Vec<Bound<'_, PyAny>>) -> PyResult<PyAdvance> {
+    let bodies: Vec<Body> = bodies
+        .iter()
+        .map(PyBody::from_iterable)
+        .collect::<PyResult<_>>()?;
+    match emmy_ir::numbering::prove(&bodies) {
+        Ok(proved) => Ok(PyAdvance { proved }),
+        Err(why) => Err(PyValueError::new_err(why)),
+    }
+}
+
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyBody>()?;
+    m.add_class::<PyCone>()?;
+    m.add_class::<PySubroutine>()?;
+    m.add_class::<PyAdvance>()?;
+    m.add_function(wrap_pyfunction!(parse_body, m)?)?;
+    m.add_function(wrap_pyfunction!(pretty_body, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_body, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_steps, m)?)?;
+    m.add_function(wrap_pyfunction!(optimize_body, m)?)?;
+    m.add_function(wrap_pyfunction!(check_types, m)?)?;
+    m.add_function(wrap_pyfunction!(check_input, m)?)?;
+    m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
+    m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
+    m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_lambda_body, m)?)?;
+    m.add_function(wrap_pyfunction!(reduce_strength, m)?)?;
+    m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
+    m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ordering_constraints, m)?)?;
+    m.add_function(wrap_pyfunction!(dtype_promote, m)?)?;
+    Ok(())
+}

@@ -17,8 +17,11 @@ from .schedule import (
     NodeSchedule,
     ProjectionSchedule,
     ReductionSchedule,
+    classic_keys,
     classic_node_key,
     classic_stage_key,
+    classic_state_keys,
+    classic_state_tile_keys,
     node_id_spelling,
 )
 
@@ -28,7 +31,8 @@ class ClassicScheduleCodec:
 
     Kernel families are bare. A node family is bare when it has one applicable site and carries
     its site's route (``@map.1/twist.1/inner``) only when the family is ambiguous. STAGE is one
-    transport decision per consumer node and follows the same rule. Decoding accepts no aliases, missing direct values,
+    transport decision per consumer node and one storage decision per carried state, under the same rule.
+    Decoding accepts no aliases, missing direct values,
     or unknown fields.
     """
 
@@ -37,17 +41,7 @@ class ClassicScheduleCodec:
             raise TypeError("classic codec requires a ClassicScheduleContext")
         self.context = context
         self.tile_op = context.tile_op
-        stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.tile_op.stage_edges))
-        self._key_order = (
-            "WORK",
-            "RASTER",
-            *(classic_node_key(self.tile_op, "TILE", site) for site in self.tile_op.family_sites["TILE"]),
-            *(classic_node_key(self.tile_op, "REDUCE", site) for site in self.tile_op.family_sites["REDUCE"]),
-            *(
-                classic_stage_key(self.tile_op, next(edge for edge in self.tile_op.stage_edges if edge[0] == site))
-                for site in stage_consumers
-            ),
-        )
+        self._key_order = classic_keys(self.tile_op)
         self._keys = frozenset(self._key_order)
 
     def encode(self, schedule: ClassicSchedule) -> dict[str, str]:
@@ -74,6 +68,10 @@ class ClassicScheduleCodec:
             if len(stages) != 1:
                 raise ValueError(f"{node_id_spelling(site)}: one STAGE value must cover every operand edge")
             row[classic_stage_key(self.tile_op, edges[0])] = stages.pop().spell()
+        for key in classic_state_tile_keys(self.tile_op):
+            row[key] = schedule.kernel.state_tile.spell()
+        for key in classic_state_keys(self.tile_op):
+            row[key] = schedule.kernel.state.spell()
         return row
 
     def delta(self, before: ClassicScheduleContext, after: ClassicScheduleContext) -> dict[str, str]:
@@ -126,8 +124,13 @@ class ClassicScheduleCodec:
                 else Tile()
             )
             nodes[site] = ProjectionSchedule(tile) if reduce is None else ReductionSchedule(tile, reduce)
+        # One state takes the row's value; several are kept direct, the only storage a kernel offers them.
+        states = {Stage.parse(row[key]) for key in classic_state_keys(self.tile_op)} or {Stage.direct()}
+        geometry = next((row[key] for key in classic_state_tile_keys(self.tile_op)), "")
+        if len(states) != 1:
+            raise ValueError("a kernel that carries several states keeps each of them direct")
         return Schedule(
-            KernelSchedule(work, Raster.parse(row["RASTER"])),
+            KernelSchedule(work, Raster.parse(row["RASTER"]), states.pop(), Tile.parse(geometry, work) if geometry else Tile()),
             nodes,
             {
                 edge: EdgeSchedule(Stage.parse(row[classic_stage_key(self.tile_op, edge)]))

@@ -116,6 +116,9 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
         "extra_widths": (1, 64, 512, 1024),
         "symbolic": True,
         "expert_slices": 1,
+        "slot_width": 64,
+        "verify_width": 0,
+        "embed_gpu": None,
         "dtype": "float16",
     }
     assert document.model == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
@@ -168,7 +171,10 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
         "symbolic": False,
         "static_only": True,
         "expert_slices": 1,
+        "slot_width": 1,
         "dtype": "float16",
+        "verify_width": 0,
+        "embed_gpu": None,
     }
     assert {(bindings, pins) for _twin, bindings, pins in _coverage(GoldenFile.load(output))} == {
         ((("num_tokens", 1),), (("FAST_MATH", False),))
@@ -238,6 +244,19 @@ def test_trace_accepts_debug_graph_json_as_input_but_emits_a_golden_file(monkeyp
     assert json.loads(source.read_text()) == source_graph.to_dict()
 
 
+def test_trace_appends_a_program_another_golden_stores(tmp_path) -> None:
+    # The wire a golden stores (`compile --golden PATH --program N --ir torch -o`) is a trace input, so one card's
+    # program can be appended to another card's golden; nodes a list is that wire, nodes a mapping a debug dump.
+    stored, relu = tmp_path / "stored.json", trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    write_trace_inventory(trace_inline_code("torch.softmax(torch.randn(4, 16), dim=-1)")["graph"], stored, ctx=_TARGET_CTX)
+    program = tmp_path / "program.json"
+    program.write_text(json.dumps(GoldenFile.load(stored).programs[0]))
+    working = tmp_path / "working.json"
+    write_trace_inventory(relu, working, ctx=_TARGET_CTX)
+    append_trace_inventory(Graph.from_dict(json.loads(program.read_text())), working, ctx=_TARGET_CTX)
+    assert GoldenFile.load(working).programs == [relu.to_wire(), GoldenFile.load(stored).programs[0]]
+
+
 def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
 
     graph = trace_inline_code("torch.relu(torch.randn(16,32))")["graph"]
@@ -249,7 +268,7 @@ def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
     assert first_doc == second_doc
     assert first_doc.programs == [original_wire]
     assert first_doc.programs and first_doc.kernels
-    stored = {"loop_ir", "name", "formed", "traced", "origins"}  # inputs only: nothing computed from the Loop IR
+    stored = {"loop_ir", "formed", "traced", "origins"}  # inputs only: nothing computed from the Loop IR
     assert all(set(kernel.to_wire()) == stored for kernel in first_doc.kernels)
     assert all(set(row.to_wire()) == {"name", "kernel", "pins"} for row in first_doc.rows)
 
@@ -338,7 +357,7 @@ def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> No
     (kernel,) = document.kernels
     (row,) = document.rows
     assert kernel.origins == ("scaled_dot_product_attention",)
-    assert row.name.startswith("k_sdpa")
+    assert row.name == kernel.name
 
 
 def test_trace_serializes_gather_target_with_a_torch_reference_mapping(tmp_path) -> None:
@@ -514,9 +533,9 @@ def test_combined_trace_inventory_deduplicates_identical_loop_targets(tmp_path) 
     assert document.model == "org/model@revision"
 
 
-def test_a_golden_file_holds_a_pool_entry_and_a_realization_per_line(tmp_path) -> None:
-    """A diff of a golden lands on the entry that changed: every program, kernel and row is a line of its own, and
-    the card's name is the first line alone, which a card-scoped reader parses without the body."""
+def test_a_golden_file_spells_a_node_a_statement_and_a_row_field_per_line(tmp_path) -> None:
+    """A diff of a golden lands on what changed: every graph node, body statement and row field is a line of its own,
+    and the card's name is the first line alone, which a card-scoped reader parses without the body."""
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x0", (512, 512), "f16"), node_id="x0")
     graph.add_node(InputOp(), [], Tensor("x1", (512, 512), "f16"), node_id="x1")
@@ -527,16 +546,20 @@ def test_a_golden_file_holds_a_pool_entry_and_a_realization_per_line(tmp_path) -
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     document = replace(GoldenFile.load(path), gpu_name="NVIDIA GeForce RTX 5090")
     document.dump(path, overwrite=True)
-    text = path.read_text()
-    lines = text.splitlines()
+    lines = [line.strip().removesuffix(",") for line in path.read_text().splitlines()]
+    wire = document.to_wire()
 
-    def entry(line: str):
-        return json.loads(line.strip().removesuffix(","))
-
-    wire = json.loads(text)
-    assert entry(lines[lines.index(' "programs": [') + 1]) == wire["programs"][0]
-    assert entry(lines[lines.index(' "kernels": [') + 1]) == wire["kernels"][0]
-    assert entry(lines[lines.index(' "rows": [') + 1]) == wire["rows"][0]
+    nodes = wire["programs"][0]["nodes"] + wire["kernels"][0]["loop_ir"]["nodes"]
+    for node in nodes:
+        if "body" not in node.get("attrs", {}):
+            assert json.dumps(node, separators=(",", ":")) in lines
+    [body] = [node["attrs"]["body"] for node in nodes if "body" in node.get("attrs", {})]
+    assert all(json.dumps(statement) in lines for statement in body.split("\n"))
+    row = wire["rows"][0]
+    for key, value in row.items():
+        field = f"{json.dumps(key)}:{json.dumps(value, separators=(',', ':'))}"
+        assert any(line.lstrip("{") in (field, field + "}") for line in lines), field
+    assert GoldenFile.load(path) == document
     assert _file_gpu_name(path) == "NVIDIA GeForce RTX 5090"
 
 

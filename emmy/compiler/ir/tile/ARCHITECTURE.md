@@ -23,10 +23,9 @@ error.
 | --- | --- |
 | `axis` | reduction axis; `None` for the root pointwise projection |
 | `lift` | pure per-element `Lambda`; nested reductions occupy their original structural position here |
-| `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements; for a carried state the seed (a constant or a buffer name) and the action `next` |
+| `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements |
 | `operands` | explicit materialized or computed inputs used by later transforms |
 | `observe` | optional per-step observer — the scan spelling: a pure `λ(k, state…)` evaluated after each combine |
-| `cells` | a carried state's cell axes in the order every carrier read indexes them — the Loop IR `Carry` index |
 
 `Fold.defines()` exposes the fold results to its containing lambda. This is what lets later statements in an SDPA
 cell read the maximum, denominator, or nested QK result without extracting or relocating any subtree.
@@ -43,42 +42,80 @@ the observer stmts (`observed_result_names` + the `observed=` reconstitution arm
 order-visible. A root without a provider chain offers a cooperative warp prefix scan beside the serial plan;
 register partials, transposed bands and cross-CTA splits remain unavailable.
 
-A recurrence is a fold that **carries a state** (`Fold.carries`): its ⊕ is the action `next` — the state becomes
-what the step computed — on every component, and its `cells` are the state's coordinates in the order the Loop IR
-`Carry` indexes them, batch and cell alike. A recurrence folds the free monoid of step maps under composition, a
-real monoid, but the composed map has a bounded form only for a closed family (an affine step composes as a
-matmul), so the term stores that ⊕'s action on the seed, the one form every step has; `next` has no identity, so
-every partition arm refuses the fold by the gate it already applies and it lowers as the serial walk. The step
-reads the carrier at other cells through **carrier reads**: a slab over one `Pre` (`Fold.carrier_read`, recognized
-by `as_carrier_read()` beside `as_slab()`) binding the state, the carrying axis and the cell coordinates, so a
-contraction over the previous state (`Σ_k W[i,k] · pre S[k,j]`) is an ordinary nested fold whose B is the carrier.
-A per-step output is a further result of the lift — a `<value>__obs` copy of what the step defines or an operand
-exposes, or a pass-through of a value an output sweep beside the cells computes — stored inside the loop.
-`Fold.lower` opens the carrying loop outside the loops over the cells, with a nest of its own for the step's
-sweeps; the closed program is the Loop IR the roll wrote.
+A recurrence is a kernel that **carries a state** (`TileOp.carries`). Its term is ONE STEP, an ordinary term, and
+the loop that carries the state is the kernel's serial axis (`Placement.serial`), outermost: the steps run in order,
+whatever runs them. The state is a buffer the kernel keeps for itself. Its update, the Loop IR `Carry`, rides among
+the kernel's stores (`TileOp.states` names the ones that are), and the step reads it through slabs like any other:
+a load of the state one step back, at any cell, so a contraction over the previous state
+(`Σ_k W[i,k] · S[c - 1,k,j]`) is an ordinary nested fold whose B is that slab. Nothing in the term says "state":
+the kernel's stores do. A per-step output is a store like any other, and the closed program opens the serial loop
+around the step, which is the Loop IR the roll wrote. A parallel loop the source spelled around the carrying one
+runs one recurrence per trip, so its coordinate joins the state's cell and the steps still stand outermost. A
+size-one dim, which the normal form pins to `0` in every index over the state, holds no cell: the lift drops that
+coordinate from the state's update and from every read of it, so a state's cell is its axes alone, and the step's
+affine reading and the split across the sequence count a read's coordinates against them.
 
-A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@…/scan=g<n>k`, offered
-by `030_cut` through `_split.realize_carry_split`). It needs the step AFFINE in the state and column-wise
-(`Fold.affine`: every carrier read keeps the cell's own coordinate at every position but one), because then a
-part's steps compose as an affine map `S ← A·S + b`, read off two walks of the part from known seeds — zero gives
-`b`, the identity packed along the kept cells gives `A` beside it — with no symbolic knowledge of the step. Three
-kernels, each lifted from Loop IR like the walk: the probe (both walks of every part, the state stored per step),
-the prefix (the state carried across the parts by their maps, each part's start stored), and the walk itself over
-each part's range from its start, one part per batch cell. Three walks of a part where the sequence took one, for
-`n` times the parallelism; whether that pays is evidence's decision. A step that is not affine (the forward
-substitution) offers nothing and stays one kernel.
+A kernel that carries a state takes the cuts of any kernel at the seams whose cone reads no state (`030_cut`), and
+a state has one kernel-set decision of its own, the **split across the sequence** (`REDUCE@map.1/scan=g<n>k[<p>]`,
+bare where the step has no reduction of its own; offered by `030_cut` through `_split.realize_carry_split`). It needs
+the step AFFINE in the state and column-wise (`Fold.affine`, asked of the step with the state's name, cells and
+next value: every load of the state keeps the cell's own coordinate at every position but one), because then a
+part's steps compose as an affine map `S ← A·S + b`. A step that is not affine (one that multiplies two reads of
+its state) offers nothing and stays one kernel. So does a walk whose stores the parts cannot write side by side.
 
-The classic schedule realizes the carrying loop as ordered launches with a global state buffer: at its fork it
-lifts the kernel's Loop IR again with the state as a buffer the node owns and the loop as the kernel's **serial
-axis** (`Placement.serial`, `lift_serial`), each launch reading the previous launch's stores one step back. That
-form is a realization of the kernel, not another kernel: the kernel keeps the lifted tile's identity, the one its
-fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
-no cell; a seed tensor keeps that dim, and both schedules read it with `0` there (`seed_index`). The
-register schedule reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
-independent. An unmapped classic fallback takes the same serial form during materialization. Re-lifting a stored
+The split is up to five kinds of kernel, each lifted from Loop IR like the walk:
+
+1. **The parts' maps.** A part of several steps is probed: two walks of the part from known seeds, zero giving `b`
+   and the identity packed along the kept cells giving `A` beside it, with no symbolic knowledge of the step. A
+   part of ONE step is read off the step itself, with no walk: a contraction over the previous state collapses to
+   its one term at the map's column, and from zero it is nothing; any other read of the state is the identity's
+   own entry. A step that is zero from zero has no offset at any level, and its maps are their matrices alone.
+2. **Pairs** (`<p>` of them). Affine maps compose, and the composition is a matrix product:
+   `(A₁, b₁) ∘ (A₀, b₀) = (A₁·A₀, A₁·b₀ + b₁)`. Each composition is a kernel for the matrices and one for the
+   offsets over half the maps of the level below, each an ordinary reduction over the column the two maps meet at,
+   with a fork and a row of its own. An odd map out passes through. This is cyclic reduction.
+3. **The prefix** carries the state across the maps of the top level and stores each one's start. One map left
+   (`p = ⌈log₂ n⌉`) applies to the seed in a kernel that carries nothing.
+4. **A fill-in** per composition gives the maps of the level below their starts: the even ones their pair's
+   start, the odd ones that start through the even map.
+5. **The walk** runs every part from its start, one part per batch cell. A part of one step carries nothing: the
+   step reads its start where it read the state.
+
+The fork offers the catalog's widths with no composition, and one step a part at every depth of composition:
+there the maps cost no probe, and how far composing pays against walking what is left is the pieces' to price.
+
+What the walk stores decides where the split ends. Stores indexed by the step are written by the walk, each part
+its own cells. A walk whose one store is the state itself, each step over the last one's, ends at the prefix: the
+prefix stores the final state, and the split mints no start, fill-in or walk, since parts side by side would race
+on that store.
+
+The maps are dense, `mixed × mixed` per kept cell, so a composition is a full matrix product whatever structure
+the step's own matrix had. That decides where the split pays. A step that is itself a dense product gains: its
+walk does the same products one after another. A step that changes one row of its state is the identity plus a
+rank-one term, the dense form does not keep that, and its walk is cheaper than any composition of dense maps.
+
+The classic schedule realizes the steps as ordered launches along the kernel's **serial axis**
+(`Placement.serial`) with a global state buffer: at its fork the kernel's term is taken with the state as a buffer
+the node owns (`serial_form`), each slab over the state a load of that buffer one launch back, the seed at the
+first, and the state's update a write to it. That form is a realization of the kernel, not another kernel: the
+kernel keeps the lifted tile's identity, the one its fork and its golden rows name. A size-one dim the Loop IR
+spelled `0` in the state's cell stays a dim of the buffer, as the seed tensor keeps it. Register
+storage reads the carrying kernel's step itself and realizes the loop inside each CTA when the state rows are
+independent. An unmapped classic fallback takes the same serial form during materialization. Every reader of a
+kernel's schedule sites takes the kernel through one more step, `TileOp.scheduled` (`scheduled_form`): a block of a
+split walks from zero, and every term keeps its range, stated of its axis as a tier walks it. Like the serial form
+it is a realization of the kernel, and the kernel keeps the identity of the tile its fork was offered. The schedule
+is enumerated on that form and the kernel lowering takes it. A tier reads a range itself: a scalar walk and a
+cooperative reduce as their loop's bounds, the chunk tier as the chunks it walks and the mask of the block a bound
+cuts. A tile folds a rectangle of every position, so a contraction that walks a range is no tile site unless the
+chunk tier folds it (`TileOp.contracts`). `Fold.block_start` is the one place that says which coordinate
+moves a block; the lowering's nest order and the tile's shared coordinates (`batch_axes`) ask it. Re-lifting a stored
 kernel reuses the state ports it already owns. The state's port, added at the lift for the classic realization,
 disappears during materialization,
-and externally read snapshots remain global outputs. Both preserve previous-state reads until the step has
+and externally read snapshots remain global outputs. A state the term itself stores every step, beside its `Carry`,
+at the step and the cell (the store the roll gives a rolled recurrence's state) has no port at all: that output
+holds every step, so the serial form reads it one step back (`stored_states`) and the shared-carry storage finds
+its state buffer there. Both preserve previous-state reads until the step has
 finished evaluating its outputs. The domain and choices are described in
 [`ir/schedule/ARCHITECTURE.md`](../schedule/ARCHITECTURE.md).
 
@@ -92,9 +129,9 @@ finished evaluating its outputs. The domain and choices are described in
 4. a per-step `Write` over the carried state (the `025_lower_scan` shape) peels into an observer — the fold gains
    `observe` with fresh `<state>__obs` results, and the store, rewritten to read the observed name, rides the stream
    position after the node, where output-spec extraction claims it as an ordinary boundary write;
-5. a loop that carries a state (`Loop.carries`) lifts to a fold folding the action `next`: the chain of loops
-   down to the `Carry` gives `cells`, each `Carry` a state whose lift result is its value and whose seed is the
-   fold's `init`, each `Pre` a carrier-read slab, and a free loop beside the chain stays an output sweep of the step.
+5. a loop that carries a state (`Loop.carries`) is peeled with the parallel loops, as the kernel's serial axis: its
+   body lifts as any step does, each `Carry` a store the boundary extracts beside the writes, each load of the
+   state a slab.
 
 There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, or raw-loop fallback at this
 boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a later fork over this complete tree.
@@ -102,7 +139,8 @@ boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a 
 ## Canonicalization
 
 `Lambda.__post_init__` owns context-independent construction normalization: every
-pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
+pure body receives the normal form's statement order (`fragment_order`) and commutative `Assign` arguments are sorted
+before it reaches a Fold.
 Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
 arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.
 For a broadcast-batched product whose batch axis occurs in only one operand, the placement's trailing output pair
@@ -110,7 +148,9 @@ still supplies that geometry. If its geometric first operand reads the reduction
 materialized operand reads it contiguously, the commutative product puts the contiguous operand in the shared A slot;
 placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
 remains a placement fact rather than part of the Fold algebra. Where an operand owns several free axes, the smallest
-known output stride chooses its tiled axis. Undetermined layouts retain the trailing placement order. Stored schedules
+known output stride chooses its tiled axis. A weight read straight from global memory reaches its fragment through one
+leading dimension, so when its reduction axis is strided its column is first an axis it is unit-stride along, then
+the smallest output stride. Undetermined layouts retain the trailing placement order. Stored schedules
 retain the same input and output tensors as the unscheduled Tile so reconstruction makes the same choice.
 A score contraction inside a chunked carrier inherits that consumer's placed M axis and uses the stream axis as N.
 Batch axes may follow the row in the free-axis order; their position does not change the nested contraction's geometry.
@@ -151,14 +191,16 @@ states over different free coordinates separate; statistics sharing the same coo
 
 Normalization ends by restoring OBJECT SHARING: same-value cones — alpha-equal with identical captures and exposed
 result names, so a copy differing only in internal binder spelling still qualifies — collapse onto one Fold object
-(`_share_common_cones`), so a value fusion inlined into several consumption sites — attention's softmax
+(the last pass of `Fold.normalized`), so a value fusion inlined into several consumption sites — attention's softmax
 statistics, read by the weight cone and by the epilogue — is one node again. This is an invariant, not an
 optimization: seam grouping and cut realization key on object identity, so severed sharing silently turns one value
 into per-site recompute that no schedule can undo (the class PR #679 measured at three orders of magnitude). A
 recompute observed across kernels is therefore ALWAYS a Tile-level sharing or seam-offer defect — fix it here or in
 the placement fork; a Loop IR fusion or emission workaround sees one kernel at a time and is the wrong altitude by
 construction. Copies that differ in captured axis names cannot share an object and stay with value clustering; copies
-that differ in exposed result names stay distinct because unifying them would rename their consumers.
+that differ in exposed result names stay distinct because unifying them would rename their consumers. A copy that a
+term computes inside its own lift has no edge at all: value clustering finds it by the same value forms, and a cut of
+the value replaces those statements with a read of its workspace (`_inline_copies`).
 
 The kernel's SHARED output sweep — an axis on every store's sweep path — is promoted into the Tile's free-axis
 placement on either of two grounds, and both answer one question: what would the grid replicate. A nested contraction
@@ -235,8 +277,10 @@ reading dropped the fp8 decode cone's scale out of the kernel entirely. Both are
 and only the measurement moves. Treat a contraction that canonicalizes to PLANAR as a coverage bug to investigate, not
 as a supported slow path.
 
-A node's own canonical forms are formation's (`Fold.__post_init__` orients a bilinear term A-first, `Lambda` orders
-its body); `TileOp.__post_init__` applies the tree-wide ones and the legacy output-sweep-to-free-axis adjustment
+A node's own canonical forms are formation's (`Fold.__post_init__` orients a bilinear term A-first — two slabs by
+the earlier row each reads alone, a coordinate the compiler minted such as a key split's partition sorting by its name
+without the leading underscore, so a sliced operand keeps its unsliced orientation; `Lambda` orders its body);
+`TileOp.__post_init__` applies the tree-wide ones and the legacy output-sweep-to-free-axis adjustment
 whenever a contraction operand reads the kernel's shared output sweep. The contraction may be the root compute node or
 a later site in the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute
 output loop.
@@ -260,16 +304,18 @@ reuses an enclosing or sibling sweep's name (the fused quantize kernel's byte sw
 alpha-renamed at the lift, binder and references together, since a term tree names one coordinate per name. The
 kernel binder's serial arm hands the stores to the term the same way, so the emitted kernel places them exactly as
 the identity's `loop_body` does; only a projection stream spelled without the term (the peeled root's tail, a cut
-piece) still wraps the trailing run reading the axis into one loop. A contraction reading the kernel's shared output
-sweep never meets this rule, because post-init promotes that sweep into a real free axis right after normalization;
-one reading a sibling nest's axis is placed by it like any other fold.
+piece) still wraps the trailing run reading the axis into one loop. That loop holds the run's statements that read
+its axis and their dependence cone with its stores; a sibling's statements in the run, another sweep's or a store
+with no sweep, follow the loop instead of nesting inside it. A contraction reading the kernel's shared output sweep
+never meets this rule, because post-init promotes that sweep into a real free axis right after normalization; one
+reading a sibling nest's axis is placed by it like any other fold.
 
 A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
 no matter what kind: a projection evaluates its operands before its scalar body, so the capture would read a value
 that does not exist yet. The `closed` gate reads only the fold's own lift and cannot see a nested capture; the
 composed placement cut builds exactly this shape (the consumer piece's workspace loads and rsqrt chain feed the
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
-nvcc).
+the code generator).
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information, and the total lift
 restores it in TWO ways, and which one applies is decided by what the term can support.
@@ -327,7 +373,8 @@ creates one zero-axis root `Fold` over the lifted cell.
 tries every twist recipe (`ir/pure/twist.py`) on every reduce that reads a reduce as an operand — the shape the lift
 gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.fuse` returns, to a fixpoint. Pure
 softmax is the arity-two case; SDPA adds expectation components, which join by the same call once the `1/l` factor
-constant along the axis has hoisted out of the fold, and a causal mask is simply part of the shared score cone. The
+constant along the axis has hoisted out of the fold. Two folds fuse where they walk the same range of the axis, and
+the carrier keeps it: a causal attention's three reductions all walk the keys at or before the row. The
 pass has no operation-family matcher: a recipe clicks by canonical form, or it does not.
 
 The rewrite consumes the canonical Fold tree. It reuses the registered monoid generator, invariant-factor splitting,
@@ -456,8 +503,10 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
   row the binder would refuse is never enumerated.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
   when it has one applicable site and carries the site's route (`TILE@map.1/twist.1/inner`, the same grammar as
-  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node and
-  follows the same rule. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
+  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node, and one more at the state's route
+  (`map.1/scan`) for
+  the storage of a carried state, and follows the same rule; register storage spells its geometry as the `TILE` of
+  that route. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
   and semantically refused schedules.
 
 Structural choices are deliberately outside this algebra. A cut or split changes the kernel set first; every fresh

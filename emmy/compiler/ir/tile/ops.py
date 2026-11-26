@@ -20,7 +20,7 @@ from dataclasses import replace
 
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.address import gmem_axis_step
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var, promoted_dtype
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -31,8 +31,7 @@ from emmy.compiler.ir.schedule.classic import (
     classic_node_key,
     classic_stage_key,
 )
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Loop, Select, refs_axis, stmt_axis_names
-from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Loop, Select, Statement
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
 
@@ -46,14 +45,14 @@ def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, ob
     amount, a nibble mask — comes back f32, and the bit operations reading it have no f32 spelling.
 
     Typed the same way :func:`edge_dtypes` types an edge's results, over the prologue's flat stmt
-    list. A name whose stmt kind carries no dtype is absent from the result; its row keeps the
+    list. A name whose statement type carries no dtype is absent from the result; its row keeps the
     float default."""
     env: dict[str, object] = {}
     for stmt in pro:
         if isinstance(stmt, Load):
             tensor = inputs.get(stmt.input) if inputs else None
             env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
-        elif isinstance(stmt, (Assign, Affine)):
+        elif isinstance(stmt, Assign):
             env[stmt.name] = _promoted(stmt, env)
         elif isinstance(stmt, (Init, Let)):
             env[stmt.name] = stmt.dtype
@@ -62,15 +61,15 @@ def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, ob
     return {nm: dt for nm in stats if (dt := env.get(nm)) is not None}
 
 
-def _promoted(stmt: Assign | Affine, env: dict) -> object:
-    """The dtype ``stmt`` computes at: its stamp, else the promotion of its named operands — a literal operand takes
-    the dtype of the computation and constrains nothing; ``None`` while an operand is untyped."""
+def _promoted(stmt: Assign, env: dict) -> object:
+    """The dtype ``stmt`` computes at: its stamp, else the promotion of its value's named operands, node by node;
+    ``None`` while an operand is untyped."""
     if stmt.dtype is not None:
         return stmt.dtype
-    args = [env.get(name) for name in stmt.deps()]
-    if not args or not all(args):
+    names = stmt.value.free_vars()
+    if not names or not all(env.get(name) for name in names):
         return None
-    return get_dtype(dtype_promote(stmt.op.name if isinstance(stmt, Assign) else "add", [dtype.name for dtype in args]))
+    return get_dtype(promoted_dtype(stmt.value, lambda name: env[name].name))
 
 
 def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict | None = None) -> tuple:
@@ -107,7 +106,7 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
             env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
         elif isinstance(stmt, Fold):
             env.update(zip(stmt.exposes, edge_dtypes(stmt, inputs, cache, env), strict=True))
-        elif isinstance(stmt, (Assign, Affine)):
+        elif isinstance(stmt, Assign):
             env[stmt.name] = _promoted(stmt, env)
         elif isinstance(stmt, (Init, Let)):
             env[stmt.name] = stmt.dtype
@@ -320,7 +319,10 @@ class Sched:
             # binds both, and a sibling output's sweep promoted beside them (the fused q/k/v
             # projections, N 64 beside N 32) never stands in for either. With several own axes,
             # tile the smallest output stride, so a reordered grid still tiles channels rather
-            # than heads. Undetermined layouts retain the trailing-grid choice.
+            # than heads — except that a streamed operand read straight from gmem reaches its
+            # fragment through one leading dimension: unless its reduction axis is unit-stride, its
+            # column must be, whatever the output's layout. Undetermined layouts retain the
+            # trailing-grid choice.
             view = node.as_contraction()
             if mn is None or view is None:
                 return mn
@@ -329,7 +331,7 @@ class Sched:
             def rank(item):
                 position, axis = item
                 steps = (
-                    gmem_axis_step(Load("", spec.write.output, spec.write.index), axis.name, self.tile.outputs)
+                    gmem_axis_step(Load(("",), spec.write.output, spec.write.index), axis.name, self.tile.outputs)
                     for spec in self.tile.output_specs
                 )
                 return min((abs(step[0]) for step in steps if step is not None and step[0]), default=float("inf")), -position
@@ -337,10 +339,19 @@ class Sched:
             # An operand role with no axes of its own takes the unit coordinate the placement added for it.
             unit = next((pair for name, pair in order.items() if name not in node.free_axes and pair[1].extent == 1), None)
 
-            def side(axes):
-                return min((order[name] for name in axes if name in order), key=rank, default=None) if axes else unit
+            b = node.operands[1].as_slab() if len(node.operands) > 1 else None
 
-            left, right = side(view.left_axes), side(view.right_axes)
+            def unit_in_b(name):
+                step = gmem_axis_step(b.load, name, self.tile.inputs)
+                return step is not None and abs(step[0]) == 1
+
+            strided_b = b is not None and gmem_axis_step(b.load, view.axis, self.tile.inputs) is not None and not unit_in_b(view.axis)
+
+            def side(axes, reach=False):
+                pairs = (order[name] for name in axes if name in order)
+                return min(pairs, key=lambda item: (reach and not unit_in_b(item[1].name), *rank(item)), default=None) if axes else unit
+
+            left, right = side(view.left_axes), side(view.right_axes, reach=strided_b)
             if left is not None and right is not None:
                 return (left[1], right[1])
             first, second = mn
@@ -388,7 +399,6 @@ def sched_of(tile) -> Sched:
 def scheduled(
     tile,
     *,
-    name: str,
     place,
     knobs: dict,
     schedule=None,
@@ -410,7 +420,6 @@ def scheduled(
         raise ValueError("encoded WORK does not agree with the accepted classic schedule")
     return replace(
         tile,
-        name=name,
         place=place,
         workers=workers,
         knobs=knobs,
@@ -441,7 +450,7 @@ def axis_names(root) -> set[str]:
     return out
 
 
-def projection_tail(tile) -> list[Stmt]:
+def projection_tail(tile) -> list[Statement]:
     """The kernel's EFFECTFUL projection stmt stream — the root zero-axis fold's (pure) body with the
     kernel-boundary ``TileOp.output_specs`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.apply_output_specs`).
     This reads the outer projection, not work nested in its operands. The ``coop-t`` band's
@@ -492,9 +501,14 @@ def output_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tup
     the operand term, the root-body statements only that operand's outputs read, and those output
     specifications, all in the operands' spelling (the form every consumer emits).
 
-    Each output specification must read exactly one region, the regions' backward cones over the
+    Each output specification's values must read exactly one region, the regions' backward cones over the
     root body must be disjoint, and together those cones must cover it. Refusals raise
     :class:`UnbindableProjection`.
+
+    A region that no store's values read, read only for a store's coordinates or guard — a scatter's row, computed
+    once per row above the cell that stores it — owns no output. It rides with the one region whose stores read it,
+    and its entry holds no stores; a piece writing those stores is built over both. A row the stores of two owners
+    read would be computed by both, so it refuses.
 
     This is the structural ownership rule alone, shared by kernel binding and by the rewrites that
     turn one multi-output ``TileOp`` into fresh pieces. :func:`projection_regions` composes it with
@@ -518,18 +532,27 @@ def output_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tup
     by_name = {name: region for region in regions for name in region.exposes}
     members: dict[int, set] = {id(region): set() for region in regions}
     grouped: dict[int, list] = {id(region): [] for region in regions}
+    readers: dict[int, set] = {id(region): set() for region in regions}
+
+    def read(names) -> set[int]:
+        cone = lift.body.backward_cone(names)
+        return {id(by_name[name]) for name in (*cone.external_reads, *names) if name in by_name}
+
     for spec in output_specs:
-        # A store reads its values, and whatever its coordinates and guard name (a scatter's row).
-        cone = lift.body.backward_cone(spec.reads)
-        used = {id(by_name[name]) for name in (*cone.external_reads, *spec.reads) if name in by_name}
-        if len(used) != 1:
+        # A store reads its values, and whatever its coordinates and guard name (a scatter's row). Its values name its
+        # owner; a store of values no region computes is owned by what its coordinates read.
+        used = read(spec.reads)
+        owners = read(spec.write.values) or used
+        if len(owners) != 1:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
-        owner = used.pop()
-        members[owner].update(cone.members)
+        owner = owners.pop()
+        members[owner].update(lift.body.backward_cone(spec.reads).members)
         grouped[owner].append(spec)
+        for other in used - {owner}:
+            readers[other].add(owner)
 
     claimed: set = set().union(*members.values()) if members else set()
-    if claimed != set(lift.body) or any(not grouped[id(region)] for region in regions):
+    if claimed != set(lift.body) or any(len(readers[id(region)]) != (0 if grouped[id(region)] else 1) for region in regions):
         raise UnbindableProjection("an output-tiled root forest must cover the complete projection")
     if any(members[id(left)] & members[id(right)] for i, left in enumerate(regions) for right in regions[i + 1 :]):
         raise UnbindableProjection("output-tiled root projections may not share tail statements")
@@ -547,12 +570,12 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold,
     The ownership partition is :func:`output_regions`; this adds the binder's own requirement, that
     each region be ABOUT one reducing term, so ``_bind_roots`` has a node to bind and a split has a
     fold to slice. A region reading several reducing roots leaves the epilogue with no piece to hand
-    it to.
+    it to, and a scatter's row owns no output to bind it around.
     """
     out = []
     for region, tail, stores in output_regions(op, output_specs):
         root = projection_root(region)
-        if root is None:
+        if root is None or not stores:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
         out.append((root, region, tail, stores))
     return tuple(out)
@@ -637,7 +660,7 @@ def owns_outputs_it_cannot_bind(op, output_specs: tuple) -> bool:
         regions = output_regions(op, tuple(output_specs))
     except UnbindableProjection:
         return False
-    return any(projection_root(region) is None for region, _tail, _stores in regions)
+    return any(projection_root(region) is None for region, _tail, stores in regions if stores)
 
 
 def chain_members(root: Fold) -> tuple[Fold, ...]:
@@ -726,7 +749,10 @@ def carries_partition(tile) -> bool:
 
     The receipt sits on the sliced axis, and that axis is not always a NODE: a computed-A cone can
     keep its sliced contraction inside the lift as a plain ``Loop``, so a ``sites``-only scan
-    misses it. Scan the loop bodies too; the receipt is in the IR either way."""
+    misses it. Scan the loop bodies too; the receipt is in the IR either way. A walk split across the sequence keeps
+    it on its serial axis, which no node binds."""
+    if any(axis.window is not None and axis.window.partition for axis in tile.place.serial):
+        return True
 
     def loops(stmts):
         for s in stmts:
@@ -746,11 +772,11 @@ def carries_partition(tile) -> bool:
 
 
 def merges_partition(tile) -> bool:
-    """Whether this kernel is a split's deferred finalize: its head fold's axis is a partition window
-    over its WHOLE parent — the merge over every partition of a split that already happened, where a
-    partial's slice windows a fraction of the parent."""
+    """Whether this kernel is a split's deferred finalize: its head fold walks the whole of a partition window's
+    parent — the merge over every partition of a split that already happened, where a partial walks one block of
+    the parent."""
     node = head(tile.op)
-    if node is None or getattr(node, "axis", None) is None:
+    if node is None or getattr(node, "axis", None) is None or node.range is not None:
         return False
     axis = tile.axis_of(node.axis)
     return axis.window is not None and axis.window.partition and axis.window.parent.extent == axis.extent
@@ -791,3 +817,27 @@ __all__ = [
     "sched_of",
     "tiled_edges",
 ]
+
+
+def refs_axis(s: Statement, name: str) -> bool:
+    """``s`` references axis ``name`` in any carried expression (deep) — ``Statement.expressions``: a ``Load`` /
+    ``Write`` index, a ``Select``'s branch predicates. Both spellings are coordinate reads, so both
+    make the stmt vary with the axis; a mask ``Select`` read as invariant would be hoisted out of
+    the per-cell body it predicates."""
+    if any(name in e.free_vars() for e in s.expressions()):
+        return True
+    return any(refs_axis(child, name) for b in s.nested() for child in b)
+
+
+def stmt_axis_names(stmts) -> set[str]:
+    """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
+    sitting in the body needs no special case — it is a ``Statement``, so its children are reached through
+    the same ``nested()`` walk as any block stmt's."""
+    out: set[str] = set()
+    for s in stmts:
+        ax = getattr(s, "axis", None)
+        if ax is not None and hasattr(ax, "name"):
+            out.add(ax.name)
+        for b in s.nested():
+            out |= stmt_axis_names(b)
+    return out

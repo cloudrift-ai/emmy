@@ -27,6 +27,7 @@ from emmy.serving.twins import (
     _profile_layers,
     _spell_coded_twins,
     _spell_expert_twins,
+    _trunk_names,
 )
 
 
@@ -121,6 +122,36 @@ def test_an_ambiguous_suffix_names_no_module():
     assert _spell_coded_twins({"post1": (g := _twin({"gate_proj": (1408, 4096)}))}, storage) == {"post1": g}
 
 
+@pytest.mark.parametrize(("embed_gpu", "tied", "twin"), [(0, False, True), (1, False, False), (0, True, False)])
+def test_a_paged_embedding_table_adds_its_gather_twin(tmp_path, embed_gpu, tied, twin):
+    """A serving config that pages an untied token-embedding table (fewer pages on the device than the table's, here
+    one) traces the gather the runner compiles over it as ``embed-sym``; a table the device holds whole has none, and
+    neither has a tied one, which stays with the output head."""
+    pytest.importorskip("torch")
+    import torch
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+
+    from emmy.compiler.pipeline.search.golden.format import program_text
+    from emmy.serving.gen_runner import embed_gather_graph
+    from emmy.serving.twins import capture_twin_graphs
+    from tests.serving.helpers import QWEN3_5_TINY
+
+    Qwen3_5TextConfig(**{**QWEN3_5_TINY, "tie_word_embeddings": tied}).save_pretrained(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=0, symbolic=False, embed_gpu=embed_gpu)
+    assert ("embed-sym" in graphs) is twin
+    if twin:
+        assert program_text(graphs["embed-sym"]) == program_text(embed_gather_graph(64, 64, torch.float16))
+
+
+def test_the_trunk_is_never_an_mtp_head_and_a_tie_names_none():
+    """An MTP head numbered like the trunk is not the trunk even at the trunk's layer count, whichever comes first;
+    two other stacks of one size leave no trunk to pick, so the checkpoint is refused rather than paired by order."""
+    trunk = ["model.layers.0.linear_attn.in_proj_qkv.weight"]
+    assert _trunk_names(["mtp.layers.0.linear_attn.in_proj_qkv.weight", *trunk]) == trunk
+    with pytest.raises(ValueError, match="no single decoder trunk"):
+        _trunk_names(["vision.layers.0.qkv.weight", *trunk])
+
+
 def test_laguna_singular_shared_expert_matches_plural_transformers_path():
     storage = {"model.layers.1.mlp.shared_expert.gate_proj": _entry("model.layers.1.mlp.shared_expert.gate_proj", 1024, 3072, 4)}
     twins = _spell_coded_twins({"post1": _twin({"mlp.shared_experts.gate_proj": (1024, 3072)})}, storage)
@@ -159,9 +190,46 @@ def test_laguna_selects_dense_full_sparse_sliding_and_sparse_full_profiles():
     ]
 
 
+def _tiny_nvfp4_hybrid(path, config, mtp=None):
+    """A tiny Qwen3.5 hybrid checkpoint whose first GDN layer's input projection and output head are NVFP4, beside
+    ``mtp`` (name -> tensor) as its multi-token-prediction head's tensors."""
+    import numpy as np
+    import torch
+    from safetensors.torch import save_file
+
+    from emmy.compiler.loader.quant import quantize_nvfp4
+    from emmy.compiler.loader.synthesize import _NVFP4_CONFIG
+
+    config.quantization_config = _NVFP4_CONFIG
+    packed, scales, scale2 = quantize_nvfp4(np.random.default_rng(0).standard_normal((128, 64), dtype=np.float32))
+    head = quantize_nvfp4(np.random.default_rng(1).standard_normal((64, 64), dtype=np.float32))
+    base = "model.layers.0.linear_attn.in_proj_qkv"
+    save_file(
+        {
+            f"{base}.weight": torch.from_numpy(packed),
+            f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
+            f"{base}.weight_scale_2": torch.from_numpy(scale2),
+            f"{base}.input_scale": torch.tensor([0.05]),
+            # An NVFP4 output head with its activation's calibrated scale, which serving keeps coded and runs W4A4 as a
+            # program of its own.
+            "lm_head.weight": torch.from_numpy(head[0]),
+            "lm_head.weight_scale": torch.from_numpy(np.ascontiguousarray(head[1])).view(torch.float8_e4m3fn),
+            "lm_head.weight_scale_2": torch.from_numpy(head[2].reshape(())),
+            "lm_head.input_scale": torch.tensor(0.05),
+            # The trunk stores more layers than the MTP head, as every real checkpoint does: that count is what
+            # tells the two stacks apart, and a tie would pick one by string-hash order.
+            "model.layers.1.input_layernorm.weight": torch.ones(64, dtype=torch.bfloat16),
+            # An unquantized multi-token-prediction layer numbered like the trunk's first: not a twin's layer.
+            **(mtp or {"mtp.layers.0.linear_attn.in_proj_qkv.weight": torch.zeros(128, 64, dtype=torch.bfloat16)}),
+        },
+        str(path / "model.safetensors"),
+    )
+    config.save_pretrained(path)
+
+
 @pytest.mark.parametrize("quantized", [False, True])
 def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, quantized):
-    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch")
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
     from emmy.serving.twins import capture_twin_graphs
@@ -169,30 +237,19 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
 
     config = Qwen3_5TextConfig(**QWEN3_5_TINY)
     if quantized:
-        import numpy as np
-        from safetensors.torch import save_file
-
-        from emmy.compiler.loader.quant import quantize_nvfp4
-        from emmy.compiler.loader.synthesize import _NVFP4_CONFIG
-
-        config.quantization_config = _NVFP4_CONFIG
-        packed, scales, scale2 = quantize_nvfp4(np.random.default_rng(0).standard_normal((128, 64), dtype=np.float32))
-        base = "model.layers.0.linear_attn.in_proj_qkv"
-        save_file(
-            {
-                f"{base}.weight": torch.from_numpy(packed),
-                f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
-                f"{base}.weight_scale_2": torch.from_numpy(scale2),
-                f"{base}.input_scale": torch.tensor([0.05]),
-                # An unquantized multi-token-prediction layer numbered like the trunk's first: not a twin's layer.
-                "mtp.layers.0.linear_attn.in_proj_qkv.weight": torch.zeros(128, 64, dtype=torch.bfloat16),
-            },
-            str(tmp_path / "model.safetensors"),
-        )
-    config.save_pretrained(tmp_path)
+        _tiny_nvfp4_hybrid(tmp_path, config)
+    else:
+        config.save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16, symbolic=False)
     suffix = "@nvfp4" if quantized else ""
-    assert set(graphs) == {f"gdn1{suffix}", f"gdn16{suffix}", "pre1-global", "post1-global", "pre16-global", "post16-global"}
+    head = {"head-sym"} if quantized else set()
+    assert set(graphs) == {f"gdn1{suffix}", f"gdn16{suffix}", "pre1-global", "post1-global", "pre16-global", "post16-global"} | head
+    if quantized:
+        from emmy.compiler.pipeline.search.golden.format import program_text
+        from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph
+
+        assert program_text(graphs["head-sym"]) == program_text(head_graph(Nvfp4HeadSpec(64, 64, "float16", str(tmp_path))))
+        assert "to_f4e2m1" in program_text(graphs["head-sym"]), "the head runs W4A4, as the trunk's marked linears"
     for name, graph in graphs.items():
         if not name.startswith("gdn"):
             continue
@@ -208,11 +265,49 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
     symbolic = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16)
     assert set(symbolic) == set(graphs) | {"pre-sym-global", "post-sym-global"}
     # Width 1 serves any token count without padding, so a GDN layer has it whatever widths attention gets.
-    assert set(capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0)) == {
+    assert (
+        set(capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0))
+        == {
+            f"gdn1{suffix}",
+            "pre-sym-global",
+            "post-sym-global",
+        }
+        | head
+    )
+    # A head split over ranks decodes into vLLM's parameter instead.
+    assert set(capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0, expert_slices=2)) == {
         f"gdn1{suffix}",
         "pre-sym-global",
         "post-sym-global",
     }
+
+
+@pytest.mark.parametrize("coded_head", [False, True])
+def test_a_dense_mtp_head_beside_a_coded_trunk_has_twins_of_its_own(tmp_path, coded_head):
+    """Under speculative decoding a checkpoint with an MTP head traces the head's prologue. A coded trunk's twins are
+    spelled from the checkpoint, so they carry the head's layer only when the checkpoint codes it too; a head stored
+    dense gets its layer's ``pre``/``post`` twins at every width, read as traced."""
+    torch = pytest.importorskip("torch")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+
+    from emmy.serving.twins import capture_twin_graphs
+    from tests.serving.helpers import QWEN3_5_TINY
+
+    base = "mtp.layers.0.self_attn.q_proj"
+    head = {f"{base}.weight": torch.zeros(128, 64, dtype=torch.bfloat16), "mtp.fc.weight": torch.zeros(64, 128, dtype=torch.bfloat16)}
+    if coded_head:
+        head[f"{base}.weight_scale"] = torch.ones(128, 4, dtype=torch.float32).to(torch.float8_e4m3fn)
+    _tiny_nvfp4_hybrid(tmp_path, Qwen3_5TextConfig(**QWEN3_5_TINY, mtp_num_hidden_layers=1), mtp=head)
+
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16, verify_width=2)
+    from emmy.compiler.pipeline.search.golden.format import program_text
+
+    own = {name for name in graphs if name.endswith("-mtp")}
+    assert {"mtp-prologue-sym", "gdn2rows@nvfp4"} <= set(graphs)
+    assert own == (set() if coded_head else {f"{half}{width}-mtp" for half in ("pre", "post") for width in ("1", "16", "-sym")})
+    # The head's layer has the trunk's full-attention shape, and the tiny trunk keeps that layer dense too.
+    for name in own:
+        assert program_text(graphs[name]) == program_text(graphs[name.replace("-mtp", "-global")])
 
 
 def test_bf16_serving_config_captures_bf16_twins_with_static_gdn(tmp_path):
@@ -367,21 +462,21 @@ def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp
         "expert1",
         "expert256",
         "expert-slots",
+        "qk-norm-rope-sym",
     }
     pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
     assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
     assert [tuple(post.nodes[i].output.shape) for i in post.inputs] == [(4, 32), (4, 64)]
-    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2)]
+    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2), (4, 32)]
     assert [tuple(expert.nodes[i].output.shape) for i in expert.inputs] == [(4, 32), (32, 32), (32, 16)]
     token_dim = graphs["pre-sym"].nodes[graphs["pre-sym"].inputs[0]].output.shape[0]
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
-def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_checkpoint(tmp_path, monkeypatch):
-    """RadixArk's Qwen3.8-Flash-Next NVFP4 codes the routed experts alone, so the trunk twins stay as traced and the
-    expert twins take each expert's packed pairs, e4m3 block scales and per-row global scale as inputs. The weight
-    index answers which trunk weights are coded, so capture never fetches the shards."""
+def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, text=None, **capture):
+    """The twins of a tiny Qwen3.8-Flash-Next coded as RadixArk's NVFP4 is, from its config and weight index alone
+    (``text``: overrides of the tiny text config)."""
     pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("transformers.models.qwen4_exp")
@@ -395,7 +490,7 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
     group = {"weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16}, "targets": ["Linear"]}
     qc = {"quant_method": "modelopt", "quant_algo": "NVFP4", "config_groups": {"group_0": group}, "ignore": ignore}
     vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32)
-    config = transformers.Qwen4ExpConfig(text_config=QWEN4_EXP_TINY, vision_config=vision, quantization_config=qc)
+    config = transformers.Qwen4ExpConfig(text_config={**QWEN4_EXP_TINY, **(text or {})}, vision_config=vision, quantization_config=qc)
     config.save_pretrained(tmp_path)
     head = "model.language_model.layers"
     keys = [f"{head}.{i}.{m}_hyper_connection.hc_norm.weight" for i in range(4) for m in ("attn", "mlp")]
@@ -407,10 +502,17 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
         raise AssertionError("capture fetched the checkpoint")
 
     monkeypatch.setattr(safetensors, "_resolve_model_dir", no_fetch)
-    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    return capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, **capture)
+
+
+def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_checkpoint(tmp_path, monkeypatch):
+    """RadixArk's Qwen3.8-Flash-Next NVFP4 codes the routed experts alone, so the trunk twins stay as traced and the
+    expert twins take each expert's packed pairs, e4m3 block scales and per-row global scale as inputs. The weight
+    index answers which trunk weights are coded, so capture never fetches the shards."""
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch)
     assert set(graphs) == {f"pre{w}" for w in ("4", "-sym")} | {f"post{w}" for w in ("4", "-sym")} | {
         f"expert{w}@nvfp4" for w in ("4", "-sym", "1", "256", "-slots")
-    }
+    } | {"qk-norm-rope-sym"}
     expert = graphs["expert4@nvfp4"]
     shapes = {i: (tuple(expert.nodes[i].output.shape), expert.nodes[i].output.dtype.name) for i in expert.inputs[1:]}
     assert shapes == {
@@ -418,6 +520,129 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
         "w_gate_up_scale": ((32, 2), "f8e4m3"), "w_gate_up_scale_2": ((32, 1), "f32"),
         "w_down_scale": ((32, 1), "f8e4m3"), "w_down_scale_2": ((32, 1), "f32"),
     }  # fmt: skip
+
+
+def test_qwen4_exp_query_key_twin_takes_a_ranks_heads(tmp_path, monkeypatch):
+    """The sparse attention's query and key norms and rope trace at a rank's heads: six of the 24 query heads, each
+    beside its gate, and one key and one value head of the two, which every rank of four holds. The program takes the
+    two norm weights and the rotary cache, half of each head wide here, as inputs, and returns the query, the key and
+    the gate."""
+    import torch
+
+    from emmy.compiler.pipeline.search.golden.format import program_text
+    from emmy.serving.gen_runner import query_key_graph
+
+    heads = {"num_attention_heads": 24, "num_key_value_heads": 2, "moe_intermediate_size": 64}
+    graph = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, heads, expert_slices=4)["qk-norm-rope-sym"]
+    shapes = {i: tuple(str(d) for d in graph.nodes[i].output.shape) for i in graph.inputs}
+    assert shapes == {
+        "qkv": ("num_tokens", str(14 * 16)), "positions": ("num_tokens",), "q_weight": ("16",), "k_weight": ("16",),
+        "cos_sin": ("64", "8"),
+    }  # fmt: skip
+    assert [tuple(str(d) for d in graph.nodes[o].output.shape)[1:] for o in graph.outputs] == [("96",), ("16",), ("96",)]
+    assert program_text(graph) == program_text(query_key_graph(6, 1, 16, 8, 64, 1e-6, torch.float16)[0])
+
+
+@pytest.mark.parametrize("rows", [4, 256])
+def test_qwen4_exp_nvfp4_sliced_experts_add_the_grouped_prefill_twins(tmp_path, monkeypatch, rows):
+    """Sliced across ranks, the experts also take the grouped prefill programs: ``EXPERT_GROUP`` experts per launch,
+    each against a block of the slot width's rows or of ``EXPERT_PREFILL_M`` rows, over the layer's E-stacked packed
+    experts. Each rank's slice of an expert keeps whole NVFP4 blocks: 64 intermediate channels over four ranks."""
+    from emmy.serving.release import EXPERT_GROUP
+
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, {"moe_intermediate_size": 64}, expert_slices=4, slot_width=4)
+    name = f"expert-group{EXPERT_GROUP}x{rows}@nvfp4"
+    assert {name, "expert-slots2@nvfp4", "expert-slots4@nvfp4"} <= set(graphs)
+    group, slots = graphs[name], graphs["expert-slots4@nvfp4"]
+    shapes = {i: (tuple(group.nodes[i].output.shape), group.nodes[i].output.dtype.name) for i in group.inputs}
+    stacked = {i: (tuple(slots.nodes[i].output.shape), slots.nodes[i].output.dtype.name) for i in slots.inputs}
+    assert shapes.pop("x") == ((EXPERT_GROUP, rows, 32), "f16")
+    assert shapes.pop("sel") == ((EXPERT_GROUP,), "i64")
+    assert shapes == {i: stacked[i] for i in shapes} and next(iter(shapes.values()))[0][0] == 4
+    assert tuple(group.nodes[group.outputs[0]].output.shape) == (EXPERT_GROUP, rows, 32)
+    # A slot program of up to two rows takes each row's router scores, in the model dtype, and the shared expert's
+    # output, and returns the routed sum; a wider one returns every pick's partial.
+    summed = graphs["expert-slots2@nvfp4"]
+    ins = {i: (tuple(summed.nodes[i].output.shape), summed.nodes[i].output.dtype.name) for i in summed.inputs}
+    assert ins["scores"] == (ins["sel"][0], "f16") and ins["shared"] == ins["x"] == ((2, 32), "f16")
+    assert tuple(summed.nodes[summed.outputs[0]].output.shape) == (2, 32)
+    assert "scores" not in stacked and len(slots.nodes[slots.outputs[0]].output.shape) == 3
+
+
+def test_qwen4_exp_nvfp4_twins_trace_into_the_inventory(tmp_path, monkeypatch):
+    """Every twin lowers into the inventory ``emmy trace --serving-twins`` writes. The fixed-slot expert program reads
+    each selected expert's per-row global scale inside the down projection's reduce loop, indexed by the expert it
+    loaded: a value, not a coordinate, which the lowering places by the coordinates of the term defining it. Its
+    kernel's body, placed back from the lifted term, computes exactly what the loop it was lifted from computes."""
+    import numpy as np
+
+    from emmy.compiler import pipeline
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.loop.ir import LoopOp
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.pipeline.search.golden import GoldenFile, write_trace_inventories
+    from emmy.compiler.pipeline.search.golden.restamp import lift_targets
+
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path / "model", monkeypatch)
+    ctx = Context.from_target((7, 0))
+    write_trace_inventories(graphs, tmp_path / "golden.json", ctx=ctx)
+    assert len(GoldenFile.load(tmp_path / "golden.json").programs) == len(graphs)
+
+    slots = graphs["expert-slots@nvfp4"]
+    fused = Pipeline.build(pipeline.LOOP_PASSES).run(slots.copy(), ctx=ctx, db=None)
+    (loop,) = (node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
+    (tile,) = lift_targets(slots, ctx).values()
+    rng = np.random.default_rng(0)
+
+    def sample(name, tensor):
+        shape = tuple(dim.as_static() for dim in tensor.shape)
+        if name == "sel":  # the experts each slot takes, of the four
+            return rng.integers(0, 4, size=shape).astype(tensor.dtype.np)
+        if tensor.dtype.name == "f8e4m3":  # block scales: bytes of finite values, 0.25 to 0.47
+            return rng.integers(0x30, 0x40, size=shape).astype(np.uint8)
+        if tensor.dtype.name == "f4e2m1x2":  # packed pairs: every byte is two finite values
+            return rng.integers(0, 256, size=shape).astype(np.uint8)
+        return rng.standard_normal(shape).astype(tensor.dtype.np)
+
+    inputs = [sample(name, tensor) for name, tensor in tile.inputs.items()]
+    want = LoopOp(body=loop.body, inputs=loop.inputs, outputs=loop.outputs).forward(*inputs)
+    got = LoopOp(body=tile.loop_body, inputs=tile.inputs, outputs=tile.outputs).forward(*inputs)
+    for expected, actual in zip(want, got, strict=True):
+        assert np.isfinite(expected).all()
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_qwen4_exp_nvfp4_slots_kernel_cuts_place_the_gathered_scale_under_its_expert(tmp_path, monkeypatch):
+    """Every cut the cut pass offers the fixed-slot kernel builds pieces that lower. A piece holding the gate/up
+    product reads each selected expert's global scale outside its reduce loop, indexed by the expert a sibling term
+    loads per slot: the lowering places that read under the slot loop, not above it, where it would read the expert
+    before any slot loaded one and the piece's identity could not order its body."""
+    from importlib import import_module
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import Match, Rule
+    from emmy.compiler.pipeline.search.golden.restamp import lift_targets
+    from emmy.compiler.wire import kernel_identity
+
+    cut = import_module("emmy.compiler.pipeline.passes.tile.cut.030_cut")
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path / "model", monkeypatch)
+    (tile,) = lift_targets(graphs["expert-slots@nvfp4"], Context.from_target((7, 0))).values()
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    arms = [option for option in cut.rewrite(match, graph.nodes[tile.name]) if "cut" in option.knobs.values()]
+    pieces = [
+        node.op.with_io(fragment, node)
+        for fragment in (arm.expand()[0] for arm in arms)
+        for node in fragment.nodes.values()
+        if isinstance(node.op, TileOp)
+    ]
+    assert pieces
+    for piece in pieces:
+        assert kernel_identity(piece) is not None
 
 
 @pytest.mark.parametrize(("inter", "slices"), [(32, 1), (64, 2)])
@@ -428,7 +653,8 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     runs. ``w_down``'s packed shape also pins the layout the caller passes down: these experts are
     ``F.linear`` parameters, so the blocks lead with ``out``; the ``x @ W`` reading would produce
     (16, 2, 16) here instead. Served across tensor-parallel ranks, each rank holds a slice of every
-    expert, so the twin is the sliced program: intermediate 64 over two ranks records the 32 one."""
+    expert, so the twin is the sliced program: intermediate 64 over two ranks records the 32 one, and the
+    sliced experts also take the grouped prefill program."""
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     from safetensors.torch import save_file
@@ -482,7 +708,7 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
         "expert4@mxfp4",
         "expert256@mxfp4",
         "expert-sym@mxfp4",
-    } | {"expert-slots@mxfp4"}
+    } | {"expert-slots@mxfp4"} | ({"expert-group32x256@mxfp4"} if slices > 1 else set())
     expert = graphs["expert4@mxfp4"]
     assert set(expert.inputs) >= {"w_gate_up", "w_gate_up_scale", "w_down", "w_down_scale"}
     by_id = {i: expert.nodes[i].output for i in expert.inputs}
@@ -841,6 +1067,114 @@ def _static_fp8_checkpoint(path: Path, *, dynamic: bool = False) -> None:
     save_file(tensors, str(path / "model.safetensors"))
 
 
+def _ct_int4_checkpoint(path: Path) -> None:
+    """A tiny two-layer Qwen3 checkpoint in llm-compressor's ``pack-quantized`` int4 form, the format of the
+    Qwen3.8-27B W4A16 recipe: every linear stores ``weight_packed`` (eight nibbles per i32 word down the input
+    dim, kept in torch's ``(out, in)`` orientation), ``weight_zero_point``, bf16 ``weight_scale`` over 32-element
+    input groups, and ``weight_shape``. No plain ``.weight`` exists for any of them."""
+    import torch
+    import transformers
+    from safetensors.torch import save_file
+
+    hidden, inter, heads, kv, head_dim, layers, group = 64, 128, 4, 2, 16, 2, 32
+    config = transformers.Qwen3Config(
+        vocab_size=64, hidden_size=hidden, intermediate_size=inter, num_hidden_layers=layers,
+        num_attention_heads=heads, num_key_value_heads=kv, head_dim=head_dim, max_position_embeddings=64,
+    )  # fmt: skip
+    config.save_pretrained(path)
+    document = json.loads((path / "config.json").read_text())
+    document["quantization_config"] = {
+        "quant_method": "compressed-tensors",
+        "format": "pack-quantized",
+        "config_groups": {
+            "group_0": {"weights": {"type": "int", "num_bits": 4, "group_size": group, "symmetric": False}, "targets": ["Linear"]}
+        },
+    }
+    (path / "config.json").write_text(json.dumps(document, indent=1))
+
+    shapes = {
+        "self_attn.q_proj": (heads * head_dim, hidden),
+        "self_attn.k_proj": (kv * head_dim, hidden),
+        "self_attn.v_proj": (kv * head_dim, hidden),
+        "self_attn.o_proj": (hidden, heads * head_dim),
+        "mlp.gate_proj": (inter, hidden),
+        "mlp.up_proj": (inter, hidden),
+        "mlp.down_proj": (hidden, inter),
+    }
+    generator = torch.Generator().manual_seed(0)
+    tensors: dict[str, object] = {}
+    for layer in range(layers):
+        for module, (n, k) in shapes.items():
+            base = f"model.layers.{layer}.{module}"
+            tensors[f"{base}.weight_packed"] = torch.randint(0, 2**31 - 1, (n, k // 8), dtype=torch.int32, generator=generator)
+            tensors[f"{base}.weight_zero_point"] = torch.randint(0, 2**31 - 1, (n // 8, k // group), dtype=torch.int32, generator=generator)
+            tensors[f"{base}.weight_scale"] = (torch.rand((n, k // group), generator=generator) * 0.01).to(torch.bfloat16)
+            tensors[f"{base}.weight_shape"] = torch.tensor([n, k], dtype=torch.int64)
+    save_file(tensors, str(path / "model.safetensors"))
+
+
+def test_packed_int4_serving_twins_carry_the_coded_weights(tmp_path):
+    """A twin of a compressed-tensors W4A16 checkpoint records the program serving compiles and the layer golden
+    holds: the packed i32 words under their checkpoint keys, with the unpack and dequantize algebra inside the
+    program, and no dense 16-bit weight. Before this, the capture traced dense weights the checkpoint does not
+    hold and wrote them under the checkpoint's name."""
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.serving.twins import capture_twin_graphs
+
+    _ct_int4_checkpoint(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
+    assert set(graphs) == {"pre4@ct-int4", "post4@ct-int4"}
+
+    def constants(graph, dtype):
+        return {
+            n.op.source_path: tuple(d.as_static() for d in n.output.shape)
+            for n in graph.nodes.values()
+            if isinstance(n.op, ConstantOp) and n.op.source_path and n.output.dtype.name == dtype
+        }
+
+    assert constants(graphs["pre4@ct-int4"], "i32") == {
+        "model.layers.0.self_attn.q_proj.weight_packed": (64, 8),
+        "model.layers.0.self_attn.q_proj.weight_zero_point": (8, 2),
+        "model.layers.0.self_attn.k_proj.weight_packed": (32, 8),
+        "model.layers.0.self_attn.k_proj.weight_zero_point": (4, 2),
+        "model.layers.0.self_attn.v_proj.weight_packed": (32, 8),
+        "model.layers.0.self_attn.v_proj.weight_zero_point": (4, 2),
+    }
+    assert set(constants(graphs["post4@ct-int4"], "i32")) == {
+        f"model.layers.0.{module}.{leaf}"
+        for module in ("self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+        for leaf in ("weight_packed", "weight_zero_point")
+    }
+    for graph in graphs.values():
+        graph.validate()
+        assert not {path for path in constants(graph, "f16") if path.endswith("_proj.weight")}
+        assert _structure(Graph.from_dict(json.loads(json.dumps(graph.to_dict())))) == _structure(graph)
+
+
+def test_serving_twins_refuse_a_quantization_they_do_not_spell(tmp_path):
+    """A checkpoint whose declared quantization no twin lane spells gets no twin at all: the dense program the
+    skeleton would trace holds weights the checkpoint does not, and the file would still name the checkpoint as
+    its model. The refusal names the format."""
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.serving.twins import capture_twin_graphs
+
+    config = transformers.Qwen3Config(
+        vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16, max_position_embeddings=64,
+    )  # fmt: skip
+    config.save_pretrained(tmp_path)
+    document = json.loads((tmp_path / "config.json").read_text())
+    document["quantization_config"] = {"quant_method": "hqq", "weight_quant_params": {"nbits": 4, "group_size": 64}}
+    (tmp_path / "config.json").write_text(json.dumps(document, indent=1))
+
+    with pytest.raises(ValueError, match="'hqq'"):
+        capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
+
+
 def test_static_fp8_serving_twins_carry_the_declared_w8a8_program(tmp_path):
     """A twin of a static-FP8 checkpoint records the checkpoint's own program: FP8 weight bits
     under their checkpoint keys, and one FP8 encode per calibrated activation scale. Nothing is
@@ -966,7 +1300,7 @@ def test_fp8_trunk_stays_coded_on_the_serving_lane(tmp_path, dynamic):
     assert decoded["trunk"] == "values"
 
 
-@pytest.mark.parametrize("scheme", ["nvfp4", "fp8", "fp8-dynamic"])
+@pytest.mark.parametrize("scheme", ["nvfp4", "fp8", "fp8-dynamic", "ct-int4"])
 def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
     """The transfer property, asserted directly: the captured twin and the graph
     ``gen_runner._compile_split`` stamps on the same wrapper at the same width are the same graph.
@@ -988,7 +1322,7 @@ def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
     if scheme == "fp8-dynamic":
         _static_fp8_checkpoint(tmp_path, dynamic=True)
     else:
-        {"nvfp4": _nvfp4_checkpoint, "fp8": _static_fp8_checkpoint}[scheme](tmp_path)
+        {"nvfp4": _nvfp4_checkpoint, "fp8": _static_fp8_checkpoint, "ct-int4": _ct_int4_checkpoint}[scheme](tmp_path)
     suffix = scheme.removesuffix("-dynamic")
     twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
 
@@ -1037,3 +1371,39 @@ def _structure(graph: Graph):
             for nid, node in graph.nodes.items()
         },
     )
+
+
+def test_a_quantized_mtp_head_loads_from_its_own_keys(tmp_path):
+    """The shard loader in ``mtp`` mode fills a one-layer twin from the head's ``mtp.`` leaves alone: each module key
+    names the head's checkpoint key, so the coded weights stream from the head and never from the trunk's layer 0."""
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    import copy
+
+    import torch
+    from safetensors.torch import load_file, save_file
+
+    from emmy.compiler.trace.huggingface import _auto_config_from_pretrained, load_quantized_split
+    from emmy.serving.gen_runner import checkpoint_key_map
+
+    _static_fp8_checkpoint(tmp_path, dynamic=True)
+    path = tmp_path / "model.safetensors"
+    tensors = load_file(path)
+    head = {
+        key.replace("model.layers.1.", "mtp.layers.0."): value.clone()
+        for key, value in tensors.items()
+        if key.startswith("model.layers.1.")
+    }
+    head["mtp.norm.weight"] = torch.full((64,), 3.0, dtype=torch.bfloat16)
+    tensors["model.norm.weight"] = torch.full((64,), 2.0, dtype=torch.bfloat16)
+    save_file(tensors | head, str(path))
+    config = copy.deepcopy(_auto_config_from_pretrained(tmp_path))
+    config.num_hidden_layers = 1
+
+    model, store = load_quantized_split(tmp_path, torch.float16, compress_trunk=True, include_embed=False, config=config, mtp=True)
+
+    assert len(model.model.layers) == 1
+    assert torch.equal(model.model.norm.weight, torch.full((64,), 3.0, dtype=torch.float16))
+    assert set(store["keys"].values()) == set(head)
+    keys = checkpoint_key_map(model, store["keys"])
+    assert keys[id(model.model.layers[0].self_attn.q_proj.weight)] == "mtp.layers.0.self_attn.q_proj.weight"

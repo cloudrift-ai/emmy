@@ -1,11 +1,11 @@
 .PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-corpus-regen lint format git-sha-guard pypi-dist \
-	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
+	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push native-image
 
 help:
 	@echo "Server Benchmark Makefile"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  setup          - Install system dependencies, create venv, and install Python packages"
+	@echo "  setup          - Create venv, install Python packages, build the Rust extensions"
 	@echo "  setup-agent    - Create venv and install API-agent workflow dependencies"
 	@echo "  lint           - Run linter and format checks"
 	@echo "  format         - Auto-format code and fix lint violations"
@@ -21,6 +21,8 @@ help:
 	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, and publish a"
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
+	@echo "  native-image RECIPE=<dir> - Bake a recipe's native lane (emmy-server + pack) on the target GPU"
+	@echo "                    (docker/emmy-native)"
 	@echo "  test-durations - Re-measure tests/durations_cpu.json (the CI test-balancing baseline)"
 	@echo "  test-corpus-regen - Restamp the realization corpus after a lowering / codec change (COMPLETE=1 adds entries)"
 	@echo "  clean          - Remove virtual environment and generated files"
@@ -43,14 +45,19 @@ venv/.setup-agent-complete: $(AGENT_SOURCE)/pyproject.toml
 
 # Keep the completion marker inside the venv so an interrupted dependency install
 # cannot leave `make setup` permanently succeeding with an unusable environment.
-# pyproject.toml is a prerequisite so dependency edits also refresh the venv.
-venv/.setup-complete: pyproject.toml
+# The prerequisites are every input of the install: the package metadata and the Rust
+# sources pip builds into the package, so a dependency or Rust edit refreshes the venv.
+RUST_SOURCES := Cargo.toml Cargo.lock $(shell find crates -name '*.rs' -o -name Cargo.toml)
+venv/.setup-complete: pyproject.toml $(RUST_SOURCES)
 	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
 	fi
-	@echo "Installing Python dependencies (builds the runtime extension with cargo)..."
-	./venv/bin/pip install -e ".[dev]"
+	@echo "Installing Python dependencies and building the Rust extensions with cargo..."
+	@./venv/bin/pip install -e ".[dev]" || { \
+		stray=$$(find . \( -path ./venv -o -path ./.git \) -prune -o ! -user "$$(id -u)" -print -quit); \
+		[ -z "$$stray" ] || echo "❌ $$stray belongs to another user (a build ran as root?): sudo chown -R $$(id -un): ."; \
+		exit 1; }
 	@touch $@
 
 setup-ci:
@@ -79,17 +86,13 @@ format: setup
 	./venv/bin/ruff check --fix
 	@for file in tests/durations_*.json; do ./venv/bin/python -m json.tool --sort-keys --indent 1 "$$file" "$$file"; done
 
-# Compile CUDA kernels at -Xcicc -O1: the CORRECTNESS lane — -O1 changes runtime perf,
-# not numerics, and the deployable perf tests (tests/perf, -m perf) run at -O3 via
-# `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3. The saving is
-# ~12% cold / ~6% warm on a 5090 (923s vs 1031s cold), not the "~3x" this comment used
-# to claim — that predated the WMMA->mma.sync migration which removed the cicc unroll
-# blowup it rested on. See AGENTS.md for the measurement.
-# `EMMY_GOLDEN_FILE=` (set, empty) deploys no repository golden in this lane: the correctness lane never asks how
+# Every compile is the deployable one; the perf tests (tests/perf, -m perf) are skipped here and run via
+# `make bench-kernels`.
+# `EMMY_GOLDEN_FILE=` (set, empty) deploys no repository golden in this lane: the suite never asks how
 # fast a pick is, and importing a card's goldens is work every worker process would repeat. Tests that need golden
 # evidence scope it themselves (`--golden PATH`, `records_override`), which takes precedence.
 test: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup
+	EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup
 
 # Restamp the realization corpus's derived half (program wire, name, canonical knobs)
 # after a lowering or schedule-codec change. `make test` DETECTS staleness on any machine,
@@ -102,7 +105,7 @@ test-corpus-regen: setup
 # commits the result to main. xdist uses all available cores for the CPU suite; GPU
 # timings remain in their separate checked-in file.
 test-durations: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n auto --dist=loadgroup --write-durations
+	EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n auto --dist=loadgroup --write-durations
 
 # The name the docs reference; the stock (no tune DB) lane is the default.
 bench-kernels: bench-kernels-clean
@@ -204,7 +207,8 @@ serve-config: serve-config-guard
 	@echo "serve      = --max-model-len $(SERVE_MAX_MODEL_LEN) --max-num-batched-tokens $(SERVE_MAX_NUM_BATCHED_TOKENS) --gpu-memory-utilization $(SERVE_GPU_MEM_UTIL) (decode bucket $(SERVE_DECODE_BUCKET))"
 	@echo "captures   = $(if $(SERVE_CAPTURE_SIZES_VALUE),$(SERVE_CAPTURE_SIZES_VALUE),the default power-of-two ladder)"
 	@echo "quant arm  = $(if $(SERVE_QUANT),$(SERVE_QUANT),none - vLLM reads the checkpoint as-is)"
-	@echo "runner mem = embed-host $(if $(SERVE_EMBED_HOST),$(SERVE_EMBED_HOST),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
+	@echo "plugin     = $(if $(SERVE_ARCHITECTURE),$(SERVE_ARCHITECTURE),EmmyGenModel)"
+	@echo "runner mem = embed pages $(if $(SERVE_EMBED_GPU),$(SERVE_EMBED_GPU),default), vision blocks $(if $(SERVE_VISION_GPU),$(SERVE_VISION_GPU),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
 	@echo "golden gate= $(if $(filter 1,$(SERVE_STATIC_ONLY)),static-only M=1,standard widths + symbolic)"
 	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
 	@echo "server env = $(SERVE_ENV_VALUE)"
@@ -258,12 +262,14 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg DECODE_BUCKET=$(SERVE_DECODE_BUCKET) \
 		--build-arg REVISION=$(SERVE_REVISION) \
 		--build-arg QUANT=$(SERVE_QUANT) \
+		--build-arg ARCHITECTURE=$(SERVE_ARCHITECTURE) \
 		--build-arg 'CAPTURE_SIZES=$(SERVE_CAPTURE_SIZES_VALUE)' \
 		--build-arg 'EXTRA_ARGS=$(SERVE_EXTRA_ARGS_VALUE)' \
 		--build-arg 'RUNTIME_ENV=$(SERVE_ENV_VALUE)' \
 		--build-arg RUNTIME_BASE=$(VLLM_BASE_IMAGE) \
-		--build-arg NVCC_VERSION="$$(docker run --rm --entrypoint nvcc $(VLLM_EMMY_TAG) --version | sed -n 's/.*, V\([0-9.]*\).*/\1/p')" \
-		--build-arg EMBED_HOST=$(SERVE_EMBED_HOST) \
+		--build-arg PTXAS_VERSION="$$(docker run --rm --entrypoint ptxas $(VLLM_EMMY_TAG) --version | sed -n 's/.*, V\([0-9.]*\).*/\1/p')" \
+		--build-arg EMBED_GPU=$(SERVE_EMBED_GPU) \
+		--build-arg VISION_GPU=$(SERVE_VISION_GPU) \
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
 		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
 		--build-arg M1_TIER=$(SERVE_M1_TIER) \
@@ -276,6 +282,12 @@ serve-verify: serve-config-guard
 serve-push: serve-config-guard
 	@echo "ERROR: direct serving-image pushes are disabled; use 'emmy publish <recipe>'." >&2
 	@exit 2
+
+# --- a recipe's native lane as one serving image (docker/emmy-native): the pack prepared from the
+# --- recipe golden on the target GPU, emmy-server and the runtime worker. Nothing is pushed.
+native-image: setup git-sha-guard
+	@test -n "$(RECIPE)" || (echo "usage: make native-image RECIPE=recipes/<model>"; exit 1)
+	docker/emmy-native/bake.sh $(RECIPE)
 
 bench: setup
 	@echo "Running benchmarks..."

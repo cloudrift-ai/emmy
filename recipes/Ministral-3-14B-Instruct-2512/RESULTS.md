@@ -148,6 +148,6 @@ parity are all outstanding. Multimodal input was not exercised.
 
 ```bash
 cp recipes/Ministral-3-14B-Instruct-2512/golden/rtx5090_sm120.json /tmp/ministral-5090.json
-EMMY_TUNE_DB=/tmp/ministral-replay.db EMMY_NVCC_FLAGS= emmy run --golden /tmp/ministral-5090.json --bench \
+EMMY_TUNE_DB=/tmp/ministral-replay.db emmy run --golden /tmp/ministral-5090.json --bench \
   --strict-evidence --bench-backends eager,tcompile,emmy
 ```

@@ -1,0 +1,12 @@
+[package]
+name = "emmy-ptx"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "The compiler from Kernel IR to NVIDIA PTX: an instruction list, its builder, printer and verifier, and the rule of each statement."
+
+[dependencies]
+emmy-ir = { path = "../emmy-ir" }
+
+[dev-dependencies]
+libm = "0.2"

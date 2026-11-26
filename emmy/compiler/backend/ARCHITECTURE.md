@@ -53,7 +53,7 @@ so `torch.compile` can trace it. A single-output graph returns its tensor direct
 ordered tuple following `graph.outputs`, matching the backend result boundary. Symbolic
 graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the supplied tensors
 (the CUDA launch convention) and bakes the env into the per-node callables — shape-resolving sites (`ReshapeOp` target
-shape, `IndexMapOp` out-shape and coord/select exprs) eval through it, so a dynamic frontend provenance slice
+shape, `IndexMapOp` out-shape and coord/select expressions) eval through it, so a dynamic frontend provenance slice
 gets the same vs-torch comparison as a static one (benched at the `Dim` hint by
 `commands/run.py::bench_lowered_vs_torch`, which sizes its random inputs by hint-resolving symbolic dims). Used to
 benchmark decoded golden programs and in-memory provenance slices against torch.
@@ -125,36 +125,48 @@ generator, not fusion.**
 
 ## CUDA backend (`cuda/`)
 
-See `cuda/ARCHITECTURE.md`. Runs the full lowering chain, compiles every kernel with `nvcc`
+See `cuda/ARCHITECTURE.md`. Runs the full lowering chain, assembles every kernel's PTX with `ptxas`
 into the cubin cache, and executes the program through the Rust runtime.
-The `COLD_CACHE` input regime measures one replay per kernel after same-stream L2 eviction outside the event
-window. It reports a sum of per-kernel times, with no whole-program timing; worker requests carry the regime
+The `COLD_CACHE` input regime measures one replay per kernel after same-stream eviction of L2 and the instruction
+caches outside the event window. It reports a sum of per-kernel times, with no whole-program timing; worker requests carry the regime
 explicitly so a persistent worker cannot reuse a previous request's cache mode.
 
 ## Execution plan + pack (`plan.py`, `pack.py`)
 
 `save_executable` bundles an existing pack with resolved constant/input bytes and its cubins for independent execution.
-It accepts explicit contiguous storage bytes and publishes only complete new directories. The Rust runtime supports
-static ordinary-pointer plans and rejects unsupported features; its contract and build instructions live in
-[`crates/emmy-runtime/ARCHITECTURE.md`](../../../crates/emmy-runtime/ARCHITECTURE.md). `native.py` reuses benchmark process
-supervision for the native worker and compares it with the existing Python dispatcher on identical artifacts through
-`emmy run --pack DIR --bench --json PATH`. This experimental comparison does not replace the general run/tune dispatcher.
+It accepts explicit contiguous storage bytes and publishes only complete new directories. The bytes of a buffer the
+runtime's pager holds are kept once for every program that declares it, as its pages one after another beside how many
+of its first pages are resident, each written from a function the caller passes so the export never holds every
+buffer at once. The Rust runtime
+supports static ordinary-pointer plans and rejects unsupported features; its contract and build instructions live in
+[`crates/emmy-runtime/ARCHITECTURE.md`](../../../crates/emmy-runtime/ARCHITECTURE.md). `native.py` reuses benchmark
+process supervision for the native worker and compares it with the existing Python dispatcher on identical artifacts
+through `emmy run --pack DIR --bench --json PATH`. This experimental comparison does not replace the general run/tune
+dispatcher. `splice` joins one plan into another under a prefix — the paging programs into a plan, native preparation's
+programs into its step — sharing each buffer the target already holds under its mapped name and merging kernels by name
+(`merge_kernels`: a different source under a taken name takes a suffix from its own).
+
+**Kernels of one identity share one source.** A kernel's name is `k_` and the first 12 hex digits of its exact
+identity (`pipeline/ARCHITECTURE.md`). Lowering gives every buffer of that identity its role slot (`buf0`, `buf1`,
+…) and declares the parameters in role order, inputs before outputs (`canonical_buffers`), so kernels of one identity
+under one schedule compile to one PTX text and share one cubin; `arg_order` maps the slots back to the graph's
+buffers in the same order. A buffer outside the identity (a neighbor's delegated zero-init) keeps its name. The plan
+keeps one source per name. A kernel of a taken name whose code differs — a neighbor's delegated zero-init, another
+schedule pick — launches under its own symbol, `k_<hash>_<8 hex digits of its source>`, the same rule `merge_kernels`
+applies when programs merge. No source is dropped in favor of another.
 
 `plan.py` defines the **execution plan** — the serializable runtime projection of a lowered `Graph[CudaOp]`:
 buffer specs (one `BufferSpec` per BUFFER — a multi-output node mints one per output slot, each with its own
 role via `graph.buffer_role`), scalar/runtime constants, the launch list (`LaunchSpec.writes` names every
 buffer a launch produces; a scratch planner's first-write test reads it, falling back to `node_id` for plans
-stored before the field existed), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
+stored before the field existed; `LaunchSpec.size_range` limits a launch to a range of one symbolic size, as native
+runs each range of windows' attention), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
 cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op vocabulary applied
-with pure numpy). A kernel ref also records `arch_specific` — whether it must compile for the arch-SUFFIXED
-target (`sm_120a`, `sm_90a`). Three unrelated instruction families need that suffix: TMA, which announces itself
-through the launch's descriptors, and the block-scaled fp4 mma and Hopper's `wgmma`, which a plan can only recognize
-by their wrapper names in
-the rendered source. Plans stored under the older `uses_tma` key still read, since the meaning is the same and
-only the name narrowed. A kernel ref also records `dependent_launch`, read the same way off the source: every kernel
-the renderer emits waits on the grid ahead of it (`griddepcontrol.wait`, compiled in on sm_90 and later) before its
-first memory access, and that wait is what lets the runtime launch it as a programmatic dependent launch. A plan
-stored before the renderer emitted the wait carries no flag, and its kernels launch serialized.
+with pure numpy). Whether a kernel needs the arch-SUFFIXED target (`sm_120a`, `sm_90a`) is no field: its PTX names
+its target, and ptxas assembles for it. A kernel ref records `dependent_launch`, which the PTX compiler reports: a
+kernel for sm_90 and later waits on the grid ahead of it (`griddepcontrol.wait`) before its first memory access, and
+that wait is what lets the runtime launch it as a programmatic dependent launch. A plan stored before the wait
+carries no flag, and its kernels launch serialized.
 A deterministic source-free bind record is the third binding kind: `plan_from_graph`
 evaluates it once and its bytes ride the plan (`WeightSpec.generated`), so no checkpoint can supply it and
 `build_from_plan` fills that buffer from the plan itself — a caller-supplied array still wins, but an
@@ -168,7 +180,7 @@ a weight, and on one with no source, instead of leaving its buffer zero.
 nothing reads the graph again — `CompiledProgram.build(graph)` is exactly `build_from_plan(plan_from_graph(g))`,
 so a plan loaded from disk and a freshly compiled one share one launch path. The JSON form (`plan_to_dict` /
 `plan_from_dict`) carries symbolic shapes and ceil-div grid factors through a tiny self-contained expression
-grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the compiler's `Expr` classes — the
+grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the compiler's `Expression` classes — the
 on-disk format survives compiler changes; only runtime-contract changes bump `PLAN_FORMAT_VERSION`.
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
 namespace and its own `build_from_plan` equivalent.
@@ -202,7 +214,12 @@ once in the preamble and addresses it flat, so staged copies and fragment stores
 search reads the same hint (`ClassicProblem.paged`): a transport that takes an operand's base address cannot feed a
 paged one, so TMA, which bakes the address into its descriptor, never stages a paged operand, and cp.async never
 stages one of several pages. The plan carries the declaration so the runtime knows the buffer has no slab: it is
-never allocated, uploaded, zeroed or read back as one; its page table is bound by address.
+never allocated, uploaded, zeroed or read back as one; its page table is bound by address. A weight can be paged
+too, and the compiler binds it in a layout it picks — its folded transpose, its source layout — under another
+buffer: the declaration names the weight as traced (`ConstantOp.name`), and `dim.paged_declarations` pages each
+buffer bound from it as one page, the only paging every layout shares, so such a declaration must be one page. Its
+bytes are then the host's to place: serving binds them as host arrays (`gen_runner._bind_plan_constants(paged=True)`)
+and writes them into the page the program's table points at.
 
 Paging rests on a scatter the lowering spells as a store into its destination's memory: a `Write` whose index is a value
 the kernel loaded or computed, guarded so that an index past the end stores nothing, into an output stored over the
@@ -211,31 +228,57 @@ paging program keeps its tables and fills a slot. The `start` scalar that shifte
 scatter's index and is gone, as is the per-launch pointer-table operand the serving MoE dispatch once resolved
 in-kernel: a gather by a selector is an index the program spells.
 
-Where a page table entry points — a device slot or a page's copy in mapped host memory — is the pager's, and the
-compiler never sees it: residency is not part of a kernel's identity, its schedule, the evidence context or a golden.
+Where a page table entry points — a device slot, a resident page's home in device memory, or a page's home in mapped
+host memory — is the pager's, and the compiler never sees it: residency is not part of a kernel's identity, its
+schedule, the evidence context or a golden. A resident page enters the paging program only as a table entry: its
+slot entry is -1, which the decisions read as a hit and whose age lands on the spare entry, so the programs and their
+kernels are the same with or without resident pages.
 The rows the evidence picks were measured with resident pages, and the schedules they pick also read host memory
 correctly. The paging program copies every miss in before a launch reads it, and only a launch that touches more
-pages than its buffer has slots reads host memory, so residency does not join the context.
+pages than its buffer has slots reads host memory, so residency does not join the context. A buffer declared with
+no slots (a fourth element of `0`) takes no inspector and no paging program, since nothing can move: its launches
+read every page in place, through a page table the pager points at the pages' homes once.
 
-The paging step is three programs — the decisions, the table update, and the copy over the step's list of moved
-pages — traced once per page word with every size symbolic and read off the tables (`arange` over a table's length),
-so one kernel serves every paged buffer of every geometry. Ranks are counted per element and inverted by a scatter,
-never by a scan, so the decision kernels have no serial step. They are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
+The paging step is four programs — the decisions, the update of the slots' state, the update of one buffer's page
+table, and the copy over the step's list of moved pages — traced once per page word with every size symbolic and read
+off the tables (`arange` over a table's length), so one kernel serves every paged buffer of every geometry. A miss's
+rank is a running count of the misses before it (a scan, O(pages) work), and the victims' ranks, over the slots, are
+counted per element; both are inverted by a scatter. A pairwise count of the misses ran pages-squared steps on one
+thread block, 34 us a run at 256 pages on the RTX 5090. Buffers of one program with the same page count and slots
+share one page list (`paging._groups`): a MoE layer's expert codes and scales are read at one expert's index, so a
+launch that reads them takes one inspector, one decision and one state update over the first buffer's tables by
+name, then each buffer's page table update and copy. Their slots move in step, so every program that pages one of
+them pages them all. One run serves every later launch of the group whose inspector reads nothing written since the
+first: its inspector marks the same page list ahead of the run, and the launch takes no run of its own. A MoE layer's
+gate-up and down launches read one selection, so they take one run; a run per launch paged the layer twice, the
+second moving nothing. The programs are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
 golden holds their rows at those sizes, so a serving compile picks the recorded kernels whatever its geometry. Each
 launch's inspector is a slice of a kernel, with no program a record run could bench. The pager's kernels lower with
 strict evidence off: a fork no row decides — an inspector's, or a kernel with nothing to re-bench alone — takes the
-prior, under a scope that refuses that for the kernels they serve.
+prior, under a scope that refuses that for the kernels they serve. A host whose launches run in an order it knows
+writes their page list itself, and no inspector derives it: `paging.listed_paging` is the step alone, a plan whose one
+input is the list, over buffers declared to the pager with their slots, while the programs that read the pages declare
+them with none and read each page through its entry of the buffer's page table (serving `ARCHITECTURE.md`, the vision
+tower).
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
-key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by
-the *runner*, and "model" there must cover everything the compiled programs read off the CHECKPOINT — not just its
-architecture config. A compressed checkpoint is the case that makes the difference: two rungs of one conversion
-share an architecture config and differ only in the per-tensor rates, which set the coded extents, so the runner
-adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key. The environment tags carry,
-beside the toolchain and the precision pins, a digest of the golden rows in scope for the card
-(`golden.scope_digest`): those rows decide every fork, so a re-recorded golden must not boot plans compiled from the
-rows it replaced. Compiler version stays out; a pack keeps serving its frozen snapshot.
-Cubins are **not** copied — plans
+key + environment tags + provenance + program index + each program's evidence) and `plan/<program>.json`. The
+validity key is composed by the *runner*, and "model" there must cover everything the compiled programs read off the
+CHECKPOINT — not just its architecture config. A compressed checkpoint is the case that makes the difference: two
+rungs of one conversion share an architecture config and differ only in the per-tensor rates, which set the coded
+extents, so the runner adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key. The
+environment tags carry, beside the toolchain and the precision pins, the card and the tune DB's kernel key version.
+Compiler version stays out; a pack keeps serving its frozen snapshot.
+
+The golden rows are validity per program, since a re-recorded golden exists to change what a compile deploys. Each
+entry keeps the exact identities of the kernels whose evidence its compile read (`policy.greedy.evidence_reads`;
+the plan template cache hands a hit its template's reads) and a digest of the evidence those reach in the tune DB,
+the golden rows in scope imported among it (`SearchDB.evidence_digest`). The manifest also keeps the card's scope
+digest (`golden.scope_digest`, file bytes only): while it holds, nothing is compared. When it moved, `load_pack`
+imports the scope into the tune DB as a compile does and computes the digests again from its rows; an entry whose
+digest moved comes back with no plan, and so does every other twin of its wrapper (the plans binding
+the same checkpoint tensors), since the first twin built settles the layout of each weight for the rest. When no
+entry moved, the manifest takes the new scope digest. Cubins are **not** copied — plans
 reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and
 the docker bake ships pack + cubin cache + model snapshot together. `load_pack` returns `None` on *any*
 disqualifier (format/environment/key mismatch, unparsable plan, evicted cubin) and the caller falls back to the

@@ -1,0 +1,37 @@
+tags:
+- best-effort
+- emmy-blocked
+model:
+  huggingface: nvidia/GLM-5.2-NVFP4
+  rationale: 'NVIDIA NVFP4 checkpoint of GLM-5.2 (465 GB, routed experts in NVFP4): one replica fits 8x RTX PRO 6000
+    Blackwell Server Edition, which the FP8 checkpoint does not.'
+  heat: 0
+  task: generate
+  revision: 53e0691e21895a3863a606dfd12910c69eba94ab
+# Tuned for throughput, not latency: one pipeline stage per GPU, FP8 KV cache, prefix caching and MTP (3 draft
+# tokens). The highest sustained throughput measured on long cached review sessions;
+# experiments/GLM-5.2-NVFP4/review_cost holds the comparison against the tensor-parallel and data-parallel layouts.
+# The layer partition gives the last stage 4 target layers because it also carries the MTP draft. FlashInfer
+# autotuning is off and OMP_NUM_THREADS is 1: each stalled model startup when left at its default.
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 8
+    context_length: 98304
+    gpu_memory_utilization: 0.95
+    max_concurrent_requests: 128
+    vllm:
+      image: vllm/vllm-openai:v0.32.0
+      extra_env:
+        OMP_NUM_THREADS: "1"
+        VLLM_USE_V2_MODEL_RUNNER: "1"
+        VLLM_PP_LAYER_PARTITION: "12,11,11,10,10,10,10,4"
+      extra_args: >-
+        --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --kernel-config '{"enable_flashinfer_autotune": false}'
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+matrices:
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+  deploy.gpu_count: 8

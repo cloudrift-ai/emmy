@@ -21,10 +21,10 @@ Graph (frontend ops)                        ── Layer 1
 Graph[LoopOp]  (one LoopOp = one kernel)    ── Layer 2
    │  pipeline/passes/tile/{lift,cut,schedule}  (Loop IR → Tile IR)
    │  pipeline/passes/lowering/kernel       (Tile IR → Kernel IR)
-   │  pipeline/passes/lowering/cuda         (Kernel IR → CUDA source)
+   │  pipeline/passes/lowering/cuda         (Kernel IR → PTX, crates/emmy-ptx)
    ▼
 Graph[CudaOp]                               ── Layer 3
-   │  backend/cuda                          (nvcc cubins, launched by the Rust runtime)
+   │  backend/cuda                          (ptxas cubins, launched by the Rust runtime)
    ▼
 GPU
 ```
@@ -69,20 +69,31 @@ excluded (names, hints, ambient I/O) — the contract is "include only
 bits that affect codegen output or dataflow semantics" so the
 autotuning cache doesn't bust on cosmetic edits.
 
+A class takes part in the two stored forms by what it supplies, never by what it is. On the wire (`compiler/wire.py`)
+a class is registered with its tag, its two wire functions (`to_wire`, `from_wire`) and the parts the wire rewrite
+goes into (`wire_parts`); the `Wire` mixin registers a subclass as it is defined and supplies all of them for a
+dataclass from its fields. In an identity, `structural.form` renders a class by its own `structural_form` when it has
+one and a dataclass by its fields; both go through `record_form`, the one rule that keeps a trailing field left at
+its default out of every key. Neither form asks a class to be a dataclass or to inherit a Python base.
+
+Two classes are their text on the wire: an expression and a body of statements (`ir/ARCHITECTURE.md`). A statement
+is not a wire class at all, so a stored kernel reads as the listing a dump prints, and the wire rewrite does not go
+into a body: a caller that binds dimensions in one maps its expressions and its loop axes through the statement
+module's own functions.
+
 `Context` binds the effective precision decisions when a compile starts. Its key includes those decisions beside
-the target, compiler flags and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override
-cannot read another regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment
-changes do not alter their keys. The bound decisions are the one carrier of the fast-math decision: the nvcc flag
-string names it only where a context is built from flags alone (`Context.from_target(compile_flags=…)`), and every
-reader — the context key, the `H_fast_math` feature, the tune DB's regime, the dataset's regime key — takes
-`Context.precision_pins()` or the row's `precision`, never the flag string.
+the target and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override cannot read another
+regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment changes do not alter
+their keys. The bound decisions are the one carrier of the fast-math decision: every reader — the context key, the
+`H_fast_math` feature, the tune DB's regime, the dataset's regime key — takes `Context.precision_pins()` or the row's
+`precision`.
 
 ## Module layout
 
 | Path                  | Role                                    | See                          |
 |-----------------------|-----------------------------------------|------------------------------|
 | `graph.py`            | `Graph`, `Node`, `Tensor`, `Hints`      | —                            |
-| `dim.py`              | `Dim` — shape extent backed by an `Expr` (static or symbolic) | —    |
+| `dim.py`              | `Dim` — shape extent backed by an `Expression` (static or symbolic) | —    |
 | `ir/`                 | Op-type definitions per dialect         | `ir/ARCHITECTURE.md`         |
 | `trace/`              | PyTorch/HuggingFace → Graph IR          | `trace/ARCHITECTURE.md`      |
 | `pipeline/`           | Rewrite engine, passes, dump hooks      | `pipeline/ARCHITECTURE.md`   |
@@ -98,26 +109,25 @@ reader — the context key, the `H_fast_math` feature, the tune DB's regime, the
 
 - **Layer 1** — no GPU, no CUDA, no backend imports. Dialect ops
   implement `infer_output_shape(input_shapes)` and a numpy `forward()`.
-- **Layer 2** — operates on `Graph` + Loop IR only. Every `LoopOp`'s
-  `__post_init__` canonicalizes (`ir/stmt/normalize.py`) and simplifies
-  (`ir/stmt/passes.py`) its body.
+- **Layer 2** — operates on `Graph` + Loop IR only. Every `LoopOp` body is normalized at construction
+  (`normalize_body`, the `emmy-ir` crate's `normalize` module).
 - **Layer 3** — backends are the only place GPU specifics live.
 
 ## Shared invariants
 
 - **Shape lives on the graph**, not on the op — `node.output.shape`. Each shape element is a `Dim`
-  (`compiler/dim.py`) that wraps an `Expr` from `ir/expr.py`: static (`Dim(32)` → `Literal(32)`), atomic
+  (`compiler/dim.py`) that wraps an `Expression` from `ir/expression.py`: static (`Dim(32)` → `Literal(32)`), atomic
   symbolic (`Dim("seq_len")` → `Var("seq_len")`), or composite from arithmetic (`Dim("S") * Dim(2)` →
-  `BinaryExpr("*", Var("S"), Literal(2))`). `Dim` overloads `+`/`-`/`*`/`//`/`%` and eager-folds via
-  `Expr.simplify` — static math matches plain int math byte-for-byte; symbolic stays as `BinaryExpr`. It
+  `BinaryExpression("*", Var("S"), Literal(2))`). `Dim` overloads `+`/`-`/`*`/`//`/`%` and eager-folds via
+  `Expression.simplify` — static math matches plain int math byte-for-byte; symbolic stays as `BinaryExpression`. It
   also exposes `ceil_div` (`(self + (b-1))//b`): the single masked-tile grid-extent formula for both
   regimes — it folds to the integer ceil (`-(-E//b)`) for a static dim and builds the composite ceil-div
-  `Expr` for a symbolic one, so the partition planner's masked block-axis / masked-K sites need no
+  `Expression` for a symbolic one, so the partition planner's masked block-axis / masked-K sites need no
   static-vs-symbolic branch.
-  Read sites use `d.expr` (always works), `d.as_static()` (raises on symbolic), `d.as_atom_name()` (raises
+  Read sites use `d.expression` (always works), `d.as_static()` (raises on symbolic), `d.as_atom_name()` (raises
   unless `Var`-backed), or `d.value` (back-compat shim: int for `Literal`, str for `Var`, raises on
   composite). There is deliberately no `__int__` / `__index__`, so `int(d)` and `range(d)` fail loudly
-  on anything but a static-int `Dim`. Symbolic dims resolve at launch via `d.expr.eval(sym_env)` —
+  on anything but a static-int `Dim`. Symbolic dims resolve at launch via `d.expression.eval(sym_env)` —
   composite shapes (e.g. an `S * 2` concat output) resolve from input array axes without per-site
   branching. `Tensor.__post_init__` and `Axis.__post_init__` coerce bare `int` / `str` to `Dim`, so
   producer call sites need no change. An atomic symbolic `Dim` also carries a `hint` — its *expected*
@@ -131,12 +141,13 @@ reader — the context key, the `H_fast_math` feature, the tune DB's regime, the
 - **A symbolic free axis is tiled for its hint and emitted as a *masked* tile.** A symbolic M/N axis is treated as
   size `hint`, always-overhang: the block axis becomes a composite ceil-div over the symbolic extent
   (`(seq_len + bf - 1)//bf`), and a boundary `Cond(decoded_coord < seq_len)` wraps the body, so one cached kernel runs
-  at any runtime `seq_len` — the grid (`ir/cuda/ir.py` `GridDimSpec` accepts an `Expr` factor, resolved via
-  `Expr.eval` at launch) and the guard read the runtime value while the tile shape is tuned for the hint. The backend
-  benches a symbolic graph at the hint when no real inputs are supplied (`Graph.symbolic_hints` /
-  `backend/cuda/program.py` `_resolve_symbolic`), so a bench and a compile agree on a hint-sized variant. (The masked
-  tensor-core / cooperative / split-K tiers for symbolic axes are part of the in-flight tile-IR rebuild — see
-  `pipeline/passes/ARCHITECTURE.md` and the tile IR sources for current coverage.)
+  at any runtime `seq_len` — the grid (`ir/cuda/ir.py` `GridDimSpec` accepts an `Expression` factor, resolved via
+  `Expression.eval` at launch) and the guard read the runtime value while the tile shape is tuned for the hint. The
+  backend benches a symbolic graph at the hint when no real inputs are supplied (`Graph.symbolic_hints` /
+  `backend/cuda/program.py` `_resolve_symbolic`), so a bench and a compile agree on a hint-sized variant. A symbolic
+  reduce stream takes the cross-CTA split as masked slices (`pipeline/passes/ARCHITECTURE.md`); the masked
+  tensor-core and cooperative tiers for symbolic axes are part of the in-flight tile-IR rebuild — see the tile IR
+  sources for current coverage.
 - **`ElementwiseOp` inputs must already share the output shape.** The
   decomposition helper
   `pipeline/passes/frontend/decomposition/_broadcast.broadcast_to` wraps
@@ -182,9 +193,13 @@ and a conservative compile can still execute the same graph algebra without sele
 When the declaration specifies static activations instead, `loader.quant.spell_static_fp8_activations` spells the same
 encode, decode and scale round trip at the calibrated per-tensor scale each linear stores beside its weight
 (`activation_scale`, or `input_scale`). There is no amax: the encode saturates to the format's finite range, which is
-the clamp the calibrated scale relies on. Linears reading one activation through equal scales share one round trip,
-as a projection group calibrated together does. Nothing is marked to stay materialized: the codes are an interior
-value of the kernel, and a contraction that wants both multiplicands as FP8 bytes takes a cut at that seam.
+the clamp the calibrated scale relies on. Linears reading one activation through equal scales share one encode, as a
+projection group calibrated together does, and each decodes the shared codes for itself, as the static 4-bit
+activation's consumers do. Loop fusion materializes an activation's fan-out point, so two consumers a kernel boundary
+parts (a Gated DeltaNet layer's `in_proj_qkv` before the recurrence, its `in_proj_z` after it) are handed the codes,
+and the second kernel's contraction reads FP8 bytes; a decoded value shared between them would cross as a 16-bit
+buffer and leave that product off the FP8 tier. Nothing is marked to stay materialized: within one kernel the codes
+are an interior value, and a contraction that wants both multiplicands as FP8 bytes takes a cut at that seam.
 
 **Input-sourced fp8.** When the weights are forward-argument `InputOp`s instead of constants (the MoE serving seam's
 expert programs — one program per layer kind, per-expert 2-D slices fed per launch), the constant speller can never
@@ -199,7 +214,7 @@ ordinary outcome — a fusion-band decision upstream of the tile binding, shared
 holds for an E-stacked bits input the serving slots program gathers by a selector, paged or resident.
 
 **NVFP4 checkpoints.** The dtype layer carries the storage format — `f4e2m1x2` (a uint8 element holding a packed
-pair of e2m1 codes) with its LUT decode `decode_f4x2` and a raw-byte CUDA spelling. `loader/quant.py` recognizes
+pair of e2m1 codes) with its LUT decode `decode_f4x2`, a raw byte in a kernel. `loader/quant.py` recognizes
 both checkpoint config conventions (modelopt, compressed-tensors `nvfp4-pack-quantized`; MXFP4's 32-element blocks
 stay excluded) and dequantizes the packed trio `<key>` + `<key>_scale` (e4m3, read as raw bits) + `<key>_scale_2`
 (f32) for the accuracy twin via `dequantize_nvfp4` — `fuse_nvfp4_scales` collapses the two scale levels into one
@@ -369,12 +384,8 @@ Boundary sentinels (`InputOp`/`ConstantOp`) never carry prov: `put` refuses to s
 outputs that land on one (the generic hint merge would otherwise copy prov onto e.g. the ConstantOp produced by the sm_90+
 weight-transpose fold, inflating `totals` so every kernel of that origin read partial coverage).
 
-Consumers: `provenance.name_for` (called from `pipeline/passes/loop/stamp/010_stamp_loop_names.py`, the
-loop-dialect stamp pass) names kernels after the ops they realize (`k_rms_norm` when full, `k_rms_norm_reduce` when partial)
-and stamps the name onto `LoopOp.name`; every subsequent dialect (`TileOp`/`KernelOp`/`CudaOp`) just copies it
-through. Multi-op labels sort dominant-first (descending piece count, lexical tie-break), so the name is independent
-of fusion merge order — the attention kernel is `k_sdpa_linear_reduce`, its QKV-prologue twin `k_linear_sdpa_reduce`.
-Layout/plumbing origins (`_WEAK_KINDS`: transpose / reshape / unsqueeze / cat / slice) label a kernel only when no
-strong op is present — RoPE plumbing fused into attention doesn't pollute the name, while a standalone copy kernel
-still reads `k_cat_…` instead of the node-id fallback. Compiler dumps retain provenance-selected frontend slices in
-memory for tune benchmarking; stable persistence of those programs belongs exclusively to golden files.
+Consumers: the golden trace inventory selects each target's `origins` — the ops a kernel computes whole — from its
+coverage (`golden.working`), and that is what a target's Torch reference slice is cut from. Provenance is a graph
+fact and never part of a kernel's name, which is computed from the kernel's exact identity
+(`pipeline/ARCHITECTURE.md`). Compiler dumps retain provenance-selected frontend slices in memory for tune
+benchmarking; stable persistence of those programs belongs exclusively to golden files.

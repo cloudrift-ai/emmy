@@ -1,5 +1,5 @@
-"""``emmy db import`` — a DB instance filled from a measurement freeze, golden files and tune DBs, each a copy of the
-file's tables; ``emmy db export``, the instance's rows as a dataset; the readers' refusal of a missing instance; and
+"""``emmy db import`` — a DB instance filled from golden files and tune DBs, each a copy of the source's rows;
+``emmy db export``, the instance's rows as a dataset; the readers' refusal of a missing instance; and
 ``emmy db check``, the checks that an instance's tables agree with themselves."""
 
 from __future__ import annotations
@@ -11,36 +11,37 @@ import pytest
 
 from emmy.commands.db import db_path, handle_db_check, handle_db_export, handle_db_import
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
-from emmy.compiler.pipeline.search.db.freeze import write_freeze, write_run_freeze
+from emmy.compiler.pipeline.search.golden import Measurements
 from emmy.compiler.pipeline.search.golden.evidence import file_source
-from emmy.compiler.structural import digest
-from tests.compiler.pipeline.search.helpers import tuned_db
+from tests.compiler.pipeline.search.helpers import CARDS, tuned_db
 from tests.compiler.realization import helpers as corpus
 
 _CASE = "fused/norm-linear-f16-scalar-reduce.json"
 
 
-def _freeze(tmp_path, name: str, us: float):
-    """A freeze of one measured kernel at ``us``, written under ``name``."""
-    tuned_db(tmp_path / f"{name}.db", (_CASE,), us=us).close()
-    write_freeze(tmp_path / f"{name}.db", tmp_path / name)
-    return {file_source("freeze", path) for path in (tmp_path / name).glob("*.json")}
+def _golden(tmp_path, name: str, us: float, case: str = _CASE):
+    """A golden file of one corpus case, under ``name``, every row measured at ``us``."""
+    document = corpus.load_case(corpus.CASES_DIR / case).document
+    measured = Measurements(emmy_us=us, reference_us=us, reference_backend="corpus")
+    rows = [dataclasses.replace(row, measurements=measured) for row in document.rows]
+    card = CARDS[tuple(document.compute_cap)]  # the card ``tuned_db`` files the same case under
+    return dataclasses.replace(document, gpu_name=card, rows=rows).dump(tmp_path / f"{name}.json")
 
 
 def test_a_reader_refuses_a_missing_dataset_db_and_reads_a_filled_one(tmp_path):
     """Nothing fills a dataset DB but an import naming its sources and the file: a reader over an instance that
     does not exist exits with the command that fills it, and reads whatever an import put there — the sources are
     the report's to name, not the reader's to check."""
-    current = _freeze(tmp_path, "current", 500.0)
+    current = _golden(tmp_path, "current", 500.0)
 
     with pytest.raises(SystemExit):
         db_path(str(tmp_path / "dataset.db"))  # nothing imported yet
 
-    handle_db_import(Namespace(sources=[str(tmp_path / "current")], db=str(tmp_path / "dataset.db"), fresh=True))
+    handle_db_import(Namespace(sources=[str(current)], db=str(tmp_path / "dataset.db"), fresh=True))
     assert db_path(str(tmp_path / "dataset.db")) == tmp_path / "dataset.db"
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert db.perf_sources() == dict.fromkeys(current, 1)
-    assert [row.stats.median for row in db.iter_perf_rows()] == [500.0]
+    assert db.perf_sources() == {file_source("golden", current): 1}
+    assert [row.us for row in db.iter_perf_rows()] == [500.0]
     db.close()
 
 
@@ -48,9 +49,7 @@ def test_a_golden_file_named_on_the_command_line_is_held_under_its_own_source(tm
     """A ``.json`` source is a golden file: its rows land under a ``golden:`` source of its own digest — where the
     golden readers read them — and naming it again is a no-op, so the documented import can be re-run without
     doubling a file's rows."""
-    # A freeze file is golden-shaped; named as a golden it is one, and it carries the measurements a corpus case lacks.
-    _freeze(tmp_path, "goldens", 500.0)
-    [mine] = (tmp_path / "goldens").glob("*.json")
+    mine = _golden(tmp_path, "mine", 500.0)
     handle_db_import(Namespace(sources=[str(mine)], db=str(tmp_path / "dataset.db"), fresh=True))
     handle_db_import(Namespace(sources=[str(mine)], db=str(tmp_path / "dataset.db"), fresh=False))
     db = SearchDB.open_readonly(db_path(str(tmp_path / "dataset.db")))
@@ -77,7 +76,9 @@ def test_export_writes_a_dataset_the_readers_load(tmp_path):
     from emmy.compiler.pipeline.search.dataset import Dataset
 
     tuned_db(tmp_path / "dataset.db", (_CASE,), us=500.0).close()
-    args = Namespace(out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1)
+    args = Namespace(
+        out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1, candidates=[]
+    )
     handle_db_export(args)
     dataset = Dataset.load(tmp_path / "dataset")
     assert (len(dataset.golden), len(dataset.measured)) == (0, 1) and dataset.provenance["source"] == str(tmp_path / "dataset.db")
@@ -87,49 +88,67 @@ def test_export_writes_a_dataset_the_readers_load(tmp_path):
     assert (tmp_path / "dataset" / "manifest.json").read_bytes() == first
 
 
+def test_import_and_export_time_their_phases_and_name_the_slowest_pools(tmp_path, caplog):
+    """Both commands log a timing summary at the end; the export also writes it beside the manifest, never into
+    it: every phase it ran, the pools per card, and each slow pool by kernel, card, sizes and the rows it
+    enumerated."""
+    import json
+    import logging
+
+    golden = _golden(tmp_path, "current", 500.0)
+    with caplog.at_level(logging.INFO, logger="emmy.progress"):
+        handle_db_import(Namespace(sources=[str(golden)], db=str(tmp_path / "dataset.db"), fresh=True))
+    assert "timing: emmy db import" in caplog.text and f"source={golden.name}" in caplog.text
+    args = Namespace(
+        out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1, candidates=[]
+    )
+    handle_db_export(args)
+    timing = json.loads((tmp_path / "dataset" / "timing.json").read_text())
+    phases = {p["name"]: p for p in timing["phases"]}
+    assert list(phases) == ["read golden pools", "golden pools", "measured groups", "write dataset"]
+    [slowest] = phases["golden pools"]["slowest"]
+    card = CARDS[tuple(corpus.load_case(corpus.CASES_DIR / _CASE).document.compute_cap)]
+    assert slowest["card"] == card and slowest["kernel"] and slowest["rows"] >= 1 and slowest["total"] >= 1 and "sizes" in slowest
+    assert phases["golden pools"]["by_card"] == {card: 1} and timing["counts"]["schedule pools"] == {card: 1}
+    assert "timing" not in json.loads((tmp_path / "dataset" / "manifest.json").read_text())["provenance"]
+
+
 def test_placement_export_reads_the_instance_alone(tmp_path):
     """A placement export opens no golden file: what a layout fork is offered on came in with the import."""
     from emmy.compiler.pipeline.search.dataset import Dataset
 
-    tuned_db(tmp_path / "source.db", ("fused/linear-add-place-cut-sm70.json",), us=500.0).close()
-    write_freeze(tmp_path / "source.db", tmp_path / "goldens")
-    [golden] = (tmp_path / "goldens").glob("*.json")
+    golden = _golden(tmp_path, "cut", 500.0, case="fused/linear-add-place-cut-sm70.json")
     database = tmp_path / "dataset.db"
     handle_db_import(Namespace(sources=[str(golden)], db=str(database), fresh=True))
-    args = Namespace(out=str(tmp_path / "placement"), db=str(database), pool_sample=0, seed=0, space="placement", jobs=1)
+    args = Namespace(out=str(tmp_path / "placement"), db=str(database), pool_sample=0, seed=0, space="placement", jobs=1, candidates=[])
     handle_db_export(args)
     assert Dataset.load(args.out).golden
 
 
-def test_a_tune_db_is_frozen_on_import(tmp_path):
-    """A tune DB's rows reach the dataset the way a freeze of it would: as the frozen file's rows, sourced by its
-    digest. A golden row a compile imported into the tune DB
-    stays behind — the golden file holds it — and a file the instance already holds is not imported twice."""
+def test_a_tune_db_is_imported_row_for_row(tmp_path):
+    """A tune DB is an instance of the same schema: the rows it measured itself reach the dataset under the keys it
+    filed them under, sourced by the file's digest. A golden row a compile imported into the tune DB stays behind —
+    the golden file holds it — and a file the instance already holds is not imported twice."""
     tune = tuned_db(tmp_path / "autotune.db", (_CASE, "fused/linear-add-place-cut-sm70.json"))
     [plain] = [row for row in tune.iter_perf_rows() if row.cc == 120]
     tune.record_perf_row(dataclasses.replace(plain, knobs={**plain.knobs, "WORK": "t8"}, source="golden:abcdef012345"))
-    measured = sorted((row.kernel, knobs_json(row.bindings), row.stats.median) for row in tune.iter_perf_rows() if row.source == "measured")
+    measured = sorted((row.kernel, knobs_json(row.bindings), row.us) for row in tune.iter_perf_rows() if row.source == "measured")
     tune.close()
 
-    handle_db_import(Namespace(sources=[str(tmp_path / "autotune.db")], db=str(tmp_path / "dataset.db"), fresh=False))
-    db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert sorted((row.kernel, knobs_json(row.bindings), row.stats.median) for row in db.iter_perf_rows()) == measured
-    assert all(source.startswith("freeze:") for source in db.perf_sources()) and len(db.perf_sources()) == 2
-    held = db.perf_sources()
-    db.close()
-
-    handle_db_import(Namespace(sources=[str(tmp_path / "autotune.db")], db=str(tmp_path / "dataset.db"), fresh=False))
-    db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert db.perf_sources() == held
-    db.close()
+    for _ in range(2):
+        handle_db_import(Namespace(sources=[str(tmp_path / "autotune.db")], db=str(tmp_path / "dataset.db"), fresh=False))
+        db = SearchDB.open_readonly(tmp_path / "dataset.db")
+        assert sorted((row.kernel, knobs_json(row.bindings), row.us) for row in db.iter_perf_rows()) == measured
+        assert db.perf_sources() == {file_source("tune", tmp_path / "autotune.db"): len(measured)}
+        assert {kernel.exact_identity for kernel in db.iter_kernels()} == {kernel for kernel, _sizes, _us in measured}
+        db.close()
 
 
 def _instance(path):
-    """A DB as the tuner writes it: two real tile kernels with their measurements, one cut on the first that
+    """A DB as a tune writes it: two real tile kernels with their measurements, one cut on the first that
     minted the second, on a registry card."""
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.bench_record import kernel_row as tile_row
-    from emmy.compiler.pipeline.search.db import PerfStats
     from emmy.compiler.wire import kernel_bindings
     from tests.compiler.helpers import case_target_tile
     from tests.compiler.pipeline.search.helpers import GPU_5090
@@ -138,12 +157,11 @@ def _instance(path):
     parent = case_target_tile("fused/norm-linear-f16-scalar-reduce.json")
     piece = case_target_tile("matmul/f16-mma-f16acc-gmem.json")
     db = SearchDB(path)
-    for tile, name in ((parent, "k_parent"), (piece, "k_piece")):
-        db.record_kernel(tile_row(tile, name))
-    stats = PerfStats(median=10.0, min=10.0, max=10.0, mean=10.0, variance=0.0, n_samples=3)
+    for tile in (parent, piece):
+        db.record_kernel(tile_row(tile))
     for tile in (parent, piece):
         identity = tile.identity_key(structural=False, with_io=True)
-        db.record_perf(ctx, identity, bindings=kernel_bindings(tile), knobs={"WORK": "t16"}, status="ok", stats=stats)
+        db.record_perf(ctx, identity, bindings=kernel_bindings(tile), knobs={"WORK": "t16"}, status="ok", us=10.0)
     db.record_routing(
         RoutingRow(
             parent=parent.identity_key(structural=False, with_io=True),
@@ -155,19 +173,13 @@ def _instance(path):
 
 
 _TAMPERS = {
-    "schedule and placement digests match their knob rows": "UPDATE placement SET digest = 'moved'",
-    "every row names the rows it references": "DELETE FROM kernel WHERE kernel_name = 'k_piece'",
+    "every row names the rows it references": "DELETE FROM kernel WHERE exact_identity = (SELECT child FROM routing LIMIT 1)",
     "every CUDA context names a registry card": "UPDATE context SET gpu_name = 'Mystery GPU'",
-    "schedule knobs and placement knobs stay apart": (
-        f"INSERT INTO schedule (id, digest) VALUES (99, '{digest(knobs_json({'PLACE': 'cut'}))}'); "
-        "INSERT INTO schedule_knob VALUES (99, 'PLACE', 'cut')"
-    ),
 }
 
 
 def test_a_fresh_instance_has_no_drift(tmp_path):
-    """What the tuner writes agrees with itself: every knob row's digest, every reference, the card, the two
-    knob vocabularies."""
+    """What a tune writes agrees with itself: every reference and the card."""
     db, _parent, _piece = _instance(tmp_path / "tune.db")
     assert db.drift() == dict.fromkeys(_TAMPERS, 0)
     db.close()
@@ -176,9 +188,8 @@ def test_a_fresh_instance_has_no_drift(tmp_path):
 
 @pytest.mark.parametrize("check", list(_TAMPERS))
 def test_each_kind_of_drift_is_counted_by_its_own_check(check):
-    """One tamper per check, each the shape a code change would leave behind: a knob row whose digest
-    moved, a kernel row deleted from under its rows, a card the registry dropped, a placement knob filed as
-    a schedule knob. The check names it; the others stay quiet."""
+    """One tamper per check, each the shape a code change would leave behind: a kernel row deleted from under its
+    rows, a card the registry dropped. The check names it; the others stay quiet."""
     db, _parent, _piece = _instance(None)
     db._conn.execute("PRAGMA foreign_keys = OFF")
     db._conn.executescript(_TAMPERS[check])
@@ -196,78 +207,36 @@ def test_check_exits_nonzero_on_drift(tmp_path):
         handle_db_check(Namespace(db=str(tmp_path / "tune.db")))
 
 
-def test_repository_import_reads_the_checked_in_freeze_beside_the_goldens(tmp_path, monkeypatch):
-    """``--repository`` reads the measurement freeze kept with the repository beside the repository goldens — its
-    rows land under their ``freeze:`` sources — and adds nothing where no freeze is checked in."""
+def test_repository_import_reads_the_hardware_goldens_alone(tmp_path, monkeypatch):
+    """``--repository`` names the hardware goldens, the priors' training set, and nothing where there is none. A
+    recipe's golden that records the same kernel otherwise is no training data, so it reaches no row of the DB the
+    dataset is exported from."""
     from contextlib import nullcontext
 
-    from emmy.compiler.pipeline.search.db import freeze
     from emmy.compiler.pipeline.search.golden import repository
 
-    monkeypatch.setattr(repository, "repository_golden_paths", lambda: nullcontext([]))  # the goldens are not the subject
-    monkeypatch.setattr(freeze, "REPOSITORY_FREEZE", tmp_path / "freezes")
+    monkeypatch.setattr(repository, "hardware_golden_paths", lambda: [])
     args = Namespace(sources=[], db=str(tmp_path / "dataset.db"), fresh=True, repository=True)
-    with pytest.raises(SystemExit):  # no freeze checked in and no golden: nothing to import
+    with pytest.raises(SystemExit):
         handle_db_import(args)
 
-    frozen = _freeze(tmp_path, "freezes", 500.0)
+    hardware, recipe = _golden(tmp_path, "card", 500.0), _golden(tmp_path, "recipe", 300.0)
+    monkeypatch.setattr(repository, "hardware_golden_paths", lambda: [hardware])
+    monkeypatch.setattr(repository, "repository_golden_paths", lambda: nullcontext([hardware, recipe]))
     handle_db_import(args)
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert db.perf_sources() == dict.fromkeys(frozen, 1)
+    assert db.perf_sources() == {file_source("golden", hardware): 1}
+    assert {row.us for row in db.iter_perf_rows()} == {500.0}
     db.close()
 
 
-def test_the_freeze_grows_by_merging_a_tune_db_and_a_second_merge_changes_nothing(tmp_path):
-    """The repository freeze grows by import and freeze: the directory and a tune DB go into one instance, the
-    instance is frozen back into the directory. A schedule measured on both sides takes the tune DB's row, faster or
-    slower, a new schedule joins, and merging the same tune DB again rewrites the same bytes."""
-    _freeze(tmp_path, "freezes", 500.0)
-    tune = tuned_db(tmp_path / "autotune.db", (_CASE,), us=700.0)
-    [row] = list(tune.iter_perf_rows())
-    tune.record_perf_row(dataclasses.replace(row, knobs={**row.knobs, "WORK": "t8"}, stats=dataclasses.replace(row.stats, median=600.0)))
-    tune.close()
-
-    def merge():
-        sources = [str(tmp_path / "freezes"), str(tmp_path / "autotune.db")]
-        handle_db_import(Namespace(sources=sources, db=str(tmp_path / "merge.db"), fresh=True))
-        return write_freeze(tmp_path / "merge.db", tmp_path / "freezes")
-
-    first = merge()
-    handle_db_import(Namespace(sources=[str(tmp_path / "freezes")], db=str(tmp_path / "check.db"), fresh=True))
-    db = SearchDB.open_readonly(tmp_path / "check.db")
-    assert sorted(row.stats.median for row in db.iter_perf_rows()) == [600.0, 700.0]
-    db.close()
-    assert merge() == first
-
-
-def test_a_tunes_freeze_file_imports_after_the_cards_and_the_fold_leaves_one_file(tmp_path):
-    """The file a tune writes beside the card's sorts after it, so the import reads it last and its row wins; the
-    nightly fold — import the directory, freeze it back — leaves one file per card holding that row, and folding
-    again rewrites the same bytes."""
-    _freeze(tmp_path, "freezes", 500.0)
-    tuned_db(tmp_path / "run.db", (_CASE,), us=700.0).close()
-    [run] = write_run_freeze(tmp_path / "run.db", tmp_path / "freezes")
-    names = sorted(path.name for path in (tmp_path / "freezes").glob("*.json"))
-    assert len(names) == 2 and names[-1] == run.name
-
-    handle_db_import(Namespace(sources=[str(tmp_path / "freezes")], db=str(tmp_path / "fold.db"), fresh=True))
-    db = SearchDB.open_readonly(tmp_path / "fold.db")
-    assert [(row.stats.median, row.source) for row in db.iter_perf_rows()] == [(700.0, file_source("freeze", run))]
-    db.close()
-    first = write_freeze(tmp_path / "fold.db", tmp_path / "freezes")
-    assert sorted(path.name for path in (tmp_path / "freezes").glob("*.json")) == sorted(first)
-    handle_db_import(Namespace(sources=[str(tmp_path / "freezes")], db=str(tmp_path / "again.db"), fresh=True))
-    assert write_freeze(tmp_path / "again.db", tmp_path / "freezes") == first
-
-
-def test_a_freeze_row_never_replaces_a_golden_row(tmp_path):
-    """A golden file's row is the file's: a freeze that measured the same schedule faster — a tune re-benching the
+def test_a_tune_db_row_never_replaces_a_golden_row(tmp_path):
+    """A golden file's row is the file's: a tune DB that measured the same schedule faster — a tune re-benching the
     golden's own pick — does not take it over, or the golden readers, which read ``golden:`` rows alone, would lose
     the pool from the fit."""
-    _freeze(tmp_path, "goldens", 500.0)
-    [golden] = (tmp_path / "goldens").glob("*.json")
-    _freeze(tmp_path, "faster", 400.0)
-    handle_db_import(Namespace(sources=[str(golden), str(tmp_path / "faster")], db=str(tmp_path / "dataset.db"), fresh=True))
+    golden = _golden(tmp_path, "golden", 500.0)
+    tuned_db(tmp_path / "faster.db", (_CASE,), us=400.0).close()
+    handle_db_import(Namespace(sources=[str(golden), str(tmp_path / "faster.db")], db=str(tmp_path / "dataset.db"), fresh=True))
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert [(row.source.split(":")[0], row.stats.median) for row in db.iter_perf_rows()] == [("golden", 500.0)]
+    assert [(row.source.split(":")[0], row.us) for row in db.iter_perf_rows()] == [("golden", 500.0)]
     db.close()

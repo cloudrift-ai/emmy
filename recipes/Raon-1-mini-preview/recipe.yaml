@@ -1,0 +1,15 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: KRAFTON/Raon-1-mini-preview
+  rationale: Fresh 10/21 KRAFTON open text-gen entry (Apache-2.0), HF trending; fills a small multi-card consumer slot.
+  heat: 45
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA L4
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 2

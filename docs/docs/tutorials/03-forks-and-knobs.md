@@ -25,7 +25,7 @@ compute. Suppose it offers four sizes:
 TILE = 64x64      TILE = 128x64     TILE = 64x128     TILE = 128x128
 ```
 
-Four options, one fork. Nothing has been built. No CUDA source exists, no kernel has been compiled, nothing has been
+Four options, one fork. Nothing has been built. No PTX exists, no kernel has been compiled, nothing has been
 measured. All that separates the four is a knob value — and that is deliberate, because it means the machinery
 deciding between them can look at all four without paying to construct any of them.
 
@@ -158,7 +158,7 @@ emmy compile --code "F.linear(torch.randn(512, 512, dtype=torch.float16), torch.
 ```
 
 ```
-=== 0: k_linear_f3a56f ===
+=== 0: k_6d03a8e1f472 ===
     Contraction [Σ a2] x0 @ x1 trans -> acc0 (scalar)
         for a2 in 0..256
             ...
@@ -175,11 +175,11 @@ EMMY_REDUCE=g2k emmy compile --code "F.linear(torch.randn(512, 512, dtype=torch.
 ```
 
 ```
-=== 0: k_linear_f3a56f__partial ===
+=== 0: k_2b7e04c19a6d ===
     ...
     store: linear__partial[a2_ks, a0, a1] = acc0
 
-=== 1: k_linear_f3a56f ===
+=== 1: k_9f1c55e03b28 ===
     Init(f32 acc0 = 0.0)
     for a2_ks in 0..2
         acc0__p = load linear__partial[a2_ks, a0, a1]

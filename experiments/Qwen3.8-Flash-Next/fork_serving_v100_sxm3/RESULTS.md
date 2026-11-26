@@ -48,7 +48,10 @@ stored, as FP16 and as FP32, found none.
 
 **Protocol.** `emmy bench` with the recipe in this directory: one deployment, one request at a time, 8,192 random
 input tokens and 512 output, greedy, `ignore_eos`, four repeats with fresh prompts (seed 380 + repeat), no warm-up
-request. It is `fork_image_v100_sxm3`'s 8K row, so the two compare directly.
+request. It is `fork_image_v100_sxm3`'s 8K row, so the two compare directly. The archived run passed
+`--no-async-scheduling`; the recipe no longer passes it since async scheduling went on in the production shape
+(2026-11-11). The caches were warmed with it off, and the flag is part of vLLM's compile key, so with async on they
+miss and a boot compiles its graphs again (`fork_baseline_v100_sxm3`).
 
 | | This image | Without baked caches (`fork_image_v100_sxm3`, 8K row) |
 | --- | ---: | ---: |

@@ -9,13 +9,14 @@ from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.search.pins import spelled_arm, unreproducible_pin_flag
 
 
-@pytest.mark.parametrize("override", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
+@pytest.mark.parametrize("override", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO"])
 def test_recorded_precision_pins_preserve_the_default_and_overrides(monkeypatch, override):
     from emmy.compiler.pipeline.search.golden import regime_live
     from emmy.compiler.pipeline.search.pins import measured_regime_pins
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS
 
-    for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"):
-        monkeypatch.delenv(f"EMMY_{name}", raising=False)
+    for knob in PRECISION_KNOBS:
+        monkeypatch.delenv(knob.env, raising=False)
     assert measured_regime_pins() == {"FAST_MATH": True}
     assert regime_live({"FAST_MATH": True})
     assert not regime_live({"FAST_MATH": False})
@@ -150,6 +151,12 @@ def test_a_family_pinned_off_is_realized_by_a_kernel_that_never_stamps_it() -> N
     assert unreproducible_pin_flag({"TILE": "f4"}, per_cell) is not None
 
 
+@pytest.mark.parametrize("pin", [{"WORK": "t1024"}, {"TILE": "f4"}, {"REDUCE": "coop"}, {"STAGE": "d2/smem"}])
+def test_a_schedule_pin_no_kernel_stamps_is_reported(pin: dict) -> None:
+    """A kernel that took no schedule stamps none of its families: the pin did not realize."""
+    assert "unreproducible pin" in unreproducible_pin_flag(pin, [{"LOOPIFY": "0"}])
+
+
 @pytest.mark.parametrize("original", ("PLACE@place_abc123/map.1/inner", "PLACE@place_abc123", "PLACE@step.1"))
 def test_piece_site_pin_requires_applied_local_receipt_and_resolved_source(original: str) -> None:
     local = [{"PLACE@map.1/inner": "cut"}]
@@ -177,12 +184,12 @@ def test_bare_fuse_pin_accepts_a_trace_with_no_cut() -> None:
 
 
 def test_scoped_kernel_pin_supersedes_bare_only_on_its_own_kernel() -> None:
-    names = [("__place_a1", "linear_0"), ("__place_b2", "linear_1")]
-    pins = {"WORK": "w1x4", "WORK@place_a1": "w1x1"}
+    names = ["k_0000000000a1", "k_0000000000b2"]
+    pins = {"WORK": "w1x4", "WORK@k_0000000000a1": "w1x1"}
     assert unreproducible_pin_flag(pins, [{"WORK": "w1x1"}, {"WORK": "w1x4"}], kernel_names=names) is None
     assert unreproducible_pin_flag(pins, [{"WORK": "w1x1"}, {"WORK": "w1x2"}], kernel_names=names) is not None
     assert unreproducible_pin_flag(pins, [{"WORK": "w1x2"}, {"WORK": "w1x4"}], kernel_names=names) is not None
     # An explicit scoped OFF overrides the bare value on exactly its target.
-    off = {"TILE": "f1x2", "TILE@place_a1": ""}
+    off = {"TILE": "f1x2", "TILE@k_0000000000a1": ""}
     assert unreproducible_pin_flag(off, [{"TILE": ""}, {"TILE": "f1x2"}], kernel_names=names) is None
     assert unreproducible_pin_flag(off, [{"TILE": ""}, {"TILE": "f1x1"}], kernel_names=names) is not None

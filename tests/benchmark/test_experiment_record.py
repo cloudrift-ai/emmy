@@ -49,7 +49,7 @@ MemTotal: 52613349376
 === AMD SMI ===
 N/A
 
-=== NVCC VERSION ===
+=== PTXAS VERSION ===
 13.0.88
 
 === CUBLAS VERSION ===
@@ -107,7 +107,7 @@ def test_system_information_extracts_common_hardware():
     assert system.gpus[0].uuid == "GPU-1234"
     assert system.gpus[0].power_limit_w == 575.0
     assert system.gpus[0].driver_version == "580.65.06"
-    assert system.software.nvcc_version == "13.0.88"
+    assert system.software.ptxas_version == "13.0.88"
     assert system.software.cublas_version == "13.1.1.3"
     assert system.root_filesystem.available_bytes == 600000000
     assert system.uptime_seconds == 1234.5
@@ -172,6 +172,25 @@ def test_record_lifecycle_serialization_and_round_trip(tmp_path):
     assert "rendered_command" not in loaded_yaml
     assert "secret-value" not in task.record_path().read_text()
     assert not task.record_path().with_suffix(".yaml.tmp").exists()
+
+
+@pytest.mark.parametrize("label", ["x" * 300, "αβ" * 150])
+def test_long_variant_artifacts_write_without_losing_identity(tmp_path, label):
+    paths = []
+    for tail in ("one", "two"):
+        task = _task(tmp_path)
+        task.variant = Variant(params={**task.variant.params, "note": label + tail})
+        record = ExperimentRecord.create(task, "20260814T120000Z")
+        record.write(task.record_path())
+        task.benchmark_log_path().write_text("raw client output")
+        loaded = ExperimentRecord.read(task.record_path())
+        assert loaded.experiment.variant == str(task.variant)
+        assert loaded.experiment.parameters["note"] == label + tail
+        assert loaded.experiment.task_id == task.task_id
+        assert task.file_stem.endswith(task.row_id)
+        assert len(task.record_path().with_suffix(".yaml.tmp").name.encode("utf-8")) <= 255
+        paths.append(task.record_path())
+    assert paths[0] != paths[1]
 
 
 async def test_staged_command_provenance_ignores_shared_venv_checkout_and_unrelated_dirty_path(tmp_path, monkeypatch):
@@ -261,7 +280,7 @@ def test_strict_command_provenance_uses_typed_system_information(tmp_path):
     assert record.missing_command_provenance() == [
         "Git provenance",
         "GPU provenance",
-        "NVCC provenance",
+        "ptxas provenance",
         "cuBLAS provenance",
     ]
 

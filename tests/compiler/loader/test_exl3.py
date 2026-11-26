@@ -484,7 +484,7 @@ def test_spell_trellis_builds_generic_cone(tmp_path):
         if isinstance(nn.op, IndexMapOp) and nn.output.name.endswith(("window_lo", "window_hi"))
     }
     assert len(direct_maps) == 2
-    assert all(any(op in src.coord_map[-1].pretty() for op in ("%", "//")) for src in direct_maps.values() for src in src.sources)
+    assert all(any(op in str(src.coord_map[-1]) for op in ("%", "//")) for src in direct_maps.values() for src in src.sources)
     assert sum(isinstance(nn.op, MatmulOp) for nn in g.nodes.values()) == 3
     # The logical dense weight and its fp16 rounding boundary never exist in the
     # executable graph; the coded linear is born as three factored contractions.
@@ -567,11 +567,9 @@ def _stacked_slots_graph(experts: int, picks: int, n: int, k: int):
     return graph
 
 
-def test_input_spelling_gathers_stacked_experts_by_a_selector():
-    """The slots form over E-stacked coded experts: the codes and both channel vectors carry the expert axis, the
-    router's picks gather them, and each pick's factorized contraction matches ``F.linear`` on its own decoded
-    weight — for the row every pick shares and for a column of each pick's own."""
-    from emmy.compiler.backend.numpy import NumpyBackend
+def _stacked_slots_case():
+    """The stacked-slots program over three coded experts, spelled, with its feed and the ``F.linear`` reference on each
+    pick's own decoded weights: ``(graph, spelled, feed, expected)``."""
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.loader.quant import spell_trellis_inputs
 
@@ -584,12 +582,6 @@ def test_input_spelling_gathers_stacked_experts_by_a_selector():
 
     graph = _stacked_slots_graph(experts, picks, n, k)
     spelled = spell_trellis_inputs(graph, {"w": (0, (experts, k // 16, n // 16, 32)), "w2": (0, (experts, n // 16, n // 16, 32))})
-    assert spelled == {"w": ("w_suh", "w_svh"), "w2": ("w2_suh", "w2_svh")}
-    assert graph.inputs == ["x", "sel", "w", "w2", "w_suh", "w_svh", "w2_suh", "w2_svh"]
-    assert tuple(d.as_static() for d in graph.nodes["w"].output.shape) == (experts, k // 16, n // 16, 32)
-    assert tuple(d.as_static() for d in graph.nodes["w_suh"].output.shape) == (experts, k)
-    graph.validate()
-
     x = _linear_input(graph)
     sel = np.array([2, 0], dtype=np.int64)
     feed = bind_constants(graph, {})
@@ -605,12 +597,47 @@ def test_input_spelling_gathers_stacked_experts_by_a_selector():
             "w2_svh": stack(coded2, "d", "svh"),
         }
     )
-    result, _ = NumpyBackend().run(graph, input_data=feed)
-    got = result.outputs[graph.outputs[0]]
     hidden = [coded[e][1].astype(np.float32) @ x.astype(np.float32).reshape(k, 1) for e in sel]
     expected = np.stack([coded2[e][1].astype(np.float32) @ h for e, h in zip(sel, hidden, strict=True)])
-    assert got.shape == (picks, n, 1)
+    return graph, spelled, feed, expected
+
+
+def test_input_spelling_gathers_stacked_experts_by_a_selector():
+    """The slots form over E-stacked coded experts: the codes and both channel vectors carry the expert axis, the
+    router's picks gather them, and each pick's factorized contraction matches ``F.linear`` on its own decoded
+    weight — for the row every pick shares and for a column of each pick's own."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    graph, spelled, feed, expected = _stacked_slots_case()
+    assert spelled == {"w": ("w_suh", "w_svh"), "w2": ("w2_suh", "w2_svh")}
+    assert graph.inputs == ["x", "sel", "w", "w2", "w_suh", "w_svh", "w2_suh", "w2_svh"]
+    assert tuple(d.as_static() for d in graph.nodes["w"].output.shape) == (3, 8, 8, 32)
+    assert tuple(d.as_static() for d in graph.nodes["w_suh"].output.shape) == (3, 128)
+    graph.validate()
+
+    result, _ = NumpyBackend().run(graph, input_data=feed)
+    got = result.outputs[graph.outputs[0]]
+    assert got.shape == (2, 128, 1)
     np.testing.assert_allclose(got.astype(np.float32), expected, rtol=3e-3, atol=3e-3 * float(np.abs(expected).max()))
+
+
+@requires_cuda
+def test_stacked_experts_run_on_the_card_under_the_greedy_pick():
+    """The stacked-slots program compiled under the default greedy pick runs on the card and matches ``F.linear``. A
+    staged warp-tier pick reads the decode's integer tables (a shift amount, a modulus) back from per-row smem rows;
+    read back as float they turned the decode's integer arithmetic into float arithmetic."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.backend.plan import plan_from_graph
+
+    graph, _spelled, feed, expected = _stacked_slots_case()
+    plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+    with gpu_lock():
+        program = CompiledProgram.build_from_plan(plan, feed)
+        program.run_once()
+        got = np.asarray(program.outputs()[graph.outputs[0]], dtype=np.float32).reshape(expected.shape)
+    assert np.max(np.abs(got - expected)) / max(float(np.max(np.abs(expected))), 1e-12) < 2e-2
 
 
 def test_gathered_input_spelling_reaches_cuda_source():
@@ -673,11 +700,12 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     from emmy.serving.gen_runner import _bind_plan_constants
 
     assert set(_bind_plan_constants(plan, {}, cache=None)) == set(plan.weights)
+    # The decode is integer bit manipulation in 32 and 64 bits, its 64-bit window shifted right by zeros, and its
+    # 16-bit codes read as halves through the low half of a register.
     source = "\n".join(op.kernel_source for op in cuda)
-    assert "emmy_bitcast" in source and "#include <cuda_fp16.h>" in source
-    for spelling in (" % ", " << ", " >> ", " & ", " | ", " ^ "):
-        assert spelling in source
-    assert "unsigned int" in source and "unsigned long long" in source
+    opcodes = {line.split()[0] for line in source.splitlines() if line.startswith("\t") and not line.startswith("\t//")}
+    for opcode in ("shl.b32", "shr.u64", "and.b32", "or.b64", "xor.b32", "rem.s32", "cvt.u16.u32"):
+        assert opcode in opcodes, sorted(opcodes)
     active_ir = "\n".join(f"{nid} {type(node.op).__module__} {type(node.op).__name__}" for nid, node in lowered.nodes.items())
     assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
 
@@ -686,7 +714,7 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
 def test_factored_linear_runs_from_a_plan_on_checkpoint_leaves_alone():
     """The birth-time spelling runs off its PLAN, fed nothing but the checkpoint leaves.
 
-    The coded head (``serving.exl3_head``) binds exactly this way: the Hadamard factor and the
+    The coded head (``serving.coded_head``) binds exactly this way: the Hadamard factor and the
     coordinate tables fold into deterministic bind records, so nothing outside the plan can
     supply them and an unfilled constant buffer would make every logit zero. Two rows, not one:
     the multi-row shape is what routes the core contraction through a cut seam, whose workspace

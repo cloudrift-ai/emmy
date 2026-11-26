@@ -16,13 +16,15 @@ event windows measure dense GPU work instead of per-launch dispatch gaps. These 
 
 import asyncio
 
+from emmy.compiler.backend.base import BenchmarkResult
+from emmy.compiler.backend.cuda import compare as compare_mod
 from emmy.compiler.backend.cuda.program import GraphCaptureError, benchmark_program
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import kernel_ptx, requires_cuda
 
-from .test_program import EW_ADD_SOURCE, _make_add_graph
+from .test_program import _make_add_graph, ew_add_source
 
 
 def _make_two_launch_graph(n: int = 8) -> Graph:
@@ -32,7 +34,7 @@ def _make_two_launch_graph(n: int = 8) -> Graph:
     g.add_node(op=InputOp(), inputs=[], output=Tensor("A", (n,)), node_id="A")
     g.add_node(op=InputOp(), inputs=[], output=Tensor("B", (n,)), node_id="B")
     op = CudaOp(
-        kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
+        kernel_source=ew_add_source(n),
         kernel_name="ew_add",
         arg_order=("A", "B", "C"),
         grid=((n + 255) // 256, 1, 1),
@@ -40,7 +42,7 @@ def _make_two_launch_graph(n: int = 8) -> Graph:
     )
     g.add_node(op=op, inputs=["A", "B"], output=Tensor("C", (n,)), node_id="C")
     op2 = CudaOp(
-        kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
+        kernel_source=ew_add_source(n),
         kernel_name="ew_add",
         arg_order=("C", "B", "D"),
         grid=((n + 255) // 256, 1, 1),
@@ -159,13 +161,13 @@ def test_reference_free_benchmark_respects_iteration_budget():
     """A slow reference-free target must not silently run ten iterations when the caller budgets one."""
     from types import SimpleNamespace
 
-    from emmy.commands.run import bench_lowered_vs_torch
+    from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
 
     calls = []
 
     async def benchmark(graph, **kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(time_ms=1.0, captured=True)
+        return BenchmarkResult(time_ms=1.0, captured=True)
 
     backend = SimpleNamespace(run=lambda graph, **kwargs: (SimpleNamespace(outputs={}, time_ms=1.0), None), benchmark_async=benchmark)
     asyncio.run(bench_lowered_vs_torch(None, Graph(), backend, seed=0, do_bench=True, warmup=0, iters=1, bench_backends="emmy"))
@@ -174,8 +176,8 @@ def test_reference_free_benchmark_respects_iteration_budget():
 
 @requires_cuda
 def test_bench_lowered_vs_torch_captures():
-    from emmy.commands.run import bench_lowered_vs_torch
     from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
 
     fe, lowered = _lowered_rmsnorm()
     results, bench, torch_available, captured, _accuracy = asyncio.run(
@@ -190,8 +192,8 @@ def test_bench_lowered_vs_torch_captures():
 
 @requires_cuda
 def test_emmy_capture_failure_falls_back_uncaptured(monkeypatch):
-    from emmy.commands.run import bench_lowered_vs_torch
     from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.compare import bench_lowered_vs_torch
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
     def _boom(self, batch_sizes):
@@ -210,7 +212,6 @@ def test_emmy_capture_failure_falls_back_uncaptured(monkeypatch):
 
 @requires_cuda
 def test_torch_capture_failure_disables_emmy_capture(monkeypatch):
-    import emmy.commands.run as run_mod
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
@@ -219,12 +220,14 @@ def test_torch_capture_failure_disables_emmy_capture(monkeypatch):
 
     emmy_captures: list = []
     orig = CompiledProgram.capture_launch_graphs
-    monkeypatch.setattr(run_mod, "_capture_torch_fn", _boom)
+    monkeypatch.setattr("emmy.compiler.backend.cuda.compare._capture_torch_fn", _boom)
     monkeypatch.setattr(CompiledProgram, "capture_launch_graphs", lambda self, bs: emmy_captures.append(bs) or orig(self, bs))
 
     fe, lowered = _lowered_rmsnorm()
     results, _, torch_available, captured, _accuracy = asyncio.run(
-        run_mod.bench_lowered_vs_torch(fe, lowered, CudaBackend(), seed=0, do_bench=True, warmup=2, iters=5, bench_backends="eager,emmy")
+        compare_mod.bench_lowered_vs_torch(
+            fe, lowered, CudaBackend(), seed=0, do_bench=True, warmup=2, iters=5, bench_backends="eager,emmy"
+        )
     )
     assert torch_available
     assert captured is False
@@ -243,7 +246,17 @@ def test_program_graph_batches_execute_every_forward_and_preserve_serving_replay
 
     graph = Graph()
     graph.add_node(op=InputOp(), inputs=[], output=Tensor("counter", (1,)), node_id="counter")
-    source = 'extern "C" __global__ void count(float* counter, float* out) { *out = ++*counter; }'
+    source = kernel_ptx(
+        "count",
+        """
+        Grid(axes=(t in 0..1), decode=(thread_idx.x), block_threads=1):
+            f32 c = load counter[0]
+            f32 n = c + 1.0
+            f32 counter[0] = n
+            f32 out[0] = n
+        """,
+        (("counter", "output", "f32"), ("out", "output", "f32")),
+    )
     for name in ("a", "b"):
         graph.add_node(
             op=CudaOp(kernel_source=source, kernel_name="count", arg_order=("counter", name), grid=(1, 1, 1), block=(1, 1, 1)),

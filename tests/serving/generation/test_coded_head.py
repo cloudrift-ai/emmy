@@ -1,0 +1,238 @@
+"""Coded output heads (EXL3, NVFP4): eligibility, the head program's values on CPU, and its compiled run on CUDA."""
+
+import numpy as np
+import pytest
+
+from emmy.compiler.loader.quant import dequantize_nvfp4, quantize_nvfp4
+from emmy.serving.coded_head import HEAD_ROWS, Exl3HeadSpec, Nvfp4HeadSpec, head_graph
+from tests.compiler.helpers import requires_cuda
+from tests.serving.helpers import static_fp4
+from tests.support.checkpoints import exl3_linear_tensors
+
+
+def _source(*, bits=6, hidden=128, vocab=256, marker="mul1"):
+    source = {
+        "lm_head.trellis": np.zeros((hidden // 16, vocab // 16, 16 * bits), dtype=np.int16),
+        "lm_head.suh": np.ones(hidden, dtype=np.float16),
+        "lm_head.svh": np.ones(vocab, dtype=np.float16),
+    }
+    if marker:
+        source[f"lm_head.{marker}"] = np.array(0, dtype=np.int32)
+    return source
+
+
+def test_coded_head_is_architecture_independent_and_keeps_logical_vocab():
+    spec = Exl3HeadSpec.from_source(
+        _source(vocab=512),
+        hidden_size=128,
+        vocab_size=500,
+        tensor_parallel_size=1,
+        tied=False,
+    )
+    assert spec == Exl3HeadSpec(bits=6, codebook=2, hidden_size=128, stored_vocab_size=512, vocab_size=500)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "source"),
+    [
+        ({"tensor_parallel_size": 2}, _source()),
+        ({"tied": True}, _source()),
+        ({}, _source(marker=None)),
+    ],
+)
+def test_unsupported_coded_head_keeps_decoded_fallback(kwargs, source):
+    base = dict(hidden_size=128, vocab_size=256, tensor_parallel_size=1, tied=False)
+    assert Exl3HeadSpec.from_source(source, **(base | kwargs)) is None
+
+
+def test_coded_head_rejects_ambiguous_marker_and_bad_storage():
+    source = _source()
+    source["lm_head.mcg"] = np.array(0, dtype=np.int32)
+    with pytest.raises(ValueError, match="both mcg and mul1"):
+        Exl3HeadSpec.from_source(
+            source,
+            hidden_size=128,
+            vocab_size=256,
+            tensor_parallel_size=1,
+            tied=False,
+        )
+
+
+@requires_cuda
+def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
+    import torch
+
+    from emmy.serving.coded_head import CodedHead
+
+    tensors, decoded = exl3_linear_tensors("lm_head", 256, 128, K=2, cb=2)
+    source = {name: tensor.numpy() for name, tensor in tensors.items()}
+    spec = Exl3HeadSpec.from_source(
+        source,
+        hidden_size=128,
+        vocab_size=251,
+        tensor_parallel_size=1,
+        tied=False,
+    )
+    assert spec is not None
+    head = CodedHead(spec, source, capacity=2)
+    assert head.program.plan.launches
+    assert all("exl3" not in launch.kernel_name.lower() for launch in head.program.plan.launches)
+    pointers = {name: head.program.executor.buffer(name)[0] for name in ("lm_head_trellis", "lm_head_suh", "lm_head_svh")}
+    x = (torch.randn(2, 128, device="cuda") * 0.1).half()
+    got = head(x)
+    # ``exl3_linear_tensors`` hands back the reference in checkpoint ``(out, in)`` orientation,
+    # so the logical-vocab slice takes the ROW axis and the matmul takes the transpose.
+    reference = x.float() @ torch.from_numpy(np.ascontiguousarray(decoded[:251].T)).float().cuda()
+    torch.testing.assert_close(got, reference, rtol=2e-2, atol=2e-2)
+    assert pointers == {name: head.program.executor.buffer(name)[0] for name in pointers}
+
+    source = _source()
+    source["lm_head.svh"] = source["lm_head.svh"].astype(np.float32)
+    with pytest.raises(ValueError, match="invalid svh"):
+        Exl3HeadSpec.from_source(
+            source,
+            hidden_size=128,
+            vocab_size=256,
+            tensor_parallel_size=1,
+            tied=False,
+        )
+
+
+def _nvfp4_checkpoint(path, vocab, hidden, *, input_scale=None, seed=0):
+    """A synthetic checkpoint whose head is NVFP4, W4A4 where it stores ``input_scale`` (modelopt's declaration of
+    static 4-bit activations, as NVIDIA's Qwen3.8-27B stores ``lm_head.input_scale``); returns the decoded head's
+    f32 weights."""
+    import json
+
+    import torch
+    from safetensors.torch import save_file
+
+    from emmy.compiler.loader.synthesize import _NVFP4_CONFIG
+
+    rng = np.random.default_rng(seed)
+    packed, scale_bits, scale_2 = quantize_nvfp4(rng.normal(scale=0.05, size=(vocab, hidden)).astype(np.float32))
+    tensors = {
+        "lm_head.weight": torch.from_numpy(packed),
+        "lm_head.weight_scale": torch.from_numpy(np.ascontiguousarray(scale_bits)).view(torch.float8_e4m3fn),
+        "lm_head.weight_scale_2": torch.from_numpy(scale_2.reshape(())),
+    }
+    if input_scale is not None:
+        tensors["lm_head.input_scale"] = torch.tensor(input_scale, dtype=torch.float32)
+    save_file(tensors, str(path / "model.safetensors"))
+    (path / "config.json").write_text(json.dumps({"model_type": "test", "quantization_config": _NVFP4_CONFIG}))
+    return dequantize_nvfp4(packed, scale_bits, scale_2)
+
+
+def _head_logits(spec, x):
+    """The head program's logits of the bf16 rows ``x`` on the NumPy backend, the W4A4 program's oracle."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.specialize import specialize_program
+
+    graph = head_graph(spec)
+    graph.validate()
+    graph = specialize_program(graph, {"num_tokens": x.shape[0]})
+    data = load_constants_from_safetensors(graph, spec.checkpoint)
+    result, _ = NumpyBackend().run(graph, input_data={**data, "x": x})
+    return graph, np.asarray(result.outputs["logits"], dtype=np.float32)
+
+
+def test_nvfp4_head_spec_comes_from_the_config():
+    base = dict(hidden_size=128, vocab_size=250, dtype="bfloat16", checkpoint="ckpt")
+    spec = Nvfp4HeadSpec.from_config(tensor_parallel_size=1, tied=False, **base)
+    assert spec == Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bfloat16", checkpoint="ckpt")
+    assert Nvfp4HeadSpec.from_config(tensor_parallel_size=2, tied=False, **base) is None
+    assert Nvfp4HeadSpec.from_config(tensor_parallel_size=1, tied=True, **base) is None
+
+
+def test_nvfp4_head_is_spelled_w4a4_as_the_trunks_linears(tmp_path):
+    """The head program is the trunk's spelling of a linear over a checkpoint weight: its one input is the rows, its
+    constants are the checkpoint's codes and scales, and where the checkpoint stores ``lm_head.input_scale`` the rows
+    reach the product through the static 4-bit round trip. At sm_120 lowering the head's contraction then reads as a
+    block-scaled pair of packed operands and is offered the e2m1 tensor-core tile, as stock vLLM runs this head; a
+    checkpoint with no activation scale keeps the weight-only head and a 16-bit tile. Every kernel is measured at
+    the head's own rows, the coded rows' product too."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.ir.pure.fold import Fold
+    from emmy.compiler.ir.schedule.classic import refusals
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.wire import kernel_bindings
+
+    def folds(node):
+        return [node, *(f for e in node.operands for f in folds(e))] if isinstance(node, Fold) else []
+
+    for marked in (True, False):
+        checkpoint = tmp_path / str(marked)
+        checkpoint.mkdir()
+        _nvfp4_checkpoint(checkpoint, 512, 256, input_scale=0.02 if marked else None)
+        graph = head_graph(Nvfp4HeadSpec(hidden_size=256, vocab_size=512, dtype="bfloat16", checkpoint=str(checkpoint)))
+        assert graph.inputs == ["x"] and not graph.nodes["x"].output.shape[0].is_static, "the rows are serving's any-width axis"
+        paths = {node.op.source_path for node in graph.nodes.values() if isinstance(node.op, ConstantOp) and node.op.source_path}
+        stored = {"lm_head.weight", "lm_head.weight_scale", "lm_head.weight_scale_2"}
+        assert paths == (stored | {"lm_head.input_scale"} if marked else stored)
+        encodes = [node for node in graph.nodes.values() if isinstance(node.op, ElementwiseOp) and node.op.op.name == "to_f4e2m1"]
+        assert bool(encodes) == marked, "the activation is coded exactly where the checkpoint calibrates it"
+        ctx = Context.from_target((12, 0))
+        tiled = Pipeline.build(["tile/lift"], select={"lift"}).run(Pipeline.build(LOOP_PASSES).run(graph), ctx=ctx)
+        tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
+        assert all(kernel_bindings(tile) == {"num_tokens": HEAD_ROWS} for tile in tiles)
+        products = [(tile, fold) for tile in tiles for fold in folds(tile.op) if fold.as_contraction() is not None]
+        assert len(products) == 1, "the head is one contraction"
+        ((tile, product),) = products
+        assert (tile.packed_reading(product)[1] is not None) == marked
+        atoms = refusals._warp_atoms(tile, ctx, product)
+        assert atoms == (("mma_m16n8k64_e2m1_f32",) if marked else ("mma_m16n8k16_bf16_f32",)), atoms
+
+
+def test_nvfp4_head_program_computes_the_w4a4_logits(tmp_path):
+    """The W4A4 head's f32 logits are the product of the rows' static 4-bit round trip with the decoded head, the
+    decodes rounded to the model dtype as the trunk's are; the weight-only head's are the decoded head's. Any
+    number of rows at once."""
+    decoded = _nvfp4_checkpoint(tmp_path, 250, 128, input_scale=0.004)
+    import torch
+
+    x = torch.from_numpy(np.random.default_rng(1).standard_normal((3, 128)).astype(np.float32) * 0.5)
+    x16 = x.to(torch.bfloat16).float().numpy()  # the rows as the model dtype holds them
+    spec = Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bfloat16", checkpoint=str(tmp_path))
+    _graph, got = _head_logits(spec, x16)
+    assert got.shape == (3, 250)
+    w4a4, w4a16 = static_fp4(x16, 0.004) @ decoded.T, x16 @ decoded.T
+    scale = float(np.abs(w4a4).max())
+    assert float(np.abs(got - w4a4).max()) < 1e-2 * scale, "the rows are not coded at the stored activation scale"
+    assert float(np.abs(got - w4a16).max()) > 2e-2 * scale, "a W4A4 head computes over coded rows, not the rows"
+
+
+def test_nvfp4_head_refuses_codes_that_do_not_store_the_vocab(tmp_path):
+    _nvfp4_checkpoint(tmp_path, 256, 128)
+    with pytest.raises(ValueError, match=r"does not store codes and scales for the \(250, 128\) head"):
+        head_graph(Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bfloat16", checkpoint=str(tmp_path)))
+
+
+@requires_cuda
+@pytest.mark.parametrize("input_scale", [None, 0.004])
+def test_nvfp4_coded_head_runs_the_head_program_and_keeps_code_pointers(tmp_path, input_scale):
+    """The plugin's head runs the program on the device, its constants bound from the checkpoint's stored tensors
+    once, at any number of rows. Its logits are the CPU program's."""
+    import torch
+
+    from emmy.serving.coded_head import CodedHead, nvfp4_head_sources
+
+    _nvfp4_checkpoint(tmp_path, 250, 128, input_scale=input_scale)
+    spec = Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bfloat16", checkpoint=str(tmp_path))
+    head = CodedHead(spec, nvfp4_head_sources(str(tmp_path)), capacity=3)
+    plan = head.program.plan
+    pointers = {name: head.program.executor.buffer(name)[0] for name, weight in plan.weights.items() if weight.source_path}
+    # The codes, the block scales and the global scale; a W4A4 head's activation scale binds twice, as its value and
+    # its reciprocal.
+    assert len(pointers) == (5 if input_scale else 3)
+    # One row, a full group, and more rows than one group holds.
+    for rows in (1, 3, 5):
+        x = (torch.randn(rows, 128) * 0.5).to(torch.bfloat16)
+        got = head(x.cuda())
+        assert got.dtype == torch.float32 and got.shape == (rows, 250)
+        _graph, want = _head_logits(spec, x.float().numpy())
+        torch.testing.assert_close(got.cpu(), torch.from_numpy(want), rtol=1e-3, atol=1e-3)
+    assert pointers == {name: head.program.executor.buffer(name)[0] for name in pointers}

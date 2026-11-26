@@ -243,6 +243,32 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    the accepted tokens per step and the speedup, measured on Qwen3.8-Flash-Next on the 5090 with experts in the tiers
    milestone 7 built.
 
+   **Model change (2026-10-18, owner's call).** Emmy does not serve Qwen3.8-Flash-Next yet, and at 133 GB it does
+   not fit the 5090 VM (32 GB GPU, 23 GB RAM) before milestone 9's disk tier. Milestone 8 runs on
+   `Qwen/Qwen3.6-35B-A3B` (40 layers, 30 GDN, 256 experts with 8 routed, a one-layer MTP head; 70 GB in BF16, so it
+   needs a 5090 box with more than 80 GB of RAM for the host tier); onboarding Qwen3.8-Flash-Next moves to
+   milestone 9. The mechanisms are built first on `Qwen/Qwen3.5-0.8B` (dense, GDN, MTP head). Steps:
+   - **GDN verify state.** A GDN layer gets programs at widths 1 to k+1 that return the state and history after
+     each row (`build_gdn_state_wrapper(rows=True)`). The serving model follows vLLM's slot layout: a request in
+     a verify step reads its state from slot `accepted - 1` and writes row t's state to slot t.
+   - **The MTP head, Emmy-compiled.** vLLM's MTP proposer stays (draft KV cache, positions, draft steps); the
+     draft model class is Emmy's: the prologue (two norms, concat, `fc`), the attention layer's pre and post
+     programs around vLLM attention, the final norm; embedding and head shared with the target.
+   - **GDN layers' experts in the tiers.** On GDN models the serving runner compiles the GDN mixer and the MoE as
+     one block program, so those experts never reach the paged expert tier. Split the block as attention layers
+     are split: the mixer program, then the MoE through the expert tier.
+
+   **State (2026-10-20).** The three steps above are built and pass their engine tests on tiny models. The
+   Qwen3.6-35B-A3B-FP8, Qwen3.8-27B-NVFP4 (5090) and Qwen3.8-27B-FP8 (V100) goldens are re-traced and re-recorded
+   on rented cards. Left:
+   - **GDN cut gap.** The cut pass never offers the fused GDN region's FP8 shared-expert projections as seams, so
+     those pieces keep a scalar schedule: Qwen3.6 GDN programs run 0.6–10 ms per layer against a ~20–40 µs floor.
+     The width-64 chunk piece (`k_linear_matmul_mean_reduce`) has no measured route on any of the three models: the
+     prior's pick runs past the 10 s bench limit. Qwen3.6's width-2 verify and width-4 GDN programs have none either.
+   - **Qwen3.6 symbolic attention pre** dropped from 151 µs to 1.41 ms after #1206 re-keyed its route.
+   - **FP8 MTP head.** `create_mtp` loads the head through Transformers, which does not read the FP8 checkpoint.
+   - Then serving and the gate.
+
 9. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090, hot experts in GPU memory, warm in host RAM,
    rare on NVMe.** The checkpoint is 133 GB; the box has 32 GB of GPU memory and 64 GB of RAM, so after the trunk, the
    KV cache and the OS, roughly 40–50 GB of experts stay on disk. Repeat the best configuration with that third tier.

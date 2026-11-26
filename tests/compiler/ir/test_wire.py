@@ -9,10 +9,18 @@ import pytest
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, Expr, FuncCallExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import (
+    BinaryExpression,
+    Builtin,
+    CastExpression,
+    Expression,
+    FlatIndex,
+    FunctionCallExpression,
+    Literal,
+    TernaryExpression,
+    Var,
+)
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
@@ -31,7 +39,7 @@ from emmy.compiler.ir.frontend.ir import (
     UnsqueezeOp,
 )
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
     CastOp,
@@ -49,57 +57,31 @@ from emmy.compiler.wire import decode, encode, intern
 
 
 @pytest.mark.parametrize(
-    ("expr", "text"),
+    ("expression", "text"),
     [
         (Var("s"), "s"),
         (Builtin("thread_idx.x"), "thread_idx.x"),
         (Literal(3, "int"), "3"),
-        (Literal(-1, "int"), "-1"),
-        (Literal(0.5), "0.5"),
-        (Literal(2, "float"), "2.0"),
-        (Literal(1e-05), "1e-05"),
-        (Literal(True, "bool"), "true"),
-        (BinaryExpr("+", Var("s"), Literal(2, "int")), "s + 2"),
-        (BinaryExpr("+", Var("a1"), Literal(-1, "int")), "a1 + -1"),
-        (
-            BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", Var("a5"), Literal(128, "int")), Literal(128, "int")), Var("a6")),
-            "a5 / 128 * 128 + a6",
-        ),
-        (BinaryExpr("-", Var("a"), BinaryExpr("-", Var("b"), Var("c"))), "a - (b - c)"),
-        (BinaryExpr("*", BinaryExpr("+", Var("a"), Var("b")), Var("c")), "(a + b) * c"),
-        (BinaryExpr("^", Var("a"), BinaryExpr("+", Var("b"), Var("c"))), "a ^ b + c"),
-        (BinaryExpr("+", BinaryExpr("^", Var("a"), Var("b")), Var("c")), "(a ^ b) + c"),
-        (BinaryExpr("&", Var("a"), BinaryExpr("*", Var("b"), Var("c"))), "a & b * c"),
-        (BinaryExpr("*", BinaryExpr("&", Var("a"), Var("b")), Var("c")), "(a & b) * c"),
-        (BinaryExpr("//", Var("a"), Literal(2, "int")), "a // 2"),
-        (FuncCallExpr("maximum", (Var("x"), Literal(0.0))), "maximum(x, 0.0)"),
-        (TernaryExpr(Var("p"), Literal(1, "int"), Literal(0, "int")), "p ? 1 : 0"),
-        (BinaryExpr("+", TernaryExpr(Var("p"), Var("a"), Var("b")), Literal(1, "int")), "(p ? a : b) + 1"),
-        (CastExpr("int", Var("x")), "(int)x"),
-        (CastExpr("int", BinaryExpr("+", Var("x"), Literal(1, "int"))), "(int)(x + 1)"),
-        (CastExpr("int", Literal(-1, "int")), "(int)(-1)"),
+        (BinaryExpression("+", Var("s"), Literal(2, "int")), "s + 2"),
+        (FunctionCallExpression("maximum", (Var("x"), Literal(0.0))), "maximum(x, 0.0)"),
+        (TernaryExpression(Var("p"), Literal(1, "int"), Literal(0, "int")), "p ? 1 : 0"),
+        (CastExpression("int", Var("x")), "(int)x"),
+        (FlatIndex("w", (Var("a0"), BinaryExpression("+", Var("a1"), Literal(1, "int")))), "w[a0, a1 + 1]"),
     ],
 )
-def test_expression_round_trip(expr, text):
-    assert expr.to_wire() == text
-    assert Expr.from_wire(text) == expr
-    assert decode(encode(expr)) == expr
-
-
-def test_expression_parse_error_names_its_position():
-    with pytest.raises(ValueError, match="position 4"):
-        Expr.from_wire("a + * b")
-
-
-def test_a_variable_spelled_like_a_builtin_has_no_text():
-    with pytest.raises(ValueError, match="no spelling"):
-        Var("thread_idx.x").to_wire()
+def test_every_expression_class_round_trips_through_the_wire(expression, text):
+    """One expression per class: its text, its wire form and the wire registry's tag read it back as that class. The
+    text of every spelling is the crate's test."""
+    assert str(expression) == text
+    assert expression.to_wire() == text
+    assert Expression.from_wire(text) == expression
+    assert decode(encode(expression)) == expression
 
 
 def test_dimension_round_trip_preserves_composite_expression_and_hint():
-    dims = [Dim(32), Dim("seq", hint=17), Dim(BinaryExpr("*", Var("seq"), Literal(2, "int")))]
+    dims = [Dim(32), Dim("seq", hint=17), Dim(BinaryExpression("*", Var("seq"), Literal(2, "int")))]
     restored = [Dim.from_wire(dim.to_wire()) for dim in dims]
-    assert [dim.expr for dim in restored] == [dim.expr for dim in dims]
+    assert [dim.expression for dim in restored] == [dim.expression for dim in dims]
     assert [dim.hint for dim in restored] == [dim.hint for dim in dims]
 
 
@@ -136,8 +118,8 @@ def test_dimension_round_trip_preserves_composite_expression_and_hint():
             sources=(
                 IndexSource(
                     input_idx=0,
-                    coord_map=(Var("out_coord_0"), BinaryExpr("%", Var("out_coord_1"), Literal(4, "int"))),
-                    select=BinaryExpr("<", Var("out_coord_0"), Var("seq")),
+                    coord_map=(Var("out_coord_0"), BinaryExpression("%", Var("out_coord_1"), Literal(4, "int"))),
+                    select=BinaryExpression("<", Var("out_coord_0"), Var("seq")),
                 ),
             ),
         ),
@@ -242,30 +224,24 @@ def test_program_rejects_unknown_ops_and_fields():
 
 
 def test_loop_graph_round_trip_preserves_structural_body_and_composite_dims() -> None:
-    extent = Dim(BinaryExpr("*", Var("seq"), Literal(2, "int")))
-    body = Body(
-        (
-            Loop(
-                Axis("a0", extent),
-                Body(
-                    (
-                        Load(name="in0", input="x", index=(Var("a0"),)),
-                        Assign(name="v0", op=ElementwiseImpl("relu"), args=("in0",)),
-                        Write(output="y", index=(Var("a0"),), value="v0"),
-                    )
-                ),
-            ),
-        )
+    extent = Dim(BinaryExpression("*", Var("seq"), Literal(2, "int")))
+    body = parse_body(
+        """
+        for a0 in 0..seq * 2:
+            in0 = load x[a0]
+            v0 = relu(in0)
+            y[a0] = v0
+        """
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (extent,), "f16"), node_id="x")
-    graph.add_node(LoopOp(body=body, name="k_relu"), ["x"], Tensor("y", (extent,), "f16"), node_id="y")
+    graph.add_node(LoopOp(body=body), ["x"], Tensor("y", (extent,), "f16"), node_id="y")
     graph.inputs, graph.outputs = ["x"], ["y"]
 
     wire = json.loads(json.dumps(graph.to_wire()))
     restored = Graph.from_wire(wire)
 
     assert restored.nodes["y"].op.body == body
-    assert restored.nodes["y"].op.name == "k_relu"
+    assert restored.nodes["y"].op.name == graph.nodes["y"].op.name  # computed from the body, never on the wire
     assert restored.buffer("y").shape == (extent,)
     assert restored.to_wire() == wire

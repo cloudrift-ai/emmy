@@ -28,18 +28,24 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY, atom_for, atoms_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
+from emmy.compiler.ir.kernel.ir import FragmentLoad, MmaSyncPtx
 from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule.classic import refusals as sched
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Assign, Load, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
-from tests.compiler.helpers import requires_cuda, requires_sm
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction, projection
 
 K32 = "mma_m16n8k32_e4m3_f32"
+
+
+def _k32_products(kernels) -> list:
+    """The ``m16n8k32`` products of ``kernels``: the native FP8 tier."""
+    return [mma for mma in statements(kernels, MmaSyncPtx) if tuple(mma.shape) == (16, 8, 32)]
+
 
 # ===================================================================
 # The side-generic mul-hoist: A-side and double-cone W8A8 (restored)
@@ -69,31 +75,22 @@ def _bind(loop, m: str = "m", n: str = "n"):
 def _w8a8_loop(*, a_scale=True, b_scale=True):
     """The fused W8A8 matmul loop body: ``acc += (sa * from_f8(a[m,k])) * (sb[n] * from_f8(w[k,n]))``
     — a storage-decode cone on EACH operand, each times a k-invariant scale factor."""
-    k = Axis("k", Dim(64))
-    stmts: list = [
-        Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=F8E4M3),
-        Assign(name="adq", op="from_f8e4m3", args=("ab",)),
-        Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3),
-        Assign(name="wdq", op="from_f8e4m3", args=("wb",)),
+    lines = [
+        "f8e4m3 ab = load a_bits[m, k]",
+        "adq = from_f8e4m3(ab)",
+        "f8e4m3 wb = load w_bits[k, n]",
+        "wdq = from_f8e4m3(wb)",
     ]
     a_val, b_val = "adq", "wdq"
     if a_scale:
-        stmts += [
-            Load(name="sa", input="act_scale", index=(Literal(0), Literal(0))),
-            Assign(name="asc", op="multiply", args=("sa", "adq")),
-        ]
+        lines += ["sa = load act_scale[0, 0]", "asc = multiply(sa, adq)"]
         a_val = "asc"
     if b_scale:
-        stmts += [
-            Load(name="sb", input="w_scale", index=(Literal(0), Var("n"))),
-            Assign(name="wsc", op="multiply", args=("sb", "wdq")),
-        ]
+        lines += ["sb = load w_scale[0, n]", "wsc = multiply(sb, wdq)"]
         b_val = "wsc"
-    stmts += [
-        Assign(name="v", op="multiply", args=(a_val, b_val)),
-        Accum(name="acc", value="v", op=ElementwiseImpl("add")),
-    ]
-    return Loop(axis=k, body=Body(tuple(stmts)))
+    lines += [f"v = multiply({a_val}, {b_val})", "acc <- add(acc, v)"]
+    [loop] = parse_body("\n".join(["for k in 0..64:", *(f"    {line}" for line in lines)]))
+    return loop
 
 
 def test_a_side_decode_scale_binds_raw_with_hoist():
@@ -103,7 +100,7 @@ def test_a_side_decode_scale_binds_raw_with_hoist():
     assert a.as_slab() is not None and a.as_slab().load.input == "a_bits"
     assert b.as_slab() is not None and b.as_slab().load.input == "w_bits"
     tail = [s for s in epi if isinstance(s, Assign)]
-    assert tail and tail[-1].op.name == "multiply", "the activation scale did not hoist"
+    assert tail and tail[-1].value.operation.name == "multiply", "the activation scale did not hoist"
 
 
 def test_double_cone_hoists_both_scales():
@@ -113,7 +110,7 @@ def test_double_cone_hoists_both_scales():
     assert a.as_slab() is not None and a.as_slab().load.input == "a_bits"
     assert b.as_slab() is not None and b.as_slab().load.input == "w_bits"
     assigns = [s for s in epi if isinstance(s, Assign)]
-    assert assigns and {s.op.name for s in assigns} == {"multiply"}
+    assert assigns and {s.value.operation.name for s in assigns} == {"multiply"}
     assert {s.input for s in epi if isinstance(s, Load)} == {"act_scale", "w_scale"}
 
 
@@ -150,13 +147,16 @@ def test_k32_tile_codec_round_trips():
 def test_k32_fragment_register_counts():
     """The k32 8-bit fragment ABI packs 4 bytes/reg/lane: A is 4x32-bit regs, B is 2 (the PTX
     m16n8k32 8-bit fragment table); C keeps the k16 f32 map (4 regs)."""
-    from emmy.compiler.ir.kernel.ir import _mma_sync_nregs
+    from emmy.compiler.ir.kernel.ir import RegFragment, fragment_registers
 
-    assert _mma_sync_nregs("a", (16, 8, 32), F8E4M3) == 4
-    assert _mma_sync_nregs("b", (16, 8, 32), F8E4M3) == 2
-    assert _mma_sync_nregs("c", (16, 8, 32), F32) == 4
+    def registers(role, dtype):
+        return fragment_registers(RegFragment(name="f", role=role, dtype=dtype))
+
+    assert registers("a", F8E4M3) == 4
+    assert registers("b", F8E4M3) == 2
+    assert registers("c", F32) == 4
     # the 16-bit family is untouched
-    assert _mma_sync_nregs("a", (16, 8, 16), F16) == 4 and _mma_sync_nregs("b", (16, 8, 16), F16) == 2
+    assert registers("a", F16) == 4 and registers("b", F16) == 2
 
 
 # ===================================================================
@@ -201,12 +201,11 @@ def test_to_f8_op_registered_with_numpy_forward():
 
 def _f8_term(cap=(12, 0), *, a_dtype=F8E4M3, b_dtype=F8E4M3, k=512):
     ka = Axis("k", Dim(k))
-    a = Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=a_dtype)
-    b = Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=b_dtype)
+    a, b = parse_body(f"{a_dtype.name} ab = load a_bits[m, k]\n{b_dtype.name} wb = load w_bits[k, n]")
     node = contraction(ka, a, (b, "acc"))
     inputs = {"a_bits": Tensor("a_bits", (32, k), a_dtype), "w_bits": Tensor("w_bits", (k, 512), b_dtype)}
     free = (Axis("m", Dim(32)), Axis("n", Dim(512)))
-    tile = TileOp(op=node, name="lin", place=Placement(free=free), axes=(*free, ka), inputs=inputs)
+    tile = TileOp(op=node, place=Placement(free=free), axes=(*free, ka), inputs=inputs)
     return tile, Context.from_target(cap), node
 
 
@@ -232,8 +231,14 @@ def test_k32_domain_is_independent_of_the_precision_restriction(monkeypatch):
 
 def test_k32_enumeration_structural_requirements(monkeypatch):
     monkeypatch.setenv("EMMY_FP8_MMA", "1")
-    # both operands must carry the SAME f8 dtype — a 16-bit B never rides the byte gather
-    assert _offered_atoms(*_f8_term(b_dtype=F16)) == ()
+    # A 16-bit B cannot ride a byte atom; A rides the compute fill as a byte slab the mma.sync fragment loads convert.
+    mixed = _offered_atoms(*_f8_term(b_dtype=F16))
+    assert mixed and all(ATOM_REGISTRY[name].operand_dtype("a") == F16 for name in mixed)
+    # A wgmma descriptor and Volta's paired layouts would read that byte slab as 16-bit values.
+    hopper = _offered_atoms(*_f8_term(cap=(9, 0), b_dtype=F16))
+    assert hopper and not any(ATOM_REGISTRY[name].is_wgmma for name in hopper)
+    assert any(ATOM_REGISTRY[name].is_wgmma for name in _offered_atoms(*_f8_term(cap=(9, 0), a_dtype=F16, b_dtype=F16)))
+    assert _offered_atoms(*_f8_term(cap=(7, 0), b_dtype=F16)) == ()
     # the sm_89 hardware floor is absolute (the bare PTX form does not compile below)
     assert _offered_atoms(*_f8_term(cap=(8, 6))) == ()
     # a symbolic K declines — no masked-K byte gather
@@ -297,12 +302,14 @@ def test_k32_mma_matches_lut_reference_cuda():
     rng = np.random.default_rng(11)
     backend = CudaBackend()
     with pinned_knobs({"TILE": f"{K32}/f2x2", "WORK": "w1x4", "REDUCE": "", "STAGE": ""}):
-        compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
-    srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-    mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32" in s), None)
-    assert mma_src is not None, "no k32 mma kernel — the f8 pair did not reach the native fp8 tier"
-    assert "emmy_mma_load_a_gmem_b8" in mma_src  # the byte-gather fragment loaders, raw bits
-    assert "emmy_mma_load_b_gmem_trans_b8" in mma_src or "emmy_mma_load_b_gmem_b8" in mma_src
+        compiled, kernels = compile_with_kernels(_bare_f8_linear_graph(m, n, k))
+    native = [kernel for kernel in kernels.values() if _k32_products(kernel)]
+    assert native, "no k32 mma kernel — the f8 pair did not reach the native fp8 tier"
+    assert all((mma.ab_dtype, mma.c_dtype) == ("e4m3", "f32") for mma in _k32_products(native[0]))
+    # The byte-gather fragment loads: both operands straight from global memory, raw bits into FP8 fragments.
+    loads = statements(native[0], FragmentLoad)
+    assert {load.role for load in loads} == {"a", "b"}
+    assert all(not load.staged and load.src_dtype == load.dtype == F8E4M3 for load in loads)
 
     # exact regime
     abits = np.take(np.array([0x00, 0x38, 0xB8], dtype=np.uint8), rng.integers(0, 3, (m, k)))
@@ -380,9 +387,8 @@ def test_w8a8_needs_the_gate_to_enumerate_cuda(monkeypatch):
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    compiled = backend.compile(_w8a8_graph(m, n, k))
-    srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-    assert not any("m16n8k32" in s for s in srcs), "the k32 atom enumerated without the precision gate"
+    compiled, kernels = compile_with_kernels(_w8a8_graph(m, n, k))
+    assert not _k32_products(kernels), "the k32 atom enumerated without the precision gate"
 
     input_data: dict = {"x": x}
     input_data.update(bind_constants(compiled, {"act.scale": act_scale, "layer.wscale": wscale, "layer.weight": bits}))

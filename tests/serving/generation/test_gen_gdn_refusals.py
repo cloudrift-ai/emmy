@@ -7,11 +7,11 @@ import pytest
 pytest.importorskip("vllm")
 
 
-def _vllm_config(*, prefix_caching=False, speculative=None, eager=True, cudagraph_mode="NONE"):
-    """The four settings the GDN boot check reads, as a stand-in for a ``VllmConfig``."""
+def _vllm_config(*, prefix_caching=False, eager=True, cudagraph_mode="NONE"):
+    """The settings the GDN boot check reads, as a stand-in for a ``VllmConfig``."""
     return SimpleNamespace(
         cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching),
-        speculative_config=speculative,
+        speculative_config=None,
         compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(name=cudagraph_mode)),
         model_config=SimpleNamespace(enforce_eager=eager),
     )
@@ -31,16 +31,15 @@ def test_gdn_layers_boot_only_on_the_hybrid_class():
     ("setting", "error", "reason"),
     [
         ({"prefix_caching": True}, NotImplementedError, "prefix caching"),
-        ({"speculative": object()}, NotImplementedError, "speculative decoding"),
         ({"eager": False, "cudagraph_mode": "FULL_AND_PIECEWISE"}, ValueError, "FULL_DECODE_ONLY"),
         ({"eager": False, "cudagraph_mode": "FULL"}, ValueError, "FULL_DECODE_ONLY"),
         ({"eager": False, "cudagraph_mode": "PIECEWISE"}, ValueError, "FULL_DECODE_ONLY"),
     ],
 )
 def test_gdn_serving_refuses_what_would_corrupt_or_cannot_record_the_state(setting, error, reason):
-    """A request keeps one recurrent state per GDN layer, with no snapshot: a cached prefix has no state to resume
-    from, and a rejected draft token has already advanced it. A capture of a prefill or mixed step would replay its
-    own per-request token ranges, which a GDN layer reads on the host, on steps whose ranges differ."""
+    """A request keeps one recurrent state per GDN layer, with no snapshot a cached prefix could resume from. A
+    capture of a prefill or mixed step would replay its own per-request token ranges, which a GDN layer reads on the
+    host, on steps whose ranges differ."""
     from emmy.serving.vllm_model_gen import EmmyGenHybridModel
 
     with pytest.raises(error, match=reason):
@@ -52,6 +51,34 @@ def test_gdn_serving_captures_decode_steps():
     from emmy.serving.vllm_model_gen import EmmyGenHybridModel
 
     EmmyGenHybridModel._check_gdn_serving(_vllm_config(eager=False, cudagraph_mode="FULL_DECODE_ONLY"))
+
+
+def test_gdn_serving_refuses_speculative_decoding_without_the_counting_builder(monkeypatch):
+    """vLLM before 0.25 has no builder class that receives a verify step's accepted-token counts, so Emmy's GDN state
+    builder never gets them and a verify step would run as a plain decode over the wrong state block. Where such a
+    class exists, speculative decoding boots."""
+    from emmy.serving import vllm_model_gen
+
+    config = _vllm_config()
+    config.speculative_config = SimpleNamespace()
+    monkeypatch.setattr(vllm_model_gen, "_CountingLinearBuilder", vllm_model_gen.LinearAttentionMetadataBuilder)
+    with pytest.raises(NotImplementedError, match="vLLM >= 0.25"):
+        vllm_model_gen.EmmyGenHybridModel._check_gdn_serving(config)
+    monkeypatch.setattr(vllm_model_gen, "_CountingLinearBuilder", object)
+    vllm_model_gen.EmmyGenHybridModel._check_gdn_serving(config)
+
+
+def test_hosted_gdn_layers_refuse_the_cache_mode_their_own_model_refuses():
+    """Qwen3.8-Flash-Next's Gated DeltaNet layers are the fork's, and its own model refuses to keep their state for every
+    cached block (``mamba_cache_mode`` "all"). The plugin refuses that too and leaves the rest to the layers."""
+    from emmy.serving.vllm_model_gen import EmmyGenHybridModel
+
+    config = _vllm_config(prefix_caching=True)
+    config.cache_config.mamba_cache_mode = "all"
+    with pytest.raises(NotImplementedError, match="align"):
+        EmmyGenHybridModel._check_gdn_serving(config, hosted=True)
+    config.cache_config.mamba_cache_mode = "align"
+    EmmyGenHybridModel._check_gdn_serving(config, hosted=True)
 
 
 def test_gdn_state_layout_matches_the_layer_programs():

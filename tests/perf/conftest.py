@@ -80,7 +80,7 @@ class PerfRow:
     # Per-kernel ncu metrics keyed by kernel name. Populated only when
     # the optional ncu pass runs (``EMMY_BENCH_NCU=1``). Each entry
     # maps metric-name → numeric value (units are baked into the metric
-    # name; see ``emmy.commands.run._NCU_METRICS``). ``None`` when
+    # name; see ``emmy.commands.ncu._NCU_METRICS``). ``None`` when
     # not collected.
     ncu: dict[str, dict[str, float]] | None = None
     #: This card's stored latency for the case, when it has one. ``None`` means the corpus has no
@@ -151,7 +151,7 @@ def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
                 command,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "EMMY_NVCC_FLAGS": "", "EMMY_DUMP_DIR": tmp},
+                env={**os.environ, "EMMY_DUMP_DIR": tmp},
                 timeout=1800,
             )
             if result.returncode != 0 or not output.exists():

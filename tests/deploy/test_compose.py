@@ -443,3 +443,16 @@ def test_replica_services_single_service_sees_the_given_devices(sample_config):
     recipe = Recipe.from_dict(sample_config)
     assert replica_services(recipe) == ([Service(recipe, None, 8000)], False)
     assert replica_services(recipe, [2, 3]) == ([Service(recipe, [2, 3], 8000)], False)
+
+
+def test_compose_native_service_runs_the_image_entrypoint_over_its_pack():
+    recipe = Recipe.from_dict(
+        {
+            "model": {"huggingface": "org/m"},
+            "engine": {"llm": {"context_length": 4096, "native": {"image": "cloudriftai/emmy-native-m:0.3.22-abcdef1", "golden": "g"}}},
+        }
+    )
+    service = yaml.safe_load(generate_compose([Service(recipe, None)], "/mnt/models", "tok"))["services"]["native_0"]
+    assert service["image"] == "cloudriftai/emmy-native-m:0.3.22-abcdef1"
+    assert "entrypoint" not in service
+    assert service["command"].split() == ["--model", "org/m", "--host", "0.0.0.0", "--port", "8000", "--max-model-len", "4096"]

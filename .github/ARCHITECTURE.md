@@ -11,8 +11,7 @@ skills and CloudRift inference endpoint.
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
-| **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` + `agent-runners` / `agents` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`, refreshes recipe lifecycle tags and onboarding shells on `main`, lists the compiler gaps, fills one hardware golden's missing measurements on a rented CloudRift card, and posts one summary to #emmy-robots. |
-| **Review pull requests** | Ready PR or new commit | GitHub-hosted | Posts a PR Agent review using the nightly CloudRift model. |
+| **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` + `agent-runners` / `agents` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`, refreshes recipe lifecycle tags and onboarding shells on `main`, lists the compiler gaps, fills one hardware golden's missing measurements on a rented CloudRift card, drops the candidate rows the compiler no longer realizes, and posts one summary to #emmy-robots. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Corpus timings** | Weekly schedule or manual dispatch | `agent-runners` / `agents` | Rents one CloudRift card and records its realization corpus timings on a rolling PR. |
@@ -77,11 +76,7 @@ cannot overwrite newer work. A job whose result depends on only part of the tree
 instead: discovery guards `recipes`, so a compiler change merged during its run is rebased over. Each prior leg
 writes its comparison line to the job output named after its space, which GitHub combines across the matrix for the
 notification job. Each leg also runs `eval prior --json` on the weights it leaves on `main` and appends how many pools
-the prior re-decides as their golden did and the regret of the picks a golden row measured (`prior_picks.jq`); the
-schedule leg adds the regret over the measured pools (`measured_regret.jq`). The schedule leg then folds the files
-tunes wrote beside each card's file into the measurement freeze: the directory alone, imported into a freeze-only DB
-and frozen back, with LFS installed locally so the push uploads the payload; it commits the directory when the bytes
-changed, and every other job tolerates that move.
+the prior re-decides as their golden did and the regret of the picks a golden row measured (`prior_picks.jq`).
 
 The gap job runs `emmy golden list` over the repository goldens and the realization corpus and lists the corpus's
 expected-failure cases; `compiler_gaps.jq` turns them into one line: the rows behind `torch.compile` and the slowest
@@ -95,24 +90,23 @@ hardware golden, which `tests/github/test_golden_fill_recipe.py` keeps whole —
 `run --record-greedy` (a proposal) or `run --record` (a `torch.compile` time) until its two-hour budget is spent. The
 job copies the returned file over the golden, holds it to `emmy golden check`, and pushes it to `main`, after a
 timed-out fill too, so a large file fills over several nights. The other jobs tolerate the hardware goldens moving on
-`main` while they run.
+`main` while they run. A hardware golden's candidate file copies the golden's tables (GLOSSARY, "Candidate file"), so
+where the filled golden has one the job copies them again with `emmy candidates build`, from no tune DB, and pushes
+the two files together.
+
+The candidates job, after the fill job, compiles every row of the candidate files under its own schedule, drops the
+rows the compiler no longer realizes (`emmy candidates realize --drop`) and pushes the files. It rents nothing.
+
+`.github/candidates-fill/recipe.yaml` is the fill recipe's twin for the candidate files: one row per hardware golden
+on its card, a tune of every kernel `emmy candidates build --json` lists as under its target, then the candidate file
+built again from the tune DB those tunes wrote, returned with that tune DB. No workflow runs it; the
+`refresh-candidates` skill does, on a rented card or a box handed to it.
 
 The workflow ends with one GitHub-hosted notification job that waits for every other job and posts a single summary to
 #emmy-robots: each job's result, whether the durations changed, each prior's comparison and picks, the compiler gaps,
-the golden fill, and the discovery outcome described below; a discovery agent that stopped short reports how many tool
-calls and notes it finished (`discovery_partial.jq`). Because that job is independent of the self-hosted ones, it still
+the golden fill, the candidate rows that realize, and the discovery outcome described below; a
+discovery agent that stopped short reports how many tool calls and notes it finished (`discovery_partial.jq`). Because that job is independent of the self-hosted ones, it still
 reports a failure, cancellation, or timeout.
-
-**Review pull requests** runs the pinned PR Agent image when a PR is opened, reopened, marked ready, or updated. It
-reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through
-the GitHub API without checking out PR code, and its token can read contents and write PR comments but cannot push.
-Only `/review` runs; PR descriptions and code suggestions are left to the author. New commits replace an in-progress
-review for the same PR. The model, endpoint, and credential are shared with the nightly agent workflows. PR Agent can
-use up to 128,000 tokens of model context. Recorded golden JSON is excluded from the review input; the repository's
-golden checks validate those files. A failed review gets one fresh attempt, and a second failure fails the job. A
-review with no actionable finding posts no empty review card. The check is advisory: completion does not establish
-that the model found every issue, and no comment is the expected result when it reports none. The patch includes ten
-unchanged lines before each change, the maximum PR Agent accepts, so it can check nearby imports and definitions.
 
 ## Package publication
 
@@ -402,7 +396,7 @@ Agent workflows use these repository secrets as applicable:
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 
 `ONBOARD_AGENT_MODEL` selects the discovery, onboarding, and PR review model and defaults to
-`Qwen/Qwen3.8-27B-FP8`.
+`deepseek-ai/DeepSeek-V4-Flash-0731`, a model the inference endpoint serves.
 `CLOUDRIFT_TEAM_ID` must be the exact Robots team UUID; the verification/onboarding workflow fails before capacity
 selection if the variable is absent, malformed, or inaccessible to `CLOUDRIFT_API_KEY`.
 `CLOUDRIFT_INFERENCE_URL` selects the agent workflows' OpenAI-compatible endpoint and defaults to

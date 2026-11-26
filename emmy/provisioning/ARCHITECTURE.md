@@ -50,10 +50,17 @@ The orchestrator tries candidates in this order until one succeeds or all are ex
 fallback follows the hardware table across providers. An explicit `--provider` restricts the entire candidate list,
 so callers that request CloudRift are never silently relocated to GCP.
 
-CloudRift rentals can also be pinned to one node (`vm create cloudrift --node <id-or-hostname>`): the rent request
-then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and `resolve_node_id()` turns a hostname
-into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint — customers pass the UUID). A pinned node has
-no placement fallback, so the pin lives on the single-shot provider command, not the candidate orchestrator.
+CloudRift rentals can also be pinned to one node (`--node <id-or-hostname>` on `vm create cloudrift` and `deploy
+cloud`): the rent request then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and
+`resolve_node_id()` turns a hostname into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint —
+customers pass the UUID). A pinned node has no placement fallback. `provision_cloud_vm(node=…)` keeps only the
+CloudRift candidates, sends every request to that node, and stops at the first failure there. The one exception is
+`InstanceTypeNotOffered`: a GPU maps to several base types and a node carries one of them, so a request the node
+rejects for its instance type moves on to the GPU's next base type, on the same node.
+
+A caller that knows the CloudRift base type can name it (`deploy cloud --instance-type`,
+`provision_cloud_vm(instance_type=…)`). It replaces the hardware table's list for the GPU and is the only
+candidate, so with a node pin the rental is a single request.
 
 A CloudRift rental opens the ports the caller names (`provision_cloud_vm(ports=…)`): SSH, one host port per engine
 service, and the load balancer's when there is one; the default is `[22, 8000, 8080]`. GCP has no per-VM port list.
@@ -61,7 +68,9 @@ service, and the load balancer's when there is one; the default is `[22, 8000, 8
 A CloudRift rental has `provision_cloud_vm(vm_active_timeout=…)` seconds to become Active (default
 `DEFAULT_VM_ACTIVE_TIMEOUT`, 1800; `deploy cloud --vm-active-timeout` sets it). One that misses the deadline is
 terminated inside `create_instance` and surfaces as `CapacityExhausted`, so the orchestrator advances to the next
-candidate. GCP's wait comes from the `create_timeout_flex_start` / `create_timeout_spot` provider keys instead.
+candidate. GCP's wait comes from the `create_timeout_flex_start` / `create_timeout_spot` provider keys instead. A
+FLEX_START request is valid for exactly that wait (`--request-valid-for-duration`), so GCP stops queueing it when
+Emmy moves to the next zone, and a request GCP drops earlier ends the wait as soon as its instance is gone.
 
 Every CloudRift rental carries free-form tags for later filtering on listings. `create_instance` resolves them
 through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env

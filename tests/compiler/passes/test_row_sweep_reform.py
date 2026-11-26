@@ -8,12 +8,13 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Assign, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.pipeline.passes.tile._row import _align_owned_sweeps, reformed
-from tests.compiler.terms import contraction, projection, slab
+from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.pipeline.passes.tile._row import _align_owned_sweeps, lift_kernel, reformed
+from tests.compiler.terms import contraction, projection, reduction, slab
 
 
 def _siblings(
@@ -35,8 +36,9 @@ def _siblings(
     second_index = ("k", "n", "p") if cross_coordinate else ("k", "p", "q") if rectangular else ("k", "p")
     second = contraction(k, slab("x1", "x", "m", "k"), (slab("n" if captured_name else "w1v", "w1", *second_index), "acc1"))
     if value_coordinate:
-        second = projection((second,), body=(Assign(name="acc1_value", op="add", args=("acc1", "p")),), results=("acc1_value",))
+        second = projection((second,), body=parse_body("acc1_value = add(acc1, p)"), results=("acc1_value",))
     root = projection((first, second), results=("acc0", "acc1_value" if value_coordinate else "acc1"))
+    out1_index = "m, p, q" if rectangular else "m, p + n" if cross_write else "m, p"
     return TileOp(
         op=root,
         place=Placement(free=(m,)),
@@ -48,17 +50,27 @@ def _siblings(
         },
         outputs={"out0": Tensor("out0", (1, 8), "f16"), "out1": Tensor("out1", (1, 2, 4) if rectangular else (1, second_extent), "f16")},
         output_specs=(
-            OutputSpec(write=Write(output="out0", index=(Var("m"), Var("n")), value="acc0"), sweep=(n,)),
+            OutputSpec(*parse_body("out0[m, n] = acc0"), sweep=(n,)),
             OutputSpec(
-                write=Write(
-                    output="out1",
-                    index=(Var("m"), Var("p"), Var("q")) if rectangular else (Var("m"), Var("p") + Var("n") if cross_write else Var("p")),
-                    value="acc1_value" if value_coordinate else "acc1",
-                ),
+                *parse_body(f"out1[{out1_index}] = {'acc1_value' if value_coordinate else 'acc1'}"),
                 sweep=(p, q) if rectangular else (p,),
             ),
         ),
     )
+
+
+def _same_values(tile: TileOp, formed: TileOp, seed: int = 1) -> None:
+    rng = np.random.default_rng(seed)
+    inputs = [rng.standard_normal(tuple(dim.as_static() for dim in tensor.shape)).astype(np.float32) for tensor in tile.inputs.values()]
+    expected, actual = (LoopOp(body=p.loop_body, inputs=p.inputs, outputs=p.outputs).forward(*inputs) for p in (tile, formed))
+    for want, got in zip(expected, actual, strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+
+
+def _kept_apart(tile: TileOp) -> None:
+    """The sweeps stay independent: alignment refuses them, and the piece formed around them computes what it did."""
+    assert _align_owned_sweeps(tile) is tile
+    _same_values(tile, reformed(tile, {}))
 
 
 def test_equal_independent_sweeps_form_one_contraction() -> None:
@@ -100,36 +112,36 @@ def test_reform_preserves_both_output_values(rectangular) -> None:
 def test_unequal_sweeps_and_windows_remain_independent() -> None:
     nested = Window(parent=Axis("parent", 8, window=Window(partition=True)))
     for tile in (_siblings(second_extent=7), _siblings(second_window=Window(parent=Axis("parent", 8))), _siblings(second_window=nested)):
-        assert reformed(tile, {}) is tile
+        _kept_apart(tile)
     windowed_rectangle = _siblings(rectangular=True, rectangular_window=Window(parent=Axis("parent", 4)))
-    assert reformed(windowed_rectangle, {}) is windowed_rectangle
+    _kept_apart(windowed_rectangle)
 
 
 def test_cross_coordinate_branch_keeps_separate_sweeps() -> None:
     tile = _siblings(cross_coordinate=True)
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
 
 
 def test_cross_coordinate_store_keeps_separate_sweeps() -> None:
     tile = _siblings(cross_write=True)
-    assert reformed(tile, {}) is tile
+    assert _align_owned_sweeps(tile) is tile  # not a kernel on its own: the refusal is all there is to check
 
 
 def test_capture_of_first_sweep_name_keeps_separate_sweeps() -> None:
     tile = _siblings(captured_name=True)
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
 
 
 def test_sweep_used_as_value_keeps_separate_sweeps() -> None:
     tile = _siblings(rectangular=True, value_coordinate=True)
-    assert reformed(tile, {}) is tile
+    assert _align_owned_sweeps(tile) is tile  # not a kernel on its own: the refusal is all there is to check
 
 
 def test_repeated_output_buffer_keeps_separate_sweeps() -> None:
     tile = _siblings()
     first, second = tile.output_specs
-    duplicate = replace(tile, output_specs=(first, replace(second, write=replace(second.write, output="out0"))))
-    assert reformed(duplicate, {}) is duplicate
+    duplicate = replace(tile, output_specs=(first, replace(second, write=second.write.replace(output="out0"))))
+    assert _align_owned_sweeps(duplicate) is duplicate  # not a kernel on its own: the refusal is all there is to check
 
 
 def _transposed_siblings(*, incompatible=False, repeated=False, batched=False) -> TileOp:
@@ -147,7 +159,8 @@ def _transposed_siblings(*, incompatible=False, repeated=False, batched=False) -
         place=Placement(free=()),
         axes=(n, m, h, row, d, k, k1, b, batch),
         inputs={
-            "x": Tensor("x", (2, 3, k.extent) if batched else (3, k.extent), "f32"),
+            # The incompatible pair reads ``x`` both as ``[m, k]`` and as ``[k1, row]``; its rows cover both reads.
+            "x": Tensor("x", (2, 3, k.extent) if batched else (k.extent if incompatible else 3, k.extent), "f32"),
             "w0": Tensor("w0", (k.extent, 8), "f32"),
             "w1": Tensor("w1", (k.extent, 2, 4), "f32"),
         },
@@ -156,8 +169,8 @@ def _transposed_siblings(*, incompatible=False, repeated=False, batched=False) -
             "out1": Tensor("out1", (2, 3, 2, 4) if batched else (2, 3, 4), "f32"),
         },
         output_specs=(
-            OutputSpec(write=Write(output="out0", index=tuple(Var(axis.name) for axis in first_sweep), value="acc0"), sweep=first_sweep),
-            OutputSpec(write=Write(output="out1", index=tuple(Var(axis.name) for axis in second_sweep), value="acc1"), sweep=second_sweep),
+            OutputSpec(*parse_body(f"out0[{', '.join(axis.name for axis in first_sweep)}] = acc0"), sweep=first_sweep),
+            OutputSpec(*parse_body(f"out1[{', '.join(axis.name for axis in second_sweep)}] = acc1"), sweep=second_sweep),
         ),
     )
 
@@ -192,12 +205,19 @@ def test_transposed_sweeps_preserve_shared_rows_and_output_order(batched) -> Non
 
 def test_incompatible_row_mapping_keeps_separate_sweeps() -> None:
     tile = _transposed_siblings(incompatible=True)
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
+    # Both pieces read ``x`` in bounds: the comparison above is of values, not of the memory past the buffer.
+    x, w0, w1 = (
+        np.random.default_rng(1).standard_normal(tuple(dim.as_static() for dim in t.shape)).astype(np.float32) for t in tile.inputs.values()
+    )
+    out0, out1 = LoopOp(body=tile.loop_body, inputs=tile.inputs, outputs=tile.outputs).forward(x, w0, w1)
+    np.testing.assert_allclose(out0, (x[:3] @ w0).T, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(out1, np.einsum("kr,khd->hrd", x[:, :3], w1), rtol=1e-5, atol=1e-5)
 
 
 def test_repeated_input_coordinate_cannot_bind_the_reduction_as_a_row() -> None:
     tile = _transposed_siblings(repeated=True)
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
 
 
 @pytest.mark.parametrize("extent,window", [(Dim("width"), None), (Dim(8), Window(parent=Axis("whole", 8)))])
@@ -228,4 +248,95 @@ def test_two_input_coordinates_cannot_map_to_one_shared_axis() -> None:
             for spec in tile.output_specs
         ),
     )
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
+
+
+def _row_scaled() -> TileOp:
+    """A residual scaled by its row's statistic, minted the way a cut carves it from its parent's tree: the
+    residual read ahead of the statistic, the output's columns a store sweep."""
+    m, n, r = Axis("m", 8), Axis("n", 16), Axis("r", 4)
+    stat = reduction(r, (slab("sample", "s", "m", "r"),), parse_body("stat__v = copy(sample)"), ("stat",))
+    root = projection((slab("res", "x", "m", "n"), stat), parse_body("result = multiply(res, stat)"), ("result",))
+    return TileOp(
+        op=root,
+        place=Placement(free=(m,)),
+        axes=(m, n, r),
+        inputs={"s": Tensor("s", (8, 4), "f32"), "x": Tensor("x", (8, 16), "f32")},
+        outputs={"out": Tensor("out", (8, 16), "f32")},
+        output_specs=(OutputSpec(*parse_body("out[m, n] = result"), sweep=(n,)),),
+    )
+
+
+def test_a_swept_piece_takes_the_tree_its_own_body_lifts_to() -> None:
+    # Rows name a site by its path in the tree, so two pieces with one body must have one tree, however each was carved.
+    tile = _row_scaled()
+    formed = reformed(tile, {})
+    own = lift_kernel(LoopOp(body=tile.loop_body), shapes={})
+    assert [site.path for site in sites(formed.op)] == [site.path for site in sites(own.op)]
+    # Re-forming moves no identity: the rows a card measured on the minted piece still join it.
+    assert formed.identity_key(structural=False, with_io=True) == tile.identity_key(structural=False, with_io=True)
+    # The statistic stays hoisted out of the column loop: the columns are still a sweep, not folded per cell.
+    assert all(spec.sweep for spec in formed.output_specs)
+    _same_values(tile, formed)
+
+
+def test_a_piece_carved_with_a_shorter_grid_takes_its_own_body_grid() -> None:
+    # A piece carved with one grid axis whose body opens two: formed alone it binds both, so formed in its program it
+    # must too — a row measured on the piece alone and one measured in the program describe one kernel.
+    m, n = Axis("m", 8), Axis("n", 16)
+    root = projection((slab("v", "x", "m", "n"),), parse_body("result = negative(v)"), ("result",))
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m,)),
+        axes=(m, n),
+        inputs={"x": Tensor("x", (8, 16), "f32")},
+        outputs={"out": Tensor("out", (8, 16), "f32")},
+        output_specs=(OutputSpec(*parse_body("out[m, n] = result"), sweep=(n,)),),
+    )
+    formed = reformed(tile, {})
+    own = lift_kernel(LoopOp(body=tile.loop_body), shapes={})
+
+    def placement(piece: TileOp) -> tuple:
+        extents = tuple(axis.extent.as_static() for axis in piece.place.free)
+        return extents, [tuple(axis.extent.as_static() for axis in spec.sweep) for spec in piece.output_specs]
+
+    assert placement(formed) == placement(own) == ((8, 16), [()])
+    _same_values(tile, formed)
+
+
+def test_a_kernel_without_a_contraction_runs_its_unit_stride_store_axis_fastest() -> None:
+    """A store at ``[r, c + 8·s]`` writes consecutive addresses along ``c``, so the grid runs ``c`` fastest, in the
+    cut's piece and in the kernel its stored body forms alone. A read of ``y[r, c]`` keeps ``c`` and ``s`` two axes
+    and hoists ``c``'s loop outside ``s``'s, which is also the order the names sort in."""
+    r, c, s = Axis("r", 2), Axis("c", 8), Axis("s", 4)
+    index = (Var("r"), Var("c") + Var("s") * 8)
+    piece = TileOp(
+        op=projection((slab("x0", "x", *index), slab("y0", "y", "r", "c")), body=parse_body("v = add(x0, y0)")),
+        place=Placement(free=(r, c, s)),
+        axes=(r, c, s),
+        inputs={"x": Tensor("x", (2, 32), "f16"), "y": Tensor("y", (2, 8), "f16")},
+        outputs={"out": Tensor("out", (2, 32), "f16")},
+        output_specs=(OutputSpec(*parse_body("out[r, c + s * 8] = v")),),
+    )
+    formed = reformed(piece, {})
+    alone = lift_kernel(formed.source, shapes={})
+    assert [axis.extent.as_static() for axis in formed.place.free] == [2, 4, 8]
+    assert [axis.name for axis in alone.place.free] == [axis.name for axis in formed.place.free]
+
+
+def test_a_kernel_without_a_contraction_runs_an_axis_its_store_does_not_name_slowest() -> None:
+    """A partition axis ``p`` the store at ``[c]`` does not name (a split's partition, a scatter's row) opens slowest,
+    so consecutive threads still write consecutive addresses along ``c``, in the piece and alone."""
+    c, p = Axis("c", 8), Axis("p", 4)
+    piece = TileOp(
+        op=projection((slab("x0", "x", "p", "c"), slab("y0", "y", "c")), body=parse_body("v = add(x0, y0)")),
+        place=Placement(free=(c, p)),
+        axes=(c, p),
+        inputs={"x": Tensor("x", (4, 8), "f16"), "y": Tensor("y", (8,), "f16")},
+        outputs={"out": Tensor("out", (8,), "f16")},
+        output_specs=(OutputSpec(*parse_body("out[c] = v")),),
+    )
+    formed = reformed(piece, {})
+    alone = lift_kernel(formed.source, shapes={})
+    assert [axis.extent.as_static() for axis in formed.place.free] == [4, 8]
+    assert [axis.name for axis in alone.place.free] == [axis.name for axis in formed.place.free]

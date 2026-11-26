@@ -1,0 +1,159 @@
+"""Shared base class for body-carrying IR ops (``LoopOp`` / ``KernelOp``;
+``TileOp`` stores a pure term instead and subclasses ``Op`` directly).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import dataclass, field, replace
+from functools import cached_property
+
+from frozendict import frozendict
+
+from emmy.compiler.dtype import F32
+from emmy.compiler.ir.base import ConstantOp, Op, buffer_types
+from emmy.compiler.ir.stmt import Body, Load, Statement, Write, ZeroPrologue, optimize_body
+from emmy.compiler.ir.stmt import pretty_body as _pretty_body_stmts
+from emmy.compiler.tensor import Tensor
+
+
+@dataclass(frozen=True)
+class BodyOp(Op):
+    """Shared base for IR ops that carry a structured :class:`Body` of
+    stmts — ``LoopOp`` (loop IR), ``KernelOp`` (kernel IR). Provides:
+
+    - the ``body`` field, plus a ``__post_init__`` that coerces tuple-bodies to :class:`Body`,
+    - ``name``, computed from the kernel's exact identity,
+    - ``__iter__`` over the body's deep stmt iterator,
+    - ``loads`` / ``writes`` typed iters,
+    - a unified ``pretty_body`` returning the indented body listing
+      (the surrounding dump emits the kernel name / I/O label).
+
+    ``__post_init__`` pre-populates ``inputs`` / ``outputs`` (inherited
+    from :class:`Op`) with body-derived names keyed to placeholder
+    ``Tensor(name, (), F32)`` values, so pre-match callers (loop lowering /
+    fusion / tests) already see the right keys + ordering without a
+    matcher run. The body walk is generic — each :class:`Statement`
+    subclass declares its :meth:`Statement.external_reads` /
+    :meth:`Statement.external_writes` / :meth:`Statement.local_decls`, and
+    ``BodyOp`` aggregates them (filtering reads / writes that name a
+    locally-declared buffer like an ``Smem`` or ``Stage``). The
+    matcher's :meth:`with_io` rebind then overrides each entry with
+    the real graph-sourced ``Tensor`` and sanity-checks that the body
+    has no Load / Write naming a buffer the dict doesn't cover."""
+
+    body: Body = field(default_factory=Body)
+
+    @cached_property
+    def name(self) -> str:
+        """The kernel's name, computed from its exact identity (:func:`~emmy.compiler.wire.kernel_name`)."""
+        from emmy.compiler.wire import kernel_name  # noqa: PLC0415 — the wire module imports the IR
+
+        return kernel_name(self)
+
+    def __post_init__(self) -> None:
+        Op.__post_init__(self)
+        # Seed the positional ABI before the body's form reorders independent reads and writes; the
+        # matcher later refreshes these placeholders in graph order.
+        object.__setattr__(self, "body", Body.coerce(self.body))
+        self._seed_io_placeholders()
+        object.__setattr__(self, "body", self._formed(self.body))
+
+    @staticmethod
+    def _formed(body: Body) -> Body:
+        """The form this op's body takes at construction: the optimizing half of the normal form, with the order and
+        the names as its builder wrote them. ``LoopOp`` takes the whole normal form, which its identity reads."""
+        return optimize_body(body)
+
+    def _seed_io_placeholders(self) -> None:
+        """Populate empty ``inputs`` / ``outputs`` with body-derived names
+        keyed to placeholder ``Tensor(name, (), F32)`` values. Skips
+        either dict if the caller already supplied entries."""
+        in_names, out_names = self._derive_io_names()
+        if not self.inputs:
+            object.__setattr__(self, "inputs", frozendict({n: Tensor(n, (), F32) for n in in_names}))
+        if not self.outputs:
+            object.__setattr__(self, "outputs", frozendict({n: Tensor(n, (), F32) for n in out_names}))
+
+    def _derive_io_names(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The body's external buffers (:attr:`Body.buffers`: kernel-local declarations left out) as
+        ``(input_names, output_names)`` in body first-use order."""
+        ins, outs = self.body.buffers
+        # A buffer the body both reads and writes is in place — a recurrence reading its own
+        # earlier steps — and is one output param, not an input too.
+        return tuple(name for name in ins if name not in outs), tuple(outs)
+
+    def __iter__(self) -> Iterator[Statement]:
+        return self.body.iter()
+
+    @property
+    def loads(self) -> tuple[Load, ...]:
+        return self.body.iter_of_type(Load)
+
+    @property
+    def writes(self) -> tuple[Write, ...]:
+        return self.body.iter_of_type(Write)
+
+    def with_io(self, graph, node):  # noqa: ANN001 — matches Op.with_io signature
+        """Override :meth:`Op.with_io` — a pure builder like the base. Sanity-checks that every
+        body external read / write names a buffer already covered by
+        ``inputs`` / ``outputs`` (caught early — a rule that rebuilt the
+        body without re-seeding I/O surfaces here, not on a later mystery
+        KeyError), then replaces each entry's placeholder Tensor with the
+        real graph-sourced one when the buffer is a graph node."""
+        body_in, body_out = self._derive_io_names()
+        stray_in = [n for n in body_in if n not in self.inputs]
+        if stray_in:
+            raise ValueError(f"{type(self).__name__}: body has Load buffers {stray_in} not covered by inputs={list(self.inputs)}")
+        stray_out = [n for n in body_out if n not in self.outputs]
+        if stray_out:
+            raise ValueError(f"{type(self).__name__}: body has Write buffers {stray_out} not covered by outputs={list(self.outputs)}")
+        # Single-source-of-truth: a body-written buffer that IS a graph buffer
+        # must be produced by THIS node (an output slot), never by another node.
+        # The one sanctioned exception is a delegated zero-init (``ZeroPrologue``
+        # writes a downstream accumulator on purpose — ``005_delegate_zero_init``).
+        delegated = {s.dst for s in self.body.iter() if isinstance(s, ZeroPrologue)}
+        own = set(node.buffer_names())
+        foreign = [n for n in body_out if n not in own and n not in delegated and graph.producer(n) is not None]
+        if foreign:
+            raise ValueError(f"{type(self).__name__}: body writes buffer(s) {foreign} produced by another node — declare them as outputs")
+        # ABI order is graph order. Body normalization may reorder independent
+        # sibling nests, so retaining body first-use/write order would swap MIMO
+        # arguments even though the buffer keys still match.
+        refreshed_inputs = {name: tensor for name in node.inputs if (tensor := _tensor_for_buffer(graph, name)) is not None}
+        refreshed_outputs = {name: tensor for name in node.buffer_names() if (tensor := _tensor_for_buffer(graph, name)) is not None}
+        # Keep matcher-known external/delegated buffers that are not graph ports.
+        refreshed_inputs.update((name, tensor) for name, tensor in self.inputs.items() if name not in refreshed_inputs)
+        refreshed_outputs.update((name, tensor) for name, tensor in self.outputs.items() if name not in refreshed_outputs)
+        inputs, outputs = frozendict(refreshed_inputs), frozendict(refreshed_outputs)
+        if inputs == self.inputs and outputs == self.outputs:
+            return self
+        # See ``Op.with_io``: an origin's refresh threads itself into ``source``.
+        return replace(self, inputs=inputs, outputs=outputs, source=self.source if self.source is not None else self)
+
+    def pretty_body(self) -> str:
+        """Indented body listing — one stmt per line via per-stmt
+        ``pretty``. Callers (``format_kernels`` /
+        ``Candidate._format_nodes``) emit the surrounding name / I/O
+        label themselves; duplicating it here would just rot."""
+        return "\n".join(_pretty_body_stmts(self.body, "    "))
+
+    def _body_identity(self, *, structural: bool = True, typed: bool = False):
+        """Override :meth:`Op._body_identity`: the stored body IS this op's Loop-IR body."""
+        return self.body.identity(structural=structural, types=buffer_types(self) if typed else None)
+
+
+def _tensor_for_buffer(graph, name: str) -> Tensor | None:  # noqa: ANN001 — Graph lives in compiler.graph; would cycle to import.
+    """Return the graph tensor traveling under buffer ``name`` (any output
+    slot of its producer), but for ``ConstantOp`` producers stamp
+    ``constant=True`` (and ``value`` for scalar literals) onto a fresh
+    Tensor so downstream consumers can recognize literal-scalar buffers
+    without re-querying the graph for ConstantOp predecessors. ``None``
+    when the buffer isn't a graph buffer (matcher-known external)."""
+    t = graph.buffer(name)
+    if t is None:
+        return None
+    node = graph.producer(name)
+    if isinstance(node.op, ConstantOp):
+        return Tensor(t.name, t.shape, t.dtype, constant=True, value=node.op.value)
+    return t

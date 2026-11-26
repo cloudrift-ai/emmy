@@ -134,20 +134,23 @@ def _append(graph, *, ctx, document: GoldenFile, name_prefix: str | None = None,
             if isinstance(node.op, LoopOp)
         }
         for outputs, tile in lift_targets(program, ctx).items():
-            kernel = definition(tile, tile.name, traced=traced, origins=origins.get(outputs, ()), bindings=dict(bindings))
+            kernel = definition(tile, traced=traced, origins=origins.get(outputs, ()), bindings=dict(bindings))
             stored_before = len(document.kernels)
             stored = document.add_kernel(kernel)
             added += len(document.kernels) - stored_before
+            sizes = kernel_bindings(tile)
             for template in group:
                 pins = dict(template.get("pins", {}))
-                if any(row.kernel == stored.ref and row.pins == pins for row in document.rows):
+                # Two programs may lower to one kernel at two sets of sizes (native's attention priced per range of
+                # windows): each set takes its own row, under a name of its own, since a name selects a realization.
+                if any((row.kernel, row.pins, row.bindings) == (stored.ref, pins, sizes) for row in document.rows):
                     continue
                 name = f"{name_prefix}.{tile.name}" if name_prefix else tile.name
                 if template.get("name"):
                     name = f"{name}.{template['name']}"
-                if any(row.name == name and row.kernel != stored.ref for row in document.rows):
-                    name = f"{name}.{stored.exact_identity[:12]}"
-                document.rows.append(Row(name=name, kernel=stored.ref, bindings=kernel_bindings(tile), pins=pins))
+                if any(row.name == name and row.pins == pins and row.bindings != sizes for row in document.rows):
+                    name = ".".join((name, *(f"{var}{size}" for var, size in sorted(sizes.items()))))
+                document.rows.append(Row(name=name, kernel=stored.ref, bindings=sizes, pins=pins))
     return added
 
 
@@ -205,11 +208,12 @@ def _timed(row: Row, hardware_id: str, latency: Latency, kernels: tuple[str, ...
 
 def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None:
     """Replay compatible routes together from their shared root, refusing any decision the fresh unpinned cut
-    pass does not take again. Conflicting decisions on one parent need separate replays."""
+    pass does not take again. Conflicting decisions on one parent need separate replays. A piece reaches its root
+    through ``routes`` first: one the fresh lowering mints unchanged may also be a child of a stale route."""
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
     groups: list[dict[str, RoutingRow]] = []
     for route in routes:
-        path = [*document.path_to(route.parent), route]
+        path = [*document.path_to(route.parent, routes), route]
         group = next(
             (g for g in groups if next(iter(g)) == path[0].parent and all(g.get(step.parent, step) == step for step in path)),
             None,
@@ -265,8 +269,8 @@ def record_greedy_pick(
         timed = [path_to[0].parent if path_to else seed.kernel]
         routes = []
         for parent, arm, pieces in decisions:
-            stored = document.add_kernel(definition(parent, parent.name))
-            children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+            stored = document.add_kernel(definition(parent))
+            children = [document.add_kernel(definition(piece)) for piece in pieces]
             routes.append(RoutingRow(stored.ref, {str(k): str(v) for k, v in arm.items()}, tuple(c.ref for c in children)))
             document.add_routing(routes[-1])
             timed.extend(ref for ref in (stored.ref, *routes[-1].children) if ref not in timed)
@@ -276,9 +280,9 @@ def record_greedy_pick(
             tile = kernel_tile(op)
             if tile is None:
                 raise ValueError(f"kernel {op.kernel_name} lowered from no tile kernel, so no row can name it")
-            stored = document.add_kernel(definition(tile, op.kernel_name))
+            stored = document.add_kernel(definition(tile))
             row = Row(
-                name=f"{name}.{stored.exact_identity[:12]}",
+                name=f"{name}.{stored.name}",
                 kernel=stored.ref,
                 bindings=kernel_bindings(tile),
                 pins=regime,

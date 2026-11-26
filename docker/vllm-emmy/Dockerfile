@@ -21,8 +21,8 @@ RUN pip wheel --no-cache-dir --no-deps -w /wheels /src/emmy_ml-*.tar.gz
 
 FROM ${BASE_IMAGE}
 
-# The SM70 1Cat base has CUDA runtime libraries but no nvcc. Pass
-# CUDA_COMPILER_VERSION=12-8 when building it for Emmy tuning.
+# The SM70 1Cat base has CUDA runtime libraries but no ptxas (NVIDIA ships it in
+# the cuda-nvcc package). Pass CUDA_COMPILER_VERSION=12-8 when building it for Emmy.
 ARG CUDA_COMPILER_VERSION=
 RUN if [ -n "$CUDA_COMPILER_VERSION" ]; then \
       apt-get update && apt-get install -y --no-install-recommends \
@@ -35,16 +35,17 @@ RUN if [ -n "$CUDA_COMPILER_VERSION" ]; then \
 # runtime deps the serving path actually uses are added explicitly. Keep the
 # base image's huggingface_hub and dependency versions: the Volta 1Cat image
 # pins transformers 4.x with huggingface_hub 0.x. cppyy is
-# deliberately absent — the CUDA serving path compiles via nvcc only.
-# (vllm-openai:v0.23.0 ships CUDA 13.0 + nvcc; transformers 5.10.2 satisfies
-# the compile pin.) CatBoost loads SciPy and pandas for prediction, so its
-# dependencies must be installed for the schedule prior to load at serving boot.
+# deliberately absent — the CUDA serving path assembles its PTX via ptxas only.
+# (vllm-openai:v0.23.0 ships CUDA 13.0 + ptxas and transformers 5.12; the compile
+# pin wants 5.19, whose GDN cache protocol the tracer follows, so it is installed on
+# top.) CatBoost loads SciPy and pandas for prediction, so its dependencies must be
+# installed for the schedule prior to load at serving boot.
 # frozendict is imported by the tensor IR itself, so every
 # serving boot needs it; only the stock image happened to carry it transitively,
 # and a fork base (1Cat-vLLM on Volta) fails at model construction without it.
 COPY --from=runtime-builder /wheels/emmy_ml-*.whl /tmp/wheels/
 RUN pip install --no-cache-dir --no-deps /tmp/wheels/emmy_ml-*.whl \
-    && pip install --no-cache-dir catboost==1.2.10 \
+    && pip install --no-cache-dir "transformers>=5.19,<5.20" catboost==1.2.10 \
     && pip install --no-cache-dir --no-deps pyyaml httpx safetensors frozendict \
     && rm -rf /tmp/wheels
 

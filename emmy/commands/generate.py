@@ -12,8 +12,10 @@ The host loop (:func:`generate`) is pure and unit-testable with any ``logits_fn`
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
+from pathlib import Path
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT
 
@@ -21,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 
 def register_generate_command(subparsers):
+    from emmy.serving.release import DTYPES  # noqa: PLC0415
+
     parser = subparsers.add_parser("generate", help="Generate text from a model (standalone oracle; no vLLM)")
     parser.add_argument("model", help="HuggingFace model ID")
     parser.add_argument("--prompt", default="Hello, ", help="Prompt text")
@@ -34,8 +38,19 @@ def register_generate_command(subparsers):
     native = parser.add_mutually_exclusive_group()
     native.add_argument("--export-native", metavar="DIR", help="Prepare a standalone cached Qwen3 artifact and exit")
     native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact")
-    parser.add_argument("--prefill-size", type=int, default=None, help="Native export chunk width (default: 16; 1 disables chunking)")
-    parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: 4096)")
+    parser.add_argument(
+        "--prefill-size",
+        type=int,
+        default=None,
+        help="Native export chunk width (default: 16; 1 disables chunking); a decode-width chunk follows",
+    )
+    parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: the model's window)")
+    parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=("auto", *DTYPES),
+        help="Native export model dtype (default: the checkpoint's)",
+    )
     parser.add_argument(
         "--page-tokens",
         type=int,
@@ -44,6 +59,11 @@ def register_generate_command(subparsers):
     )
     parser.add_argument("--capture", action="store_true", help="Replay native token steps as a CUDA graph")
     parser.add_argument("--timeout", type=float, help="Native worker operation deadline in seconds (default: 120)")
+    parser.add_argument(
+        "--json",
+        metavar="PATH",
+        help="Write the native run's prompt and generated token IDs, when each token came and how long the pack took to load, in ms",
+    )
     parser.add_argument("--revision", help="Checkpoint and tokenizer revision")
     parser.add_argument(
         "--golden", metavar="PATH", help="A golden file whose measured rows are the golden evidence the native export deploys from"
@@ -107,34 +127,31 @@ def handle_generate(args):
             raise ValueError("timeout requires --native-pack")
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise ValueError("timeout must be finite and positive")
-    if args.capture and not args.native_pack:
-        raise ValueError("capture requires --native-pack")
+    if (args.capture or args.json) and not args.native_pack:
+        raise ValueError("capture and json require --native-pack")
     if (
         args.golden
         or args.strict_evidence
         or args.context_length is not None
         or args.page_tokens is not None
         or args.prefill_size is not None
+        or args.dtype != "auto"
     ) and not args.export_native:
-        raise ValueError("compiler evidence, context capacity, page size and prefill size require --export-native")
+        raise ValueError("compiler evidence, context capacity, page size, prefill size and dtype require --export-native")
     if args.export_native:
-        from emmy import config
-        from emmy.compiler.backend.gpu_lock import gpu_lock
-        from emmy.serving.native.prepare import MAX_CONTEXT, export_model, load_model
+        from emmy.serving.native.prepare import export_checkpoint
 
-        model, ckpt = load_model(args.model, args.revision)
-        eos = model.generation_config.eos_token_id
-        eos = [eos] if isinstance(eos, int) else (eos or [])
-        with gpu_lock(), config.golden_file_override(args.golden), config.strict_evidence_override(args.strict_evidence):
-            export_model(
-                model,
-                args.export_native,
-                context_length=MAX_CONTEXT if args.context_length is None else args.context_length,
-                page_tokens=args.page_tokens,
-                eos_ids=eos,
-                prefill_size=args.prefill_size,
-                ckpt=ckpt,
-            )
+        export_checkpoint(
+            args.model,
+            args.revision,
+            args.export_native,
+            dtype=args.dtype,
+            golden=args.golden,
+            strict=args.strict_evidence,
+            context_length=args.context_length,
+            page_tokens=args.page_tokens,
+            prefill_size=args.prefill_size,
+        )
         logger.info("Prepared native artifact at %s", args.export_native)
         return
     try:
@@ -157,7 +174,7 @@ def handle_generate(args):
         from emmy.serving.native.client import DEFAULT_TIMEOUT_SECONDS, generate_tokens
 
         with gpu_lock():
-            generated = asyncio.run(
+            generated, token_ms, load_ms = asyncio.run(
                 generate_tokens(
                     args.native_pack,
                     prompt_ids,
@@ -170,6 +187,13 @@ def handle_generate(args):
                 )
             )
         logger.info("%s", tokenizer.decode(generated, skip_special_tokens=True))
+        logger.info("pack loaded in %.1f s", load_ms / 1000)
+        if len(token_ms) > 1:
+            # Time per output token as the vLLM benchmark client reports it: the first token excluded.
+            tpot = (token_ms[-1] - token_ms[0]) / (len(token_ms) - 1)
+            logger.info("first token after %.1f ms, then %.2f ms per token", token_ms[0], tpot)
+        if args.json:
+            Path(args.json).write_text(json.dumps({"prompt": prompt_ids, "tokens": generated, "token_ms": token_ms, "load_ms": load_ms}))
         return
     if len(prompt_ids) >= DYNAMIC_DIM_MAX:
         logger.error("prompt length %d exceeds DYNAMIC_DIM_MAX (%d)", len(prompt_ids), DYNAMIC_DIM_MAX)

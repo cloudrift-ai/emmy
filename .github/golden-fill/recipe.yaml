@@ -17,10 +17,11 @@ command:
     export PATH=$$HOME/.cargo/bin:/usr/local/cuda/bin:$$PATH
     cd $repo_dir
     sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq || exit 1
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq make python3.12-venv || exit 1
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq make build-essential python3.12-venv python3.12-dev || exit 1
     command -v cargo >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal
-    [ -d venv ] || make setup || exit 1
-    export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_CUBIN_CACHE=$task_dir/cubins EMMY_NVCC_FLAGS=
+    # The marker, not the directory: an install that failed halfway leaves a venv and must run again.
+    [ -f venv/.setup-complete ] || make setup || exit 1
+    export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_CUBIN_CACHE=$task_dir/cubins
     export CUDA_VISIBLE_DEVICES="$gpu_device_ids"
     cp "$golden" $task_dir/working.json
     : > $task_dir/failed.txt
@@ -79,6 +80,14 @@ matrices:
     budget_s: 7200
   - golden: emmy/compiler/pipeline/search/golden/records/rtxpro6000_sm120.json
     deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+    deploy.gpu_count: 1
+    budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/rtxpro6000_se_sm120.json
+    deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    deploy.gpu_count: 1
+    budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/rtxpro6000_ws_sm120.json
+    deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
     deploy.gpu_count: 1
     budget_s: 7200
   - golden: emmy/compiler/pipeline/search/golden/records/v100_sm70.json

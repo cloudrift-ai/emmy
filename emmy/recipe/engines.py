@@ -22,6 +22,11 @@ SGLANG_FLAG_MAP = {
     "max_concurrent_requests": "--max-running-requests",
 }
 
+# The native server takes the context alone; ``extra_args`` names how its pack was prepared.
+NATIVE_FLAG_MAP = {
+    "context_length": "--max-model-len",
+}
+
 # Flags that must never appear in extra_args (they are emitted from named fields
 # or hardcoded by generate_compose).
 _HARDCODED_FLAGS = {
@@ -34,11 +39,16 @@ _HARDCODED_FLAGS = {
     "--revision",
 }
 
+# Preparation flags a native lane's pack takes from the recipe's own fields or the bake.
+_NATIVE_FLAGS = {"--native", "--native-pack", "--export", "--golden", "--strict-evidence", "--runner"}
+
+_FLAG_MAPS = {"vllm": VLLM_FLAG_MAP, "sglang": SGLANG_FLAG_MAP, "native": NATIVE_FLAG_MAP}
+
 
 def banned_extra_arg_flags(engine: str = "vllm") -> set[str]:
     """Return the set of CLI flags that must not appear in extra_args."""
-    flag_map = VLLM_FLAG_MAP if engine == "vllm" else SGLANG_FLAG_MAP
-    return set(flag_map.values()) | _HARDCODED_FLAGS
+    banned = set(_FLAG_MAPS[engine].values()) | _HARDCODED_FLAGS
+    return banned | _NATIVE_FLAGS if engine == "native" else banned
 
 
 def build_engine_args(llm: LLMConfig, model_name: str, model_revision: str | None = None, *, model_dir: str | None = None) -> list[str]:
@@ -46,8 +56,12 @@ def build_engine_args(llm: LLMConfig, model_name: str, model_revision: str | Non
 
     Each element in the returned list is a complete flag-value pair (e.g.
     "--tensor-parallel-size 1") suitable for joining with newlines in a
-    docker-compose command block.
+    docker-compose command block. The native server's image names its pack; it takes the served model ID, its
+    address and the context, and its ``extra_args`` are preparation flags the bake reads, not the server's.
     """
+    if llm.engine_name == "native":
+        context = [] if llm.context_length is None else [f"--max-model-len {llm.context_length}"]
+        return [f"--model {model_name}", "--host 0.0.0.0", "--port 8000", *context]
     flag_map = VLLM_FLAG_MAP if llm.engine_name == "vllm" else SGLANG_FLAG_MAP
     args = [
         "--trust-remote-code",

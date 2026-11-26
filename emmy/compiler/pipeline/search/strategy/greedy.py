@@ -40,6 +40,26 @@ if TYPE_CHECKING:
 _MAX_GREEDY_RETRIES = 8
 
 
+def piece_seams(graph: Graph, key: str) -> str:
+    """For an unmatched pin addressed to one kernel (``PLACE@<name>/…``), the seams that kernel offers in ``graph`` —
+    the spellings a pin on it can name, bare when it has one — so a guessed site path says what would have resolved;
+    ``""`` for any other key."""
+    from emmy.compiler.pipeline.knob import pinned_kernel  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
+
+    name = pinned_kernel(key)
+    if name is None:
+        return ""
+    kernels = [
+        node.op for node in graph.nodes.values() if (getattr(node.op, "kernel_name", None) or getattr(node.op, "name", None)) == name
+    ]
+    offered = sorted({seam.spelling for op in kernels if (tile := kernel_tile(op)) is not None for seam in cuttable_seams(tile)})
+    if not kernels:
+        return f"; no kernel of the compile is {name}"
+    return f"; that kernel offers {', '.join(offered)}" if offered else "; that kernel offers no seam"
+
+
 class GreedyStrategy(SearchStrategy):
     """The greedy compile as a search shape over the engine's one loop (``Run.resolve``):
     deterministic resolution with :func:`~..policy.greedy.greedy_decide`, plus the retry
@@ -123,7 +143,9 @@ class GreedyStrategy(SearchStrategy):
         _raise_on_unlowered(terminal, rejections, lowers_to_cuda=complete)
         if report_pins:
             for key in unmatched_place_pins(resolved):
-                logger.warning("PLACE pin %s names no seam of any kernel in this compile — it decided nothing", key)
+                logger.warning(
+                    "PLACE pin %s names no seam of any kernel in this compile — it decided nothing%s", key, piece_seams(terminal, key)
+                )
         terminal.hints.set(
             PLACEMENT_DECISIONS_HINT,
             [

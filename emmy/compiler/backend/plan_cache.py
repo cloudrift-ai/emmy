@@ -154,10 +154,11 @@ def _instantiate_plan_template(template: ExecutionPlan, actual_by_slot: dict[str
 
 
 class PlanTemplateCache:
-    """Binding-neutral execution-plan templates for one immutable compile session."""
+    """Binding-neutral execution-plan templates for one immutable compile session, each with the kernels whose
+    evidence its compile read (``policy.greedy.evidence_reads``), which a hit records as read again."""
 
     def __init__(self) -> None:
-        self._entries: dict[tuple[str, tuple[tuple[str, str], ...]], ExecutionPlan] = {}
+        self._entries: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[ExecutionPlan, frozenset[str]]] = {}
         self.hits = 0
         self.misses = 0
 
@@ -171,18 +172,22 @@ class PlanTemplateCache:
         ``settled`` are the weight layouts ``compile_plan`` compiles under (``settled_layouts``): one
         graph under other settled layouts is another entry.  Failed compilation or templating is never cached.
         """
+        from emmy.compiler.pipeline.search.policy.greedy import evidence_reads, note_reads  # noqa: PLC0415
+
         bindings = _binding_neutral_graph(graph)
         key = (bindings.payload, settled)
-        template = self._entries.get(key)
-        if template is None:
+        entry = self._entries.get(key)
+        if entry is None:
             self.misses += 1
-            plan = compile_plan(graph)
+            with evidence_reads() as reads:
+                plan = compile_plan(graph)
             template = _plan_to_template(plan, bindings.slot_by_actual)
             instantiated = _instantiate_plan_template(template, bindings.actual_by_slot)
-            self._entries[key] = template
+            self._entries[key] = (template, frozenset(reads))
             return instantiated
-        else:
-            self.hits += 1
+        self.hits += 1
+        template, reads = entry
+        note_reads(reads)
         return _instantiate_plan_template(template, bindings.actual_by_slot)
 
     def __len__(self) -> int:

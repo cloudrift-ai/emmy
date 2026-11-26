@@ -9,14 +9,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from emmy.compiler.graph import Node
+from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused, schedule
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import MissingSiteError, parse_key, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
-from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
-from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, place_token, realize
+from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins, pinned_kernel
+from emmy.compiler.pipeline.passes.tile._cut import (
+    PIECE,
+    cuttable_seams,
+    full_projection_seams,
+    join_pairs,
+    joined_halves,
+    joined_spelling,
+    output_map,
+    realize,
+)
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.passes.tile.cut import takes_kernel_set_decision
@@ -48,13 +57,33 @@ class _CutContext(ScheduleContext[DeferredFork, object, object]):
         return replace(self, _schedule=pick)
 
 
-def _cut_arm(root: Node, materialize, seams) -> DeferredFork:
+def _cut_arm(root: Node, materialize, seams, joins=()) -> DeferredFork:
     """The arm that cuts ``seams`` of ``root``'s kernel: it spells every occurrence of each clustered
     value, names the seam each of those spellings stands for, and carries the redirect of the kernel's
-    buffers onto its pieces' outputs."""
-    knobs = {spelling: "cut" for seam in seams for spelling in (seam.spelling, *seam.aliases)}
-    aliases = {alias: seam.spelling for seam in seams for alias in seam.aliases}
+    buffers onto its pieces' outputs. A joined pair is spelled by its one joined key."""
+    joined = {id(seam) for pair in joins for seam in pair}
+    knobs = {spelling: "cut" for seam in seams if id(seam) not in joined for spelling in (seam.spelling, *seam.aliases)}
+    knobs.update((joined_spelling(producer, region), "cut") for producer, region in joins)
+    aliases = {alias: seam.spelling for seam in seams if id(seam) not in joined for alias in seam.aliases}
     return DeferredFork(materialize, knobs, structural=True, aliases=aliases, output=output_map(root))
+
+
+def _resolved_seams(tile: TileOp, key: str, all_sites, by_node, *, strict: bool = True) -> tuple | None:
+    """The seams a key's sites address on ``tile`` (two for a joined key), or ``None`` when a site is not on this
+    tree. A site that resolves to no cuttable Fold edge is an addressing error in a pin (``strict``); in a recorded
+    route it is another kernel's seam, and the key resolves to ``None``."""
+    out = []
+    for half in joined_halves(key):
+        try:
+            site = resolve(tile.op, half, all_sites=all_sites)
+        except MissingSiteError:
+            return None
+        if id(site.node) not in by_node:
+            if strict:
+                raise ValueError(f"PLACE pin {key!r} does not address a cuttable Fold edge in this kernel")
+            return None
+        out.append(by_node[id(site.node)])
+    return tuple(out)
 
 
 def _seam_index(seams) -> dict[int, object]:
@@ -77,92 +106,41 @@ def _rootmost(seams, all_sites, refuse: frozenset[str] = frozenset()):
     return min(kept, key=lambda candidate: depth[id(candidate.node)])
 
 
-def _child_pins() -> tuple[tuple[str, str, str], ...]:
-    """``(original, local key, value)`` for PLACE pins addressed to a cut piece.
-
-    The ``place_<token>/`` prefix identifies the piece; the remainder uses the ordinary
-    site spelling relative to that piece, or no suffix for its root-most cut.
-    """
-    return tuple(
-        (name, "PLACE" + ("@" + scope.partition("/")[2] if "/" in scope else ""), value)
-        for name, value in family_pins("PLACE", kernels=True)
-        if (scope := axis_of(name)) is not None and scope.startswith("place_")
-    )
-
-
-def _step_pin(key: str) -> tuple[int, str] | None:
-    """A root-site pin addressed to one same-name remainder after successive cuts."""
-    scope = axis_of(key) or ""
-    stage, slash, site = scope.partition("/")
-    if not stage.startswith("step.") or not stage[5:].isdigit() or (slash and not site):
-        return None
-    return int(stage[5:]), f"PLACE@{site}" if slash else "PLACE"
+def _placement_pins(tile: TileOp, piece: bool) -> tuple[tuple[tuple[str, str], ...], dict[str, str]]:
+    """The PLACE pins this kernel reads, by their local key, and the original key of each kernel pin among them: the
+    kernel pins naming it (``PLACE@<name>``, ``PLACE@<name>/<site>`` with the site spelled relative to it), else —
+    for a kernel no cut minted (``piece``) — the pins every kernel reads. A piece of a cut is a new kernel: the pins
+    its parent read never address it."""
+    own = {
+        "PLACE" + ("@" + site if site else ""): (key, value)
+        for key, value in family_pins("PLACE", kernels=True)
+        if pinned_kernel(key) == tile.name
+        for site in ((axis_of(key) or "").partition("/")[2],)
+    }
+    if own:
+        return tuple((local, value) for local, (_, value) in own.items()), {local: key for local, (key, _) in own.items()}
+    return (() if piece else family_pins("PLACE")), {}
 
 
-def _site_exists(op, key: str) -> bool:
-    """Whether a scoped key addresses this fold tree."""
-    try:
-        return resolve(op, key) is not None
-    except MissingSiteError:
-        return False
-
-
-def _placement_candidates(tile: TileOp) -> tuple[tuple[tuple[str, str, str], ...], bool]:
-    """The original and local spellings of pins addressed to this kernel."""
-    targeted = _child_pins()
-    if targeted and (token := place_token(tile.name)) is not None:
-        # A nested cut keeps its ancestor's token in its name. Address only the most recent
-        # piece, so an ancestor's output-cut pin cannot cut the grandchild again.
-        matched = tuple(
-            (original, local, value)
-            for original, local, value in targeted
-            if original.split("@", 1)[1].split("/", 1)[0] == f"place_{token}"
-        )
-        return matched, True
-    return tuple((key, key, value) for key, value in family_pins("PLACE")), False
-
-
-def _placement_pins(tile: TileOp) -> tuple[tuple[tuple[str, str], ...], dict[str, str]]:
-    """Resolve child-site scope and the current cut stage before parsing site paths."""
-    candidates, child = _placement_candidates(tile)
-    selected: list[tuple[str, str]] = []
-    sources: dict[str, str] = {}
-    for original, local, value in candidates:
-        if original in tile.placement_consumed:
-            continue
-        staged = _step_pin(local)
-        if staged is not None and staged[0] != tile.placement_step:
-            continue
-        local = staged[1] if staged is not None else local
-        previous = next((sources.get(name, name) for name, _ in selected if name == local), None)
-        if previous is not None:
-            raise ValueError(f"PLACE pins {previous!r} and {original!r} address the same site at step {tile.placement_step}")
-        selected.append((local, value))
-        if staged is not None or child:
-            sources[local] = original
-    return (tuple(selected), sources) if selected or not child else ((("PLACE", "fuse"),), {})
-
-
-def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[str]] | None:
+def _placement_restriction(tile: TileOp, seams, piece: bool) -> tuple[tuple, str, tuple] | None:
     """The authoritative placement spelled by live PLACE pins, or ``None``.
 
     This restriction is consumed entirely by the cut pass before classic schedule enumeration.
     Every scoped ``PLACE@site=cut`` pin that resolves on this kernel joins ONE composed decision —
-    the seams all live on this kernel's tree, so one realization cuts them together. A numbered
-    ``PLACE@step.N/site=cut`` pin applies only after N same-name cuts. A bare ``PLACE=cut``
-    consumes its root-most cut the same way. A scoped pin whose
-    site path does not exist on this kernel addresses another kernel of the graph; a kernel none of
-    the pins address decides FUSE, so the unpinned fork never returns under a pin-driven compile.
-    A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
+    the seams all live on this kernel's tree, so one realization cuts them together. A bare ``PLACE=cut`` names no
+    site: it cuts the root-most seam of every kernel no cut minted, once (``PLACE@<name>=cut`` cuts the one kernel of
+    that name). A scoped pin whose site path does not exist on this kernel addresses another kernel of the graph, and a
+    kernel none of the pins address takes its own fork. A pin that resolves to a site no cut realizes is an addressing
+    error and raises. A scoped
     ``PLACE@site=fuse`` excludes that seam from the composed cut (alone, it decides fuse under
     that spelling). A bare cut supplies the primary root-most seam and composes with scoped cuts;
-    a bare fuse applies only when no scoped pin addressed this kernel."""
-    scoped_pins, source_keys = _placement_pins(tile)
+    a bare fuse applies only when no scoped pin addressed this kernel. A JOINED key
+    (``PLACE@<workspace seam>+<output-owning seam>=cut``) cuts both seams and splices their pieces into one; the
+    last element of the result lists those pairs. A pin decides the forks it names: every piece a pinned cut mints
+    takes its own fork, which a pin naming the piece decides, else evidence or the prior."""
+    scoped_pins, source_keys = _placement_pins(tile, piece)
     pins = [(name, value) for name, value in scoped_pins if family_of(name) == "PLACE"]
     if not pins:
-        # A numbered future cut cannot choose an unpinned prerequisite at this stage.
-        if any((step := _step_pin(key)) is not None and step[0] > tile.placement_step for key, _ in family_pins("PLACE")):
-            return ("PLACE",), "fuse", frozenset()
         return None
     for _, value in pins:
         if value not in {"fuse", "cut"}:
@@ -170,57 +148,58 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[s
     all_sites = sites(tile.op)
     by_node = _seam_index(seams)
     cut: list = []
+    joins: list = []
     fused: list[str] = []
-    addressed: list[tuple[str, str, object]] = []
+    addressed: list[tuple[str, str, tuple]] = []
     missing = False
     for name, value in pins:
         if name == "PLACE":
             continue
-        try:
-            site = resolve(tile.op, name, all_sites=all_sites)
-        except MissingSiteError:
+        found = _resolved_seams(tile, name, all_sites, by_node)
+        if found is None:
             missing = True  # the key addresses a seam of another kernel in the graph
             continue
-        if id(site.node) not in by_node:
-            raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")
-        seam = by_node[id(site.node)]
-        addressed.append((source_keys.get(name, name), value, seam))
+        addressed.append((source_keys.get(name, name), value, found))
         if value == "fuse":
-            fused.append(seam.spelling)
-        elif not any(chosen is seam for chosen in cut):
-            cut.append(seam)
+            fused.extend(seam.spelling for seam in found if len(found) == 1)
+            continue
+        if len(found) == 2 and not any(pair[0] is found[0] and pair[1] is found[1] for pair in join_pairs(seams)):
+            raise ValueError(f"PLACE pin {name!r} joins two seams no joined cut offers: a workspace seam, then an output region")
+        cut.extend(seam for seam in found if not any(chosen is seam for chosen in cut))
+        if len(found) == 2:
+            joins.append(found)
     refused = frozenset(fused)
     cut = [seam for seam in cut if seam.spelling not in refused]
+    joins = [pair for pair in joins if all(any(chosen is seam for chosen in cut) for seam in pair)]
     bare = next(((name, value) for name, value in pins if name == "PLACE"), None)
     if bare is not None and bare[1] == "cut":
         seam = _rootmost(seams, all_sites, refused)
         if seam is not None and not any(chosen is seam for chosen in cut):
             cut.append(seam)
     if cut:
-        for original, value, seam in addressed:
-            if (value == "cut" and any(chosen is seam for chosen in cut)) or (value == "fuse" and seam.spelling in refused):
+        for original, value, found in addressed:
+            if (value == "cut" and all(any(chosen is seam for chosen in cut) for seam in found)) or (
+                value == "fuse" and all(seam.spelling in refused for seam in found)
+            ):
                 note_place_key(original)
-        used = frozenset(original for original, _, _ in addressed)
         if bare is not None and bare[1] == "cut":
-            original = source_keys.get("PLACE", "PLACE")
-            note_place_key(original)
-            used |= {original}
-        return tuple(cut), "cut", used
+            note_place_key(source_keys.get("PLACE", "PLACE"))
+        return tuple(cut), "cut", tuple(joins)
     if fused:
-        for original, value, seam in addressed:
-            if value == "fuse" and seam.spelling in refused:
+        for original, value, found in addressed:
+            if value == "fuse" and all(seam.spelling in refused for seam in found):
                 note_place_key(original)
-        return (fused[0],), "fuse", frozenset()
+        return (fused[0],), "fuse", ()
     if bare is not None:
         if bare[1] == "fuse":
             note_place_key(source_keys.get("PLACE", "PLACE"))
-        return ("PLACE",), "fuse", frozenset()
+        return ("PLACE",), "fuse", ()
     if missing:
-        return ("PLACE",), "fuse", frozenset()
+        return ("PLACE",), "fuse", ()
     return None
 
 
-def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[DeferredFork]:
+def _composed_forks(root: Node, tile: TileOp, seams, ctx, mint) -> list[DeferredFork]:
     """One composed arm per measured route of this kernel that names several of its seams
     (:func:`composed_cuts_for`) — the decision a pinned compile consumed those seams as, offered
     again so the row that measured it can spell it. A route is registered for every kernel of the
@@ -240,20 +219,20 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
     out: list[DeferredFork] = []
     for keys in routes:
         chosen: list = []
+        joins: list = []
         for name in keys:
-            if parse_key(name).bare:
+            if parse_key(joined_halves(name)[0]).bare:
                 continue
-            try:
-                site = resolve(tile.op, name, all_sites=all_sites)
-            except MissingSiteError:
+            found = _resolved_seams(tile, name, all_sites, by_node, strict=False)
+            if found is None:
                 continue
             note_place_key(name)
-            seam = by_node.get(id(site.node)) if site is not None else None
-            if seam is not None and not any(picked is seam for picked in chosen):
-                chosen.append(seam)
+            chosen.extend(seam for seam in found if not any(picked is seam for picked in chosen))
+            if len(found) == 2:
+                joins.append(found)
         if len(chosen) > 1:
-            composed = tuple(chosen)
-            out.append(_cut_arm(root, lambda composed=composed: realize(match, root, composed), composed))
+            composed, joined = tuple(chosen), tuple(joins)
+            out.append(_cut_arm(root, lambda composed=composed, joined=joined: mint(composed, joined), composed, joined))
     return out
 
 
@@ -263,46 +242,24 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
     if not seams:
         return None
 
-    pinned = _placement_restriction(tile, seams)
+    def mint(chosen, joins: tuple = ()) -> Graph:
+        return realize(match, root, chosen, joins=joins)
+
+    pinned = _placement_restriction(tile, seams, root.hints.has(PIECE))
     if pinned is not None:
-        chosen, value, used = pinned
+        chosen, value, joins = pinned
         if value == "fuse":
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
-
-        consumed = tile.placement_consumed | used
-        pending = tuple(
-            (original, local) for original, local, _ in _placement_candidates(tile)[0] if original != "PLACE" and original not in consumed
-        )
-
-        def cut():
-            fragment = realize(match, root, chosen, placement_decided=not _child_pins())
-            for node in fragment.nodes.values():
-                if isinstance(node.op, TileOp) and node.op.name == tile.name:
-                    # A numbered pin may name a site exposed by a later cut; until its step,
-                    # the future-step guard in _placement_restriction chooses fuse. An ordinary
-                    # pin keeps this remainder open only when its site exists here.
-                    next_step = node.op.placement_step
-                    later = False
-                    for _, local in pending:
-                        staged = _step_pin(local)
-                        if staged is not None:
-                            later = staged[0] >= next_step
-                        else:
-                            later = _site_exists(node.op.op, local)
-                        if later:
-                            break
-                    node.op = replace(node.op, placement_decided=not later, placement_consumed=consumed)
-            return fragment
-
-        return _cut_arm(root, cut, chosen)
+        return _cut_arm(root, lambda: mint(chosen, joins), chosen, joins)
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
-    options.extend(_cut_arm(root, lambda seam=seam: realize(match, root, (seam,)), (seam,)) for seam in seams)
+    options.extend(_cut_arm(root, lambda seam=seam: mint((seam,)), (seam,)) for seam in seams)
     whole = full_projection_seams(tile, seams)
     if whole:
-        options.append(_cut_arm(root, lambda: realize(match, root, whole), whole))
-    options.extend(_composed_forks(match, root, tile, seams, ctx))
+        options.append(_cut_arm(root, lambda: mint(whole), whole))
+    options.extend(_cut_arm(root, lambda pair=pair: mint(pair, (pair,)), pair, (pair,)) for pair in join_pairs(seams))
+    options.extend(_composed_forks(root, tile, seams, ctx, mint))
     return options
 
 
@@ -310,18 +267,8 @@ def rewrite(match: Match, root: Node, ctx=None):
     tile: TileOp = root.op
     if not takes_kernel_set_decision(tile):
         raise RuleSkipped("TileOp already scheduled")
-    if tile.carries:
-        # The runner launches one kernel's steps to completion before the next kernel's first, so
-        # the pieces of a cut could not interleave step by step: piece two's step c would read what
-        # piece one stored at EVERY step. A kernel that carries a state takes no cut; its one
-        # kernel-set decision is the split across the sequence (``_split.realize_carry_split``).
-        choices = split_forks(match, root)
-        if choices is None:
-            raise RuleSkipped("a kernel that carries a state is one kernel")
-        options = [cut.kernel for cut in schedule(_CutContext(tuple(choices)))]
-        return options if len(options) > 1 else options[0]
     choices = None if tile.placement_decided else _placement_forks(match, root, tile, ctx)
-    if choices is None:
+    if choices is None and not tile.carries:
         choices = layout_forks(match, root)
     if choices is None:
         choices = split_forks(match, root)

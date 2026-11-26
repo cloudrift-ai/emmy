@@ -39,6 +39,16 @@ provisioning is part of the work: `emmy deploy ssh` installs Docker and adds the
 before retrying, because the group applies only to a new login). A missing package, stopped daemon, or missing group
 is a node to provision, never a gate failure. Reach the host through Emmy's own commands, not bare-shell probes.
 
+A host with about 23.5 GiB of RAM has known traps. An export with swap off needs `vm.overcommit_memory=1`, or the
+compile's forked arm builds fail with ENOMEM. Transparent hugepages and proactive compaction go off beside pinned expert
+pages, or the compaction thread runs a core at 100%. Few compile workers fit beside 16 GiB of pinned pages.
+
+A container can show the host's CPUs while its CPU quota (`/sys/fs/cgroup/cpu/cpu.cfs_quota_us`) allows far fewer.
+Every Emmy and torch process then starts threads and workers for every CPU it sees, and the quota throttles them: on a
+384-CPU host with a 46-CPU quota, four exports and audits ran 245 threads each, were throttled in 38% of the quota's
+periods, and a strict 27B export had not finished after 45 minutes; with 8 threads and 10 workers each it took 37. Set
+`OMP_NUM_THREADS` and `EMMY_WORKERS` so the processes you run together stay under the quota.
+
 ## 0. Inputs and mode
 
 Read [`README.md`](../../../README.md) first. Its **Related Projects** map names the platform, runtime, provisioning,
@@ -135,12 +145,11 @@ target reconstructs and lowers for the exact compute capability; otherwise it is
 a bounded fix and retrace. The layer-to-program mapping goes in the summary; the report gets only counts and gaps.
 
 **Recording.** Record every target with `emmy run --golden <working.json> --bench --record`, and the kernel set the
-greedy pick took with `--record-greedy`, then repeat the deployable O3 correctness check on the recorded rows. Every
-retained target needs a deployable O3 measurement, a positive reference-backend measurement, and a `torch.compile`
-measurement. When no recorded row beats the greedy pick, record the correct greedy pick rather than dropping the
-target.
+greedy pick took with `--record-greedy`, then repeat the correctness check on the recorded rows. Every retained
+target needs a deployable measurement, a positive reference-backend measurement, and a `torch.compile` measurement.
+When no recorded row beats the greedy pick, record the correct greedy pick rather than dropping the target.
 
-**The bar: every target on par with `torch.compile` or faster.** Bench the working golden at deployable optimization:
+**The bar: every target on par with `torch.compile` or faster.** Bench the working golden:
 
 ```bash
 emmy run --golden <working.json> --bench --bench-backends eager,tcompile,emmy --strict --json <out>
@@ -157,10 +166,8 @@ classify each loss:
   emmy run --golden <working.json> --kernel <kernel name> --bench --tune 100
   ```
 
-  The clean rows land under the identity the layer compile reads, and the tune writes them once more as a file
-  beside the card's under `search/freezes/`, which comes back with the working golden and is committed with it. A
-  kernel times differently alone than in its layer (warm weights), so re-bench the whole target afterwards and
-  record only what wins there. `--ab` stays the tool for one specific schedule, such as a sibling's;
+  The clean rows land in the card's tune DB, under the identity the layer compile reads. A kernel times differently
+  alone than in its layer (warm weights), so re-bench the whole target afterwards and record only what wins there. `--ab` stays the tool for one specific schedule, such as a sibling's;
 - an **eligibility or optimization lockout**, a pin that refuses or fails to lower, or a pin that runs wrong gets a
   bounded fix when one is tractable, and otherwise becomes a realization-corpus case (below);
 - a **code generation quality** loss is reported, not recorded;
@@ -192,6 +199,17 @@ validation and lower every entry again from the committed file. Keep it even whe
 fails later. A partial inventory never goes under `golden/`: keep it and its diagnostics outside the repository, and
 never create an empty golden. If the model has no recipe directory, create an `onboarding`/`untested` shell first.
 
+**Promote into the hardware golden.** The priors train on the hardware goldens alone; a recipe golden is evidence for
+compiles of that model, never training data. When the card has a hardware golden
+(`emmy/compiler/pipeline/search/golden/records/<gpu-slug>_<compute-cap>.json`), copy the recipe golden's measured rows
+into it so the prior learns them: open it with `GoldenFile.edit(path)`, add each target's traced program, then each
+kernel with `add_kernel`, each decision with `add_routing` and each measured row with `upsert_row`, using the
+references `add_kernel` returns. Where the hardware golden already records the same kernel at the same sizes, keep the
+faster priced route, and record the loser again on the card rather than editing it. Then `emmy golden check` the
+hardware golden, run `emmy candidates restamp` and `emmy candidates build` for its candidate file, and refit both priors
+(AGENTS.md finalization step 22). A card without a hardware golden leaves the rows out of the prior; say so in the
+report.
+
 ## 3. Create and validate a conservative baseline
 
 Create or update the shared experiment recipe with a conservative feasible baseline — the smallest tensor-parallel size
@@ -206,9 +224,12 @@ Before measuring performance, require: weights load and the server reaches healt
 returns coherent output; advertised tool calling returns structured `tool_calls`; advertised reasoning lands in the
 engine's reasoning field; requested multimodal input is exercised and the recipe declares
 `model.input_modalities: [text, image]`, or it is disabled for a text-only run and the field stays unset; and the largest
-claimed context is tested with an input that materially fills it. Start context testing at the native maximum; on an
-out-of-memory or capacity failure, halve it and retry from a clean deployment. Never claim a context from startup
-alone. Search upstream issues for an unfamiliar error and make one evidence-backed change per retry.
+claimed context is tested with a non-streaming request that materially fills it. Start context testing at the native
+maximum; on an out-of-memory or capacity failure, or when that request takes longer than 290 seconds to answer, halve
+it and retry from a clean deployment. A deployed request has 290 seconds before Relay abandons it, so a context the
+platform cannot answer within that time is not this platform's context, whatever the model card claims. Never claim a
+context from startup alone. Search upstream issues for an unfamiliar error and make one evidence-backed change per
+retry.
 
 Run `emmy ... --teardown` after every failed deployment and before changing a serving configuration. Never mutate the
 remote checkout or containers by hand; reading `nvidia-smi`, container state, and logs is fine.
@@ -266,10 +287,34 @@ vLLM or SGLang lane, never a placeholder Emmy lane. Add only the comparisons tha
 including a cache-reuse lane when caching matters for the intended deployment, and name the lane the final recipe
 selects.
 
+Every experiment carries one **full-context latency lane** for the deployment entry the recipe will pin: three
+non-streaming completion requests sent one at a time, each filling the context (a prompt of `context_length - 512`
+tokens, 512 generated tokens, EOS ignored), as a one-call session lane of the serving configuration the recipe
+selects. It is the longest ordinary request the deployment serves, and the reference Relay sets its non-streaming
+request timeout from. Its request timeout is the 290 seconds a deployed request has: a request that runs past it
+fails the lane at once instead of running for an hour, and the context is too long for this platform. Apply the
+context rule of section 3: halve it, redeploy, and run the lane again.
+
+```yaml
+- <<: *platform
+  benchmark.session_calls: 1
+  benchmark.session_request_timeout_s: 290
+  benchmark.random_input_len: <context_length - 512>
+  benchmark.random_output_len: 512
+  benchmark.max_concurrency: 1
+  benchmark.num_prompts: 3
+  benchmark.num_warmups: 0
+```
+
+The client writes one JSON record per request with its start and end times; the request's wall time is their
+difference. Read all three, including the cold first one. The native server takes a text prompt, so the lane does
+not run against a native recipe; leave the field unset there.
+
 Run the final measurement with the `run-experiment` skill. Store it as this platform's archive, update this
 platform's section of the experiment `RESULTS.md` including failed rows, and remove this platform's legacy top-level
 records only after verifying the archive. Fold the winner into a single-variant `recipes/<model>/recipe.yaml`, which
-has no `benchmark:` block.
+has no `benchmark:` block, with `engine.llm.full_context_latency_s` set on the matrix entry it was measured on to
+the slowest of the lane's three requests, rounded up to whole seconds.
 
 ## 6. Write the durable report
 
@@ -286,8 +331,10 @@ the tables that help, drawing from:
 - the exact workload; validated context, modality, tool-call and reasoning-parser results;
 - throughput, TTFT, TPOT or ITL, failure count, and duration for the selected lane, plus any comparison that
   justified the choice;
-- Emmy eligibility with its evidence; compiler coverage, tuned target counts, O3 verification, targets still slower
-  than `torch.compile`, and remaining gaps; the golden's path when it is complete;
+- the full-context latency lane: the three request times, the slowest one the recipe carries, and every larger
+  context the 290-second rule rejected;
+- Emmy eligibility with its evidence; compiler coverage, tuned target counts, the verification of the recorded rows,
+  targets still slower than `torch.compile`, and remaining gaps; the golden's path when it is complete;
 - for an Emmy recipe, the published image tag, kernel-tuning summary, and the accuracy result behind the FAST_MATH
   decision; for a vLLM or SGLang recipe, that engine's result without a comparison column;
 - one `emmy bench experiments/<model>/<name> ...` reproduction command filtered to the selected lane;
@@ -311,19 +358,22 @@ emmy deploy ssh --dry-run --recipe recipes/<model> --ssh <target>
 Also check:
 
 - the coverage manifest accounts for every layer and seam; a complete trace has a committed golden whose every row
-  has paired positive O3 and reference timings and lowers on the requested compute capability, and a partial trace
+  has paired positive Emmy and reference timings and lowers on the requested compute capability, and a partial trace
   has nothing under `golden/`;
-- only repeated O3 rows are called deployable, and each tuning winner names its O1 ranking lane;
+- only repeated measurements are called deployable;
 - a serving recipe has at least one successful result for its exact lane, and its report uses only numbers from that
   run;
+- the recipe's `full_context_latency_s` is the slowest request of this platform's full-context latency lane in the
+  archive, rounded up, at most 290, from the same run as the report's numbers and at a prompt of the recipe's
+  `context_length - 512` tokens;
 - recipe and experiment pin immutable images and target exactly the requested GPU name and count;
 - a published Emmy image passed offline zero-recompile verification, and a FAST_MATH recipe has a verified FAST_MATH
   pack for its serving shape; `EMMY_FAST_MATH=1` is in an Emmy recipe unless its accuracy gate regressed, and never in
   a vLLM or SGLang recipe;
 - the experiment snapshot has the shared `recipe.yaml` and `RESULTS.md` plus this platform's LFS archive with its
   records inside, and other platforms' archives and sections are unchanged;
-- the prior reproduction gate passes on the recipe's golden, or the recipe is tagged `prior-pending` (AGENTS.md
-  finalization step 22);
+- when the card has a hardware golden, the recipe's measured rows are promoted into it, its candidate file is rebuilt,
+  both priors are refit, and the prior reproduction gate passes (AGENTS.md finalization step 22);
 - every new corpus case reproduces its named stage, `pytest tests/compiler/realization` is green,
   `make test-corpus-regen` is a no-op, and every `_xfail_*` note has an `evidence:` paragraph;
 - nothing staged is a dated run directory, loose benchmark output, or onboarding summary, and no tracked artifact holds

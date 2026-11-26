@@ -69,7 +69,7 @@ def record_routing(db: SearchDB, parent, arm: dict, pieces) -> None:
     kernels = [(op.identity_key(structural=False, with_io=True), op) for op in (parent, *pieces)]
     for identity, op in kernels:
         if identity is not None:
-            db.record_kernel(kernel_row(op, op.name))
+            db.record_kernel(kernel_row(op))
     (parent_key, _), *children = kernels
     db.record_routing(RoutingRow(parent=parent_key, arm=arm, children=tuple(identity for identity, _ in children if identity is not None)))
 

@@ -73,11 +73,11 @@ legacy recipes and sorts as null until the next discovery run.
 `recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
 versioned JSON document produced by `recipe_inventory_document()` (schema version 2) adds the directory name,
 lifecycle-aware runnable state, whether any variant serves through Emmy, and one entry per matrix-expanded
-deployment — its GPU, GPU count, GPU memory fraction (`engine.llm.gpu_memory_utilization`, default 0.9) and
-effective context length — to the identity, tags, task, input modalities (`model.input_modalities`, `["text"]`
-unless declared), rationale, and heat. Deployments are unique per (GPU, count,
-fraction): a recipe that may share its GPU lists a reduced-fraction entry beside its whole-GPU one, each with its
-own qualified context length, and both appear.
+deployment — its GPU, GPU count, GPU memory fraction (`engine.llm.gpu_memory_utilization`, default 0.9), effective
+context length and measured full-context latency (`engine.llm.full_context_latency_s`, null until measured) — to
+the identity, tags, task, input modalities (`model.input_modalities`, `["text"]` unless declared), rationale, and
+heat. Deployments are unique per (GPU, count, fraction): a recipe that may share its GPU lists a reduced-fraction
+entry beside its whole-GPU one, each with its own qualified context length, and both appear.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
 live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
@@ -243,6 +243,22 @@ This design provides:
 3. **Computed properties** — `LLMConfig.gpus_per_instance` derives from `tensor_parallel_size * pipeline_parallel_size * data_parallel_size` without parsing strings.
 4. **Deep merge support** — named fields participate in matrix merging naturally. An `extra_args` string cannot be partially overridden.
 
+### Full-Context Latency
+
+`engine.llm.full_context_latency_s` is the one named field that is a measurement, not a setting, and it maps to no
+engine flag. The full-context latency of a deployment entry is the wall time, in whole seconds, of the slowest of
+three non-streaming completion requests sent one at a time against that exact entry, each filling its context: a
+prompt of `context_length - 512` random tokens and 512 generated tokens with EOS ignored. It is the longest ordinary
+request the entry serves, which is what a proxy's response timeout has to cover: Relay abandons a request whose
+response headers do not arrive in time, and a non-streaming response sends its headers only after the whole
+generation. The onboarding skill measures it as a one-call session lane of the serving experiment
+(`emmy/benchmark/ARCHITECTURE.md`), rounds the slowest request up, and writes it on the matrix entry it measured. It
+is bounded: a deployed request has `MAX_FULL_CONTEXT_LATENCY_S` (290) seconds before Relay abandons it, so the lane
+runs with that request timeout, and a context whose full-context request runs past it is halved until the request
+fits. The context a recipe carries is therefore one the platform answers in time, not the model card's maximum. The
+catalog exports the latency per deployment and rejects a value that is not a positive whole number or is over the
+bound; an unmeasured entry exports null, so a reader can tell it from a fast one. Never estimate it.
+
 ### Controlled Workload Flags
 
 `BenchmarkConfig` carries three optional knobs that pin the bench-client workload for controlled cross-engine
@@ -268,6 +284,11 @@ raw benchmark artifact; the experiment record does not parse or aggregate those 
 `/v1/audio/transcriptions` through the client's `openai-audio` backend instead of random text prompts. Each clip sets
 its own input and transcript length, so the random lengths and `ignore_eos` are not sent, and the backend takes no
 `temperature`.
+
+`benchmark.client_image` names the vLLM image that runs the `vllm bench serve` client. Unset, a vLLM recipe's client
+runs in its own serving image and an SGLang recipe's in the default vLLM image. Naming it gives every lane of a
+cross-engine comparison the same client, and gives a model whose tokenizer the default client cannot load (GLM-5.2's
+`TokenizersBackend`) a client that can.
 
 `benchmark.random_prefix_len` (default 0) prepends that many tokens to every prompt, so a request's input is the
 prefix plus `random_input_len` random tokens. The client draws the prefix once per run from its seed: every request
@@ -305,7 +326,27 @@ engines, and deployment passes the same value to `hf download`. `--revision` is 
 
 ### Engine-Specific Nesting
 
-Engine-specific config (`image`, `extra_args`, `extra_env`) nests under `engine.llm.vllm` or `engine.llm.sglang`, while engine-agnostic config lives at `engine.llm`. `LLMConfig.engine_name` is determined by which sub-config is present (SGLang takes priority if both exist). The `image`, `extra_args`, and `extra_env` properties delegate to the active engine's config.
+Engine-specific config (`image`, `extra_args`, `extra_env`) nests under `engine.llm.vllm`, `engine.llm.sglang` or
+`engine.llm.native`, while engine-agnostic config lives at `engine.llm`. `LLMConfig.engine_name` is determined by which
+sub-config is present (native, then SGLang, then vLLM). The `image`, `extra_args`, and `extra_env` properties delegate
+to the active engine's config.
+
+### The Native Lane (`engine.llm.native`)
+
+A recipe can serve through Emmy's native server, one request at a time on one GPU, from an image that carries the
+server, its runtime worker and a pack prepared from the recipe golden ([emmy-native](../../docker/emmy-native/ARCHITECTURE.md)).
+The block names the `image`, the recipe-relative `golden` the pack is prepared from, and what it was prepared with:
+`extra_args` in `emmy serve --runner generate --native`'s spelling (`--kv-cache-dtype`, `--page-tokens`,
+`--limit-mm-per-prompt`, `--speculative-config`) and `extra_env` (the `EMMY_GEN_*` widths and pager budgets, the
+precision lane). The context is `engine.llm.context_length`. The pack fixes all of them, so the image bake reads them
+and the server takes only the served model ID, its address and the context; `--golden`, `--strict-evidence` and the
+pack flags are the bake's and banned from `extra_args`. A native lane must name its image and golden, keep every
+parallel size at 1 and `max_concurrent_requests` at 1 (or unset), and its deploy downloads nothing: the pack holds
+the weights.
+
+A native lane usually sits beside a vLLM lane of the same card, as a second matrix entry that sets
+`engine.llm.native`. `resolve_for_hardware(..., engine=...)` keeps only the entries a given engine serves, which
+`emmy deploy local --engine native` and `emmy publish --engine native` use; without it the card's first entry deploys.
 
 ### Pinned vLLM LoRA adapter
 
@@ -412,7 +453,7 @@ Command recipes skip `validate_extra_args()` since they don't go through engine 
 
 Without `strict`, result transfer is best effort and staged files may include local edits. With `strict`, the staged
 paths must be clean before execution, the Git revision and dirty flag are recorded, every `result_files` entry must be
-retrieved, and GPU, NVCC, and cuBLAS provenance must be available. A failed command still attempts to retrieve its
+retrieved, and GPU, ptxas, and cuBLAS provenance must be available. A failed command still attempts to retrieve its
 declared results so partial evidence is not lost.
 
 ### Result interpretation
@@ -449,6 +490,10 @@ fails its health check forever. So every engine service carries the label `autoh
 `autoheal` service (`willfarrell/autoheal`, with the Docker socket mounted) that restarts a labelled container once
 Docker marks it unhealthy — after the health check's `start_period` and `retries`. It touches no unlabelled container on
 the host. The deploy starts it last, after every service has passed its first health check.
+
+The restart policy also hides an engine that crashes while it loads: Docker brings it back, so it never reads as
+exited, and it would fail its way through the whole health timeout. Until a service first answers `/health`, the
+deploy therefore treats a non-zero restart count like an exit and fails at once with the containers' last log lines.
 
 Matrix overrides work naturally via deep merge:
 ```yaml
@@ -512,3 +557,11 @@ build_engine_args(recipe.engine.llm, model_name, model_revision=recipe.model.rev
     v
 generate_compose() -> docker-compose.yaml string
 ```
+
+### Sequential synthetic benchmark sessions
+
+`benchmark.session_calls` opts into the sequential completion workload. `session_new_tokens` controls new input per
+turn; `session_affinity` controls vLLM rank affinity. `session_concurrencies` runs several concurrency values against
+one deployment; `session_request_timeout_s` bounds each request in seconds (unset: one hour). The benchmark
+architecture defines prompt growth and raw measurement semantics. Benchmark fields are validated from the
+`BenchmarkConfig` dataclass, so defaults and accepted workload fields share one declaration.

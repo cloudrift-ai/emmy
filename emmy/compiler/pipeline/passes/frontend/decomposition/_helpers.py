@@ -19,7 +19,7 @@ from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, placeholder
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to, squeeze_axis
 from emmy.compiler.pipeline.passes.frontend.decomposition._matmul_helpers import matmul_unsqueeze
@@ -84,7 +84,7 @@ def opmath_dtype(dtype):
 
 def const_bc(frag: Graph, *, name: str, value=None, context_value=None, target_shape: tuple, dtype: str) -> Node:
     """Add a scalar ConstantOp and broadcast it to ``target_shape``. Pass ``value`` for a
-    static scalar, or ``context_value`` (an ``Expr`` over symbolic-dim names) for a runtime
+    static scalar, or ``context_value`` (an ``Expression`` over symbolic-dim names) for a runtime
     scalar resolved at launch — e.g. a dynamic mean's divisor = the runtime reduce-axis size."""
     cid = frag.add_node(
         op=ConstantOp(name=name, value=value, context_value=context_value),
@@ -94,9 +94,10 @@ def const_bc(frag: Graph, *, name: str, value=None, context_value=None, target_s
     return broadcast_to(frag, cid, tuple(target_shape))
 
 
-def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dtype: str | None = None) -> Node:
+def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dtype: str | None = None, range=None) -> Node:
     """Decompose a matmul into unsqueeze → broadcast → multiply → reduce_sum → squeeze.
 
+    ``range`` gives the part of the contracted axis each row folds, from the row's coordinate (``ReduceOp.range``).
     Returns the squeezed output node.
     """
     a, b = _node(frag, a), _node(frag, b)
@@ -114,22 +115,25 @@ def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dt
         output=Tensor(f"{name}_ew", mul_shape, opmath_dtype(dtype)),
     )
     red_shape = reduction_shape(mul_shape, k_axis)
+    row = k_axis % len(mul_shape) - 1
     red = frag.add_node(
-        op=ReduceOp(op="sum", axis=k_axis),
+        op=ReduceOp(op="sum", axis=k_axis, range=None if range is None else range(placeholder(row))),
         inputs=[ew],
         output=Tensor(f"{name}_reduce", red_shape, dtype),
     )
     return squeeze_axis(frag, red, k_axis, out_name=name)
 
 
-def softmax_decompose(frag: Graph, x: Node | str, axis: int, *, name: str, dtype: str | None = None) -> Node:
-    """Decompose softmax into max → sub → exp → sum → div. Returns the div node."""
+def softmax_decompose(frag: Graph, x: Node | str, axis: int, *, name: str, dtype: str | None = None, range=None) -> Node:
+    """Decompose softmax into max → sub → exp → sum → div. Returns the div node. ``range`` is the part of ``axis``
+    the distribution is over (``ReduceOp.range``): both reductions walk it, and the quotient outside it is read by
+    nothing that walks the same range."""
     x = _node(frag, x)
     dtype = dtype or x.output.dtype
     out_shape = tuple(x.output.shape)
     red_shape = reduction_shape(out_shape, axis) if out_shape else (1,)
     max_id = frag.add_node(
-        op=ReduceOp(op="maximum", axis=axis),
+        op=ReduceOp(op="maximum", axis=axis, range=range),
         inputs=[x],
         output=Tensor(f"{name}_max", red_shape, dtype),
     )
@@ -145,7 +149,7 @@ def softmax_decompose(frag: Graph, x: Node | str, axis: int, *, name: str, dtype
         output=Tensor(f"{name}_exp", out_shape, dtype),
     )
     sum_id = frag.add_node(
-        op=ReduceOp(op="sum", axis=axis),
+        op=ReduceOp(op="sum", axis=axis, range=range),
         inputs=[exp_id],
         output=Tensor(f"{name}_sum", red_shape, dtype),
     )
@@ -167,7 +171,7 @@ def gqa_broadcast(
     coord_map = []
     for d in range(len(target_shape)):
         p = placeholder(d)
-        coord_map.append(BinaryExpr("/", p, Literal(group_size, "int")) if d == head_axis else p)
+        coord_map.append(BinaryExpression("/", p, Literal(group_size, "int")) if d == head_axis else p)
     return single_indexmap(frag, src, out_shape=target_shape, coord_map=coord_map, name=name, dtype=dtype)
 
 
@@ -186,10 +190,12 @@ def padded_read(frag: Graph, x: Node, *, out_shape: tuple, channel: object, leng
     if isinstance(length, Literal) or in_length <= 0:
         return single_indexmap(frag, x, out_shape=out_shape, coord_map=coords, name=name)
 
-    in_bounds = BinaryExpr("&&", BinaryExpr(">=", length, Literal(0, "int")), BinaryExpr("<", length, Literal(in_length, "int")))
+    in_bounds = BinaryExpression(
+        "&&", BinaryExpression(">=", length, Literal(0, "int")), BinaryExpression("<", length, Literal(in_length, "int"))
+    )
     # Clamp the off-domain coord so the post-fusion unconditional Load stays in range; the
     # select is what actually discards the value.
-    clamped = TernaryExpr(cond=in_bounds, if_true=length, if_false=Literal(0, "int"))
+    clamped = TernaryExpression(cond=in_bounds, if_true=length, if_false=Literal(0, "int"))
     zero_id = frag.add_node(
         op=ConstantOp(name=f"{name}_zero", value=0.0),
         inputs=[],

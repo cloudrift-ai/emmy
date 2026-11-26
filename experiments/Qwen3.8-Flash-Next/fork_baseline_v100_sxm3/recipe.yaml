@@ -1,12 +1,12 @@
 # The plain 1Cat fork serving Qwen3.8-Flash-Next on V100 SXM3 32GB: the baseline Emmy's kernels have to match.
 #
-# The image is the upstream 1Cat-vLLM v1.5.1 release wheel (tag commit 589a5d1e1a9e, wheel sha256 757f2200ba6b...) on
-# nvidia/cuda:12.8.1-devel-ubuntu24.04 with python3.12 and python3.12-dev, built and tagged locally on the test node;
-# it is not published. The flags are the release launcher's (serve_flash_next_nvfp4_v100.sh) with the serving shape
-# chosen on this node: TP4, MTP off, the KV pool pinned at 2.5 GiB per card (194,016 tokens), a
+# The image is CloudRift's v1.5.1 fork image with its kernel caches baked in, by digest: the one Emmy's serving image
+# builds on (fork_serving_v100_sxm3). The flags are the release launcher's (serve_flash_next_nvfp4_v100.sh) with the
+# serving shape chosen on this node: TP4, MTP off, the KV pool pinned at 2.5 GiB per card (194,016 tokens), a
 # 4,096-token prefill step and up to eight sequences. That shape keeps 3 GiB per card free under the worst-case loads
 # with a 131,072 context; the launcher's 8,192-token step does not. The n-gram table sits in pinned host memory, the
-# launcher's default at TP4.
+# launcher's default at TP4. Async scheduling is on, vLLM's default with MTP off; the first run of this baseline, on
+# the upstream release wheel, turned it off (RESULTS.md).
 #
 # Rows: time to first token and per-token decode at one request (1K, 8K, 32K and the full context), total output at
 # four and eight concurrent requests, and the node at four replicas with eight requests each behind the load balancer.
@@ -25,14 +25,13 @@ engine:
     context_length: 131072
     max_concurrent_requests: 8
     vllm:
-      image: "local/1cat-vllm:1.5.1-wheel"
+      image: "cloudriftai/1cat-vllm-qwen3.8-flash-next-nvfp4@sha256:bf976828fc0028aa2f67d2e4e23586e749c7d6ff39a036bc4f97fbbcaccef65b"
       entrypoint: "vllm serve"
       extra_args: >-
         --dtype half
         --kv-cache-dtype auto
         --language-model-only
         --max-num-batched-tokens 4096
-        --no-async-scheduling
         --mamba-cache-mode align
         --enable-prefix-caching
         --kv-cache-memory-bytes 2684354560

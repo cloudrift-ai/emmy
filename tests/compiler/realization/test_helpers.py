@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,20 +9,24 @@ from emmy.compiler.pipeline.search.golden import GoldenFile
 from tests.compiler.realization import helpers
 
 
-def test_built_loads_the_lowered_program_through_nvcc(monkeypatch) -> None:
-    source = SimpleNamespace(copy=lambda: "source-copy")
-    case = SimpleNamespace(program=lambda: source)
-    lowered = object()
+def test_built_assembles_every_kernel_for_the_target_its_text_names(monkeypatch) -> None:
+    from emmy.compiler.ir.cuda import CudaOp
+
+    graph = SimpleNamespace(
+        nodes={
+            "plain": SimpleNamespace(op=CudaOp(kernel_source=".target sm_90\n", kernel_name="k_plain")),
+            "tma": SimpleNamespace(op=CudaOp(kernel_source=".target sm_90a\n", kernel_name="k_tma")),
+            "input": SimpleNamespace(op=object()),
+        }
+    )
+    case = SimpleNamespace(compute_cap=(9, 0), context=lambda: "declared")
     seen = []
 
-    monkeypatch.setattr(helpers, "lowered", lambda case, ctx: (lowered, []))
-    monkeypatch.setattr("emmy.compiler.context.Context.probe", staticmethod(lambda: "live"))
-    monkeypatch.setattr("emmy.compiler.backend.cuda.program.CompiledProgram.build", lambda graph, feed: seen.append((graph, feed)))
-    monkeypatch.setattr("emmy.compiler.backend.gpu_lock.gpu_lock", nullcontext)
-    monkeypatch.setattr(helpers, "seeded_inputs", lambda program: {"x": program})
+    monkeypatch.setattr(helpers, "lowered", lambda case, ctx: (graph, []) if ctx == "declared" else None)
+    monkeypatch.setattr("emmy.compiler.backend.cuda.ptxas.compile_to_cubin", lambda source, name: seen.append((name, source)))
 
-    assert helpers.built(case) is lowered
-    assert seen == [(lowered, {"x": source})]
+    assert helpers.built(case) is graph
+    assert seen == [("k_plain", ".target sm_90\n"), ("k_tma", ".target sm_90a\n")]
 
 
 def test_bench_command_replays_the_named_realization_through_the_golden_flags() -> None:
@@ -45,6 +48,23 @@ def test_reference_and_lowered_weights_share_the_source_before_transpose() -> No
     reference = helpers.seeded_inputs(case.document.reference_program(case.target), sources=sources)
 
     np.testing.assert_array_equal(feed["linear_6_wt"], reference["p_mlp_down_proj_weight"].T)
+
+
+def test_regenerate_refuses_a_row_that_would_lose_a_key() -> None:
+    """A row's scoped key that names no site of the fresh kernel would be dropped by the restamp; a corpus row has no
+    measurement whose demotion would show it, so the regen refuses instead of writing a case that is "current" with
+    a schedule nobody authored."""
+    from dataclasses import replace
+
+    import pytest
+
+    document = GoldenFile.load(helpers.CASES_DIR / "fused/gdn-recurrence-state-kv.json")
+    (row,) = document.rows
+    nested = max((key for key in row.knobs if key.startswith("TILE@")), key=len).partition("@")[2]
+    unmapped = {key.replace(nested, f"{nested}9"): value for key, value in row.knobs.items()}
+    with pytest.raises(helpers.CaseError, match="names no site"):
+        helpers.regenerate(replace(document, rows=[replace(row, knobs=unmapped)]))
+    assert helpers.regenerate(document) == document
 
 
 def test_a_regenerated_case_keeps_its_note(tmp_path) -> None:

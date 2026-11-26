@@ -219,30 +219,30 @@ def trace_inline_code(code: str, dynamic_shapes: dict | None = None) -> dict:
         logger.error('--code must end with an expression (e.g. "torch.exp(torch.neg(x))")')
         sys.exit(2)
 
-    final_expr = tree.body[-1].value
+    final_expression = tree.body[-1].value
     scope = {"torch": torch, "nn": torch.nn, "F": F}
     preamble = ast.Module(body=tree.body[:-1], type_ignores=[])
     exec(compile(preamble, "<--code>", "exec"), scope)  # noqa: S102 — local CLI
 
     # Fast path: direct call to an nn.Module — trace it straight, preserving
     # the module's parameter capture (weights land as Graph constants).
-    if isinstance(final_expr, ast.Call):
+    if isinstance(final_expression, ast.Call):
         try:
-            maybe_mod = eval(compile(ast.Expression(final_expr.func), "<--code>", "eval"), scope)  # noqa: S307
+            maybe_mod = eval(compile(ast.Expression(final_expression.func), "<--code>", "eval"), scope)  # noqa: S307
         except Exception:  # noqa: BLE001
             maybe_mod = None
         if isinstance(maybe_mod, torch.nn.Module):
-            args = tuple(eval(compile(ast.Expression(a), "<--code>", "eval"), scope) for a in final_expr.args)  # noqa: S307
+            args = tuple(eval(compile(ast.Expression(a), "<--code>", "eval"), scope) for a in final_expression.args)  # noqa: S307
             kws = {
                 kw.arg: eval(compile(ast.Expression(kw.value), "<--code>", "eval"), scope)  # noqa: S307
-                for kw in final_expr.keywords
+                for kw in final_expression.keywords
                 if kw.arg
             }
-            logger.info("Tracing inline module: %s", ast.unparse(final_expr.func))
+            logger.info("Tracing inline module: %s", ast.unparse(final_expression.func))
             graph, const_targets = trace_module_with_constants(maybe_mod, args, kwargs=kws or None, dynamic_shapes=dynamic_shapes)
             return {
                 "graph": graph,
-                "slug": _slugify(ast.unparse(final_expr.func)),
+                "slug": _slugify(ast.unparse(final_expression.func)),
                 "module": maybe_mod,
                 "args": args,
                 "kwargs": kws,
@@ -255,7 +255,7 @@ def trace_inline_code(code: str, dynamic_shapes: dict | None = None) -> dict:
     # tensor-constructor calls (``torch.randn(...)``, etc.) which get
     # eagerly evaluated and bound to fresh placeholder names. Everything
     # else (torch, F, nn, helper modules, scalars) stays in the closure.
-    rewritten, tensor_params = _lift_tensor_inputs(final_expr, scope)
+    rewritten, tensor_params = _lift_tensor_inputs(final_expression, scope)
     if not tensor_params:
         logger.error("--code expression has no tensor inputs to trace")
         sys.exit(2)
@@ -272,17 +272,17 @@ def trace_inline_code(code: str, dynamic_shapes: dict | None = None) -> dict:
             if isinstance(node, ast.Name) and node.id in rename:
                 node.id = rename[node.id]
 
-    expr_src = ast.unparse(rewritten)
+    expression_src = ast.unparse(rewritten)
     forward_sig = ", ".join(["self", *tensor_params.keys()])
-    wrapper_src = f"class _Wrapper(torch.nn.Module):\n    def forward({forward_sig}):\n        return {expr_src}\n"
+    wrapper_src = f"class _Wrapper(torch.nn.Module):\n    def forward({forward_sig}):\n        return {expression_src}\n"
     exec(wrapper_src, scope)  # noqa: S102 — local CLI
     module = scope["_Wrapper"]()
     example_inputs = tuple(tensor_params.values())
-    logger.info("Tracing inline expression: %s", ast.unparse(final_expr))
+    logger.info("Tracing inline expression: %s", ast.unparse(final_expression))
     graph, const_targets = trace_module_with_constants(module, example_inputs, dynamic_shapes=dynamic_shapes)
     return {
         "graph": graph,
-        "slug": _slugify(ast.unparse(final_expr)),
+        "slug": _slugify(ast.unparse(final_expression)),
         "module": module,
         "args": example_inputs,
         "kwargs": {},
@@ -293,8 +293,8 @@ def trace_inline_code(code: str, dynamic_shapes: dict | None = None) -> dict:
 _TENSOR_CTOR_NAMES = frozenset({"randn", "rand", "zeros", "ones", "empty", "full", "arange", "linspace", "tensor", "randint", "eye"})
 
 
-def _lift_tensor_inputs(expr: "ast.expr", scope: dict) -> tuple["ast.expr", dict]:
-    """Rewrite ``expr`` so every tensor input becomes a named placeholder.
+def _lift_tensor_inputs(expression: "ast.expr", scope: dict) -> tuple["ast.expr", dict]:
+    """Rewrite ``expression`` so every tensor input becomes a named placeholder.
 
     Two kinds of input subtrees are lifted to the returned ``tensor_params``
     dict (preserving order for function-parameter generation):
@@ -356,7 +356,7 @@ def _lift_tensor_inputs(expr: "ast.expr", scope: dict) -> tuple["ast.expr", dict
                 setattr(node, field, visit(value))
         return node
 
-    rewritten = visit(copy.deepcopy(expr))
+    rewritten = visit(copy.deepcopy(expression))
     ast.fix_missing_locations(rewritten)
     return rewritten, tensor_params
 

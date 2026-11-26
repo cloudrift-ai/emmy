@@ -29,8 +29,8 @@ def _schedule(row) -> dict:
 
 
 def test_a_plain_row_is_its_kernels_row() -> None:
-    """One target, one kernel, one row: the perf row is the row's schedule as recorded, keyed on the kernel, captured,
-    under the source given."""
+    """One target, one kernel, one row: the perf row is the row's schedule as recorded, keyed on the kernel, under the
+    source given."""
     case, document = _case("fused/norm-linear-f16-scalar-reduce.json")
     db, ctx = SearchDB(), case.context()
     assert import_rows(db, ctx, document, document.rows, source="golden:test") == 1
@@ -39,8 +39,8 @@ def test_a_plain_row_is_its_kernels_row() -> None:
     assert _schedule(row) == {key: str(value) for key, value in stored.knobs.items()}
     identity = case.target.exact_identity  # computed from the file's Loop IR: the file names the kernel by a ref of its own
     assert stored.kernel == case.target.ref
-    assert (row.kernel, row.stats.median, row.captured, row.source, row.gpu) == (identity, 1.0, True, "golden:test", ctx.hardware_id())
-    assert db.perf_sources(ctx) == {"golden:test": 1}
+    assert (row.kernel, row.us, row.source, row.gpu) == (identity, 1.0, "golden:test", ctx.hardware_id())
+    assert db.perf_sources() == {"golden:test": 1}
     [kernel] = db.iter_kernels()
     assert kernel.exact_identity == identity and kernel.loop_ir == case.target.loop_ir
 
@@ -91,19 +91,40 @@ def test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go(t
         with evidence_scope([document]):
             assert evidence_db(db, ctx) is db
             [stored] = db.iter_perf_rows()
-            assert stored.stats.median == 1.0
+            assert stored.us == 1.0
             first = db.perf_sources()
             assert evidence_db(db, ctx) is db and db.perf_sources() == first
         with evidence_scope([slower]):
             assert evidence_db(db, ctx) is db
             [stored] = db.iter_perf_rows()
-            assert stored.stats.median == 2.0 and db.perf_sources() != first
+            assert stored.us == 2.0 and db.perf_sources() != first
         with evidence_scope([]):
             assert evidence_db(db, ctx) is db
-            assert [stored.stats.median for stored in db.iter_perf_rows()] == [2.0]
+            assert [stored.us for stored in db.iter_perf_rows()] == [2.0]
         with evidence_scope([document]):
             assert evidence_db(db, ctx) is db
-            assert [stored.stats.median for stored in db.iter_perf_rows()] == [1.0]
+            assert [stored.us for stored in db.iter_perf_rows()] == [1.0]
+
+
+def test_a_scope_with_no_row_of_the_live_regime_is_imported_once(tmp_path, monkeypatch) -> None:
+    """What the DB notes is the import, not its rows: a scope none of whose rows is evidence here — a trace inventory,
+    a file recorded in another regime — is read once, and a decision the file no longer holds goes with the scope
+    that stored it."""
+    from emmy.compiler.pipeline.search.golden import evidence
+
+    case, document = _case("fused/linear-add-place-cut-sm70.json")
+    ctx = case.context()
+    db = SearchDB(tmp_path / "tune.db")
+    traced = replace(document, rows=[replace(row, measurements=None) for row in document.rows])
+    imports, read = [], evidence._import
+    monkeypatch.setattr(evidence, "_import", lambda *scope: imports.append(scope) or read(*scope))
+    with pinned_knobs(case.regime):
+        with evidence_scope([traced]):
+            assert evidence_db(db, ctx) is db and evidence_db(db, ctx) is db
+        assert len(imports) == 1 and list(db.iter_perf_rows()) == [] and list(db.iter_routing())
+        with evidence_scope([replace(traced, routing=[])]):
+            evidence_db(db, ctx)
+        assert len(imports) == 2 and list(db.iter_routing()) == []
 
 
 def test_a_compile_without_a_db_picks_from_an_instance_holding_its_scope() -> None:
@@ -134,7 +155,7 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db() -> None:
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.knob import schedule_row_key
+    from emmy.compiler.pipeline.knob import schedule_match_key
     from emmy.compiler.pipeline.search.golden import GoldenFile
     from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
     from emmy.compiler.wire import kernel_tile
@@ -148,51 +169,46 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db() -> None:
         assert import_rows(db, ctx, document, live, source="golden:rtx5090") == len(live) >= 30
         assert not any(db.drift().values())
         measured: dict[str, list[dict]] = {}
-        for row in db.iter_perf(ctx):
-            measured.setdefault(row.kernel, []).append({k: str(v) for k, v in dict(schedule_row_key(dict(row.knobs))).items()})
+        for row in db.iter_perf_rows():
+            measured.setdefault(row.kernel, []).append({k: str(v) for k, v in dict(schedule_match_key(dict(row.knobs))).items()})
         with evidence_scope([]):
             for target in document.targets():
                 if target.exact_identity not in measured:
                     continue
                 graph = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=ctx, db=db)
                 [op] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
-                picked = {k: str(v) for k, v in dict(schedule_row_key(dict(op.knobs or {}))).items()}
+                picked = {k: str(v) for k, v in dict(schedule_match_key(dict(op.knobs or {}))).items()}
                 assert picked in measured[kernel_tile(op).identity_key(structural=False, with_io=True)], target.name
 
 
 def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> None:
     """The tune DB is a cache the import fills, and a row this machine measured is the one copy of that measurement: a
-    golden row of the same kernel and schedule, captured or faster, leaves it alone, and a scope change lets golden
-    rows go, never a local one."""
-    from emmy.compiler.pipeline.search.bench_record import point_stats
-    from emmy.compiler.pipeline.search.db import PerfStats
-
+    golden row of the same kernel and schedule, faster or not, leaves it alone, and a scope change lets golden rows
+    go, never a local one."""
     case, document = _case("fused/norm-linear-f16-scalar-reduce.json")
     ctx = case.context()
     [row] = document.rows
     db = SearchDB(tmp_path / "tune.db")
     with pinned_knobs(case.regime):
         db.record_kernel(case.target)
-        local = PerfStats(median=9.0, min=9.0, max=9.0, mean=9.0, variance=0.0, n_samples=30)
-        db.record_perf(ctx, case.target.exact_identity, bindings=row.bindings, knobs=row.knobs, status="ok", stats=local)
+        db.record_perf(ctx, case.target.exact_identity, bindings=row.bindings, knobs=row.knobs, status="ok", us=9.0)
         with evidence_scope([document]):
             evidence_db(db, ctx)
         [stored] = db.iter_perf_rows()
-        assert (stored.stats.median, stored.source) == (9.0, "measured")
+        assert (stored.us, stored.source) == (9.0, "measured")
         db.record_perf(
             ctx,
             case.target.exact_identity,
             bindings=row.bindings,
             knobs=row.knobs,
             status="ok",
-            stats=point_stats(1.0),
-            captured=True,
+            us=1.0,
             source="golden:x",
         )
         with evidence_scope([replace(document, rows=[replace(row, measurements=replace(row.measurements, emmy_us=0.5))])]):
             evidence_db(db, ctx)
         [stored] = db.iter_perf_rows()
-        assert (stored.stats.median, stored.source) == (9.0, "measured")
+        assert (stored.us, stored.source) == (9.0, "measured")
 
 
 def _import_in_a_worker(path, barrier) -> None:

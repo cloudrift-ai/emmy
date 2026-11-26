@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.base import ConstantOp, InputOp
 
 
 def apply_load_ops(source: np.ndarray, load_ops: tuple, dtype: str | None = None) -> np.ndarray:
@@ -155,3 +155,111 @@ def bind_constants_from_module(graph: Graph, module) -> dict[str, np.ndarray]:  
     for name, t in module.state_dict().items():
         sources[name] = t.detach().cpu().float().numpy()
     return bind_constants(graph, sources)
+
+
+def bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=None):
+    """Match graph inputs and constants to tensors from ``module`` / call args.
+
+    Activations come from the call's positional/keyword tensors. Constants
+    come from ``module.named_parameters()`` / ``named_buffers()`` keyed
+    by each ``ConstantOp.source_path`` recorded at trace time. Each
+    constant's ``load_ops`` chain is replayed via the NumPy backend
+    (see ``compiler.loader.binder``), so any compile-time-folded
+    transpose / reshape is honored uniformly.
+
+    ``checkpoint`` (the model id / path, when the caller has one) covers the
+    constants a live module cannot supply: an fp8 checkpoint's weights bind as
+    raw bits + scale sources (or a folded ``source_graph`` record over them)
+    that exist only in the safetensors shards, so any still-unbound constant is
+    re-tried through the safetensors loader before the hard error below.
+    """
+    import torch
+
+    flat_inputs: list[torch.Tensor] = []
+    for v in example_args:
+        flat_inputs.extend(flatten_tensors(v))
+    for v in example_kwargs.values():
+        flat_inputs.extend(flatten_tensors(v))
+
+    input_ids = list(compiled.inputs)
+    if len(input_ids) != len(flat_inputs):
+        # Raise, don't sys.exit: this also runs inside the bench worker child, where an
+        # exit(1) surfaces to the parent as an opaque ``SystemExit(1)`` with the real
+        # cause stranded in the child's log stream.
+        raise RuntimeError(f"Input arity mismatch: graph has {len(input_ids)} inputs, code provided {len(flat_inputs)}")
+
+    input_data: dict[str, np.ndarray] = {}
+    torch_f8 = (torch.float8_e4m3fn, torch.float8_e5m2)
+    for nid, tensor in zip(input_ids, flat_inputs, strict=True):
+        dtype = compiled.nodes[nid].output.dtype
+        np_dtype = dtype.np
+        tensor = tensor.detach().cpu()
+        # An fp8 activation/weight INPUT binds the raw bit pattern on its uint8 carrier —
+        # numpy has no fp8 scalar type, and a value cast would decode the bits (the same
+        # rule the constant side and the serving expert feed already follow).
+        if tensor.dtype in torch_f8:
+            tensor = tensor.view(torch.uint8)
+        if dtype.name == "bf16":
+            from emmy.compiler.dtype import encode_bf16  # noqa: PLC0415
+
+            if tensor.dtype == torch.bfloat16:
+                input_data[nid] = tensor.contiguous().view(torch.uint16).numpy()
+            else:
+                input_data[nid] = encode_bf16(tensor.numpy())
+        else:
+            if tensor.dtype == torch.bfloat16:
+                tensor = tensor.float()
+            input_data[nid] = tensor.numpy().astype(np_dtype, copy=False)
+
+    # ``remove_duplicate=False`` so tied weights (e.g. a model whose lm_head
+    # shares the embedding matrix) are surfaced under *every* name, including
+    # the ``source_path`` the tracer recorded — otherwise the alias the trace
+    # picked may be the one torch dedups away and the constant won't bind.
+    sources: dict[str, np.ndarray] = {}
+    for path, tensor in module.named_parameters(remove_duplicate=False):
+        tensor = tensor.detach().cpu()
+        sources[path] = (
+            tensor.contiguous().view(torch.uint16).numpy()
+            if tensor.dtype == torch.bfloat16
+            else tensor.numpy().astype(np.float32, copy=False)
+        )
+    for path, tensor in module.named_buffers(remove_duplicate=False):
+        tensor = tensor.detach().cpu()
+        sources[path] = (
+            tensor.contiguous().view(torch.uint16).numpy()
+            if tensor.dtype == torch.bfloat16
+            else tensor.numpy().astype(np.float32, copy=False)
+        )
+
+    input_data.update(bind_constants(compiled, sources))
+
+    if checkpoint is not None and any(nid not in input_data for nid, _op in compiled.loadable_constants()):
+        from emmy.compiler.trace.huggingface import quantized_checkpoint_dir  # noqa: PLC0415
+
+        quant_dir = quantized_checkpoint_dir(checkpoint)
+        if quant_dir is not None:
+            from emmy.compiler.loader.safetensors import load_constants_from_safetensors  # noqa: PLC0415
+
+            for nid, arr in load_constants_from_safetensors(compiled, str(quant_dir)).items():
+                input_data.setdefault(nid, arr)
+
+    for nid, node in compiled.nodes.items():
+        if not isinstance(node.op, ConstantOp) or nid in input_data:
+            continue
+        if node.op.value is not None:
+            continue  # backend materializes scalars from node.op.value
+        raise RuntimeError(f"Could not bind constant {nid} (source_path={node.op.source_path!r})")
+    return input_data
+
+
+def flatten_tensors(value):
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        out = []
+        for v in value:
+            out.extend(flatten_tensors(v))
+        return out
+    return []

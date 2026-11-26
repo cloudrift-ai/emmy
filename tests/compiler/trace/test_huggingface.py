@@ -1085,8 +1085,8 @@ def test_nvfp4_routed_experts_load_packed_with_per_row_global_scales(tmp_path, e
 
 def test_qwen4_exp_shared_expert_loads_under_its_own_name(tmp_path):
     """Qwen4Exp names its gated shared expert ``mlp.shared_expert`` in the checkpoint and in its module, so the
-    singular-to-plural translation Laguna's and GLM's checkpoints need does not apply, and every rank's ``post``
-    program holds the whole shared expert and its gate."""
+    singular-to-plural translation Laguna's and GLM's checkpoints need does not apply. Each rank's ``post`` program
+    holds its slice of the shared expert along the intermediate axis, as of every routed expert, and the whole gate."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers.models.qwen4_exp")
 
@@ -1098,13 +1098,17 @@ def test_qwen4_exp_shared_expert_loads_under_its_own_name(tmp_path):
     for key, value in shared.items():
         loaded = state[key.replace("model.language_model.", "model.")]
         assert not loaded.is_meta, key
+        if ".shared_expert." in key:
+            axis = 1 if ".down_proj." in key else 0
+            value = value.narrow(axis, value.shape[axis] // 2, value.shape[axis] // 2)
         assert torch.equal(loaded, value.to(torch.float16)), key
 
 
-def test_serving_load_leaves_the_engines_attention_and_ple_unread(tmp_path):
-    """At serving the 1Cat fork runs Qwen3.8-Flash-Next's sparse attention and n-gram PLE, so the runner's load
-    reads none of their weights (the n-gram table alone is about 51 GB) and they stay meta. The default load, which
-    ``emmy run --layer N`` uses for its eager reference, still reads them, and both read the gated residual."""
+def test_serving_load_leaves_the_engines_token_mixers_and_ple_unread(tmp_path):
+    """At serving the 1Cat fork runs Qwen3.8-Flash-Next's sparse attention, Gated DeltaNet and n-gram PLE, and the
+    engine runs the output head, so the runner's load reads none of their weights (the n-gram table alone is about
+    51 GB) and they stay meta. The default load, which ``emmy run --layer N`` uses for its eager reference, still reads
+    them, and both read the gated residual."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers.models.qwen4_exp")
     from safetensors.torch import load_file, save_file
@@ -1114,7 +1118,12 @@ def test_serving_load_leaves_the_engines_attention_and_ple_unread(tmp_path):
     _qwen4_exp_nvfp4_checkpoint(tmp_path)
     declared = load_quantized_split(tmp_path, torch.float16)[0].state_dict()
     module_keys = {
-        "hosted": ["model.layers.3.self_attn.o_proj.weight", "model.layers.1.ple.key_proj.weight"],
+        "hosted": [
+            "model.layers.3.self_attn.o_proj.weight",
+            "model.layers.0.linear_attn.out_proj.weight",
+            "model.layers.1.ple.key_proj.weight",
+            "lm_head.weight",
+        ],
         "kept": ["model.layers.3.attn_hyper_connection.hc_norm.weight"],
     }
     extra = {key.replace("model.", "model.language_model.", 1): torch.randn(*declared[key].shape, dtype=torch.bfloat16)
@@ -1208,7 +1217,7 @@ def test_gdn_state_wrapper_continues_resets_and_isolates_requests(length):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("length", [1, 16])
+@pytest.mark.parametrize("length", [1, 16, 130])
 def test_gdn_state_wrapper_traces_both_state_outputs(length):
     import numpy as np
     import torch
@@ -1235,6 +1244,97 @@ def test_gdn_state_wrapper_traces_both_state_outputs(length):
         reference = wrapper(x, state, history)
     for name, expected in zip(graph.outputs, reference, strict=True):
         np.testing.assert_allclose(result.outputs[name], expected.numpy(), rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("length", [1, 3])
+def test_gdn_state_wrapper_keeps_every_token_state(length):
+    """With ``rows``, state and history after token t are what the plain wrapper returns after t + 1 single-token
+    steps, and the traced graph returns them."""
+    import numpy as np
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
+    from emmy.compiler.trace.torch import trace_module_with_constants
+
+    block = _qwen3_5_linear_block()
+    mixer = block.linear_attn
+    state = torch.randn(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim) * 0.1
+    history = torch.randn(1, mixer.conv_dim, mixer.conv_kernel_size) * 0.1
+    x = torch.randn(1, length, mixer.hidden_size) * 0.1
+    plain, rows = build_gdn_state_wrapper(block), build_gdn_state_wrapper(block, rows=True)
+    with torch.no_grad():
+        y, states, histories = rows(x, state, history)
+        assert states.shape == (length, *state.shape[1:]) and histories.shape == (length, *history.shape[1:])
+        step_state, step_history = state, history
+        for t in range(length):
+            step_y, step_state, step_history = plain(x[:, t : t + 1], step_state, step_history)
+            torch.testing.assert_close(y[:, t : t + 1], step_y, rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(states[t : t + 1], step_state, rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(histories[t : t + 1], step_history, rtol=1e-4, atol=1e-6)
+    graph, targets = trace_module_with_constants(rows, (x, state, history))
+    tensors = dict(rows.named_parameters()) | dict(rows.named_buffers())
+    inputs = {name: value.numpy() for name, value in zip(graph.inputs, (x, state, history), strict=True)}
+    inputs.update({name: tensors[path].detach().numpy() for name, path in targets.items()})
+    result, _ = NumpyBackend().run(graph, input_data=inputs)
+    for name, expected in zip(graph.outputs, (y, states, histories), strict=True):
+        np.testing.assert_allclose(result.outputs[name], expected.numpy(), rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("float32_residual", [False, True])
+def test_gdn_moe_block_splits_off_its_routed_experts(float32_residual):
+    """A GDN block with routed experts returns the residual with its gated shared expert folded in and the ``xn`` the
+    router reads; adding the routed experts' weighted combine gives the block's output, in the FP32-residual form
+    native generation traces too."""
+    import torch
+    from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextModel
+
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper, build_moe_split_wrapper, moe_block_parts
+
+    torch.manual_seed(0)
+    tiny = QWEN3_5_TINY | {"num_experts": 4, "num_experts_per_tok": 2, "moe_intermediate_size": 32, "shared_expert_intermediate_size": 32}
+    block = Qwen3_5MoeTextModel(Qwen3_5MoeTextConfig(**tiny)).eval().layers[0]
+    mixer = block.linear_attn
+    state = torch.randn(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim) * 0.1
+    history = torch.randn(1, mixer.conv_dim, mixer.conv_kernel_size) * 0.1
+    x = torch.randn(1, 3, mixer.hidden_size) * 0.1
+    pre, post, expert = build_moe_split_wrapper(block)
+    assert pre is None and post is None
+    gate, experts = moe_block_parts(block.mlp)
+    with torch.no_grad():
+        expected = build_gdn_state_wrapper(_dense(block))(x, state, history)
+        h, xn, next_state, next_history = build_gdn_state_wrapper(block, float32_residual=float32_residual)(x, state, history)
+        _, weights, picks = gate(xn.reshape(-1, xn.shape[-1]))
+        rows = xn.reshape(-1, xn.shape[-1])
+        routed = torch.zeros_like(rows)
+        for k in range(picks.shape[1]):
+            for row in range(rows.shape[0]):
+                e = int(picks[row, k])
+                routed[row] += weights[row, k] * expert(rows[row : row + 1], experts.gate_up_proj[e], experts.down_proj[e])[0]
+    torch.testing.assert_close(h + routed.reshape(h.shape), expected[0], rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(next_state, expected[1], rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(next_history, expected[2])
+
+
+def _dense(block):
+    """The block as Transformers runs it, behind a ``mlp`` that hides the MoE interface from the wrapper."""
+    import copy
+
+    import torch.nn as nn
+
+    class Opaque(nn.Module):
+        def __init__(self, mlp):
+            super().__init__()
+            self.inner = mlp
+
+        def forward(self, x):
+            return self.inner(x)
+
+    dense = copy.copy(block)
+    dense._modules = dict(block._modules)
+    dense.mlp = Opaque(block.mlp)
+    return dense
 
 
 def _tiny_gdn_cuda_programs(prefill, paged):

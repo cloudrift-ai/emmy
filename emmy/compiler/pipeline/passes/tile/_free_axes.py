@@ -15,7 +15,7 @@ definition, so a perfectly-nested run of free loops between them (the ``transpos
 fuses after its view puts ``seq`` between ``heads`` and ``head_dim``) interchanges outward and the fused axis takes
 ``q``'s place under it. The substitution is semantics-preserving unconditionally; whether it lands is checked after
 the fact: every rewritten access must fold clean. A composite operand index collapses to the bare axis
-(``(f/Q)·Q + f%Q → f``, the recomposition fold in ``Expr.simplify``); a store that indexes the pair as separate
+(``(f/Q)·Q + f%Q → f``, the recomposition fold in ``Expression.simplify``); a store that indexes the pair as separate
 buffer dims keeps the honest split-store spelling — ``[…, f/Q, f%Q]`` when the buffer's row-major flatten folds it
 back to an affine address, or the permuted ``[…, f/Q, …, f%Q]`` of a transposed output, whose address is per-element
 exact on every scalar tier and whose warp-tier addressability is the scheduler's legality question
@@ -36,33 +36,39 @@ fusion must keep the spelling the splicer composes through.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from emmy.compiler.ir.address import split_pair
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expression import (
+    BinaryExpression,
+    CastExpression,
+    Expression,
+    FunctionCallExpression,
+    Literal,
+    SimplifyCtx,
+    TernaryExpression,
+    Var,
+)
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.passes import simplify as _simplify_stmt
+from emmy.compiler.ir.stmt import Body, Load, Loop, Write, simplify_body
 
 
-def _no_divmod_on(e: Expr, name: str) -> bool:
+def _no_divmod_on(e: Expression, name: str) -> bool:
     """No ``/`` / ``%`` subterm of ``e`` has ``name`` in its dividend — the residue detector."""
-    if isinstance(e, BinaryExpr):
+    if isinstance(e, BinaryExpression):
         if e.op in ("/", "//", "%") and name in e.left.free_vars():
             return False
         return _no_divmod_on(e.left, name) and _no_divmod_on(e.right, name)
-    if isinstance(e, TernaryExpr):
+    if isinstance(e, TernaryExpression):
         return all(_no_divmod_on(x, name) for x in (e.cond, e.if_true, e.if_false))
-    if isinstance(e, CastExpr):
-        return _no_divmod_on(e.expr, name)
-    if isinstance(e, FuncCallExpr):
+    if isinstance(e, CastExpression):
+        return _no_divmod_on(e.expression, name)
+    if isinstance(e, FunctionCallExpression):
         return all(_no_divmod_on(a, name) for a in e.args)
     return True
 
 
 def _access_ok(index: tuple, shape, fname: str, store: bool = False) -> bool:
-    """A rewritten access folds clean when its index exprs carry no div/mod residue on the fused
+    """A rewritten access folds clean when its index expressions carry no div/mod residue on the fused
     axis, or — the split-store spelling ``[…, f/Q, f%Q]`` — when the buffer's row-major flatten
     recomposes the residue to an affine address (needs the full static shape). A ``store`` may
     also keep the bare pair at permuted strides (``[…, f/Q, …, f%Q]``): every tier addresses an
@@ -73,10 +79,10 @@ def _access_ok(index: tuple, shape, fname: str, store: bool = False) -> bool:
         return True
     if shape is None or len(shape) != len(index) or not all(getattr(d, "is_static", False) for d in shape):
         return False
-    flat: Expr = Literal(0, "int")
+    flat: Expression = Literal(0, "int")
     stride = 1
     for e, d in zip(reversed(index), reversed(list(shape)), strict=True):
-        flat = BinaryExpr("+", flat, BinaryExpr("*", e, Literal(stride, "int")))
+        flat = BinaryExpression("+", flat, BinaryExpression("*", e, Literal(stride, "int")))
         stride *= d.as_static()
     return _no_divmod_on(flat.simplify(SimplifyCtx.empty()), fname)
 
@@ -89,7 +95,7 @@ def _folds_clean(fused: Loop, fname: str, shapes: dict) -> bool:
         elif isinstance(s, Write):
             if not _access_ok(s.index, shapes.get(s.output), fname, store=True):
                 return False
-        elif any(fname in e.free_vars() and not _no_divmod_on(e, fname) for e in s.exprs()):
+        elif any(fname in e.free_vars() and not _no_divmod_on(e, fname) for e in s.expressions()):
             return False
     return True
 
@@ -112,14 +118,14 @@ def _fuse_pair(outer: Loop, inner: Loop, shapes: dict, between: tuple[Loop, ...]
             return None  # an inner loop shadows a pair name — substitution would capture
     f = Var(q.name)
     lit = Literal(small, "int")
-    sigma = Sigma({p.name: BinaryExpr("//", f, lit), q.name: BinaryExpr("%", f, lit)})
+    sigma = Sigma({p.name: BinaryExpression("//", f, lit), q.name: BinaryExpression("%", f, lit)})
     body = Body(tuple(s.substitute(sigma) for s in inner.body))
     fused = Loop(axis=Axis(q.name, big * small), body=body, unroll=outer.unroll or inner.unroll, seed=inner.seed)
-    fused = _simplify_stmt(fused, SimplifyCtx.empty())
+    (fused,) = simplify_body((fused,))
     if not _folds_clean(fused, q.name, shapes):
         return None
     for mid in reversed(between):
-        fused = replace(mid, body=Body((fused,)))
+        fused = mid.replace(body=Body((fused,)))
     return fused
 
 
@@ -145,23 +151,23 @@ def _fuse_once(body: Body, shapes: dict) -> Body | None:
                 return Body((*body[:i], fused, *body[i + 1 :]))
         inner = _fuse_once(s.body, shapes)
         if inner is not None:
-            return Body((*body[:i], replace(s, body=inner), *body[i + 1 :]))
+            return Body((*body[:i], s.replace(body=inner), *body[i + 1 :]))
     return None
 
 
-def _reads_whole(e: Expr, name: str) -> bool:
+def _reads_whole(e: Expression, name: str) -> bool:
     """Whether ``e`` reads ``name`` outside every ``/`` / ``%`` dividend."""
     if isinstance(e, Var):
         return e.name == name
-    if isinstance(e, BinaryExpr):
+    if isinstance(e, BinaryExpression):
         if e.op in ("/", "//", "%"):
             return _reads_whole(e.right, name)
         return _reads_whole(e.left, name) or _reads_whole(e.right, name)
-    if isinstance(e, TernaryExpr):
+    if isinstance(e, TernaryExpression):
         return any(_reads_whole(x, name) for x in (e.cond, e.if_true, e.if_false))
-    if isinstance(e, CastExpr):
-        return _reads_whole(e.expr, name)
-    if isinstance(e, FuncCallExpr):
+    if isinstance(e, CastExpression):
+        return _reads_whole(e.expression, name)
+    if isinstance(e, FunctionCallExpression):
         return any(_reads_whole(a, name) for a in e.args)
     return False
 
@@ -171,16 +177,16 @@ def _divisors(loads, name: str) -> dict[int, set[str]]:
     divisors: dict[int, set[str]] = {}
     for load in loads:
         for index in load.index:
-            for expr in index.subterms():
+            for expression in index.subterms():
                 if (
-                    isinstance(expr, BinaryExpr)
-                    and expr.op in ("/", "//", "%")
-                    and expr.left == Var(name)
-                    and isinstance(expr.right, Literal)
-                    and isinstance(expr.right.value, int)
-                    and expr.right.value > 1
+                    isinstance(expression, BinaryExpression)
+                    and expression.op in ("/", "//", "%")
+                    and expression.left == Var(name)
+                    and isinstance(expression.right, Literal)
+                    and isinstance(expression.right.value, int)
+                    and expression.right.value > 1
                 ):
-                    divisors.setdefault(expr.right.value, set()).add("%" if expr.op == "%" else "/")
+                    divisors.setdefault(expression.right.value, set()).add("%" if expression.op == "%" else "/")
     return divisors
 
 
@@ -221,13 +227,13 @@ def _split_once(body: Body, names: frozenset[str]) -> Body | None:
                 while outer in names:
                     outer += "_"
                 sigma = Sigma({axis.name: Var(outer) * Literal(factor, "int") + Var(axis.name)})
-                inner = replace(stmt, axis=Axis(axis.name, factor), body=Body(s.substitute(sigma) for s in stmt.body))
+                inner = stmt.replace(axis=Axis(axis.name, factor), body=Body(s.substitute(sigma) for s in stmt.body))
                 split = Loop(Axis(outer, extent // factor), Body((inner,)), unroll=stmt.unroll, seed=stmt.seed)
-                split = _simplify_stmt(split, SimplifyCtx.empty())
+                (split,) = simplify_body((split,))
                 return Body((*body[:i], split, *body[i + 1 :]))
         inner = _split_once(stmt.body, names)
         if inner is not None:
-            return Body((*body[:i], replace(stmt, body=inner), *body[i + 1 :]))
+            return Body((*body[:i], stmt.replace(body=inner), *body[i + 1 :]))
     return None
 
 

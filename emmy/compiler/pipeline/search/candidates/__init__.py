@@ -1,0 +1,263 @@
+"""Candidate files: measured schedules that are NOT the best known one, for the groups the hardware goldens hold.
+
+A hardware golden records the best known schedule of each group — one kernel, at one set of sizes, in one input
+regime. A candidate file holds a few other schedules measured on the same group: 3 for a kernel with a small schedule
+space, up to 10 for the largest (:func:`target`), spread across their latency so the slow ones are there beside the
+near misses. It is a file in the golden file format (``golden.GoldenFile``) and is never a golden: nothing in it is
+the best of anything, no compile reads it as evidence, and the reproduction gate does not see it.
+
+One file per hardware golden, under the same file name, in ``records/`` here. It copies the golden's traced programs,
+kernels and decisions, so it restamps onto a fresh lowering exactly as its golden does (``emmy candidates restamp``),
+and its rows are the candidates alone: the best row stays in the golden, and the two join on the kernel's exact
+identity, the sizes and the regime.
+
+:func:`build` fills a file from a DB instance that holds the card's measurements — the tune DB a tune writes its
+rows into; a group it does not cover is listed short, for a tune on the card to fill.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+
+from emmy.compiler.pipeline.knob import family_of, get, is_off_value, values_equal
+from emmy.compiler.pipeline.search.dataset.pool import GoldenPool, GoldenRow, regime_of
+from emmy.compiler.pipeline.search.db import SearchDB, knobs_json
+from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Row, regime_context
+from emmy.compiler.pipeline.search.space import COLD_CACHE, REGIME_KNOBS
+
+logger = logging.getLogger(__name__)
+
+_REGIME = frozenset(knob.name for knob in REGIME_KNOBS)
+
+#: The candidate files kept with the repository, one per hardware golden. Left out of the wheel: training data.
+RECORDS = Path(__file__).parent / "records"
+
+#: Candidates a group is filled to: ``FEWEST`` where the kernel's schedule space holds ``SMALL`` schedules or fewer,
+#: ``MOST`` where it holds ``LARGE`` or more, by the logarithm of the size between.
+FEWEST, MOST = 3, 10
+SMALL, LARGE = 10, 1_000_000
+#: A schedule space of at most this many schedules is walked, so its group is asked for no more candidates than exist.
+WALKED = 64
+
+
+def candidate_paths() -> list[Path]:
+    """The repository's candidate files."""
+    return sorted(RECORDS.glob("*.json"))
+
+
+def target(size: int) -> int:
+    """How many candidates a group whose kernel's schedule space holds ``size`` schedules is filled to."""
+    scale = math.log(max(size, SMALL) / SMALL) / math.log(LARGE / SMALL)
+    return min(MOST, FEWEST + round((MOST - FEWEST) * scale))
+
+
+def space_size(pool: GoldenPool) -> int:
+    """An upper bound on the schedules ``pool``'s kernel can run with: the bound its schedule fork declares
+    (``Fork.pool_bound``), read off the lowering of the kernel's definition without walking the space. ``0`` for a
+    kernel whose definition does not lower on its own, or that opens no schedule fork: its group is asked for
+    nothing, and is no group of the file while it holds no candidate."""
+    from emmy.compiler.pipeline import LOWERING_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import NO_OPTION, Run  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import pool_context  # noqa: PLC0415
+
+    size = 0
+
+    def decide(fork):
+        nonlocal size
+        size = max([size, *(bound for option in fork.options if (bound := getattr(option, "pool_bound", None)) is not None)])
+        return next(fork.leaves(), NO_OPTION)
+
+    try:
+        with pinned_knobs(pool.pins), unpinned_decisions():
+            Run(pipeline=Pipeline.build(LOWERING_PASSES[:-1]), ctx=pool_context(pool)).resolve(pool.kernel.program(pool.bindings), decide)
+    except Exception as exc:  # noqa: BLE001 — whatever the lowering raises, the group has no space to size
+        logger.debug("%s does not lower on its own (%s: %s)", pool.name, type(exc).__name__, exc)
+        return 0
+    return size
+
+
+def measured_rows(paths: Sequence[Path]) -> dict[tuple, tuple[GoldenRow, ...]]:
+    """The measured rows of the candidate files at ``paths`` by card and group — ``(gpu, exact identity, sizes,
+    regime)``, the key a golden pool of the dataset export joins on — each filed under its file's source."""
+    from emmy.compiler.pipeline.search.golden.evidence import file_source  # noqa: PLC0415
+
+    out: dict[tuple, tuple[GoldenRow, ...]] = {}
+    for path in paths:
+        document = GoldenFile.load(path)
+        source = file_source("candidate", path)
+        for key, rows in _groups(document).items():
+            measured = [row for row in rows if row.measured]
+            out[(document.gpu_name, *key)] = tuple(
+                GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.measurements.emmy_us, source) for row in measured
+            )
+    return out
+
+
+def _groups(document: GoldenFile) -> dict[tuple, list[Row]]:
+    """``document``'s rows that spell a schedule, by group: the kernel's exact identity, the sizes and the regime."""
+    identity = document.identities()
+    out: dict[tuple, list[Row]] = {}
+    for row in document.rows:
+        if row.knobs is not None and row.kernel in identity:
+            regime = regime_of(bool(row.pins.get(COLD_CACHE.name)), row.pins)
+            out.setdefault((identity[row.kernel], knobs_json(row.bindings), regime), []).append(row)
+    return out
+
+
+def golden_groups(golden: GoldenFile) -> dict[tuple, list[Row]]:
+    """``golden``'s groups. A row that records no sizes counts at every size of its kernel
+    (``GoldenFile.target_rows``): where the kernel has rows at recorded sizes in the same regime, it joins each of
+    those groups instead of making one of its own."""
+    groups = _groups(golden)
+    for key in [key for key in groups if key[1] == "{}"]:
+        sized = [other for other in groups if other != key and (other[0], other[2]) == (key[0], key[2])]
+        if sized:
+            rows = groups.pop(key)
+            for other in sized:
+                groups[other] = groups[other] + rows
+    return groups
+
+
+def _of_group(groups: dict[tuple, list[Row]], key: tuple) -> list[Row]:
+    """The rows of ``groups`` on the golden group ``key``. A golden row that records no sizes counts at every size of
+    its kernel (``GoldenFile.target_rows``), so its group takes the kernel's rows in its regime at any sizes."""
+    identity, sizes, regime = key
+    if sizes != "{}":
+        return groups.get(key, [])
+    return [row for (other, _sizes, lane), rows in groups.items() if (other, lane) == (identity, regime) for row in rows]
+
+
+def _schedule(row: Row) -> tuple:
+    """A row's schedule as a key (:func:`_key` of its knobs)."""
+    return _key(row.knobs or {})
+
+
+def _key(knobs: dict) -> tuple:
+    """A schedule row as a key: its knobs by value. A knob at its default or OFF value is left out, since a golden
+    row spells only what its record pinned while a tune's row spells every knob the kernel carries; a regime knob is
+    left out too, the regime being the group's."""
+    out = []
+    for key, value in knobs.items():
+        family = family_of(key)
+        knob = get(family)
+        if family in _REGIME or is_off_value(family, value):
+            continue
+        if knob is not None and knob.hints and values_equal(family, knob.hints[0], value):
+            continue
+        out.append((key, str(value).casefold()))
+    return tuple(sorted(out))
+
+
+def _others(pool: GoldenPool, taken: set[tuple]) -> int:
+    """The schedules ``pool``'s kernel can run with besides ``taken``, counted by walking its schedule space — for a
+    space small enough to walk (:data:`WALKED`)."""
+    from emmy.compiler.pipeline.search.ranking import enumerate_pool, pool_context  # noqa: PLC0415
+
+    return len({_key(row) for row in enumerate_pool(pool, pool_context(pool)).rows} - taken)
+
+
+def _spread(rows: list[tuple[dict, dict, float]], count: int) -> list[tuple[dict, dict, float]]:
+    """``count`` of ``rows`` (the sizes, the schedule row and the µs of a measurement) at evenly spaced ranks of
+    their latency, the fastest and the slowest among them."""
+    rows = sorted(rows, key=lambda row: (row[2], _key(row[1])))
+    if count >= len(rows):
+        return rows
+    if count == 1:
+        return rows[:1]
+    return [rows[round(index * (len(rows) - 1) / (count - 1))] for index in range(count)]
+
+
+@dataclass
+class Report:
+    """What a build left: the groups and the candidate rows, the groups under their target — each the kernel
+    (its name), the golden row it is named by, the regime and the sizes a tune of it runs at, and the candidates it
+    holds beside its target — and the candidates faster than every golden row of their group as ``(name, candidate
+    µs, golden µs)``."""
+
+    groups: int = 0
+    rows: int = 0
+    short: list[dict] = field(default_factory=list)
+    faster: list[tuple[str, float, float]] = field(default_factory=list)
+
+
+def build(golden: GoldenFile, db: SearchDB | None = None, existing: GoldenFile | None = None) -> tuple[GoldenFile, Report]:
+    """The candidate file of ``golden``: its programs, kernels and decisions, and for each of its measured groups the
+    candidate rows ``existing`` holds, topped up to the group's :func:`target` from the measurements ``db`` holds of
+    the group's kernel on the card, in its regime and at its sizes (``SearchDB.measured``): the tune DB the card's
+    tunes wrote, where the row benched last stands at one schedule. With no ``db`` nothing is added: the file takes
+    its golden's tables again and keeps its rows. A schedule a golden row of the group spells is never a candidate; a
+    row of ``existing`` whose group the golden no longer holds is dropped, as is one that holds no measurement."""
+    document = GoldenFile(
+        gpu_name=golden.gpu_name,
+        compute_cap=golden.compute_cap,
+        programs=list(golden.programs),
+        kernels=list(golden.kernels),
+        routing=list(golden.routing),
+    )
+    report = Report()
+    held = _groups(existing) if existing is not None else {}
+    for key, rows in golden_groups(golden).items():
+        best = [row for row in rows if row.measured]
+        if not best:
+            continue
+        identity, _sizes, regime = key
+        head = min(best, key=lambda row: row.measurements.emmy_us)
+        timed = tuple(GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.measurements.emmy_us, "") for row in best)
+        pool = GoldenPool(golden.gpu_name or "", tuple(golden.compute_cap), regime, golden.kernel(head.kernel), dict(head.bindings), timed)
+        size = space_size(pool)
+        taken = {_schedule(row) for row in rows}
+        wanted = target(size)
+        if 0 < size <= WALKED:
+            wanted = min(wanted, _others(pool, taken))
+        # A candidate is a measurement: a row a restamp left with a schedule and no time is dropped, and a tune refills.
+        kept = [row for row in _of_group(held, key) if row.measured and _schedule(row) not in taken]
+        taken.update(_schedule(row) for row in kept)
+        # One measurement per schedule the group does not hold yet. A golden row that records no sizes counts at every
+        # size of its kernel, and a candidate taken for it names the sizes it was measured at.
+        ctx, fresh = regime_context(golden, head.pins), {}
+        for sizes in [] if db is None else [head.bindings] if head.bindings else db.sizes(ctx, identity):
+            for knobs, us in db.measured(ctx, identity, bindings=sizes):
+                if _key(knobs) not in taken:
+                    fresh.setdefault(_key(knobs), (sizes, knobs, us))
+        names = {row.name for row in kept}
+        numbers = (f"{head.name}.c{n}" for n in range(len(kept) + len(fresh) + 1))
+        added = [
+            Row(
+                name=next(name for name in numbers if name not in names),
+                kernel=head.kernel,
+                bindings=dict(sizes),
+                pins=dict(head.pins),
+                knobs=knobs,
+                measurements=Measurements(emmy_us=us),
+            )
+            for sizes, knobs, us in _spread(list(fresh.values()), max(0, wanted - len(kept)))
+        ]
+        # A restamp of the golden can re-key a kernel; a kept row names it as the golden's file does now.
+        group = [replace(row, kernel=head.kernel) for row in kept] + added
+        document.rows.extend(group)
+        if not size and not group:
+            continue  # no schedule fork of its own and nothing measured: no candidate can exist
+        report.groups += 1
+        report.rows += len(group)
+        if size and len(group) < wanted:
+            report.short.append(
+                {
+                    "kernel": golden.kernel(head.kernel).name,
+                    "row": head.name,
+                    "pins": dict(head.pins),
+                    "bindings": dict(head.bindings),
+                    "held": len(group),
+                    "target": wanted,
+                }
+            )
+        report.faster.extend(
+            (row.name, row.measurements.emmy_us, head.measurements.emmy_us)
+            for row in group
+            if row.measured and row.measurements.emmy_us < head.measurements.emmy_us
+        )
+    return document, report

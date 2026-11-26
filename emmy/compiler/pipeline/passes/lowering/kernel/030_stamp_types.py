@@ -1,195 +1,68 @@
-"""Stamp per-statement dtypes on every Load / Assign / Write.
+"""Stamp per-statement dtypes on every Load / Assign / Accum / Write.
 
-Runs over a materialized ``KernelOp`` body, after ``010_materialize`` and
-before the analytical codegen passes (demote, vectorize) see the IR. After
-this pass those passes read dtypes directly off the IR instead of
-re-deriving them from the op's ``inputs`` / ``outputs`` side channels.
+Runs over a materialized ``KernelOp`` body, after ``010_materialize`` and before the analytical codegen passes
+(shared carry, vectorize) see the IR: those passes read dtypes off the statements, and match one-operation values
+over names, so the stamps come early and the conversions (``120_explicit_conversions``) last. The rules are
+:func:`emmy.compiler.ir.types.stamp_types`. A ``Load`` against a locally-declared buffer (smem) is stamped with the
+conversions.
 
-Stamping rules:
-
-- ``Load(input=B)`` — ``dtype = B``'s buffer dtype, read off the op's
-  ``inputs`` / ``outputs`` (matcher-populated graph Tensors). A Load against
-  a locally-declared buffer (smem) keeps the render-time fallback.
-- ``Assign(op, args)`` — ``dtype = dtype_promote(op.name, [ssa[a] for a in
-  args])``, the same rule ``Assign.render`` applies inline. Same-arg squares
-  and ``pow`` are promoted to f32 (overflow guard, below).
-- ``Write(output, value)`` — ``value_dtype = ssa[value]``. The destination
-  buffer dtype stays a render-time concern; only the value side is stamped.
-- ``Accum`` / ``Init`` are already typed — register
-  them in the running ``ssa_dtypes`` so downstream Assigns / Writes pick up
-  the right arg dtype.
-
-Idempotent: ``None``-stamped fields are filled and existing stamps are kept, except integer algebra whose result dtype
-is recovered from typed operands. This repairs stale float stamps retained by structurally cloned, previously untyped
-bodies.
+A cross-thread combine is built before its state has a dtype, so it runs at f32 unless its combine program names
+one. Once the stamps give its states an integer dtype, the combine and the shared slabs it folds through take that
+dtype: through f32 an integer rounds past 2**24.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 
-from emmy.compiler.dtype import F16, F32, DataType
-from emmy.compiler.dtype import get as dtype_get
+from emmy.compiler.dtype import F32, INTEGER_NAMES
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Select, Stmt, Write
-from emmy.compiler.ir.stmt.base import dtype_promote
+from emmy.compiler.ir.kernel.ir import Smem, TreeHalve, WarpShuffle
+from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.types import stamp_types, value_dtypes
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
 
 
-@dataclass
-class _StampCtx:
-    """Per-walk state. ``buf_dtypes`` maps an op I/O buffer name to its
-    dtype; ``ssa_dtypes`` accumulates as Stmts are stamped."""
+def _integer_combines(body: Body) -> Body:
+    """``body`` with each f32 cross-thread combine over states of one integer dtype at that dtype, its slabs too."""
+    dtypes = value_dtypes(body)
+    slabs: dict[str, object] = {}
 
-    buf_dtypes: dict[str, DataType]
-    ssa_dtypes: dict[str, DataType] = field(default_factory=dict)
+    def combines(stmts: Body) -> Body:
+        out = []
+        for s in stmts:
+            if isinstance(s, (WarpShuffle, TreeHalve)) and s.dtype == F32:
+                held = {dtypes.get(name) for name in s.state}
+                (one,) = held if len(held) == 1 else (None,)
+                if one is not None and one.name in INTEGER_NAMES:
+                    if isinstance(s, TreeHalve):
+                        slabs.update(dict.fromkeys(s.bufs, one))
+                    s = s.replace(dtype=one)
+            if s.nested():
+                s = s.with_bodies(tuple(combines(b) for b in s.nested()))
+            out.append(s)
+        return Body(tuple(out))
+
+    def retyped(stmts: Body) -> Body:
+        out = []
+        for s in stmts:
+            if isinstance(s, Smem) and s.name in slabs:
+                s = s.replace(dtype=slabs[s.name])
+            if s.nested():
+                s = s.with_bodies(tuple(retyped(b) for b in s.nested()))
+            out.append(s)
+        return Body(tuple(out))
+
+    body = combines(body)
+    return retyped(body) if slabs else body
 
 
 def rewrite(root: Node) -> KernelOp | None:
     op: KernelOp = root.op
-    buf_dtypes = {n: t.dtype for n, t in {**op.inputs, **op.outputs}.items()}
-    new_body = op.body
-    while True:
-        ctx = _StampCtx(buf_dtypes=buf_dtypes)
-        _seed_explicit_dtypes(new_body, ctx)
-        stamped = _stamp_body(new_body, ctx)
-        if stamped == new_body:
-            break
-        new_body = stamped
-    if new_body == op.body:
+    body = _integer_combines(stamp_types(op.body, {n: t.dtype for n, t in {**op.inputs, **op.outputs}.items()}))
+    if body == op.body:
         raise RuleSkipped("every Load/Assign/Write already stamped")
-    return replace(op, body=new_body, knobs=dict(op.knobs))
-
-
-def _seed_explicit_dtypes(body: Body, ctx: _StampCtx) -> None:
-    """Register explicit SSA types before inference.
-
-    Materialization can place a typed definition in a sibling body visited after one of its uses. Each inference walk
-    still performs promotion in execution order, but no longer mistakes that known integer input for f32. The caller
-    repeats the walk until inferred upstream types have propagated through every consumer.
-    """
-    for s in body:
-        if isinstance(s, Load) and s.dtype is not None:
-            ctx.ssa_dtypes.update((name, s.dtype) for name in s.names)
-        elif isinstance(s, (Assign, Accum, Init, Let)) and s.dtype is not None:
-            ctx.ssa_dtypes[s.name] = s.dtype
-        for nested in s.nested():
-            _seed_explicit_dtypes(nested, ctx)
-
-
-def _stamp_body(body: Body, ctx: _StampCtx) -> Body:
-    return Body(_stamp_stmt(s, ctx) for s in body)
-
-
-def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
-    if isinstance(s, Load):
-        return _stamp_load(s, ctx)
-    if isinstance(s, Assign):
-        return _stamp_assign(s, ctx)
-    if isinstance(s, Affine):
-        return _stamp_affine(s, ctx)
-    if isinstance(s, Select):
-        ctx.ssa_dtypes[s.name] = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(b.value) or F32).name for b in s.branches]))
-        return s
-    if isinstance(s, Write):
-        return _stamp_write(s, ctx)
-    if isinstance(s, Accum):
-        return _stamp_accum(s, ctx)
-    if isinstance(s, Init):
-        ctx.ssa_dtypes[s.name] = s.dtype or F32
-        return s
-    if isinstance(s, Let):
-        # A float literal takes f32 when nothing narrows it; an index keeps its expression's type.
-        if s.dtype is None and isinstance(s.value, Literal) and s.value.dtype == "float":
-            s = replace(s, dtype=F32)
-        if s.dtype is not None:
-            ctx.ssa_dtypes[s.name] = s.dtype
-        return s
-    # Block-structured stmts (Tile / Loop / StridedLoop / Cond, …):
-    # recurse through children via the generic ``nested()`` / ``with_bodies()``
-    # protocol — no isinstance ladder.
-    nested = s.nested()
-    if not nested:
-        return s
-    return s.with_bodies(tuple(_stamp_body(b, ctx) for b in nested))
-
-
-def _stamp_accum(s: Accum, ctx: _StampCtx) -> Accum:
-    """Freeze the accumulator dtype — the old ``020_place_inits`` policy, applied to the
-    ``Accum`` itself (the carrier is the source of truth; ``Loop.render`` derives the seed
-    from it). A **selecting** combine (``max`` / ``min``) picks an existing value, so it
-    stays in the folded value's dtype — fp16 ``max`` accumulates in fp16. An
-    **accumulating** combine (``sum`` / ``prod`` — incl. the matmul fold) builds magnitude,
-    so it promotes fp16 to f32 to avoid precision loss / overflow. Already-stamped Accums
-    keep their dtype."""
-    if s.dtype is not None:
-        ctx.ssa_dtypes[s.name] = s.dtype
-        return s
-    value_dt = ctx.ssa_dtypes.get(s.value) or F32
-    dt = value_dt if s.op.selecting else F32
-    ctx.ssa_dtypes[s.name] = dt
-    return replace(s, dtype=dt)
-
-
-def _stamp_load(s: Load, ctx: _StampCtx) -> Load:
-    dt = s.dtype if s.dtype is not None else ctx.buf_dtypes.get(s.input)
-    if dt is not None:
-        for n in s.names:
-            ctx.ssa_dtypes[n] = dt
-        if s.dtype is None:
-            return replace(s, dtype=dt)
-    return s
-
-
-def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
-    arg_dtypes = [(ctx.ssa_dtypes.get(a) or F32).name for a in s.args]
-    result_dt = dtype_get(dtype_promote(s.op.name, arg_dtypes))
-    if s.dtype is not None and result_dt.np.kind not in "iu":
-        ctx.ssa_dtypes[s.name] = s.dtype
-        return s
-    # Integer algebra is determined by its operands. Structural lowering can carry an old f32
-    # stamp from a once-untyped body; keeping it would turn shifts into unsupported float ops.
-    # Explicit casts use ``copy`` / ``bitcast``, whose inferred result is not integer and therefore
-    # retain their declared dtype above.
-    # Overflow guard: a square (``x * x``) or a ``pow`` of an fp16 value can
-    # blow past fp16's 65504 ceiling, giving inf → a garbage reduction
-    # (RMSNorm's mean-of-squares). torch computes that reduction in fp32; do
-    # the same here. Matmul products already carry an explicit compute dtype;
-    # this fallback promotes only an untyped same-arg square / pow.
-    if result_dt == F16 and _is_overflow_prone(s):
-        result_dt = F32
-    ctx.ssa_dtypes[s.name] = result_dt
-    return replace(s, dtype=result_dt) if s.dtype != result_dt else s
-
-
-def _stamp_affine(s: Affine, ctx: _StampCtx) -> Affine:
-    """A sum computes at the promotion of its terms; its literal coefficients take that dtype."""
-    if s.dtype is not None:
-        ctx.ssa_dtypes[s.name] = s.dtype
-        return s
-    result_dt = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(a) or F32).name for a in s.args]))
-    ctx.ssa_dtypes[s.name] = result_dt
-    return replace(s, dtype=result_dt)
-
-
-def _is_overflow_prone(s: Assign) -> bool:
-    """True for elementwise ops that can overflow fp16 from in-range inputs —
-    the square ``multiply(a, a)`` and any ``pow``. Distinct-arg products are excluded."""
-    if s.op.name == "pow":
-        return True
-    return s.op.semiring_product and len(s.args) == 2 and s.args[0] == s.args[1]
-
-
-def _stamp_write(s: Write, ctx: _StampCtx) -> Write:
-    if s.value_dtype is not None:
-        return s
-    # In a multi-value (vector) Write all values share the same SSA dtype by
-    # construction (vectorize_stores widens runs of same-dtype values).
-    dt = ctx.ssa_dtypes.get(s.values[0])
-    if dt is None:
-        return s
-    return Write(output=s.output, index=s.index, values=s.values, value_dtype=dt, atomic=s.atomic, swizzle=s.swizzle)
+    return replace(op, body=body, knobs=dict(op.knobs))

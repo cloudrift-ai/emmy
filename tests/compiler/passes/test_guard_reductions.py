@@ -1,45 +1,35 @@
 """Coordinate selects can discard a scalar reduction without executing its loop."""
 
-from dataclasses import replace
 from importlib import import_module
 
 import numpy as np
 import pytest
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Select, parse_body
 
 guard = import_module("emmy.compiler.pipeline.passes.lowering.kernel.090_guard_reductions")
 
 
 def _body(*, extra_use=False, overlapping=False, strided=False) -> Body:
-    reduction = Loop(
-        Axis("k", 7),
-        (Load(name="value", input="x", index=(Var("i"), Var("k"))), Accum(name="sum", op="add", value="value")),
+    return parse_body(
+        f"""
+        for i in 0..6:
+            for k in {"1..6 of 7 step 2" if strided else "0..7"}:
+                value = load x[i, k]
+                sum <- add(sum, value)
+            other = load fallback[i]
+            neg = negative(sum)
+            selected = select:
+                neg when i < 2
+                {"other" if overlapping else "neg"} when i < 4
+                other when false
+            out[i] = selected
+            {"unmasked[i] = sum" if extra_use else ""}
+        """
     )
-    if strided:
-        reduction = StridedLoop(reduction.axis, Literal(1, "int"), Literal(2, "int"), reduction.body, end=Literal(6, "int"))
-    select = Select(
-        "selected",
-        (
-            SelectBranch("neg", Var("i").lt(2)),
-            SelectBranch("other" if overlapping else "neg", Var("i").lt(4)),
-            SelectBranch("other", Literal(False, "bool")),
-        ),
-    )
-    body = (
-        reduction,
-        Load(name="other", input="fallback", index=(Var("i"),)),
-        Assign(name="neg", op="negative", args=("sum",)),
-        select,
-        Write(output="out", index=(Var("i"),), value="selected"),
-    )
-    if extra_use:
-        body += (Write(output="unmasked", index=(Var("i"),), value="sum"),)
-    return Body((Loop(Axis("i", 6), body),))
 
 
 def _run(body: Body, *, extra_use=False) -> tuple:
@@ -62,10 +52,10 @@ def test_coordinate_demand_preserves_values_and_skips_only_unused_iterations(str
     if extra_use:
         assert reduction == body[0].body[0], "one unmasked reader requires every original iteration"
     else:
-        assert isinstance(reduction, StridedLoop)
+        assert reduction.step is not None
         needed_rows = 2 if overlapping else 4
         for i in range(6):
-            assert reduction.end.eval({"i": i}) == ((6 if strided else 7) if i < needed_rows else 0)
+            assert reduction.walk()[1].eval({"i": i}) == ((6 if strided else 7) if i < needed_rows else 0)
     for actual, expected in zip(_run(changed, extra_use=extra_use), _run(body, extra_use=extra_use), strict=True):
         np.testing.assert_array_equal(actual, expected)
 
@@ -76,17 +66,39 @@ def test_guard_does_not_skip_effects_or_use_an_unavailable_predicate(unsafe):
     outer = body[0]
     reduction, *tail = outer.body
     if unsafe == "store":
-        reduction = replace(reduction, body=(*reduction.body, Write(output="side", index=(Var("k"),), value="value")))
+        reduction = reduction.replace(body=(*reduction.body, *parse_body("side[k] = value")))
     elif unsafe == "sync":
-        reduction = replace(reduction, body=(*reduction.body, Sync()))
+        reduction = reduction.replace(body=(*reduction.body, Sync()))
     elif unsafe == "carried":
-        reduction = replace(reduction, seed=False)
+        reduction = reduction.replace(seed=False)
     else:
         tail = [
-            replace(s, branches=tuple(replace(b, select=b.select.substitute({"i": Var("later")})) for b in s.branches))
+            s.replace(branches=tuple(b.replace(select=b.select.substitute({"i": Var("later")})) for b in s.branches))
             if isinstance(s, Select)
             else s
             for s in tail
         ]
-    candidate = Body((replace(outer, body=(reduction, *tail)),))
+    candidate = Body((outer.replace(body=(reduction, *tail)),))
     assert guard._guard(candidate)[0].body[0] == reduction
+
+
+def test_a_select_of_many_branches_leaves_its_reduction_unguarded():
+    """A select of hundreds of branches nests its demand past the expression depth limit; the demand is then the
+    whole domain, so the reduction it reads runs every iteration instead of failing the pass."""
+    branches = "\n".join(f"                neg when i == {b}" for b in range(300))
+    body = parse_body(
+        f"""
+        for i in 0..6:
+            for k in 0..7:
+                value = load x[i, k]
+                sum <- add(sum, value)
+            other = load fallback[i]
+            neg = negative(sum)
+            selected = select:
+{branches}
+                other when true
+            out[i] = selected
+        """
+    )
+    changed = guard._guard(body)
+    assert changed[0].body[0] == body[0].body[0]

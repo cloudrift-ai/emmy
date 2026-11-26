@@ -6,6 +6,7 @@ are explicit at each call site and test modules never import implementation from
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 from collections.abc import Mapping
@@ -14,6 +15,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
+
+def golden_lane(path: Path) -> tuple:
+    """The marks of a node that reads the repository golden at ``path``. The default suite holds the RTX 5090's
+    goldens alone; every other card's runs nightly under ``-m goldens``, because all of them together outlast the
+    PR job."""
+    return () if path.name == "rtx5090_sm120.json" else (pytest.mark.goldens,)
 
 
 def classic_cartesian_schedules(context):
@@ -118,8 +126,6 @@ def literal_classic_context(tile, target, *, kernel, nodes, edges, row=None, ord
 def case_target_tile(case: str):
     """Lift the target of a realization corpus case, named by its path under ``realization/cases``: the one kernel
     its traced program lowers to, as the cut pass is offered it."""
-    from dataclasses import replace
-
     from emmy.compiler.context import Context
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import Pipeline
@@ -129,8 +135,7 @@ def case_target_tile(case: str):
     [target] = document.targets()
     lifted = Pipeline.build(["tile/lift"]).run(target.program({}), ctx=Context.from_target(tuple(document.compute_cap)), db=None)
     [node] = [node for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
-    tile = node.op.with_io(lifted, node)
-    return replace(tile, name=next(iter(tile.outputs)))  # addressed by its primary output, as a graph node is
+    return node.op.with_io(lifted, node)
 
 
 def has_cuda_gpu() -> bool:
@@ -141,17 +146,17 @@ def has_cuda_gpu() -> bool:
 
 
 def has_cuda_toolchain() -> bool:
-    """Check that Emmy can both see a GPU and compile CUDA kernels."""
+    """Check that Emmy can both see a GPU and assemble kernels."""
     if not has_cuda_gpu():
         return False
-    from emmy.compiler.backend.cuda.nvcc import nvcc_path
+    from emmy.compiler.backend.cuda.ptxas import ptxas_path
 
-    return nvcc_path() is not None
+    return ptxas_path() is not None
 
 
 requires_cuda = pytest.mark.skipif(
     not has_cuda_toolchain(),
-    reason="CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)",
+    reason="CUDA not available (need the emmy.emmy_runtime extension + GPU + ptxas)",
 )
 
 
@@ -163,6 +168,24 @@ def device_compute_capability() -> tuple[int, int] | None:
     return compute_capability()
 
 
+def kernel_ptx(name: str, body: str, params) -> str:
+    """The PTX of a hand-written kernel for the live card: ``body`` is a Kernel IR body in the text form, its grid
+    stating the threads of a block, and ``params`` its parameters in call order, each ``(name, kind, dtype)`` with
+    ``kind`` an ``input``, an ``output`` or a ``descriptor``. Without a card the kernel is for ``sm_80``."""
+    from emmy.emmy_ir import compile_ptx, parse_body
+
+    from emmy.compiler.dtype import get
+    from emmy.compiler.ir.kernel.interface import Interface, Param
+
+    major, minor = device_compute_capability() or (8, 0)
+    interface = Interface(
+        tuple(Param(n, kind, None if dtype is None else get(dtype), "" if kind == "descriptor" else n) for n, kind, dtype in params),
+        {},
+        0,
+    )
+    return compile_ptx(name, parse_body(body), interface, sm=major * 10 + minor)[0]
+
+
 def requires_sm(major: int, minor: int = 0):
     """Skip an instruction-specific CUDA test below its minimum compute capability."""
     return pytest.mark.skipif(
@@ -172,11 +195,14 @@ def requires_sm(major: int, minor: int = 0):
 
 
 # Skip the mma.sync warp-tier tests below sm_90. On sm_80-89 the pin-only path is currently non-functional because
-# nvcc rejects the ``sm_NNa`` target and ``ldmatrix`` faults at runtime on at least Ada (sm_89).
+# ptxas has no ``sm_NNa`` target there and ``ldmatrix`` faults at runtime on at least Ada (sm_89).
 requires_sm90 = pytest.mark.skipif(
     (device_compute_capability() or (0, 0)) < (9, 0),
     reason="mma.sync warp tier needs sm_90+ (pin-only / non-functional on sm_80-89: ldmatrix fault + sm_NNa TMA compile)",
 )
+
+# Skip the warp-group tests off Hopper: datacenter Blackwell has a different instruction and consumer Blackwell none.
+requires_hopper = pytest.mark.skipif(device_compute_capability() != (9, 0), reason="wgmma runs on sm_90 only")
 
 
 def direct_classic_leaf(fork_point):
@@ -213,10 +239,31 @@ def dtype_input_scale(dtype) -> float:
     return 0.05 if dtype.name == "f16" else 1.0
 
 
+def grouped_raster_decode(kernel, group: int) -> list[str]:
+    """The block-axis decodes of ``kernel``'s grid that take a grouped raster of ``group`` block-tiles, as text: a
+    block axis read from the CTA index alone as its group's base plus its offset in the group (``group * (...) +
+    ...``, the factor on either side)."""
+    from emmy.compiler.ir.kernel.ir import Grid
+
+    (grid,) = [stmt for stmt in kernel.body if isinstance(stmt, Grid)]
+    decodes = [str(decode) for decode in grid.decode]
+    return [
+        decode
+        for decode in decodes
+        if "block_idx.x" in decode and "thread_idx" not in decode and (f" * {group} + " in decode or decode.startswith(f"{group} * ("))
+    ]
+
+
+#: Pins for a test that holds an f32 program's numbers to f32 arithmetic and leaves its schedule to the prior. Under
+#: fast math a product of two f32 operands may take a cell that rounds them (the TF32 atom, the bf16 atoms); the rest
+#: of the default lane stays as a deploy compiles it.
+F32_PRODUCTS = {"TF32_MMA": False, "F32_AS_BF16_MMA": False}
+
+
 def skip_if_no_cuda() -> None:
     """Skip the current test when Emmy cannot compile CUDA kernels."""
     if not has_cuda_toolchain():
-        pytest.skip("CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)")
+        pytest.skip("CUDA not available (need the emmy.emmy_runtime extension + GPU + ptxas)")
 
 
 def matmul_graph(m: int, k: int, n: int):
@@ -306,3 +353,127 @@ def qwen3_embedding_model(config=None, auto_class=None):
 
     torch.manual_seed(0)
     return (auto_class or AutoModel).from_config(config if config is not None else qwen3_embedding_config()).float().eval()
+
+
+def render_typed(statements, ctx) -> list[str]:
+    """The host C++ lines of hand-built ``statements`` once their types are complete: the renderer prints a typed body
+    (``ir.types.explicit_conversions``), and the names ``ctx`` already types are taken as declared."""
+    from emmy.compiler.dtype import get
+    from emmy.compiler.ir.loop.render import render_body
+    from emmy.compiler.ir.stmt import Body
+    from emmy.compiler.ir.types import explicit_conversions
+    from emmy.compiler.target import native_f16_ops
+
+    known = {name: get(dtype) for name, dtype in ctx.ssa_dtypes.items()}
+    return render_body(explicit_conversions(Body(statements), {}, native_f16_ops(), known), ctx)
+
+
+def _kernel_recorder():
+    """A pipeline strategy that records the ``KernelOp`` each ``CudaOp`` was lowered from; its ``kernels(compiled)``
+    gives the Kernel IR of each kernel node of a compiled graph, by node id."""
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.pipeline.strategy import PipelineStrategy
+
+    class LoweredKernels(PipelineStrategy):
+        def __init__(self) -> None:
+            self.lowered: list[tuple[KernelOp, CudaOp]] = []
+
+        def on_rebind(self, e) -> None:
+            if isinstance(e.replaced, KernelOp) and isinstance(e.node.op, CudaOp):
+                self.lowered.append((e.replaced, e.node.op))
+
+        def kernels(self, compiled) -> dict:
+            found = {}
+            for node_id, node in compiled.nodes.items():
+                if isinstance(node.op, CudaOp):
+                    # A retried resolution lowers a kernel again: the one the result holds is the one it was generated from.
+                    found[node_id] = next(kernel for kernel, op in reversed(self.lowered) if op is node.op)
+            return found
+
+    return LoweredKernels()
+
+
+def compile_with_kernels(graph, *, ctx=None, passes=None, decide=None, **run):
+    """``graph`` compiled to CUDA ops, and the Kernel IR each kernel's code was generated from, by node id.
+
+    A ``CudaOp`` holds its kernel's code, not the statements it was generated from. This runs the one compile a test
+    would run (``passes``, the whole pipeline when omitted; ``ctx`` and ``run`` as ``Pipeline.run`` takes them; the
+    pins in scope apply as they do there) and keeps each ``KernelOp`` the last lowering pass read: the grid decoded,
+    every index flat, every type said. A check of a kernel's structure reads that body; only a check of how an
+    instruction is spelled reads the code. With ``decide`` the forks are resolved by it (``Run.resolve``) on the
+    live device's context, where ``Pipeline.run`` takes the greedy pick."""
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+
+    recorder = _kernel_recorder()
+    pipeline = Pipeline.build(passes or CUDA_PASSES).with_strategies(recorder)
+    if decide is None:
+        compiled = pipeline.run(graph, ctx=ctx, **run)
+    else:
+        from emmy.compiler.context import Context
+        from emmy.compiler.pipeline.pipeline import Run
+
+        compiled, _ = Run(pipeline=pipeline, ctx=ctx or Context.probe()).resolve(graph, decide)
+    return compiled, recorder.kernels(compiled)
+
+
+@contextlib.contextmanager
+def recording_kernels():
+    """Record the Kernel IR of every kernel lowered inside the block, for a compile the test does not run itself (a
+    backend's, a serving split's). Yields a function from a compiled graph to its kernels by node id, as
+    :func:`compile_with_kernels` returns them."""
+    from unittest import mock
+
+    from emmy.compiler.pipeline import Pipeline
+
+    recorder = _kernel_recorder()
+    build = Pipeline.build.__func__
+
+    def recording(cls, passes, **kwargs):
+        return build(cls, passes, **kwargs).with_strategies(recorder)
+
+    with mock.patch.object(Pipeline, "build", classmethod(recording)):
+        yield recorder.kernels
+
+
+def statements(kernels, *types) -> list:
+    """Every statement of ``types`` in ``kernels`` (one ``KernelOp``, or the ``{node id: KernelOp}`` of a compile),
+    nested ones included, in body order; every statement when no type is given."""
+    ops = kernels.values() if isinstance(kernels, dict) else (kernels,)
+    return [stmt for op in ops for stmt in op.body.iter() if not types or isinstance(stmt, types)]
+
+
+def operations(kernels) -> set[str]:
+    """The elementwise operations ``kernels`` compute, by name: in a value, as a fold's or a fragment statement's own
+    operation, inside a cross-thread combine or a store's epilogue."""
+    found: set[str] = set()
+    pending = statements(kernels)
+    while pending:
+        stmt = pending.pop()
+        found |= {node.fn for e in stmt.expressions() for node in e.subterms() if hasattr(node, "fn")}
+        found |= {node.operation.name for e in stmt.expressions() for node in e.subterms() if getattr(node, "operation", None)}
+        if getattr(stmt, "op", None) is not None:
+            found.add(stmt.op.name)
+        for carried in ("combine_states", "epilogue", "run"):
+            pending.extend(getattr(stmt, carried, None) or ())
+    return found
+
+
+def text(kernels) -> str:
+    """The Kernel IR of ``kernels`` (the kernels of a compile, one of them, or a body) in its text form: what a check
+    of a name the lowering gave, or of an index's form, reads."""
+    from emmy.compiler.ir.stmt import Body, pretty_body
+
+    if isinstance(kernels, Body):
+        return "\n".join(pretty_body(kernels))
+    ops = kernels.values() if isinstance(kernels, dict) else (kernels,)
+    return "\n".join(line for op in ops for line in pretty_body(op.body))
+
+
+def case_kernels(case, ctx=None):
+    """A realization corpus case lowered with itself as its only evidence, as ``realization.helpers.lowered`` lowers
+    it: the compiled graph and the Kernel IR of its kernels by node id."""
+    from tests.compiler.realization.helpers import evidence_scope
+
+    with evidence_scope(case):
+        return compile_with_kernels(case.program(), ctx=ctx or case.context(), db=None)

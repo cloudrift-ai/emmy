@@ -159,9 +159,8 @@ def test_moe_split_folds_shared_experts_into_post_attn():
     assert torch.allclose(h, h_ref + block.mlp.shared_experts(xn_ref), atol=1e-6)
 
 
-def test_moe_split_rejects_gated_shared_expert():
-    """Qwen-MoE's shared expert is GATED (``shared_expert_gate``); the ungated fold would
-    silently drop the gate, so it must reject LOUDLY."""
+def test_moe_split_folds_gated_shared_expert():
+    """Qwen-MoE's shared expert is scaled by a per-token sigmoid gate (``shared_expert_gate``) before the fold."""
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     from transformers.models.olmoe.modeling_olmoe import OlmoeDecoderLayer
@@ -172,8 +171,13 @@ def test_moe_split_rejects_gated_shared_expert():
     block = OlmoeDecoderLayer(_tiny_olmoe_config(transformers), layer_idx=0).eval()
     block.mlp.shared_expert = torch.nn.Linear(64, 64)
     block.mlp.shared_expert_gate = torch.nn.Linear(64, 1)
-    with pytest.raises(NotImplementedError, match="shared_expert_gate"):
-        build_moe_split_wrapper(block)
+    _, post_attn, _ = build_moe_split_wrapper(block)
+    attn_out, residual = torch.randn(5, 64), torch.randn(5, 64)
+    with torch.no_grad():
+        h, xn = post_attn(attn_out, residual)
+        h_ref = residual + block.self_attn.o_proj(attn_out)
+        shared = torch.sigmoid(block.mlp.shared_expert_gate(xn)) * block.mlp.shared_expert(xn)
+    torch.testing.assert_close(h, h_ref + shared)
 
 
 def _tiny_glm4_moe_config(transformers):
@@ -643,6 +647,42 @@ def test_combine_casts_fp32_router_scores():
     assert torch.allclose(out, ref, atol=1e-2)
 
 
+def test_a_softmax_topk_router_routes_through_the_engines_fused_topk():
+    """A plain softmax top-k router hands its logits to the engine's fused top-k and picks what the router picks;
+    the routed combine takes the fused top-k's int32 indices."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.serving.gen_runner import EmmyGenRunner, combine_routed_experts, serving_router
+
+    def fused_topk(hidden, logits, k, renormalize):  # vLLM's fused_topk contract: float32 weights, int32 ids
+        assert hidden.shape[0] == logits.shape[0]
+        weights, ids = torch.topk(torch.softmax(logits.float(), dim=-1), k)
+        if renormalize:
+            weights = weights / weights.sum(dim=-1, keepdim=True)
+        return weights, ids.to(torch.int32), ids.to(torch.int32)
+
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
+
+    torch.manual_seed(0)
+    config = transformers.Qwen3MoeConfig(hidden_size=16, num_experts=8, num_experts_per_tok=2, norm_topk_prob=True)
+    gate = Qwen3MoeTopKRouter(config)
+    torch.nn.init.normal_(gate.weight)
+    moe = {"gate": serving_router(gate, torch.float32), "softmax_topk": True}
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    runner._softmax_topk = fused_topk
+    xn = torch.randn(5, 16)
+
+    _, scores, indices = runner._route(moe, xn, None)
+    _, want_scores, want_indices = gate(xn)
+    assert indices.dtype == torch.int32
+    torch.testing.assert_close(indices.long(), want_indices, rtol=0, atol=0)
+    torch.testing.assert_close(scores, want_scores)
+    out = combine_routed_experts(xn, (None, scores, indices), per_expert(lambda e, rows: rows * (e + 1)), num_experts=8)
+    want = combine_routed_experts(xn, (None, want_scores, want_indices), per_expert(lambda e, rows: rows * (e + 1)), num_experts=8)
+    torch.testing.assert_close(out, want)
+
+
 def test_marked_moe_contributions_preserve_the_float32_residual():
     """Large routed and shared terms remain finite in Laguna's float32 residual stream."""
     torch = pytest.importorskip("torch")
@@ -658,7 +698,9 @@ def test_marked_moe_contributions_preserve_the_float32_residual():
     def run_expert(expert, rows):
         return partials[expert].expand_as(rows)
 
-    assert not torch.isfinite(combine_routed_experts(xn, gated, per_expert(run_expert), num_experts=2)).all()
+    # The model-dtype lane weighs and sums in float32 and rounds once: products past the fp16 range still cancel.
+    plain = combine_routed_experts(xn, gated, per_expert(run_expert), num_experts=2)
+    torch.testing.assert_close(plain, torch.zeros_like(xn), rtol=0, atol=0)
     routed = combine_routed_experts(xn, gated, per_expert(run_expert), num_experts=2, accumulate_float32=True)
     slots = _combine_slot_partials(scores, partials, xn.dtype, accumulate_float32=True)
 

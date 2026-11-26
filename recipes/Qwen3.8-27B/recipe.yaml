@@ -18,8 +18,8 @@ tags:
 
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "Trending score decayed to 294 and off top-30; demand cooled from breakout to established."
-  heat: 70
+  rationale: "Trending 293, 7.7M downloads, dominant 3.8 line; VLM serving blocker."
+  heat: 80
   revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
   task: generate
 

@@ -141,7 +141,7 @@ def _serialize(panels: list[BankConflictResult], all_panels_for_union: list[Bank
                     "row_stride": row_stride,
                     "banks": smem_layout,
                     "touched": touched_entries,
-                    "index_expr": ", ".join(p.index_repr),
+                    "index_expression": ", ".join(p.index_repr),
                     "load_name": p.load_name,
                 },
                 "notes": [],

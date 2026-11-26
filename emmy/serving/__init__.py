@@ -19,9 +19,11 @@ def register() -> None:
 
     # vLLM 0.23 dummy-run seq lens exceed max_model_len for capture sizes above it,
     # overrunning the block table (capture-warmup illegal access); see vllm_patches.
-    from emmy.serving.vllm_patches import clamp_dummy_run_seq_lens
+    from emmy.serving.vllm_patches import clamp_dummy_run_seq_lens, one_token_prompt_rows_replay_decode_graphs
 
     clamp_dummy_run_seq_lens()
+    # Model Runner V2 runs the last token of a prompt eager; see vllm_patches.
+    one_token_prompt_rows_replay_decode_graphs()
 
     if "EmmyEmbedModel" not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model("EmmyEmbedModel", "emmy.serving.vllm_model:EmmyEmbedModel")
@@ -31,3 +33,7 @@ def register() -> None:
         ModelRegistry.register_model("EmmyGenLoRAModel", "emmy.serving.vllm_model_lora:EmmyGenLoRAModel")
     if "EmmyGenHybridModel" not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model("EmmyGenHybridModel", "emmy.serving.vllm_model_gen:EmmyGenHybridModel")
+    if "EmmyGenQwenVLModel" not in ModelRegistry.get_supported_archs():
+        ModelRegistry.register_model("EmmyGenQwenVLModel", "emmy.serving.vllm_model_vision:EmmyGenQwenVLModel")
+    if "EmmyMTPModel" not in ModelRegistry.get_supported_archs():
+        ModelRegistry.register_model("EmmyMTPModel", "emmy.serving.vllm_model_mtp:EmmyMTPModel")

@@ -32,16 +32,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from functools import cached_property
+from typing import NamedTuple
 
 from frozendict import frozendict
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op, buffer_types
-from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.mask import keys_ranged
 from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.views import (
     ContractionFacts,
@@ -49,10 +51,10 @@ from emmy.compiler.ir.schedule.views import (
     NodeId,
     contraction_facts,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, OutputSpec, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Carry, Cond, Load, Loop, OutputSpec, Statement, Write
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
-from emmy.compiler.ir.tile.ops import Sched, chain_members, kernel_roots, refused_roots
+from emmy.compiler.ir.tile.ops import Sched, carries_partition, chain_members, kernel_roots, refused_roots
 from emmy.compiler.ir.tile.path import Site, sites
 
 
@@ -69,8 +71,6 @@ def observed_result_names(op) -> frozenset[str]:
             continue
         if node.observe is not None:
             names.update(node.observe.results)
-        if node.carries:  # a carried state's per-step outputs stream the same way
-            names.update(node.exposes[len(node.base.results) :])
         stack.extend(node.operands)
         stack.extend(s for s in node.lift.body if isinstance(s, Fold))
     return frozenset(names)
@@ -82,25 +82,28 @@ def _dense_axis_suffix(index: tuple, name: str) -> bool:
         return False
     stride = 1
     for position in reversed(range(len(index))):
-        expr = index[position]
+        expression = index[position]
         dim = None
         if position:
             if not (
-                isinstance(expr, BinaryExpr)
-                and expr.op == "%"
-                and isinstance(expr.right, Literal)
-                and isinstance(expr.right.value, int)
-                and expr.right.value > 0
+                isinstance(expression, BinaryExpression)
+                and expression.op == "%"
+                and isinstance(expression.right, Literal)
+                and isinstance(expression.right.value, int)
+                and expression.right.value > 0
             ):
                 return False
-            expr, dim = expr.left, expr.right.value
+            expression, dim = expression.left, expression.right.value
         if stride != 1:
             if not (
-                isinstance(expr, BinaryExpr) and expr.op in ("/", "//") and isinstance(expr.right, Literal) and expr.right.value == stride
+                isinstance(expression, BinaryExpression)
+                and expression.op in ("/", "//")
+                and isinstance(expression.right, Literal)
+                and expression.right.value == stride
             ):
                 return False
-            expr = expr.left
-        if expr != Var(name):
+            expression = expression.left
+        if expression != Var(name):
             return False
         if dim is not None:
             stride *= dim
@@ -189,15 +192,18 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
         return None
     for spec in specs:
         index = spec.write.index
-        split = next((position for position, expr in enumerate(index) if not (isinstance(expr, Literal) and expr.value == 0)), len(index))
-        suffix = tuple(expr for expr in index[split:] if not (isinstance(expr, Literal) and expr.value == 0))
+        split = next(
+            (position for position, expression in enumerate(index) if not (isinstance(expression, Literal) and expression.value == 0)),
+            len(index),
+        )
+        suffix = tuple(expression for expression in index[split:] if not (isinstance(expression, Literal) and expression.value == 0))
         dense = _dense_axis_suffix(suffix, columns[0]) if len(columns) == 1 else suffix == tuple(Var(name) for name in columns)
         if split == 0 or not dense:
             return None
     return Axis("_um", Dim(1))
 
 
-def guarded_store(stmt: Stmt) -> Write | None:
+def guarded_store(stmt: Statement) -> Write | None:
     """The one ``Write`` a bare ``Cond`` guards — a store that runs only where its predicate holds."""
     if isinstance(stmt, Cond) and not stmt.else_body and len(stmt.body) == 1 and isinstance(stmt.body[0], Write):
         return stmt.body[0]
@@ -219,7 +225,7 @@ def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | No
     tail: list[OutputSpec] = []
     while inner:
         last = inner[-1]
-        if isinstance(last, Write):
+        if isinstance(last, (Write, Carry)):
             tail.insert(0, OutputSpec(write=inner.pop(), sweep=path))
             continue
         if guarded_store(last) is not None:
@@ -239,7 +245,7 @@ def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | No
     return (inner, tail) if tail and all(s.pure for s in inner) else None
 
 
-def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
+def extract_output_specs(stmts) -> tuple[tuple[Statement, ...], tuple[OutputSpec, ...]] | None:
     """Split an effectful projection stmt stream into ``(pure stmts, OutputSpec decorations)`` — the
     conversion-side inverse of :func:`apply_output_specs`, valid ONLY when the reconstitution
     round-trips byte-identically (checked here; ``None`` otherwise). The trailing run of root
@@ -247,12 +253,12 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     non-reduce ``Loop`` holding writes and nested output loops — sibling sweeps included) gives
     one ``sweep`` spec per write over its axis PATH (:func:`_sweep_specs`), its pure prefix
     rejoining the stream. An already-pure stream returns ``(stmts, ())``."""
-    original = tuple(stmts)
+    original = Body(stmts)
     rest = list(stmts)
     stores: list[OutputSpec] = []
     while rest:
         last = rest[-1]
-        if isinstance(last, Write):
+        if isinstance(last, (Write, Carry)):  # a carried state's update is the kernel's store into its own buffer
             stores.insert(0, OutputSpec(write=rest.pop()))
             continue
         if guarded_store(last) is not None:
@@ -290,6 +296,22 @@ def _reads_move_with(edge: Fold, coord: str, ctx: SimplifyCtx) -> bool:
     return any(coord in index.simplify(ctx).free_vars() for index in _index_reads(edge) if coord in index.free_vars())
 
 
+class ResidentState(NamedTuple):
+    """The one state a kernel keeps between steps, as register fragments hold it (:attr:`TileOp.resident_state`)."""
+
+    #: The step: the kernel's term.
+    fold: Fold
+    #: The state's update, and the axis of the steps.
+    carry: Carry
+    time: str
+    #: The cells a block holds one position of, ahead of the state's matrix.
+    batch: tuple[str, ...]
+    col: str
+    row: str
+    #: The kernel's outputs: every store but the state's own.
+    outputs: tuple[OutputSpec, ...]
+
+
 def loaded_buffers(term):
     """Every ``Load`` the STORED tree reads — each lift body's loads, through the operand edges."""
     yield from term.lift.body.loads
@@ -324,7 +346,6 @@ class TileOp(Op):
     (``identity_key(with_io=True, with_knobs=True)``) is untouched."""
 
     op: object = None
-    name: str = ""
     place: Placement = field(default_factory=Placement)
     # The kernel's AXIS TABLE — the extent and window of every axis the term binds or reads: the
     # free axes, each reduce axis, a split's slice and partition, a sweep. The term itself carries
@@ -342,13 +363,8 @@ class TileOp(Op):
     # the effectful stmt stream via ``apply_output_specs`` — never read a ``Write`` out of the term.
     output_specs: tuple[OutputSpec, ...] = ()
     # Whether the graph-level Fold-edge placement decision is consumed. Unpinned cut pieces keep
-    # the default ``False`` and may expose their own smaller seam set; a pinned cut can close
-    # a piece once the pins addressing it have been consumed.
+    # the default ``False`` and may expose their own smaller seam set.
     placement_decided: bool = False
-    # Scoped placement pins already consumed on this kernel's same-name remainder.
-    placement_consumed: frozenset[str] = field(default=frozenset(), compare=False, repr=False)
-    # Number of placement cuts taken by this kernel's same-name remainder.
-    placement_step: int = field(default=0, compare=False, repr=False)
     # Folded constant inputs whose layout choice this kernel already declined. The source arm
     # replaces its input with a new constant, so only the folded arm needs this receipt.
     layout_decided: tuple[str, ...] = field(default=(), compare=False, repr=False)
@@ -361,6 +377,13 @@ class TileOp(Op):
     # the schedule memo — a receipt-bearing twin can never serve a receipt-free one.
     split_consumed: bool = False
 
+    @cached_property
+    def name(self) -> str:
+        """The kernel's name, computed from its exact identity (:func:`~emmy.compiler.wire.kernel_name`)."""
+        from emmy.compiler.wire import kernel_name  # noqa: PLC0415 — the wire module imports the IR
+
+        return kernel_name(self)
+
     def __post_init__(self) -> None:
         Op.__post_init__(self)
         normalized = normalize_fold_tree(self.op, self.output_specs)
@@ -372,7 +395,7 @@ class TileOp(Op):
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
         if len(self.place.free) > 1:
             view = normalized.as_contraction()
-            if view is None or view.left_axes or view.shared_axes:
+            if view is None or view.left_axes or self.batch_axes(normalized):
                 unit_row = None
         if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
             object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
@@ -421,7 +444,7 @@ class TileOp(Op):
         if self.place.is_mapped and (not self.place.grid or self.place.grid[-1].name != free[-1].name):
             return
         roots = kernel_roots(self.op)
-        if not roots or not all(self._vector_against_matrix(root.as_contraction()) for root in roots):
+        if not roots or not all(self._vector_against_matrix(root) for root in roots):
             return
         unit = Axis("_um", Dim(1))
         grid = self.place.grid
@@ -429,29 +452,98 @@ class TileOp(Op):
             grid = (*grid[:-1], unit, grid[-1])
         object.__setattr__(self, "place", replace(self.place, free=(*free[:-1], unit, free[-1]), grid=grid))
 
-    def _vector_against_matrix(self, view) -> bool:
-        """Whether contraction ``view`` has one empty operand role, the other role owning the trailing free axis, and
-        the free axes are that role's axes, one dense column every boundary store writes, or shared batch coordinates
-        beside a column. The physical matrix pair then puts the unit coordinate in the empty role."""
+    def batch_axes(self, node: Fold) -> frozenset[str]:
+        """The coordinates both operands of the contraction ``node`` ride besides the reduction: the ones both read,
+        and the block coordinate of a split, which moves the positions both are read at. A tier reads such a block
+        with the coordinate in both indices (``Fold.scheduled``), so the two spellings of one kernel answer alike."""
+        view = node.as_contraction()
+        shared = frozenset(view.shared_axes) if view is not None else frozenset()
+        start = node.block_start(self.axes) if node.range is not None else None
+        return shared if start is None else shared | (frozenset(start.free_vars()) & {axis.name for axis in self.place.free})
+
+    def _vector_against_matrix(self, node: Fold) -> bool:
+        """Whether the contraction ``node`` reads as has one empty operand role, the other role owning the trailing
+        free axis, and the free axes are that role's axes, one dense column every boundary store writes, or shared
+        batch coordinates beside a column. The physical matrix pair then puts the unit coordinate in the empty role."""
         free = self.place.free
+        view = node.as_contraction()
         if view is None or (view.left_axes and view.right_axes):
             return False
         role = view.left_axes | view.right_axes
         if free[-1].name not in role:
             return False
-        if view.shared_axes:
+        if self.batch_axes(node):
             return len(free) >= 2
         if len(free) == 1:
             return all(_dense_axis_suffix(spec.write.index, free[0].name) for spec in self.output_specs)
         return {axis.name for axis in free} == role
 
     @cached_property
+    def split_taken(self) -> bool:
+        """Whether the split question is answered for this kernel, the one reading of its two records: the flag
+        (:attr:`split_consumed`: the split was declined, or the kernel is a piece with no sliced axis), and the
+        receipt the kernel's own IR keeps and a stored kernel reads back, a partition window on a sliced axis
+        (``ops.carries_partition``)."""
+        return self.split_consumed or carries_partition(self)
+
+    @cached_property
+    def states(self) -> tuple[OutputSpec, ...]:
+        """The stores of this kernel into a carried state of its own, one per state: the term is one step, the state
+        a buffer the kernel keeps for itself, and a slab of the term reads it one step back."""
+        return tuple(spec for spec in self.output_specs if isinstance(spec.write, Carry))
+
+    @cached_property
     def carries(self) -> bool:
-        """Whether this kernel carries a state: a fold of its tree folds the action ``next``
-        (:attr:`Fold.carries`), so its steps run in order inside one loop and the kernel stays one
-        kernel — the classic schedule realizes the loop as one launch per step over a state buffer,
+        """Whether this kernel carries a state (:attr:`states`), so its steps run in order along its serial axis and
+        the kernel stays one kernel — the classic schedule realizes the steps as one launch each over a state buffer,
         the register schedule as a loop inside each CTA."""
-        return any(site.node.carries for site in self.sites)
+        return bool(self.states)
+
+    @cached_property
+    def state_routes(self) -> tuple[str, ...]:
+        """The route each carried state this kernel keeps between steps is addressed by, its own or, for its serial
+        form (:attr:`Placement.serial`), those of the carrying kernel that form was lifted from. A state is a value
+        the kernel reads again at every step, so each route is a ``STAGE`` site. No node of the term is the state, so
+        the route is a spelling: ``map.<n>/scan`` for the ``n``-th state, which is what every stored row names."""
+        carrying = self._carrying
+        count = len(carrying.states) if carrying is not None else 0
+        return tuple(f"map.{position + 1}/scan" for position in range(count))
+
+    @cached_property
+    def resident_state(self) -> ResidentState | None:
+        """The one state this kernel keeps between steps, where register fragments can hold it, else ``None``. One
+        warp owns sixteen positions of the state's last cell and every position of the one before it, so: one state
+        of static shape under no free axis of more than one position but its own cells, a row count the fragment's
+        sixteen rows divide and column counts its eight divide, and every output a matrix over the state's rows.
+        What the step computes is the lowering's to accept or decline."""
+        carrying = self._carrying
+        states = carrying.states if carrying is not None else ()
+        if len(states) != 1 or any(not axis.extent.is_static for axis in (*carrying.axes, *carrying.place.free)):
+            return None
+        carry, (time,) = states[0].write, carrying.place.serial
+        cells = carry.cells
+        if len(cells) < 2 or any(axis.extent.as_static() != 1 for axis in carrying.place.free if axis.name not in cells):
+            return None
+        *batch, col, row = cells
+        extent = {axis.name: axis.extent.as_static() for axis in (*carrying.axes, *carrying.place.free)}
+        outputs = tuple(spec for spec in carrying.output_specs if spec is not states[0])
+        matrices = [spec.write.index[-2:] for spec in outputs]
+        if any(len(spec.write.values) != 1 for spec in outputs) or any(
+            len(index) != 2 or not all(isinstance(e, Var) for e in index) for index in matrices
+        ):
+            return None
+        if extent[row] % 16 or any(extent[r.name] != extent[row] for _, r in matrices):
+            return None
+        if any(extent[name] % 8 for name in (col, *(c.name for c, _ in matrices))):
+            return None
+        return ResidentState(carrying.op, carry, time.name, tuple(batch), col, row, outputs)
+
+    @cached_property
+    def _carrying(self) -> TileOp | None:
+        if self.carries:
+            return self
+        ancestors = (op for op in self.source_chain() if isinstance(op, TileOp) and op.carries)
+        return next(ancestors, None) if self.place.serial else None
 
     def _own_axes(self) -> None:
         """The kernel owns its axis table, COMPLETE by construction: the free axes' extents are the
@@ -483,13 +575,6 @@ class TileOp(Op):
         if not callable(validate):
             raise TypeError("schedule materialization must provide validate(schedule, source, place=..., workers=...)")
         validate(self.schedule, self, place=self.place, workers=self.workers)
-
-    @cached_property
-    def register_program(self):
-        """The rectangular loop whose state can be owned by independent register rows."""
-        from emmy.compiler.ir.schedule.register import RegisterProgram  # noqa: PLC0415
-
-        return RegisterProgram.from_tile(self)
 
     @cached_property
     def grid_sched(self):
@@ -574,6 +659,10 @@ class TileOp(Op):
         node = self.views[site]
         view = node.as_contraction()
         if view is None or not node.tiles_whole():
+            return False
+        # A tile folds a rectangle of every position. The chunk tier alone reads a range, as the chunks it walks
+        # and the mask of the block a bound cuts; any other contraction that walks one is no tile site.
+        if node.range is not None and not node.chunked():
             return False
         mn = self.grid_sched._mn_for(node)
         if (
@@ -694,16 +783,30 @@ class TileOp(Op):
         )
 
     @cached_property
-    def nested_tiles(self) -> tuple[tuple[NodeId, NodeId], ...]:
+    def nested_tiles(self) -> frozendict[tuple[NodeId, NodeId], bool]:
         """The ``(root, site)`` pairs of a kernel root (``ops.kernel_roots``) and a site below it that can
-        take a ``TILE``. The binder lowers such a tile only inside a root it output-tiles, and even there
-        only where the tier folds it (the chunked carrier's score); any other root lowers its subtree
-        serially, which would drop the tile, so the binder refuses the row instead. The classic
-        compatibility rules (``refusals._relation_refusal``) apply this binder rule at the offer."""
+        take a ``TILE``, each with whether the root folds that site: a chunked root folds its score
+        (``ContractionFacts.need``). The binder lowers such a tile only there, and only when the root
+        takes the tensor-core tier. A root it does not output-tile lowers its subtree serially, and an
+        output-tiled one evaluates any other nested site per cell in its fill, so either would drop the
+        tile; the binder refuses the row instead. The classic compatibility rules
+        (``refusals._relation_refusal``) apply this binder rule at the offer."""
         if not isinstance(self.op, Fold):
-            return ()
+            return frozendict()
         roots = [self._node_ids[id(root)] for root in kernel_roots(self.op) if id(root) in self._node_ids]
-        return tuple((root, site) for root in roots for site in self.family_sites["TILE"] if self.sites[site].under(self.sites[root]))
+        return frozendict(
+            ((root, site), self.views[root].chunked() and root in self.contractions and self.contractions[root].need == site)
+            for root in roots
+            for site in self.family_sites["TILE"]
+            if self.sites[site].under(self.sites[root])
+        )
+
+    @cached_property
+    def nested_sites(self) -> frozenset[NodeId]:
+        """The sites below a kernel root (:attr:`nested_tiles`). None takes a transport of its own: the binder
+        reads one only at the root it builds around, and the chunk tier stages its score's operands through the
+        carrier's."""
+        return frozenset(site for _, site in self.nested_tiles)
 
     def __getstate__(self):
         """Pickle stored fields only; derived schedule inventories recompute after transport."""
@@ -735,9 +838,11 @@ class TileOp(Op):
             return None
         # A grid axis only the stores read — a pointwise cell indexed by its coordinate, nothing
         # evaluated over it — is the kernel's to bind: the term opens every coordinate it declares
-        # and those loops wrap outside, in grid order.
-        glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
+        # and those loops wrap outside, in grid order. Under a serial axis every grid axis is bound here: the
+        # steps enclose the state's cells, each a loop of its own, so a kernel a split of the sequence lifts from
+        # this body has every cell for a grid axis as this one does.
         serial = tuple(self.place.serial)
+        glue = tuple(axis for axis in self.place.free if serial or axis.name not in self.op.free_axes)
         with binding_extents(self.extents):
             body = self.op.lower(frozenset(axis.name for axis in (*glue, *serial)), self.output_specs, self.axes)
         # A serial axis is time: it encloses every cell, so a lagged read of this kernel's own
@@ -754,7 +859,22 @@ class TileOp(Op):
             *(dim for tensor in (*self.inputs.values(), *self.outputs.values()) for dim in tensor.shape),
             *(a.extent for a in self.axes),
         )
-        return frozenset(name for dim in dims for name in dim.expr.free_vars())
+        return frozenset(name for dim in dims for name in dim.expression.free_vars())
+
+    def scheduled(self) -> TileOp:
+        """This kernel as the classic schedule addresses it and the kernel lowering takes it (``Fold.scheduled``):
+        a block of a partition walks from zero, and every term keeps its range, stated of its axis as a tier walks
+        it. A tier reads the range itself: a scalar walk and a cooperative reduce as their loop's bounds, the chunk
+        tier as the chunks it walks and the mask of the block a bound cuts. A tile, which folds a rectangle of every
+        position, is offered on no other term that walks one (:meth:`contracts`). A softmax carrier whose score a
+        program masked by the coordinates walks the range that mask states, the mask gone from its lift
+        (``schedule.mask.keys_ranged``), so a tier reads one thing whichever way the program said which keys a row
+        attends. The form does not change which kernel this is (``wire.kernel_tile``)."""
+        if self.op is None:
+            return self
+        op, axes = self.op.scheduled(self.axes)
+        op = keys_ranged(op, axes)
+        return self if op is self.op else replace(self, op=op, axes=axes)
 
     def axis_of(self, name: str) -> Axis:
         """The axis table's entry for ``name`` — a reduce axis's extent and window, a free axis's extent."""

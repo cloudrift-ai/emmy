@@ -13,8 +13,6 @@ signature rather than trusting the hint.
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 import pytest
 
@@ -92,13 +90,15 @@ def _kernels(compiled):
     return [node.op for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None)]
 
 
-def _signature(kernel) -> str:
-    return re.search(r'extern "C" __global__[^{]*', kernel.kernel_source).group(0)
+def _page_reads(kernel) -> int:
+    """How many addresses of a page the kernel reads from a table: a 64-bit load each."""
+    return kernel.kernel_source.count("ld.global.u64")
 
 
 def test_paged_hint_reaches_the_kernel_abi(monkeypatch):
     """The marked buffers take a page table in place of a pointer, the launcher binds that table
-    by name, and every read of them goes through it — codegen only, so no GPU is needed."""
+    by name, and every read of them goes through it, reading its page's address from the table —
+    codegen only, so no GPU is needed."""
     pytest.importorskip("torch")
     from emmy.compiler.backend.plan import PLAN_FORMAT_PAGED, plan_from_graph, plan_to_dict
 
@@ -108,12 +108,9 @@ def test_paged_hint_reaches_the_kernel_abi(monkeypatch):
     compiled = _compile_read(paged=True)
     (kernel,) = _kernels(compiled)
 
-    signature = _signature(kernel)
     for name in ("k", "v"):
-        assert f"const float* const* {name}__pages" in signature, signature
-        assert not re.search(rf"const float\* {name}\b", signature), signature
-        assert f"{name}__pages[" in kernel.kernel_source
-    assert "k__pages" in kernel.arg_order and "k" not in kernel.arg_order
+        assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
+    assert _page_reads(kernel) >= 2
     # The table is a runtime contract of its own: a plan carrying one serializes as the paged format.
     assert plan_to_dict(plan_from_graph(compiled))["format"] == PLAN_FORMAT_PAGED
 
@@ -126,7 +123,7 @@ def test_unpaged_build_is_byte_identical_to_before(monkeypatch):
     monkeypatch.setenv("EMMY_REDUCE", "")
     (kernel,) = _kernels(_compile_read(paged=False))
 
-    assert "__pages" not in kernel.kernel_source
+    assert _page_reads(kernel) == 0
     assert kernel.arg_order == tuple(dict.fromkeys(kernel.arg_order))
     assert "k" in kernel.arg_order and "v" in kernel.arg_order
 
@@ -141,11 +138,9 @@ def test_a_paged_output_stored_over_its_cache_writes_through_the_table_at_its_in
     (kernel,) = _kernels(compiled)
     name = compiled.outputs[0]
 
-    signature = _signature(kernel)
-    assert f"float* const* {name}__pages" in signature, signature
-    assert "const long long* __restrict__ past" in signature and not kernel.runtime_args, signature
-    page = kernel.kernel_source.split(f"{name}__pages[", 1)[1].split("]", 1)[0]
-    assert f"/ {PAGE}" in page and "past" in kernel.kernel_source, page  # the page of a value computed from ``past``, not an axis
+    # ``past`` is a buffer the kernel reads, never a launch argument, and each store reads its page's address.
+    assert "past" in kernel.arg_order and not kernel.runtime_args
+    assert _page_reads(kernel) >= 1
     assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
     assert compiled.buffer(name).alias == "cache"
 
@@ -153,7 +148,7 @@ def test_a_paged_output_stored_over_its_cache_writes_through_the_table_at_its_in
 def test_one_page_buffer_resolves_its_base_once(monkeypatch):
     """A buffer whose single page spans it keeps the table in its signature but is addressed like
     the flat buffer it replaces: the preamble takes the table's only entry as the base, so every
-    statement kind — a fragment store, a staged copy — works over it unchanged, and no access
+    statement type — a fragment store, a staged copy — works over it unchanged, and no access
     resolves a page per element."""
     pytest.importorskip("torch")
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -165,11 +160,39 @@ def test_one_page_buffer_resolves_its_base_once(monkeypatch):
     graph.hints.set("cuda.paged_buffers", (("k", 2, SEQ), ("v", 2, SEQ)))
     (kernel,) = _kernels(CudaBackend().compile(graph))
 
-    signature = _signature(kernel)
     for name in ("k", "v"):
-        assert f"const float* const* {name}__pages" in signature, signature
-        assert f"const float* {name} = {name}__pages[0];" in kernel.kernel_source
-    assert kernel.kernel_source.count("__pages[") == 2
+        assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
+    # Each buffer's one page address is read once, where the kernel starts.
+    assert _page_reads(kernel) == 2
+
+
+def test_a_paged_weight_is_one_page_in_the_layout_its_kernel_reads():
+    """A weight the compiler re-lays — a linear's folded transpose, pinned so the placement prior's layout pick
+    does not decide what is tested — is bound under another buffer: its declaration pages that buffer, one page, the
+    paging every layout of it shares, and its own name goes. A declaration of it that is not one page has no such
+    buffer to name and is refused."""
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.trace.torch import trace_module
+
+    def traced():
+        return trace_module(torch.nn.Linear(16, 24), (torch.zeros(8, 16),))
+
+    graph = traced()
+    (weight,) = (nid for nid, _ in graph.loadable_constants() if len(graph.buffer(nid).shape) == 2)
+    graph.hints.set("cuda.paged_buffers", ((weight, 0, 24, 0),))
+    with pinned_knobs({"LAYOUT@linear_wt": "folded"}):
+        plan = plan_from_graph(CudaBackend().compile(graph))
+    ((name, paging),) = plan.paged.items()
+    assert name != weight and plan.weights[name].source_path == "weight" and paging == (0, 16, 0)
+    assert all(name not in {t.src_buf for t in launch.tma_descriptors} for launch in plan.launches)
+    graph = traced()
+    graph.hints.set("cuda.paged_buffers", ((weight, 0, 1, 0),))
+    with pytest.raises(ValueError, match="paged as one page only"):
+        CudaBackend().compile(graph)
 
 
 @requires_cuda

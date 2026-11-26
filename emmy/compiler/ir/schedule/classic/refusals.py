@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
+from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
@@ -24,15 +25,20 @@ from emmy.compiler.ir.schedule.catalog import (
     warp_tile_moves,
 )
 from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage, Stage, Tile, Work
+from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Load, Loop, Select, Stmt, Write, mask_select_predicate
-from emmy.compiler.ir.stmt.passes import has_contraction_tail
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Select, Write
 
 from .schedule import NodeSchedule, binds_root, node_id_spelling, packed_works
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.tile import TileOp
+
+    from .sites import ClassicProblem
+
+
+_WIDE = (BF16, F16)  # the 16-bit multiplicand families a computed weight repacks into
 
 
 def _inner_free(tile: TileOp):
@@ -71,7 +77,7 @@ def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
     roots = kernel_roots(tile.op)
     is_root = any(node is root for root in roots)
     owner = node if is_root else next((root for root in roots if any(node is member for member in chain_members(root))), None)
-    if node.carries or owner is None:
+    if owner is None:
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
     # A sweep the member's own ROOT is evaluated over wraps the whole chain, members included, and
     # only the serial fold spells that: the chain arm closes one grid cell.
@@ -92,14 +98,33 @@ def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
         )
     transposed_ok = _transposed_reduction_ok(tile) and is_root
     lanes = (32, 8) if target.compute_capability == (7, 0) else (32,)
+    # A transposed band folds the columns a lane owns in one loop, so a fold that walks a range takes one column:
+    # its range may differ from one column to the next.
+    columns_ok = node.range is None
     return (
         Reduce(),
         *(
             choice
             for choice in coop_reduce_moves(transposed_lanes=lanes)
-            if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok)
+            if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok and (columns_ok or choice.coop_columns == 1))
         ),
     )
+
+
+def _swept_root_refusal(tile: TileOp, node) -> str | None:
+    """Why no output tile realizes this contraction, whatever its plan: an output sweep rides one of its own
+    output coordinates, or ``None``.
+
+    The grid binds a sweep only where every store rides it at one extent (``promoted_sweep``). Two sibling roots
+    whose stores ride different widths (a chunk's ``q·S`` over 128 value columns beside its ``q·kᵀ`` over 64 chunk
+    positions) keep their sweeps as serial loops, so a root's N axis is no grid axis and its register cells have
+    no coordinate to own. The binder declines such a row, as a root (``_factor._refuse_partitioned_sweep``) or as a
+    product the projection lowers serially; the offer leaves it out, so the prior never ranks it and a pin naming
+    it says why."""
+    swept = {axis.name for spec in tile.output_specs for axis in spec.sweep} & node.free_axes
+    if not swept:
+        return None
+    return f"its output sweep {sorted(swept)[0]!r} stays a serial loop the grid does not bind, so no tile cell owns that coordinate"
 
 
 def _contraction_reductions(tile: TileOp, node, facts: ContractionFacts, target) -> tuple[Reduce, ...]:
@@ -144,8 +169,43 @@ def _channel_dtype(tile: TileOp, node, target):
     dtypes = {edge_dtypes(edge, tile.inputs)[0] for edge in node.operands[1:]}
     if len(dtypes) == 1:
         return next(iter(dtypes))
+    # Streamed operands of several dtypes meet in a cell of 16 bits or fewer, which converts the others: the TF32
+    # cell is the one of operands that are all f32, answered above.
+    dtypes.discard(F32)
     eligible = {dtype for dtype in dtypes if dtype is not None and atoms_for(dtype, ctx=target)}
+    if not eligible:
+        # A dtype only another card multiplies still names the channel (an FP8 value beside an integer position on
+        # sm_80): the chunk tier converts a 1-byte value into a 16-bit cell, and every other caller refuses it by
+        # its own check against this target.
+        eligible = {dtype for dtype in dtypes if any(atom.operand_dtype("a") == dtype for atom in ATOM_REGISTRY.values())}
     return next(iter(eligible)) if len(eligible) == 1 else None
+
+
+def _family_dtype(tile: TileOp, node, target, dtype):
+    """The multiplicand dtype whose atoms ``node`` takes, ``dtype`` being its first operand's: that operand's own
+    where it has a cell of 16 bits or more, else the one its streamed operands share. An f32 first operand takes
+    the cell of what it multiplies, since a 16-bit cell converts it in its fill, so only a product of f32 operands
+    is the TF32 cell's."""
+    own = dtype is not None and dtype.nbytes >= 2 and dtype != F32 and atoms_for(dtype, ctx=target)
+    return dtype if own else _channel_dtype(tile, node, target)
+
+
+def _f32_product(tile: TileOp, target, node) -> bool:
+    """Whether ``node`` is a product whose operands are all f32, off the chunk tier and the packed pair: the one
+    product the TF32 atoms are the cells of."""
+    from emmy.compiler.ir.tile.ops import edge_dtypes  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
+
+    if node.chunked() or tile.packed_reading(node)[1] is not None:
+        return False
+    return _family_dtype(tile, node, target, edge_dtypes(node.operands[0], tile.inputs)[0]) == F32
+
+
+def _f32_as_bf16_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
+    """The bf16 atoms a product of f32 operands takes with every operand rounded to bf16 in its fill: the cell an
+    f32 operand beside a bf16 one already takes, on a product that has no bf16 operand. bf16 keeps f32's exponent
+    range, so the rounding cannot overflow; it keeps eight bits of mantissa, so offering it is a precision decision
+    (``ClassicProblem.allow_f32_as_bf16``). Empty for any other product."""
+    return atoms_for(BF16, ctx=target) if _f32_product(tile, target, node) else ()
 
 
 def _fragment_rows_refusal(tile: TileOp) -> str | None:
@@ -209,19 +269,22 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return None if atoms_for(weight, ctx=target) else f"no tensor-core atom takes a {weight} multiplicand on this target"
     if dtype is not None and dtype.logical_elems != 1:
         return f"a packed {dtype} A pairs with no packed peer; no atom multiplies packed codes against decoded ones"
-    if dtype is not None and dtype.nbytes == 1:
+    if dtype is not None and dtype.nbytes == 1 and _channel_dtype(tile, node, target) == dtype:
         if a_edge.as_slab() is None:
             return "fp8 fragment loads require a materialized A edge"
-        if _channel_dtype(tile, node, target) != dtype:
-            return "fp8 fragment loads require one matching operand dtype"
         if not atoms_for(dtype, ctx=target):
             return f"no tensor-core atom takes a {dtype} multiplicand on this target"
         return None
 
-    atom_dtype = dtype if atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
+    atom_dtype = _family_dtype(tile, node, target, dtype)
     if atom_dtype is None:
         return "no operand dtype selects a tensor-core atom family"
     if atom_dtype.nbytes == 1 and atom_dtype != dtype:
+        if node.chunked():
+            # The chunk tier's weight is computed in f32 registers and repacks into a 16-bit A fragment; a 1-byte
+            # streamed value converts per element in its gmem-direct fragment load (its staged slab declines), so
+            # the cell is a 16-bit one over the value's codes.
+            return None if any(atoms_for(wide, ctx=target) for wide in _WIDE) else "no 16-bit tensor-core atom on this target"
         return "a demoting compute fill cannot produce an fp8 fragment"
     if not (atoms_for(atom_dtype, ctx=target) or atoms_for(atom_dtype, acc=atom_dtype, ctx=target)):
         return f"no tensor-core atom takes a {atom_dtype} multiplicand on this target"
@@ -239,33 +302,38 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # GATHERED into them when the carrier's own A edge is already the stored tile (softmax@V, whose
     # probabilities arrive as an input). Either way the tier gets a ``(row, chunk)`` C fragment; a
     # carrier that is neither has no chunk to fold.
-    reads = (*score.operands, node.operands[1]) if score is not None else node.operands[:2]
+    reads = (*score.operands, node.streamed) if score is not None else (node.operands[0], node.streamed)
     if score is None and node.operands[0].as_slab() is None:
         return "the chunk tier folds a carrier whose pivot a nested contraction or a stored tile supplies"
     # The chunk covers the score's OWN contraction in one pass and holds a query fragment per step,
     # so a symbolic extent there has no step count to hold them at.
     if score is not None and not tile.axis_of(score.axis).extent.is_static:
         return "the chunk tier covers the score's contraction in one pass, so its extent must be static"
+    if score is not None and score.range is not None:
+        return "the chunk tier covers the score's contraction in one pass, and it walks a range"
     if any(edge.as_slab() is None for edge in reads):
         return "the chunk tier reads its score operands and its streamed value as slabs"
     # The score's own PREFIX is the CARRIER's lift cut to its score role — A is the score
     # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
     # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
     prefix = node.applied.cone(node.roles[0])
-    if any(not isinstance(stmt, (Affine, Assign, Load, Select)) for stmt in prefix.body):
-        return "the score's own prefix holds more than a straight-line program"
     coord_axes = {node.axis, *node.as_contraction().left_axes}
-    uniform = {name for edge in node.operands if not edge.free_axes for name in edge.exposes}
-    for stmt in (stmt for stmt in prefix.body if isinstance(stmt, Select)):
-        consumers = [consumer for consumer in prefix.body if _adds(consumer, stmt.name)]
-        if (
-            mask_select_predicate(stmt) is None
-            or len(consumers) != 1
-            or not {branch.value for branch in stmt.branches} <= uniform
-            or any(not branch.select.free_vars() <= coord_axes for branch in stmt.branches)
-        ):
-            return "the score's coordinate Select does not form a cell-uniform additive mask"
-    leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & set(prefix.params)]
+    uniform = cell_uniform(tile.axes, node, coord_axes)
+    # The keys a row folds are the carrier's range: a mask the program wrote over the coordinates was read as one
+    # (``TileOp.scheduled``). A mask the range could not take is still in the prefix, as is any other value computed
+    # from a coordinate, and no per-fragment evaluation places either.
+    aliases = coordinate_aliases((*prefix.body, *(stmt for edge in node.operands[1:] for stmt in edge.lift.body)), coord_axes, uniform)
+    body = select_masks(prefix.body, aliases, uniform, coord_axes)
+    if body is None or any(isinstance(stmt, Select) for stmt in body):
+        return "the score's prefix reads a coordinate its range does not state"
+    if any(not isinstance(stmt, (Assign, Let, Load)) for stmt in prefix.body):
+        return "the score's own prefix holds more than a straight-line program"
+    # The range lands as one coordinate mask for each bound: over the row, the key and the values one CTA holds.
+    walked = node.applied_range or ()
+    if any(not bound.free_vars() <= coord_axes | uniform for bound in walked):
+        return "the carrier's range reads a coordinate the chunk tier holds neither per element nor per CTA"
+    ranged = {name for bound in walked for name in bound.free_vars()}
+    leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & (set(prefix.params) | ranged)]
     if any(node.axis in edge.free_axes for edge in leaves):
         return "the score's prefix reads an operand that varies over the chunk"
     # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
@@ -312,7 +380,11 @@ def _atom_refusal(
     shapes: dict,
 ) -> str | None:
     """Return why one otherwise available atom cannot bind this node."""
-    converting = a_is_load and a_dtype is not None and a_dtype.nbytes >= 2 and a_dtype != atom.operand_dtype("a")
+    converting = a_is_load and a_dtype is not None and a_dtype.logical_elems == 1 and a_dtype != atom.operand_dtype("a")
+    if converting and a_dtype.nbytes == 1 and (atom.is_wgmma or atom.fragment_layout == "m8n8k4"):
+        # The fill stages a 1-byte A verbatim and only the mma.sync fragment loads convert it: a wgmma
+        # descriptor would read the bytes as 16-bit values, and Volta's paired layouts hold 16-bit slabs.
+        return f"warp TILE: a 1-byte A stays a byte slab until its fragment loads convert it, which {atom.name} does not load"
     if a_is_load and not converting and (a_step is None or a_step[0] != 1 or (a_step[1] and a_step[1] % atom.atom_k)):
         motion = "unknown" if a_step is None else f"{a_step[0]} elements per column"
         return (
@@ -343,20 +415,24 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
     # f32 carrier once per chunk — the reduced one therefore runs that chain at the full consumer-die
     # rate without moving the softmax statistics off f32 (the score keeps ``wide_accumulate``).
     if node.chunked():
-        # Scores accumulate at full width; the streamed value determines the repacked multiplicand width.
+        # Scores accumulate at full width; the streamed value determines the repacked multiplicand width, except
+        # that a 1-byte value takes a 16-bit cell and converts in its fragment load (``_node_refusal``).
         dtype = _channel_dtype(tile, node, target)
-        offered = bindable((*atoms_for(dtype, ctx=target), *atoms_for(dtype, acc=dtype, ctx=target)))
+        families = _WIDE if dtype is not None and dtype.nbytes == 1 else (dtype,)
+        offered = bindable(
+            tuple(name for wide in families for name in (*atoms_for(wide, ctx=target), *atoms_for(wide, acc=wide, ctx=target)))
+        )
         return tuple(dict.fromkeys(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack))
     if (pair := packed[1]) is not None:
         # ``_node_refusal`` already proved the channels share one stored code dtype that this
         # target has a cell for; the cell addresses its own operands, so no atom refusal applies.
         return atoms_for(tile.inputs[pair.b[0].bits.input].dtype, ctx=target)
-    if dtype is not None and dtype.nbytes == 1:
+    if dtype is not None and dtype.nbytes == 1 and _channel_dtype(tile, node, target) == dtype:
         return bindable(atoms_for(dtype, ctx=target))
-    atom_dtype = dtype if atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
+    atom_dtype = _family_dtype(tile, node, target, dtype)
     base = bindable(atoms_for(atom_dtype, ctx=target))
     reduced_acc = bindable(atoms_for(atom_dtype, acc=atom_dtype, ctx=target))
-    return tuple(dict.fromkeys((*base, *reduced_acc)))
+    return tuple(dict.fromkeys((*base, *reduced_acc, *bindable(_f32_as_bf16_atoms(tile, target, node)))))
 
 
 def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
@@ -375,14 +451,17 @@ def _scalar_catalog() -> frozenset[Tile]:
     return frozenset(scalar_tile_moves())
 
 
-def _atom_policy_ok(atom: AtomKind, *, allow_f16_accumulate: bool, allow_fp8: bool) -> bool:
-    """The precision policy of UNPINNED enumeration: an f16-accumulate or FP8 atom is offered
-    only where the caller allowed it. A row that names such a tile bypasses this — an authored
-    value is a legal independent choice — so the policy filters the catalog, never a parse."""
+def _atom_policy_ok(atom: AtomKind, problem: ClassicProblem) -> bool:
+    """The precision policy of UNPINNED enumeration: an f16-accumulate, FP8 or TF32 atom is offered
+    only where ``problem`` allows it. A row that names such a tile bypasses this — an authored
+    value is a legal independent choice — so the policy filters the catalog, never a parse. The split TF32 atom
+    trades no precision, so the policy passes it; the catalog leaves it out all the same (``AtomKind.row_only``)."""
     a = atom.operand_dtype("a")
-    if a.logical_elems == 1 and a.nbytes == 1 and not allow_fp8:
+    if a.logical_elems == 1 and a.nbytes == 1 and not problem.allow_fp8:
         return False
-    return atom.operand_dtype("c").nbytes != 2 or allow_f16_accumulate
+    if a == F32 and not (atom.row_only or problem.allow_tf32):
+        return False
+    return atom.operand_dtype("c").nbytes != 2 or problem.allow_f16_accumulate
 
 
 def _warp_plan_ok(node, facts: ContractionFacts, plan: Tile) -> bool:
@@ -624,6 +703,29 @@ def _wgmma_refusal(plan: Tile, stage: Stage | None = None) -> str | None:
     return None
 
 
+def _wgmma_slab_refusal(node: Fold, plan: Tile, inputs) -> str | None:
+    """Why a warp-group cell cannot read ``node``'s operands from the slabs its kernel root stages, or ``None``. The
+    root copies the query (the A operand) into a slab of 128-byte swizzle rows on cp.async, once
+    ahead of its chunk loop, so every copy must start on its own width (``staging.vector_copies_aligned``). The
+    descriptor takes the B slab's bytes as the atom's B dtype and converts nothing, while the root stages B at the
+    dtype it is stored at — an FP8 key-value cache's key as raw bytes (:func:`~emmy.compiler.ir.schedule.staging.chunk_slab_dtype`)."""
+    if not (plan.is_warp and plan.atom.is_wgmma) or len(node.operands) < 2:
+        return None
+    from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
+
+    query = node.operands[0].as_slab()
+    nbytes = plan.atom.operand_dtype("a").nbytes
+    if query is not None and not staging.vector_copies_aligned(
+        ((query.load, node.as_contraction().axis, 128 // nbytes, nbytes, 1),), inputs
+    ):
+        return f"the query {query.load.input} is copied on cp.async, and a copy would start off its own width in gmem"
+    slab = node.operands[1].as_slab()
+    stored = inputs.get(slab.load.input) if slab is not None and inputs else None
+    if stored is None or stored.dtype == plan.atom.operand_dtype("b"):
+        return None
+    return f"wgmma reads {slab.load.input} through a descriptor, which cannot convert its stored {stored.dtype}"
+
+
 #: Registers a ``wgmma`` lane keeps live beside its accumulators: descriptors, addresses, the ring
 #: counters. ptxas asked for 154 at an m64n192 (96 accumulator registers) and refused the 128 a
 #: sixteen-warp CTA leaves each lane.
@@ -649,16 +751,14 @@ def _wgmma_register_refusal(node: Fold, plan: Tile) -> str | None:
     )
 
 
-def _adds(consumer: Stmt, name: str) -> bool:
-    """Whether ``consumer`` adds the value ``name`` to something: a sum with it as a unit term."""
-    if isinstance(consumer, Affine):
-        return any(arg == name and coefficient == 1 for coefficient, arg in consumer.terms)
-    return isinstance(consumer, Assign) and consumer.op.name == "add" and name in consumer.args
-
-
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
 
+    if node.range is not None and not plan.is_warp:
+        # A scalar tile's thread folds its register cells in one loop, which walks one range: its own cell's.
+        reads = {name for bound in node.range for name in bound.free_vars()}
+        if any(side is not None and side.reg > 1 and side.axis.name in reads for side in placed.mn):
+            return "a scalar tile's loop walks one range, so it holds one register cell along an axis the range reads"
     refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan) or _wgmma_register_refusal(node, plan)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
@@ -803,12 +903,16 @@ def _relation_refusal(site: NodeId, pick, relation: _Relation, *, roots, pairs, 
             return "a partitioned chain member under an output-tiled root, whose fill owns its cone"
         if picks[root].reduce.coop_transposed:
             return "a partitioned chain member under a transposed band, which binds its fold alone"
-    for root, nested in nests:
+    for (root, nested), folded in nests.items():
         if site not in (root, nested):
             continue
         picks = {**relation.nodes, site: node}
-        if root in picks and nested in picks and picks[nested].tile.is_tiled and not picks[root].tile.is_tiled:
-            return "a contraction tile under a root that is not output-tiled, whose serial lowering would drop it"
+        if nested not in picks or not picks[nested].tile.is_tiled:
+            continue
+        if not folded:
+            return "a contraction tile below a kernel root that does not fold it, whose lowering would drop it"
+        if root in picks and not picks[root].tile.is_warp:
+            return "a score tile under a root that is not tensor-core tiled, whose lowering would drop it"
     work = relation.work
     if work is not None and pick.work is not None and pick.work != work:
         return "pick requires a different worker inventory"
@@ -918,30 +1022,17 @@ def _seam_layout(atom) -> str:
     return "m16n8k16" if atom.is_wgmma else atom.fragment_layout
 
 
-def _fragment_registers(atom, role: str) -> int:
-    explicit = atom.fragment_nregs(role)
-    if explicit is not None:
-        return explicit
-    m, n, k = atom.ptx_shape
-    dtype = atom.operand_dtype(role)
-    if role == "a":
-        return m * k * dtype.nbytes // 128
-    if role == "b":
-        return n * k * dtype.nbytes // 128
-    return m * n // (64 if dtype.nbytes == 2 else 32)
-
-
 def _paired_registers(node: Fold, producer: Fold, placed: PlacedTile, stage: ResolvedStage, partial_columns: int) -> int:
     """The live fragment registers one thread of a paired contraction needs, with ``partial_columns``
     register columns of reduced partials live at once."""
     atom = placed.atom
-    a_regs = _fragment_registers(atom, "a")
-    b_regs = _fragment_registers(atom, "b")
+    a_regs = atom.fragment_registers("a")
+    b_regs = atom.fragment_registers("b")
     cells = placed.reg_m * placed.reg_n
-    cell_regs = cells * _fragment_registers(atom, "c")
+    cell_regs = cells * atom.fragment_registers("c")
     if atom.operand_dtype("c").nbytes == 2:
         # A reduced accumulator promotes into an f32 shadow per cell, beside its live partials.
-        cell_regs = cells * (atom.atom_m * atom.atom_n // 32) + placed.reg_m * partial_columns * _fragment_registers(atom, "c")
+        cell_regs = cells * (atom.atom_m * atom.atom_n // 32) + placed.reg_m * partial_columns * atom.fragment_registers("c")
     depth = max(1, stage.reg_depth)
     # C fragment SETS the consumer holds. A fused multi-channel edge keeps one per streamed
     # operand; a TWISTED carrier keeps one — its bilinear channel — beside per-row registers for
@@ -952,7 +1043,7 @@ def _paired_registers(node: Fold, producer: Fold, placed: PlacedTile, stage: Res
     producer_n = stage.bk_elems // atom.atom_n
     # The producer accumulates at ITS own cell: a chunked consumer on the reduced-accumulate cell
     # still scores in f32 (``wide_accumulate``), so its score tile is no wider for it.
-    producer_c = _fragment_registers(wide_accumulate(atom), "c")
+    producer_c = wide_accumulate(atom).fragment_registers("c")
     producer_regs = placed.reg_m * a_regs + (len(producer.operands) - 1) * (producer_n * b_regs + placed.reg_m * producer_n * producer_c)
     return max(consumer, consumer_c + producer_regs)
 
@@ -988,3 +1079,18 @@ def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile
         f"paired contractions require at least {required} live fragment registers/thread, over the "
         f"{available}-register envelope at {placed.block_threads} threads/CTA"
     )
+
+
+def has_contraction_tail(stmts) -> bool:
+    """True if the post-reduce tail contracts over a NEW free axis — a ``Loop`` whose body holds an
+    inner reduce ``Loop``. This is the fused norm→linear shape, distinguished from a plain softmax
+    tail (a single sweep over the SAME axis). ``Body.accums`` supplies the deep accumulator scan.
+
+    The reduce tiers read it to price a tail, and the shared-row stage gate to decide there is one
+    to share a row with."""
+    for s in stmts:
+        if isinstance(s, Loop) and any(isinstance(c, Loop) and Body(c.body).accums for c in s.body):
+            return True
+        if any(has_contraction_tail(list(b)) for b in s.nested()):
+            return True
+    return False

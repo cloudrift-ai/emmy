@@ -3,7 +3,7 @@
 Evaluates the post-fusion graph via numpy whole-tensor ops. Used as a
 reference/debugging backend — sits between the ``NumpyBackend``
 (evaluates the pre-fusion Graph) and the ``CudaBackend`` (lowers to
-``Graph[CudaOp]`` and runs via nvcc) so bugs can be attributed to
+``Graph[CudaOp]`` and runs its PTX) so bugs can be attributed to
 fusion vs codegen.
 """
 

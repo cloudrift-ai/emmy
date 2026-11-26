@@ -67,6 +67,37 @@ def test_static_decode_capacity_proof(max_tokens, decode_bucket, prefill_bucket,
     assert _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket) is expected
 
 
+def test_an_embedding_table_below_its_page_budget_is_gathered_through_its_page_table(monkeypatch):
+    """``EMMY_GEN_EMBED_GPU`` is a page budget beside the experts': unset, or at the table's page count, the device
+    holds the table whole. Below it the gather is a program over the table paged into blocks of rows, and with no
+    slots that program is the gather alone, reading every page at its home through the page table."""
+    import torch
+
+    from emmy import config
+    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, _embed_gather_plan
+
+    monkeypatch.delenv("EMMY_GEN_EMBED_GPU", raising=False)
+    assert config.gen_embed_slots(4) is None
+    # The gather may list every page, so every page of the budget is a slot and none is resident.
+    for budget, split in (("0", (0, 0)), ("3", (3, 0)), ("4", None), ("9", None)):
+        monkeypatch.setenv("EMMY_GEN_EMBED_GPU", budget)
+        assert config.gen_embed_slots(4) == split
+    monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "-1")
+    with pytest.raises(ValueError, match="EMMY_GEN_EMBED_GPU"):
+        config.gen_embed_slots(4)
+
+    table = (3 * EMBED_PAGE_ROWS - 5, 32, torch.bfloat16)
+    plan = _embed_gather_plan(*table, 0)
+    (gather,) = plan.launches
+    assert plan.inputs == ["ids", "weight"] and plan.paged == {"weight": (0, EMBED_PAGE_ROWS, 0)}
+    assert "weight__pages" in gather.arg_names
+    # With slots, the inspector ahead of the gather marks the pages of as many ids as the gather reads: the program's
+    # own width, not a copy of it frozen at its hint.
+    plan = _embed_gather_plan(*table, 2)
+    inspector = next(launch for launch in plan.launches if ".inspect." in launch.node_id)
+    assert inspector.runtime_args == plan.launches[-1].runtime_args == ("num_tokens",)
+
+
 def test_static_only_runner_counts_layers_without_symbolic_programs():
     runner = EmmyGenRunner(
         embed_weight=np.empty((1, 1), dtype=np.float16),
@@ -180,11 +211,20 @@ def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
 
 @pytest.mark.parametrize(
     ("quant_method", "coded_trunk"),
-    [("exl3", True), ("awq", True), ("fp8", True), ("fp8-static", True), ("modelopt", True), ("bitsandbytes", False)],
+    [
+        ("exl3", True),
+        ("awq", True),
+        ("gptq", True),
+        ("compressed-tensors", True),
+        ("fp8", True),
+        ("fp8-static", True),
+        ("modelopt", True),
+        ("bitsandbytes", False),
+    ],
 )
 def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_method, coded_trunk):
-    """EXL3/AWQ/NVFP4 and FP8, static or dynamic, stay checkpoint-coded; a scheme with no coded
-    lane keeps the decoded one.
+    """EXL3, the packed-int4 families (AWQ, GPTQ, compressed-tensors), NVFP4 and FP8, static or dynamic, stay
+    checkpoint-coded; a scheme with no coded lane keeps the decoded one.
 
     NVFP4 (``modelopt``) sat in the decoded column while two defects made a coded trunk compute
     silently wrong numbers — a packed operand that dropped its split-K slice base, and a plan-keyed
@@ -205,6 +245,11 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
         quant_config["quant_algo"] = "NVFP4"
     if quant_method == "awq":
         quant_config.update(bits=4, version="gemm", zero_point=True)
+    if quant_method == "gptq":
+        quant_config.update(bits=4, sym=True, desc_act=False)
+    if quant_method == "compressed-tensors":
+        group = {"weights": {"type": "int", "num_bits": 4, "group_size": 128, "symmetric": False}, "targets": ["Linear"]}
+        quant_config.update(format="pack-quantized", config_groups={"group_0": group})
     (tmp_path / "config.json").write_text(json.dumps({"quantization_config": quant_config}))
     seen = {}
     fake_model = object()
@@ -223,6 +268,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
         include_norm=True,
         expert_slice=None,
         hosted_by_engine=False,
+        experts=True,
     ):
         seen.update(
             path=path,
@@ -463,7 +509,7 @@ def test_gated_runner_post_is_the_serving_twin(tmp_path, monkeypatch):
         twin = twins["post-sym" if rows is None else f"post{rows}"]
         assert graph.structural_key() == twin.structural_key()
         if rows is not None:  # the symbolic program lowers per bound width; the static ones stand for it
-            identities = [{kernel_row(t, "k").exact_identity for t in lift_targets(g, ctx).values()} for g in (graph, twin)]
+            identities = [{kernel_row(t).exact_identity for t in lift_targets(g, ctx).values()} for g in (graph, twin)]
             assert identities[0] and identities[0] == identities[1]
 
 
@@ -492,6 +538,21 @@ def test_a_gated_prefill_twin_takes_the_layouts_a_narrower_twin_settled(monkeypa
         if isinstance(node.op, TileOp):
             assert set(node.inputs) == set(_loads(node.op)), node.id
     scope.record("pre16", graph_layouts(cut))
+
+
+def test_a_bf16_embedding_table_keeps_its_own_bits(monkeypatch):
+    """A BF16 table the runner gathers from is the checkpoint table's bits, the ones the float32 round trip gave,
+    taken without that round trip (it held a vocab-sized table three times over and exhausted a 23 GB host)."""
+    torch = pytest.importorskip("torch")
+    import transformers
+
+    from emmy.compiler.dtype import encode_bf16
+
+    torch.manual_seed(0)
+    model = transformers.Qwen3_5ForCausalLM(_qwen3_5_full_attention_config()).eval().to(torch.bfloat16)
+    runner, _traced = _traced_runner(monkeypatch, model, dtype_str="bfloat16", decode_bucket=4)
+    table = model.model.embed_tokens.weight.detach()
+    assert np.array_equal(runner._embed_weight, encode_bf16(table.float().numpy()))
 
 
 @pytest.mark.parametrize("prefill_bucket", [0, 8])
@@ -559,6 +620,47 @@ def test_lora_prefill_just_below_static_bucket_uses_static_programs():
     runner.forward_layer_pre_device(0, hidden, lora=(mask, weight))
     runner._route_post_device(0, hidden, hidden, lora=(mask, weight))
     assert pre.inputs[0][2].shape == post.inputs[0][3].shape == (2, 8)
+
+
+@pytest.mark.parametrize(
+    ("decode_bucket", "rows", "static"),
+    [(16, 17, True), (16, 63, True), (16, 64, True), (8, 17, False), (8, 47, False), (8, 48, True), (8, 64, True)],
+)
+def test_a_step_above_the_decode_bucket_pads_into_a_narrow_or_nearly_full_chunk_twin(decode_bucket, rows, static):
+    """Pre and post are row-independent, so a step above the decode bucket runs the chunk twin padded when the chunk
+    is at most four decode buckets wide or the step fills three quarters of it; otherwise it keeps the symbolic
+    programs."""
+    torch = pytest.importorskip("torch")
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    class Program:
+        def __init__(self):
+            self.calls = []
+
+        def run_device(self, inputs):
+            self.calls.append("static")
+            return [inputs[0]]
+
+        def run_device_sym(self, inputs):
+            self.calls.append("symbolic")
+            return [inputs[0]]
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    pre, post, pre_sym, post_sym = Program(), Program(), Program(), Program()
+    runner._decode_bucket = decode_bucket
+    runner._prefill_bucket = 64
+    runner._pre_m1 = runner._post_m1 = runner._pre_decode = runner._post_decode = None
+    runner._pre_prefill, runner._post_prefill = [pre], [post]
+    runner._pre, runner._post = [pre_sym], [post_sym]
+    runner._sym_decode_warned = set()
+    runner._prefill_capacity = 64
+    hidden = torch.zeros(rows, 8)
+    runner.forward_layer_pre_device(0, hidden)
+    runner._route_post_device(0, hidden, hidden)
+    assert (pre.calls, post.calls) == ((["static"], ["static"]) if static else ([], []))
+    assert (pre_sym.calls, post_sym.calls) == (([], []) if static else (["symbolic"], ["symbolic"]))
+    # The attention-output backing must follow the same route.
+    assert runner._pads_into_chunk(rows, None) is static
 
 
 def test_lora_prefill_multiple_chunks_preserves_masks_and_weights():

@@ -156,9 +156,11 @@ OPTIONAL_KEYS = {
     "SERVE_WARM_SHAPES",
     "SERVE_REVISION",
     "SERVE_QUANT",
+    "SERVE_ARCHITECTURE",
     "SERVE_CAPTURE_SIZES",
     "SERVE_EXTRA_ARGS",
-    "SERVE_EMBED_HOST",
+    "SERVE_EMBED_GPU",
+    "SERVE_VISION_GPU",
     "SERVE_PREFILL_CAPACITY",
     "SERVE_PREFILL_BUCKET",
     "SERVE_M1_TIER",
@@ -285,7 +287,7 @@ def render_serve_runner_env(tmp_path: Path, env: dict[str, str]) -> list[str]:
     stub = stub_dir / "python3"
     stub.write_text(
         "#!/bin/sh\n"
-        "for name in EMMY_GEN_EMBED_HOST EMMY_GEN_PREFILL_CAPACITY EMMY_GEN_PREFILL_BUCKET EMMY_GEN_M1_TIER "
+        "for name in EMMY_GEN_EMBED_GPU EMMY_GEN_VISION_GPU EMMY_GEN_PREFILL_CAPACITY EMMY_GEN_PREFILL_BUCKET EMMY_GEN_M1_TIER "
         "VLLM_USE_V2_MODEL_RUNNER; do\n"
         '  value=$(printenv "$name") && printf "%s=%s\\n" "$name" "$value" || printf "%s=UNSET\\n" "$name"\n'
         "done\n"
@@ -307,7 +309,7 @@ def test_serve_sh_renders_the_shipped_invocation_unchanged(tmp_path):
     cache-key input: a spelling that drifts by one character invalidates a released image."""
     for path in sorted(SERVE_DIR.glob("models/*.env")):
         values = config_values(path)
-        if values.keys() & {"SERVE_REVISION", "SERVE_QUANT", "SERVE_CAPTURE_SIZES", "SERVE_EXTRA_ARGS"}:
+        if values.keys() & {"SERVE_REVISION", "SERVE_QUANT", "SERVE_ARCHITECTURE", "SERVE_CAPTURE_SIZES", "SERVE_EXTRA_ARGS"}:
             continue  # a config that opts in is covered by the EXL3/MoE case below
         assert render_serve_sh(tmp_path, values) == [
             "-m",
@@ -360,6 +362,18 @@ def test_serve_sh_renders_the_quantized_moe_invocation(tmp_path):
     assert argv[argv.index("--hf-overrides") + 1] == json.dumps({"architectures": ["EmmyGenModel"], "quantization_config": None})
     assert '"cudagraph_capture_sizes": [1],' in argv[argv.index("--compilation-config") + 1]
     assert argv[-2:] == ["--kv-cache-dtype", "fp8_e4m3"], "SERVE_EXTRA_ARGS must word-split into flags"
+
+
+def test_serve_sh_routes_a_gated_deltanet_nvfp4_checkpoint_to_the_hybrid_class(tmp_path):
+    """Qwen3.8-Flash-Next's pinned V100 config: Gated DeltaNet layers need the class that declares their state, and the
+    NVFP4 experts emmy's loader owns are presented as unquantized — the two overrides `emmy serve` derives from the
+    checkpoint, in its own spelling. The plain class refuses the checkpoint at model construction."""
+    config = {
+        key: value.strip('"')
+        for key, value in config_values(PROJECT_ROOT / "recipes" / "Qwen3.8-Flash-Next-NVFP4" / "serving-v100.env").items()
+    }
+    argv = render_serve_sh(tmp_path, config)
+    assert argv[argv.index("--hf-overrides") + 1] == json.dumps({"architectures": ["EmmyGenHybridModel"], "quantization_config": None})
 
 
 def test_serve_sh_renders_the_deepseek_v4_parallel_invocation(tmp_path):
@@ -417,7 +431,8 @@ def test_warm_shape_env_keeps_runner_memory_lane_and_prefill_override_wins():
     env = {
         "SERVE_DECODE_BUCKET": "32",
         "SERVE_MAX_NUM_BATCHED_TOKENS": "64",
-        "SERVE_EMBED_HOST": "1",
+        "SERVE_EMBED_GPU": "0",
+        "SERVE_VISION_GPU": "1",
         "SERVE_PREFILL_CAPACITY": "64",
         "SERVE_PREFILL_BUCKET": "0",
         "SERVE_M1_TIER": "1",
@@ -426,7 +441,9 @@ def test_warm_shape_env_keeps_runner_memory_lane_and_prefill_override_wins():
     override = render_warm_shape_env("8:2048:2056", env)
     assert pinned == [
         "-e",
-        "EMMY_GEN_EMBED_HOST=1",
+        "EMMY_GEN_EMBED_GPU=0",
+        "-e",
+        "EMMY_GEN_VISION_GPU=1",
         "-e",
         "EMMY_GEN_PREFILL_CAPACITY=64",
         "-e",
@@ -450,13 +467,15 @@ def test_serve_sh_unsets_empty_optional_runner_envs(tmp_path):
         "SERVE_MAX_MODEL_LEN": "128",
         "SERVE_MAX_NUM_BATCHED_TOKENS": "64",
         "SERVE_GPU_MEM_UTIL": "0.9",
-        "EMMY_GEN_EMBED_HOST": "",
+        "EMMY_GEN_EMBED_GPU": "",
+        "EMMY_GEN_VISION_GPU": "",
         "EMMY_GEN_PREFILL_CAPACITY": "",
         "EMMY_GEN_PREFILL_BUCKET": "",
         "EMMY_GEN_M1_TIER": "",
     }
     assert render_serve_runner_env(tmp_path, env) == [
-        "EMMY_GEN_EMBED_HOST=UNSET",
+        "EMMY_GEN_EMBED_GPU=UNSET",
+        "EMMY_GEN_VISION_GPU=UNSET",
         "EMMY_GEN_PREFILL_CAPACITY=UNSET",
         "EMMY_GEN_PREFILL_BUCKET=UNSET",
         "EMMY_GEN_M1_TIER=UNSET",
@@ -481,7 +500,8 @@ def test_runner_memory_config_is_warm_bake_verify_cache_parity():
     dockerfile = (SERVE_DIR / "Dockerfile").read_text()
     verify = (SERVE_DIR / "verify.sh").read_text()
     mappings = {
-        "SERVE_EMBED_HOST": ("EMBED_HOST", "EMMY_GEN_EMBED_HOST"),
+        "SERVE_EMBED_GPU": ("EMBED_GPU", "EMMY_GEN_EMBED_GPU"),
+        "SERVE_VISION_GPU": ("VISION_GPU", "EMMY_GEN_VISION_GPU"),
         "SERVE_PREFILL_CAPACITY": ("PREFILL_CAPACITY", "EMMY_GEN_PREFILL_CAPACITY"),
         "SERVE_PREFILL_BUCKET": ("PREFILL_BUCKET", "EMMY_GEN_PREFILL_BUCKET"),
         "SERVE_M1_TIER": ("M1_TIER", "EMMY_GEN_M1_TIER"),
@@ -628,6 +648,22 @@ def test_release_config_reads_the_tensor_parallel_width(tmp_path):
     assert load_serving_config(config).tensor_parallel_size == 1
     config.write_text(config.read_text() + 'SERVE_EXTRA_ARGS="--enforce-eager --tensor-parallel-size=x"\n')
     with pytest.raises(ValueError, match="positive integer"):
+        load_serving_config(config)
+
+
+def test_release_config_reads_the_embedding_page_budget(tmp_path):
+    """``SERVE_EMBED_GPU`` is a page count, zero included (every row read in place); absent, the table is whole."""
+    config = tmp_path / "model.env"
+    base = (
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.json'}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=32\n"
+    )
+    config.write_text(base)
+    assert load_serving_config(config).embed_gpu is None
+    config.write_text(base + "SERVE_EMBED_GPU=0\n")
+    assert load_serving_config(config).embed_gpu == 0
+    config.write_text(base + "SERVE_EMBED_GPU=-1\n")
+    with pytest.raises(ValueError, match="SERVE_EMBED_GPU"):
         load_serving_config(config)
 
 

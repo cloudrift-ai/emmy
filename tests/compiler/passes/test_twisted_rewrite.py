@@ -10,26 +10,27 @@ slow kernel, and no numerics assert downstream would attribute the wrong answer 
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from textwrap import indent
 
 import pytest
 
 from emmy import config
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
-from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import F16
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.kernel.ir import MmaSyncPtx, RegStore
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Let, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Let, Loop, parse_body
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import _hoist_invariant, _replace, rewrite_twisted
+from tests.compiler.helpers import compile_with_kernels, statements
+from tests.compiler.ir.stmt import listing
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 
@@ -37,18 +38,33 @@ def _carrier(weight_of: str) -> Fold:
     """FlashAttention's carrier with the weight still IN the lift — the shape the fusion holds
     before ``_factor_weights`` reifies ``e`` into an operand of its own. ``weight_of`` names the
     value the weight is derived from, so the negative case differs by one argument."""
-    score = projection((slab("s", "S", "i", "j"),), (Assign(name="r", op="negative", args=("s",)),))
+    score = projection((slab("s", "S", "i", "j"),), parse_body("r = negative(s)"))
     value = slab("v", "V", "j", "n")
     return Fold(
         operands=(score, value),
         lift=Lambda(
             params=("j", "r", "v"),
-            body=Body((Assign(name="e", op="exp", args=(weight_of,)), Assign(name="ev", op="multiply", args=("e", "v")))),
+            body=parse_body(
+                f"""
+                e = exp({weight_of})
+                ev = multiply(e, v)
+                """
+            ),
             results=("r", "e", "ev"),
         ),
         init=(-1e30, 0.0, 0.0),
         base=Lambda.componentwise((ElementwiseImpl("maximum"), ElementwiseImpl("add"), ElementwiseImpl("add")), ("m", "d", "o")),
     )
+
+
+def _nodes(stmt):
+    """The operation nodes of a definition's value, each ahead of its operands."""
+    return [node for node in stmt.value.subterms() if node.operation is not None]
+
+
+def _operations(body, name: str) -> list:
+    """Every operation node named ``name`` in the body's definitions."""
+    return [node for stmt in body if isinstance(stmt, Assign) for node in _nodes(stmt) if node.operation.name == name]
 
 
 def test_a_carrier_reads_bilinear_before_its_weight_is_reified() -> None:
@@ -72,15 +88,15 @@ def test_a_weight_derived_from_the_streamed_value_is_no_contraction() -> None:
 @pytest.mark.parametrize(("coordinate", "contracts"), [("i", True), ("j", True), ("n", False)])
 def test_a_weight_may_read_only_its_own_operand_coordinates(coordinate, contracts) -> None:
     carrier = _carrier("r")
-    body = Body(
-        (
-            Let("offset", Var(coordinate)),
-            Assign("shifted", "add", ("r", "offset")),
-            replace(carrier.lift.body[0], args=("shifted",)),
-            carrier.lift.body[1],
-        )
+    body = parse_body(
+        f"""
+        let offset = {coordinate}
+        shifted = add(r, offset)
+        e = exp(shifted)
+        ev = multiply(e, v)
+        """
     )
-    carrier = replace(carrier, lift=Lambda.closing(carrier.lift.params, body, carrier.lift.results))
+    carrier = carrier.replace(lift=Lambda.closing(carrier.lift.params, body, carrier.lift.results))
     assert (carrier.as_contraction() is not None) == contracts
 
 
@@ -121,12 +137,13 @@ def test_softmax_rewrites_to_twisted_pair() -> None:
     carrier's own ⊕ folds — and ψ⁻¹ brings back ``(score, exp score)`` for a matcher to read."""
     fold = _twisted("torch.softmax(torch.randn(4, 8, dtype=torch.float16), dim=-1)")
 
-    assert fold.twist.recipe is SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
+    assert fold.twist.recipe == SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
     assert len(fold.init) == 2 and fold.init[1] == 0.0
     assert [edge.as_slab() is not None for edge in fold.operands] == [True], "the score slab is its one operand"
     assert [stmt.value.value for stmt in fold.lift.body if isinstance(stmt, Let)] == [1.0], "the stable singleton is (score, 1)"
-    assert not [stmt for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "exp"], "no exp in the term"
-    assert [stmt.op.name for stmt in fold.based().body if isinstance(stmt, Assign)] == ["exp", "multiply"], "psi_inv restores it"
+    assert not _operations(fold.lift.body, "exp"), "no exp in the term"
+    restored = [node.operation.name for stmt in fold.based().body if isinstance(stmt, Assign) for node in _nodes(stmt)]
+    assert restored == ["exp", "multiply"], "psi_inv restores it"
     assert any(isinstance(stmt, Let) and stmt.value.value == 1.0 for stmt in fold.injected.body), "psi injects 1"
 
 
@@ -148,8 +165,8 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
     (_, streamed) = fold.bilinear_channels()[0]
     assert streamed.as_slab() is not None and streamed.free_axes, "the value slab is B"
     assert fold.as_contraction() is not None
-    assert not [s for s in fold.lift.body if isinstance(s, Assign) and s.op.name == "exp"], "the weight is not in the term"
-    assert tile.op.axis is None and any(stmt.op.name == "divide" for stmt in tile.op.lift.body), "the epilogue divides by l once"
+    assert not _operations(fold.lift.body, "exp"), "the weight is not in the term"
+    assert tile.op.axis is None and _operations(tile.op.lift.body, "divide"), "the epilogue divides by l once"
 
 
 def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
@@ -196,21 +213,26 @@ def test_twist_compares_operand_values_independently_of_coordinate_parameter_ord
         # The same load can close its captured coordinates in either order. Neither order is
         # an index permutation; changing the actual coordinates must still reject the recipe.
         if suffix:
-            weights = replace(weights, lift=replace(weights.lift, params=tuple(reversed(weights.lift.params))))
+            weights = weights.replace(lift=weights.lift.replace(params=tuple(reversed(weights.lift.params))))
         values = slab(f"x{suffix}", "x", "k" if suffix and different == "coordinate" else "row", "d")
         return contraction("d", values, (weights, f"score{suffix}"))
 
     first, second = score(""), score("2")
     maximum = Fold(
         operands=(first,),
-        lift=Lambda(("k", "score"), Body(()), ("score",)),
+        lift=Lambda(("k", "score"), parse_body(""), ("score",)),
         init=(float("-inf"),),
         base=Lambda.componentwise(("maximum",), ("maximum",)),
     )
     denominator = reduction(
         "k",
         (maximum, second),
-        (Affine("shift", ("score2", "maximum"), (1.0, -1.0)), Assign("total__v", "exp", ("shift",))),
+        parse_body(
+            """
+            shift = score2 - maximum
+            total__v = exp(shift)
+            """
+        ),
         ("total",),
     )
     axes = {axis.name: axis for axis in (Axis("row", 4), Axis("d", 3), Axis("k", 5))}
@@ -256,13 +278,16 @@ def test_sdpa_score_contraction_reaches_the_mma_tier(monkeypatch) -> None:
         "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
         "torch.randn(1, 1, 32, 16, dtype=torch.float16))"
     )
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
-    sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1, "the pinned carrier is one kernel"
-    assert "emmy_mma_m16n8k16" in sources[0], "the score contraction reaches the tensor-core tier"
-    # The kernel writes the f16 output and converts at the boundary — through the explicit packer,
-    # or through the per-element assign a fragment store converts implicitly.
-    assert "__float2half" in sources[0] or "half2_rn" in sources[0] or "acc" in sources[0]
+    _, kernels = compile_with_kernels(graph, ctx=Context.from_target((8, 0)))
+    assert len(kernels) == 1, "the pinned carrier is one kernel"
+    (kernel,) = kernels.values()
+    assert {tuple(mma.shape) for mma in statements(kernel, MmaSyncPtx)} == {(16, 8, 16)}, (
+        "the score contraction reaches the tensor-core tier"
+    )
+    # The kernel writes the f16 output and converts at the boundary: the fragment store of the f32 accumulator.
+    ((output, tensor),) = kernel.outputs.items()
+    assert tensor.dtype == F16 and statements(kernel, RegStore)
+    assert all(store.dst_buffer == output for store in statements(kernel, RegStore))
 
 
 # ===================================================================
@@ -270,45 +295,58 @@ def test_sdpa_score_contraction_reaches_the_mma_tier(monkeypatch) -> None:
 # ===================================================================
 
 
-def _reduce_loop(*stmts, axis: str = "a1", extent: int = 128) -> Loop:
-    return Loop(axis=Axis(name=axis, extent=Dim(extent)), body=Body(tuple(stmts)))
+def _reduce_loop(body: str, axis: str = "a1", extent: int = 128) -> str:
+    """The text of a serial reduce loop over ``axis`` around the statements ``body`` spells."""
+    return f"for {axis} in 0..{extent}:\n" + indent(listing(body), "    ")
 
 
-def _row_max() -> Loop:
-    idx = (Var("a0"), Var("a1"))
+def _row_max() -> str:
     return _reduce_loop(
-        Load(name="in0", input="x", index=idx),
-        Accum(name="acc0", value="in0", op=ElementwiseImpl("maximum")),
+        """
+        in0 = load x[a0, a1]
+        acc0 <- maximum(acc0, in0)
+        """
     )
 
 
-def _sum_exp_shifted() -> Loop:
-    idx = (Var("a0"), Var("a1"))
+def _sum_exp_shifted() -> str:
     return _reduce_loop(
-        Load(name="in1", input="x", index=idx),
-        Assign(name="v0", op="subtract", args=("in1", "acc0")),
-        Assign(name="v1", op="exp", args=("v0",)),
-        Accum(name="acc1", value="v1", op=ElementwiseImpl("add")),
+        """
+        in1 = load x[a0, a1]
+        v0 = subtract(in1, acc0)
+        v1 = exp(v0)
+        acc1 <- add(acc1, v1)
+        """
     )
 
 
-def _sum_x() -> Loop:
-    idx = (Var("a0"), Var("a1"))
-    return _reduce_loop(Load(name="in0", input="x", index=idx), Accum(name="acc0", value="in0", op=ElementwiseImpl("add")))
+def _sum_x() -> str:
+    return _reduce_loop(
+        """
+        in0 = load x[a0, a1]
+        acc0 <- add(acc0, in0)
+        """
+    )
 
 
-def _mean_of_sum() -> tuple:
+def _mean_of_sum() -> str:
     # ``1/N`` is a scalar input, as the frontend spells a constant in Loop IR: a zero-index load.
-    return (Load(name="inv_n", input="inv_n", index=()), Assign(name="mean", op="multiply", args=("acc0", "inv_n")))
+    return listing(
+        """
+        inv_n = load inv_n[]
+        mean = multiply(acc0, inv_n)
+        """
+    )
 
 
-def _sum_sq_dev() -> Loop:
-    idx = (Var("a0"), Var("a1"))
+def _sum_sq_dev() -> str:
     return _reduce_loop(
-        Load(name="in1", input="x", index=idx),
-        Assign(name="v0", op="subtract", args=("in1", "mean")),
-        Assign(name="v1", op="multiply", args=("v0", "v0")),
-        Accum(name="acc1", value="v1", op=ElementwiseImpl("add")),
+        """
+        in1 = load x[a0, a1]
+        v0 = subtract(in1, mean)
+        v1 = multiply(v0, v0)
+        acc1 <- add(acc1, v1)
+        """
     )
 
 
@@ -317,7 +355,7 @@ def test_welford_variance_pair_fuses_into_one_carrier() -> None:
     by the Welford recipe into ONE fold carrying ``(sum, count, mean, M2)``: the pivot sits behind
     the mean's projection, the ``1/N`` inside the deviation is a scalar operand the pattern binds
     as an extra, and the count and running mean are states the two-pass form never had."""
-    root, axes = _rewrite(_sum_x(), *_mean_of_sum(), _sum_sq_dev())
+    root, axes = _rewrite(_sum_x(), _mean_of_sum(), _sum_sq_dev())
     (fold,) = _twisted_folds(root)
     view = fold.as_reduction()
     assert view.states == ("acc0", "acc1__n", "acc1__mean", "acc1")
@@ -342,29 +380,36 @@ def test_welford_variance_pair_fuses_into_one_carrier() -> None:
 def test_welford_declines_a_deviation_that_is_not_squared() -> None:
     """A sum followed by ``Σ (x − mean)`` is not the variance's second pass: no channel of the
     recipe matches, and the pair stays two folds."""
-    idx = (Var("a0"), Var("a1"))
     linear = _reduce_loop(
-        Load(name="in1", input="x", index=idx),
-        Assign(name="v0", op="subtract", args=("in1", "mean")),
-        Accum(name="acc1", value="v0", op=ElementwiseImpl("add")),
+        """
+        in1 = load x[a0, a1]
+        v0 = subtract(in1, mean)
+        acc1 <- add(acc1, v0)
+        """
     )
-    root, _ = _rewrite(_sum_x(), *_mean_of_sum(), linear)
+    root, _ = _rewrite(_sum_x(), _mean_of_sum(), linear)
     assert not _twisted_folds(root)
 
 
-def _plain_sum() -> Loop:
-    idx = (Var("a0"), Var("a1"))
+def _plain_sum() -> str:
     return _reduce_loop(
-        Load(name="in1", input="x", index=idx),
-        Accum(name="acc1", value="in1", op=ElementwiseImpl("add")),
+        """
+        in1 = load x[a0, a1]
+        acc1 <- add(acc1, in1)
+        """
     )
 
 
-def _rewrite(*stmts) -> tuple[Fold, tuple]:
+def _row(*parts: str) -> LoopOp:
+    """The statements ``parts`` spell, then the store of ``acc1``, under one row ``a0``."""
+    cell = "\n".join((*parts, "out[a0] = acc1"))
+    return LoopOp(body=parse_body("for a0 in 0..4:\n" + indent(cell, "    ")))
+
+
+def _rewrite(*parts: str) -> tuple[Fold, tuple]:
     """Lift the statements under one row and rewrite: the second loop's read of ``acc0`` arrives as
     an operand edge, which is what the recipe matches on. Returns the tree and the kernel's axis table."""
-    cell = (*stmts, Write(output="out", index=(Var("a0"),), value="acc1"))
-    tile = lift_loop_op(LoopOp(body=(Loop(axis=Axis("a0", Dim(4)), body=Body(cell)),)), name="k_pair")
+    tile = lift_loop_op(_row(*parts))
     return rewrite_twisted(tile.op, tile.axes), tile.axes
 
 
@@ -399,23 +444,13 @@ def test_an_invariant_factor_hoists_out_of_the_fold(spelling: str) -> None:
     epilogue over the fold's state, under the state's original name; the fold sums ``x`` alone.
     Loop IR may already have split the divide into a reciprocal ahead of the loop, so the epilogue
     applies the factor by whichever ⊗ reached the term."""
-    idx = (Var("a0"), Var("a1"))
-    weight = (
-        (Assign(name="inv", op="reciprocal", args=("d",)), Assign(name="p", op="multiply", args=("in1", "inv")))
-        if spelling == "reciprocal"
-        else (Assign(name="p", op="divide", args=("in1", "d")),)
-    )
-    cell = (
-        Load(name="d", input="den", index=(Var("a0"),)),
-        _reduce_loop(Load(name="in1", input="x", index=idx), *weight, Accum(name="acc1", value="p", op=ElementwiseImpl("add"))),
-        Write(output="out", index=(Var("a0"),), value="acc1"),
-    )
-    tile = lift_loop_op(LoopOp(body=(Loop(axis=Axis("a0", Dim(4)), body=Body(cell)),)), name="k_hoist")
+    weight = "inv = reciprocal(d)\np = multiply(in1, inv)" if spelling == "reciprocal" else "p = divide(in1, d)"
+    tile = lift_loop_op(_row("d = load den[a0]", _reduce_loop(f"in1 = load x[a0, a1]\n{weight}\nacc1 <- add(acc1, p)")))
     fold = next(term for term in _folds(tile.op) if term.axis is not None)
     (state,) = fold.as_reduction().states
     inner, epilogue = _hoist_invariant(fold)
     assert inner.as_reduction().states == (f"{state}__sum",) and len(inner.lift.results) == 1
-    assert epilogue.exposes == (state,) and epilogue.lift.body[-1].op.name in {"multiply", "divide"}
+    assert epilogue.exposes == (state,) and epilogue.lift.body[-1].value.operation.name in {"multiply", "divide"}
 
 
 def test_a_refusing_sibling_cluster_says_why(caplog) -> None:
@@ -433,9 +468,9 @@ def test_a_refusing_sibling_cluster_says_why(caplog) -> None:
 def test_replacing_shared_components_rebinds_every_reader() -> None:
     """Two old edges may land on the same fused component under different reader names."""
     first, second = slab("first", "x", "j"), slab("second", "x", "j")
-    reader = projection((first, second), (Assign("sum", "add", ("first", "second")),))
+    reader = projection((first, second), parse_body("sum = add(first, second)"))
     rewritten = _replace(reader, {id(second): (first, {0: 0})})
     assert rewritten.operands == (first,)
     assert rewritten.lift.params == ("first",)
-    assert rewritten.lift.body == Body((Assign("sum", "add", ("first", "first")),))
+    assert str(rewritten.lift.body) == "sum = 2 * first"
     assert rewritten.free_axes == reader.free_axes

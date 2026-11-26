@@ -2,8 +2,7 @@
 golden rows measured on it — the supervision a training group is built over.
 
 The regime vocabulary lives here too: :data:`REGIME_PINS` maps arithmetic and cache regimes to golden input pins.
-:func:`regime_of` reads a row's precision decisions and cache mode back to that key. The freeze and export preserve
-it.
+:func:`regime_of` reads a row's precision decisions and cache mode back to that key. The export preserves it.
 """
 
 from __future__ import annotations
@@ -11,18 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from itertools import product
 
-from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
-from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, REGIME_KNOBS, precision_pins
+from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, REGIME_KNOBS, precision_overrides, precision_pins
 from emmy.compiler.wire import Wire
 
 
 def regime_of(cold_cache: bool = False, precision: dict | None = None) -> str:
     """The recorded precision and cache regime, with independent overrides preserved and no ambient pins."""
     pins = precision_pins(precision or {})
-    umbrella = pins[FAST_MATH.name]
-    parts = [FAST_MATH_FLAG] if umbrella else []
-    parts.extend(f"{name}={int(value)}" for name, value in pins.items() if name != FAST_MATH.name and value != umbrella)
+    parts = [FAST_MATH.name] if pins[FAST_MATH.name] else []
+    parts.extend(f"{name}={int(value)}" for name, value in precision_overrides(pins).items())
     return " ".join([*parts, *(["cold-cache"] if cold_cache else [])])
 
 
@@ -52,7 +49,8 @@ class GoldenPool(Wire):
     and its pool is skipped by name. A placement pool also holds the constant inputs its golden program binds
     (``placement_constants``, each constant's wire by input name), so the placement walk offers the forks a deploy
     sees — the layout fork of a transposed weight among them; the kernel's standalone definition reads every input
-    as an activation."""
+    as an activation. A schedule pool also holds the rows the card's candidate file measured on the same group
+    (``candidates``: other schedules than the golden's, the labeled negatives among them)."""
 
     gpu: str
     cap: tuple[int, int]
@@ -61,13 +59,13 @@ class GoldenPool(Wire):
     bindings: dict[str, int]
     rows: tuple[GoldenRow, ...]
     placement_constants: dict[str, dict] = field(default_factory=dict)
+    candidates: tuple[GoldenRow, ...] = ()
 
     @property
     def name(self) -> str:
-        """The pool's label in a report: the kernel's C name and the head of its exact identity — the name a freeze
-        gives its realizations — with the sizes when the kernel is symbolic."""
+        """The pool's label in a report: the kernel's name, with the sizes when the kernel is symbolic."""
         sizes = " ".join(f"{var}={size}" for var, size in sorted(self.bindings.items()))
-        return f"{self.kernel.name}.{self.kernel.exact_identity[:12]}" + (f" {sizes}" if sizes else "")
+        return self.kernel.name + (f" {sizes}" if sizes else "")
 
     @property
     def pins(self) -> dict:

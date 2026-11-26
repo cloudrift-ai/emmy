@@ -1,4 +1,5 @@
-"""Kernel-set decisions to a fixpoint: every stored Fold-edge cut, then every cross-CTA split."""
+"""Kernel-set decisions to a fixpoint: the kernel cache replay, every stored Fold-edge cut, then every cross-CTA
+split."""
 
 from __future__ import annotations
 

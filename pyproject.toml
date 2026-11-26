@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emmy-ml"
-version = "0.3.22"
+version = "0.3.27"
 description = "Optimized LLM compiler, benchmarking, and deployment stack."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -75,8 +75,7 @@ include = ["emmy*"]
 
 [tool.setuptools.package-data]
 # Model-agnostic hardware goldens; model goldens are staged with their recipes below.
-# ``search/freezes/`` is deliberately NOT here: a measurement freeze is evaluation data for
-# `emmy fit` / `emmy eval prior`, which a wheel install never runs, and it is several MB per card.
+# ``search/candidates/records/`` is deliberately NOT here: a candidate file is data no compile reads.
 "emmy.compiler.pipeline.search.golden" = ["records/*.json"]
 "emmy.compiler.pipeline.search.prior" = ["weights/*.json"]
 # Staged out of the top-level recipes/ by `scripts/prepare_dist.py --recipes`
@@ -98,6 +97,14 @@ optional = true
 debug = false
 args = ["--locked"]
 
+# The compiler's statement and expression vocabulary, as ``emmy.emmy_ir``: required, every compile reads it.
+[[tool.setuptools-rust.ext-modules]]
+target = "emmy.emmy_ir"
+path = "crates/emmy-ir-py/Cargo.toml"
+binding = "PyO3"
+debug = false
+args = ["--locked"]
+
 # The extension targets the stable ABI (PyO3 ``abi3-py312``), so one wheel serves every Python
 # from 3.12 on.
 [tool.distutils.bdist_wheel]
@@ -113,6 +120,8 @@ emmy = "emmy.dynamo:emmy_backend"
 asyncio_mode = "auto"
 markers = [
     "perf: GPU performance comparison vs PyTorch (deselected by default; run with `pytest -m perf`)",
+    "goldens: a node that reads a repository golden other than the RTX 5090's; deselected by default, run nightly with `pytest -m goldens`",
+    "sweep: an exhaustive run on the card (a math function over every f32 input, every corpus case through both code generators); deselected by default, run with `pytest -m sweep`",
 ]
 
 [tool.ruff]

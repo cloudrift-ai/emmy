@@ -28,34 +28,49 @@ They do three jobs at once:
 
 Model goldens live under `recipes/<model>/golden/`, in one file per exact GPU model and compute capability. The
 maintained model-agnostic golden records live under `emmy/compiler/pipeline/search/golden/records/`. A file is JSON
-with four tables, one entry per line:
+with four tables. Each entry starts on its own line, and a graph's nodes, a kernel body's statements and a row's
+fields each take a line of their own, so a diff shows the one that changed:
 
 ```json
 {"gpu_name": "NVIDIA GeForce RTX 5090",
  "compute_cap": [12, 0],
  "model": "google/gemma-4-12B-it",
  "programs": [
-  {"inputs":[...],"outputs":[...],"nodes":[...]}
+  {"inputs":[...],"outputs":[...],"nodes":[
+   {"id":"x0","op":"input",...},
+   ...
+  ]}
  ],
  "kernels": [
-  {"loop_ir":{...},"name":"k_linear_7a1c2e","formed":true,"traced":0,"origins":["linear_7"],"bindings":{"num_tokens":32}}
+  {"loop_ir":{"inputs":[...],"outputs":[...],"nodes":[
+   ...,
+   {"id":"linear_7","op":"loop","attrs":{"body":[
+    "for a0 in 0..num_tokens~32:",
+    "  ..."
+   ]},...}
+  ]},"formed":true,"traced":0,"origins":["linear_7"],"bindings":{"num_tokens":32}}
  ],
  "routing": [
-  {"parent":"k_linear_7a1c2e","arm":{"PLACE@inner.1/map":"cut"},"children":["k_linear_7a1c2e__place_d2802d6545","k_linear_7a1c2e#2"]}
+  {"parent":0,"arm":{"PLACE@inner.1/map":"cut"},"children":[1,2]}
  ],
  "rows": [
-  {"name":"gemma4_12b.norm_q_proj.m32","kernel":"k_linear_7a1c2e","pins":{"FAST_MATH":false},"knobs":{"WORK":"w1x16","TILE":"mma_m16n8k16_f16_f32/f2x2/k2","REDUCE":"g8k","RASTER":"","STAGE":"d2/smem"},"measurements":{"emmy_us":26.7,"reference_us":19.8,"reference_backend":"cublas"}}
+  {"name":"gemma4_12b.norm_q_proj.m32",
+   "kernel":0,
+   "pins":{"FAST_MATH":false},
+   "knobs":{"WORK":"w1x16","TILE":"mma_m16n8k16_f16_f32/f2x2/k2","REDUCE":"g8k","RASTER":"","STAGE":"d2/smem"},
+   "measurements":{"emmy_us":26.7,"reference_us":19.8,"reference_backend":"cublas"}}
  ]}
 ```
 
 - `programs` are the traced Torch IR programs — provenance: the twin a benchmark compares a kernel against, and what
   a record run re-compiles.
-- `kernels` are the kernels' definitions: the standalone Loop IR body, the C name, and, for a kernel lowered from a
+- `kernels` are the kernels' definitions: the standalone Loop IR body and, for a kernel lowered from a
   program, which program (`traced`), which of its ops it computes whole (`origins`) and the sizes that specialized it
   (`bindings`). A piece a cut or a split minted has no program of its own; a routing row reaches it from its parent.
   Nothing computed from a kernel is stored beside it. The identity the tuning database keys a kernel by, and the
-  structural features the prior reads, are computed from the Loop IR when they are needed. Inside the file, rows and
-  routing rows name a kernel by its C name, or by a `key` such as `k_linear_7a1c2e#2` where two kernels share one.
+  structural features the prior reads, are computed from the Loop IR when they are needed, and so is its name, `k_` and
+  12 hex digits of that identity. Inside the file, rows and routing rows point at a kernel by its position in this
+  list.
 - `routing` are the kernel-set decisions: the kernel a decision was taken on, the arm (a `PLACE@seam: cut`, or the
   cross-CTA half of a `REDUCE` value) and the pieces it minted, in order. A decision has no time of its own: at the
   parent's fork it is priced as the sum of its pieces' fastest rows.
@@ -80,7 +95,7 @@ To verify a row still living in a working golden file, select both the file and 
 on every command (`run`, `compile`, `serve`):
 
 ```bash
-emmy compile --golden _tune/model/working.json --realization target.name --ir cuda
+emmy compile --golden _tune/model/working.json --realization target.name --ir ptx
 emmy run --golden _tune/model/working.json --realization target.name --bench
 ```
 
@@ -152,14 +167,22 @@ release naming the kernel. Beyond that, a recorded row's health is its pinned re
 ### Against a fresh lowering
 
 A row is evidence for the kernel it names, and a deploy keys rows by the kernels it lowers fresh from the model. When a
-compiler change moves that lowering the file goes stale: serving builds kernels none of its rows describe. Two
-commands cover it, and neither needs a card:
+compiler change moves that lowering the file goes stale: serving builds kernels none of its rows describe. These
+commands cover it, and none needs a card:
 
 ```bash
 emmy golden list [PATH…]       # every measured row beside torch.compile, slowest relative to it first
 emmy golden check [PATH…]      # what a restamp onto the fresh lowering of the golden's own programs would change
 emmy golden restamp [PATH…]    # write that rewrite
+emmy golden realize PATH…      # compile every row under its own schedule; the rows the compiler no longer realizes
 ```
+
+`emmy golden realize` asks the other question of a file: it compiles every row under its own schedule and names the
+rows the compiler no longer realizes, and `--drop` writes the file back without them.
+
+A change that re-spells kernels without changing their code need not cost the measurements. Write every row's PTX
+before the change (`emmy golden realize --ptx DIR PATH…`), then restamp with `emmy golden restamp --ptx-baseline DIR
+PATH…`: a row keeps its time exactly when its kernel still compiles to the same bytes.
 
 A restamp lowers every traced program again, gives each kernel the body the fresh lowering gives it, and takes every
 kernel-set decision again on the fresh parent. A kernel that kept its identity keeps its rows and their measurements.

@@ -1,4 +1,5 @@
-"""Decompose scaled_dot_product_attention into QK^T → scale [→ mask] → softmax → @V.
+"""Decompose scaled_dot_product_attention into QK^T → scale [→ mask] → softmax → @V. A causal or a sliding-window
+attention folds each query's keys over a range of the key axis; an explicit mask operand is added to the scores.
 
 For GQA (Grouped Query Attention) where Q has more heads than K/V, an
 explicit IndexMapOp is inserted on K and V to broadcast the head dim
@@ -9,10 +10,9 @@ import math
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
+from emmy.compiler.ir.expression import Literal, apply, placeholder
 from emmy.compiler.ir.frontend.ir import SdpaOp, TransposeOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import (
     broadcast_to,
@@ -24,13 +24,6 @@ from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import (
 )
 
 PATTERN = [Pattern("root", SdpaOp)]
-
-_NEG = {"<=": ">", ">": "<=", "<": ">=", ">=": "<"}
-
-
-def _negate(e: BinaryExpr) -> BinaryExpr:
-    """The complement of a single comparison predicate (integer coordinates)."""
-    return BinaryExpr(_NEG[e.op], e.left, e.right)
 
 
 def _maybe_gqa(frag: Graph, src: Node | str, q_batch: tuple, src_batch: tuple, target_last_dims: tuple, *, name: str) -> Node | str:
@@ -117,67 +110,30 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
             output=Tensor(f"{name}_masked", scores_shape, F32),
         )
 
-    # Coordinate masks — each a single-predicate IndexMapOp Select (0 keep / -1e9 fill) added to the
-    # scores, one per structural condition. They ride the graph as STRUCTURE (the lowering derives
-    # its stream bounds from the predicates); a stamped SDPA carries them alongside an explicit
-    # bias (the bias may mask more, e.g. padding — the coordinate region is a superset).
-    def _coord_mask(keep_select, suffix: str):
-        nonlocal scaled_id
-        zero_id = frag.add_node(
-            op=ConstantOp(name=f"{name}_mask_zero{suffix}", value=0.0),
-            inputs=[],
-            output=Tensor(f"{name}_mask_zero{suffix}", (1,), dtype),
-        )
-        mask_fill_id = frag.add_node(
-            op=ConstantOp(name=f"{name}_mask_fill{suffix}", value=-1e9),
-            inputs=[],
-            output=Tensor(f"{name}_mask_fill{suffix}", (1,), dtype),
-        )
-        mask_op = IndexMapOp(
-            out_shape=scores_shape,
-            sources=(
-                IndexSource(input_idx=0, coord_map=(Literal(0, "int"),), select=keep_select),
-                IndexSource(input_idx=1, coord_map=(Literal(0, "int"),), select=_negate(keep_select)),
-            ),
-        )
-        mask_id = frag.add_node(
-            op=mask_op,
-            inputs=[zero_id, mask_fill_id],
-            output=Tensor(f"{name}{suffix}mask", scores_shape, dtype),
-        )
-        scaled_id = frag.add_node(
-            op=ElementwiseOp(op="add"),
-            inputs=[scaled_id, mask_id],
-            output=Tensor(f"{name}_masked{suffix}", scores_shape, F32),
-        )
+    # The keys a query folds, as the range of the key axis over the query's row: causal attention folds the keys
+    # at or before the row, a sliding window the last ``window`` of them. The softmax's two reductions and the
+    # product with V walk that range, so a key outside it is no part of the row's distribution. A stamped SDPA
+    # states the range beside an explicit bias (the bias may mask more, e.g. padding).
+    window = root.op.sliding_window
+
+    def keys(row):
+        """The range of the key axis for the query at ``row``, or ``None`` when every key is folded."""
+        start, end = Literal(0, "int"), kv_len.expression if not kv_len.is_static else Literal(kv_len.as_static(), "int")
+        if root.op.is_causal:
+            # A query past the last key (more queries than keys) still ends at the last key.
+            end = row + Literal(1, "int") if seq_len == kv_len else apply("minimum", row + Literal(1, "int"), end)
+        # A window no shorter than a static sequence leaves every key in.
+        if window is not None and not (seq_len.is_static and window >= seq_len.as_static()):
+            start = apply("maximum", start, row - Literal(window - 1, "int"))
+        return (start, end) if root.op.is_causal or start != Literal(0, "int") else None
 
     ndim_scores = len(scores_shape)
-    i_var = placeholder(ndim_scores - 2)
-    j_var = placeholder(ndim_scores - 1)
-    window = root.op.sliding_window
-    # Causal mask: add -1e9 where key_pos > query_pos. torch's API forbids is_causal alongside an
-    # explicit mask, so both appear only on a stamped SDPA — there the coord mask is bit-neutral
-    # (the bias already holds -inf above the diagonal) and drives the lowering's stream end.
-    if root.op.is_causal:
-        _coord_mask(BinaryExpr("<=", j_var, i_var), "_c")
-    # Sliding-window band: add -1e9 where key_pos ≤ query_pos − window (keep kv > m − W). The
-    # stamped band is synthesized even alongside an explicit bias — bit-neutral there (the bias
-    # already holds -inf on that region) and it is what the lowering skips key blocks off.
-    # A STATICALLY VACUOUS band (static seq, W ≥ S: every m − W < 0, so the keep predicate holds
-    # everywhere) is dropped instead of emitted: its Select's predicate constant-folds and the
-    # +0 mask term hoists out of the reduce loops, where the flash recognizer's mask-chain walk
-    # (``_flash._classify_rowmax``) can no longer resolve it — the fuse then silently degrades to
-    # cut and the softmax·P@V falls to the unstructured sequential lowering (the layer-0
-    # ``seq 512 < window 1024`` gemma trace deployed a grid-1 kernel that "hangs").
-    if window is not None and not (seq_len.is_static and window >= seq_len.as_static()):
-        _coord_mask(BinaryExpr(">", j_var, BinaryExpr("-", i_var, Literal(window, "int"))), "_b")
-
-    softmax = softmax_decompose(frag, scaled_id, -1, name=f"{name}_softmax")
+    softmax = softmax_decompose(frag, scaled_id, -1, name=f"{name}_softmax", range=keys(placeholder(ndim_scores - 2)))
 
     # Softmax @ V (with GQA on V).
     v_last = v_shape[-2:] if len(v_shape) >= 2 else v_shape
     v_eff = _maybe_gqa(frag, inp_v, q_batch, v_batch, v_last, name=f"{name}_v_gqa")
-    sv = matmul_decompose(frag, softmax, v_eff, name=name, dtype=dtype)
+    sv = matmul_decompose(frag, softmax, v_eff, name=name, dtype=dtype, range=keys)
 
     frag.outputs = [sv.id]
     return frag

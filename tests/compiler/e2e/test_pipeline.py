@@ -11,7 +11,8 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import Accum, LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-from tests.compiler.helpers import matmul_graph, requires_cuda
+from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import F32_PRODUCTS, matmul_graph, requires_cuda
 
 
 def _compile(graph: Graph) -> Graph:
@@ -78,7 +79,8 @@ def test_matmul_gpu():
     import random
 
     random.seed(0)
-    compiled = CudaBackend().compile(matmul_graph(3, 4, 5))
+    with pinned_knobs(F32_PRODUCTS):
+        compiled = CudaBackend().compile(matmul_graph(3, 4, 5))
     a_data = [random.random() for _ in range(12)]
     b_data = [random.random() for _ in range(20)]
     expected = []

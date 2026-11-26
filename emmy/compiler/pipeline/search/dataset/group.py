@@ -118,27 +118,15 @@ class MeasuredGroup(Group):
 
     The counterpart of :class:`GoldenGroup`: there the labels mark which rows are the answer, here they say how
     fast each row ran. What the two kinds have in common is all the base needs, which is why a ranking metric
-    takes the base and this class adds only the one fact the base has nowhere to put.
-
-    :attr:`h_opt` is the compile regime every row in the pool was measured under. It is part of the grouping key
-    (:func:`measured_groups`) rather than a description of it: ``-O1`` and ``-O3`` reorder the same candidates
-    often enough that a pool spanning both would measure neither, so the regime is what makes these rows
-    comparable at all. A report reads it as an axis, and it is a FIELD rather than a lookup into the packed
-    ``H_opt`` column for a mechanical reason: :meth:`Group.matrix` memoizes exactly one projection, so asking
-    for the single-column one right before a model asks for its own would evict and rebuild the model's
-    projection for every group — two full strided copies each, on the path whose measurements made that cache
-    exist in the first place."""
+    takes the base and this class adds only the one fact the base has nowhere to put."""
 
     # One benched latency in MICROSECONDS per row, lower = faster. Lives here rather than on the base because
     # nothing generic reads it: the metrics take plain sequences and never see a group, so a label on the base
     # would be a column with no consumer and two mutually exclusive meanings.
     latency_us: np.ndarray = field(kw_only=True, repr=False)
-    h_opt: float = field(kw_only=True)
 
     @classmethod
-    def from_measured(
-        cls, key: str, gpu: str, op_sig: str, h_opt: float, latency_us: Sequence[float], feats: list[dict[str, float]]
-    ) -> MeasuredGroup:
+    def from_measured(cls, key: str, gpu: str, op_sig: str, latency_us: Sequence[float], feats: list[dict[str, float]]) -> MeasuredGroup:
         """A pool where every row was benched, labelled with its own measured µs.
 
         ``op_sig`` serves as both ``name`` and ``shape`` — a measured pool IS one op, so there is no second
@@ -159,7 +147,6 @@ class MeasuredGroup(Group):
             matrix,
             len(matrix),
             latency_us=np.asarray(latency_us, dtype=float),
-            h_opt=h_opt,
         )
 
 
@@ -180,6 +167,12 @@ class GoldenGroup(Group):
     # single-golden functions exactly. Stored as the indices themselves: the metrics take indices, so a
     # per-row marker column would only be an encoding to decode back on every read.
     golden_ids: tuple[int, ...] = field(kw_only=True)
+    # The labeled negatives: rows measured more than ``ranking.POSITIVE_WITHIN`` slower than the pool's fastest
+    # verified row — a verified row another one beats, or a candidate from the card's candidate file. Never a positive.
+    negative_ids: tuple[int, ...] = field(default=(), kw_only=True)
+    # Every row with a measurement: the positives, the negatives and the candidates measured between them (or faster
+    # than the golden: a stale golden). The trainer's uniform draw takes none of them as an unlabeled negative.
+    measured_ids: tuple[int, ...] = field(default=(), kw_only=True)
     # The golden pools this group was built from — one, or several that packed identically and folded — each with
     # its kernel's definition and its verified rows, so a dataset carries what the deploy check re-lowers.
     pools: tuple[GoldenPool, ...] = field(default=(), kw_only=True)
@@ -214,10 +207,13 @@ class GoldenGroup(Group):
         goldens: int | Sequence[int],
         total: int | None = None,
         pools: Sequence[GoldenPool] = (),
+        negatives: Sequence[int] = (),
+        measured: Sequence[int] = (),
     ) -> GoldenGroup:
         """The same over an already-packed pool — the entry point for a builder that had to pack before it
         could know which goldens landed in it, which is every builder that deduplicates pools. ``goldens`` is
-        one row index or several, in any order, with duplicates; what is stored is the sorted set.
+        one row index or several, in any order, with duplicates; what is stored is the sorted set, and so for
+        ``negatives`` (less any positive: two folded pools can disagree about one row) and ``measured``.
 
         ``tier`` must agree with the routing stamp the rows carry, and disagreeing is a hard error. The two
         reach here by different routes — the stamp through the featurizer, the tier from the source record's
@@ -244,5 +240,7 @@ class GoldenGroup(Group):
             matrix,
             len(matrix) if total is None else total,
             golden_ids=ids,
+            negative_ids=tuple(sorted({int(i) for i in negatives} - set(ids))),
+            measured_ids=tuple(sorted({int(i) for i in measured})),
             pools=tuple(pools),
         )

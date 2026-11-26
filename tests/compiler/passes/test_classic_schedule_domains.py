@@ -11,7 +11,7 @@ from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import CastExpression, Var
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work
 from emmy.compiler.ir.schedule import schedule as advance_schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
@@ -24,12 +24,11 @@ from emmy.compiler.ir.schedule.classic import (
 )
 from emmy.compiler.ir.schedule.classic import refusals as classic
 from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works, packed_works
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Loop, parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
-from tests.compiler.helpers import enumerate_classic_reference, requires_cuda
+from tests.compiler.helpers import compile_with_kernels, enumerate_classic_reference, requires_cuda, statements
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
@@ -49,7 +48,7 @@ def _enumerate_context(context: ScheduleContext):
 
 def _row(tile, pins) -> dict[str, str]:
     """Production's pin row: a kernel that consumed a split reads a REDUCE pin without its g<n> half."""
-    consumed = carries_partition(tile) or tile.split_consumed
+    consumed = tile.split_taken
     row = {}
     for family, pairs in (pins or {}).items():
         for key, value in pairs:
@@ -82,19 +81,28 @@ def _reference(tile, target, *, pins=None):
 
 def _schedule_leaves(tile, name, target):
     """Expand the lazy traversal while retaining its typed schedule leaves."""
-    return tuple(iter_leaves(classic_forks(tile, name, {}, target)))
+    return tuple(iter_leaves(classic_forks(tile, {}, target)))
 
 
 def _pointwise() -> TileOp:
     """``y[n] = x[n] + x[n]`` — one projection site and no reduce axis: the read stays a statement of
     the cell, as the lift leaves it for a root nothing reduces over."""
     n = Axis("n", 8)
-    root = projection((), (Load(name="x", input="x", index=(Var("n"),)), Assign("y", "add", ("x", "x"))), ("y",))
+    root = projection(
+        (),
+        parse_body(
+            """
+            x = load x[n]
+            y = add(x, x)
+            """
+        ),
+        ("y",),
+    )
     return TileOp(op=root, place=Placement(free=(n,)), axes=(n,))
 
 
 def _sweep_tile(*sweeps: tuple[Axis, ...]):
-    specs = tuple(OutputSpec(Write(output=f"out{i}", index=(), value=f"v{i}"), sweep=sweep) for i, sweep in enumerate(sweeps))
+    specs = tuple(OutputSpec(parse_body(f"out{i}[] = v{i}")[0], sweep=sweep) for i, sweep in enumerate(sweeps))
     return SimpleNamespace(family_sites={"TILE": (), "REDUCE": (0,)}, output_specs=specs)
 
 
@@ -122,16 +130,21 @@ def test_a_node_owned_inventory_suppresses_sweep_worker_widths() -> None:
 
 def _row_sum(k: Axis, n: Axis) -> TileOp:
     """``acc[n] = Σ_k x[k]`` — one reduction site over the kernel's ``k``."""
-    root = fold_from_loop(
-        Loop(axis=k, body=Body((Load(name="xv", input="x", index=(Var("k"),)), Accum(name="acc", value="xv", op="add", axes=("k",)))))
+    (loop,) = parse_body(
+        f"""
+        for {k.name} in 0..{k.extent.expression}:
+            xv = load x[k]
+            acc <- add(acc, xv) over k
+        """
     )
+    root = fold_from_loop(loop)
     return TileOp(op=root, place=Placement(free=(n,)), axes=(n, k))
 
 
 def _matmul(m: Axis, n: Axis, k: Axis, a=None, **fields) -> TileOp:
     """``acc[m, n] = Σ_k a[m, k] · b[k, n]`` — one contraction site; ``a`` may be a computed edge."""
-    a = a if a is not None else Load(name="a_e", input="a", index=(Var("m"), Var("k")))
-    root = contraction(k, a, (Load(name="b_e", input="b", index=(Var("k"), Var("n"))), "acc"))
+    a = a if a is not None else slab("a_e", "a", "m", "k")
+    root = contraction(k, a, (slab("b_e", "b", "k", "n"), "acc"))
     return TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k), **fields)
 
 
@@ -151,11 +164,11 @@ def test_eight_output_lanes_are_offered_on_volta_and_lower_with_their_own_grid()
         problem = ClassicProblem(tile, target, row=row, validate_pins=True)
         choices = list(advance_schedule(ClassicScheduleContext(tile, target, problem)))
         assert len(choices) == 1, (spec, choices)
-        realized = materialize_classic(tile, name="matmul", knobs=row, target=target, schedule=choices[0])
+        realized = materialize_classic(tile, knobs=row, target=target, schedule=choices[0])
         bound = factorize(realized, root=None)
         assert tuple(axis.extent.as_static() for axis in bound.axes[1:]) == expected
         (tree,) = [stmt for stmt in bound.body.iter() if isinstance(stmt, TreeHalve)]
-        assert tree.inner == ("n_ln", expected[-1])
+        assert tree.inner == (Var("n_ln"), expected[-1])
 
     tile = _matmul(Axis("m", 1), Axis("n", 1024), Axis("k", 2048))
     for cap in ((8, 0), (12, 0)):
@@ -165,7 +178,7 @@ def test_eight_output_lanes_are_offered_on_volta_and_lower_with_their_own_grid()
 
 def _deferred_softmax_merge(count: int) -> TileOp:
     """Finished workspace states, including a ragged partition count, with one rounded output."""
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.pure import Fold, Lambda
     from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 
@@ -174,19 +187,19 @@ def _deferred_softmax_merge(count: int) -> TileOp:
     values = ("pm", "pd", "po")
     fold = Fold(
         operands=tuple(slab(value, "x", Literal(i, "int"), "k", "n") for i, value in enumerate(values)),
-        lift=Lambda(("k", *values), Body(), values),
+        lift=Lambda(("k", *values), parse_body(""), values),
         init=(ElementwiseImpl("maximum").identity, 0.0, 0.0),
         base=Lambda.componentwise(SOFTMAX.base, ("m", "d", "o")),
         twist=Twist(SOFTMAX, ()),
     )
-    root = projection((fold,), (Assign("out", "divide", ("o", "d")),), ("out",))
+    root = projection((fold,), parse_body("out = divide(o, d)"), ("out",))
     return TileOp(
         op=root,
         place=Placement(free=(n,)),
         axes=(n, k),
         inputs={"x": Tensor("x", (3, count, 8), F32)},
         outputs={"y": Tensor("y", (8,), F16)},
-        output_specs=(OutputSpec(Write("y", (Var("n"),), "out")),),
+        output_specs=(OutputSpec(parse_body("y[n] = out")[0]),),
     )
 
 
@@ -221,7 +234,6 @@ def _partial_states():
 def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, work):
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.ir.tile.ops import merges_partition
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     tile = _deferred_softmax_merge(count)
@@ -229,11 +241,14 @@ def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, 
     graph = _deferred_merge_graph(tile)
     row = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0"}
     with pinned_knobs(row):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)), db=None)
+        compiled, kernels = compile_with_kernels(graph, ctx=Context.from_target((8, 0)), db=None)
     (kernel,) = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    (body,) = kernels.values()
     assert kernel.knobs["REDUCE"] == reduce and kernel.knobs["WORK"] == work
-    assert kernel.kernel_source.count("__float2half(") == 1
-    assert "const float*" in kernel.kernel_source
+    # The states are read and merged in f32; the one conversion is the result's, to the f16 output.
+    conversions = [stmt for stmt in statements(body, Assign) if isinstance(stmt.value, CastExpression) and stmt.dtype == F16]
+    assert len(conversions) == 1
+    assert [tensor.dtype for tensor in body.inputs.values()] == [F32]
 
 
 @pytest.mark.parametrize("reduce", ["r2", "r4"])
@@ -250,11 +265,11 @@ def test_deferred_register_partials_preserve_empty_states_and_the_uneven_tail(re
     row = {"WORK": "", "REDUCE": reduce}
     problem = ClassicProblem(tile, target, row=row, validate_pins=True)
     (choice,) = advance_schedule(ClassicScheduleContext(tile, target, problem))
-    realized = materialize_classic(tile, name="merge", knobs=row, target=target, schedule=choice)
+    realized = materialize_classic(tile, knobs=row, target=target, schedule=choice)
     bound = factorize(realized, root=None)
     assert bound.axes == tile.place.free
     # This serial Kernel IR uses only the shared scalar statements. Execute its actual strided
-    # body through the host renderer; the CUDA source assertion above checks the storage conversion.
+    # body through the host renderer; the Kernel IR assertion above checks the storage conversion.
     kernel = KernelOp(body=Body((Loop(bound.axes[0], bound.body),)), inputs=tile.inputs, outputs=tile.outputs)
     states, expected = _partial_states()
     actual = execute_loop_op_cpp(kernel, {"x": states}, {"y": (8,)})
@@ -336,8 +351,17 @@ def test_a_swept_map_row_decodes_exactly_with_its_strip_bare() -> None:
     catalog spells it; folding the WORK into it made every such row equal no enumerated leaf,
     which failed the release audit of the Gemma 4 golden on four QK-norm pieces."""
     m, n = Axis("m", 8), Axis("n", 256)
-    root = projection((), (Load(name="x", input="x", index=(Var("m"), Var("n"))), Assign("y", "add", ("x", "x"))), ("y",))
-    spec = OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="y"), sweep=(n,))
+    root = projection(
+        (),
+        parse_body(
+            """
+            x = load x[m, n]
+            y = add(x, x)
+            """
+        ),
+        ("y",),
+    )
+    spec = OutputSpec(parse_body("out[m, n] = y")[0], sweep=(n,))
     tile = TileOp(op=root, place=Placement(free=(m,)), axes=(m, n), output_specs=(spec,))
     target = Context.from_target((12, 0))
     context = _plain(tile, target)
@@ -424,12 +448,7 @@ def test_overwide_reduction_is_in_the_domain_before_c_restricts_it(monkeypatch) 
 
 def test_multi_channel_contraction_domain_is_per_cell_direct_and_warp_staged() -> None:
     m, n, k = Axis("m", 16), Axis("n", 16), Axis("k", 16)
-    root = contraction(
-        k,
-        Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        (Load(name="b0_e", input="b0", index=(Var("k"), Var("n"))), "acc0"),
-        (Load(name="b1_e", input="b1", index=(Var("k"), Var("n"))), "acc1"),
-    )
+    root = contraction(k, slab("a_e", "a", "m", "k"), (slab("b0_e", "b0", "k", "n"), "acc0"), (slab("b1_e", "b1", "k", "n"), "acc1"))
     tile = TileOp(
         op=root,
         place=Placement(free=(m, n)),
@@ -512,11 +531,22 @@ def test_a_packed_gate_up_edge_offers_a_scalar_register_tile() -> None:
     fold like two B edges. The scalar register tier reads both channels per register column,
     sharing A while retaining each product's independent accumulator."""
     m, n, k = Axis("m", 16), Axis("n", 16), Axis("k", 16)
-    loads = (Load(name="gate", input="b0", index=(Var("k"), Var("n"))), Load(name="up", input="b1", index=(Var("k"), Var("n"))))
-    packed = projection((), loads, ("gate", "up"))
+    packed = projection(
+        (),
+        parse_body(
+            """
+            gate = load b0[k, n]
+            up = load b1[k, n]
+            """
+        ),
+        ("gate", "up"),
+    )
     a = slab("a_e", "a", "m", "k")
-    products = tuple(
-        Assign(name=f"{acc}__v", op=ElementwiseImpl("multiply"), args=("a_e", b)) for acc, b in (("acc0", "gate"), ("acc1", "up"))
+    products = parse_body(
+        """
+        acc0__v = multiply(a_e, gate)
+        acc1__v = multiply(a_e, up)
+        """
     )
     root = reduction(k, (a, packed), products, ("acc0", "acc1"))
     assert len(root.operands) == 2 and len(root.bilinear_channels()) == 2
@@ -692,12 +722,11 @@ def test_kernel_pin_without_work_keeps_the_matching_catalog_rows(monkeypatch, fa
         Axis("m", 64),
         Axis("n", 64),
         Axis("k", 64),
-        name="k_matmul__place_ab12",
         inputs={name: Tensor(name, (64, 64), "f16") for name in ("a", "b")},
         outputs={"out": Tensor("out", (64, 64), "f16")},
     )
-    monkeypatch.setenv(f"EMMY_{family}@place_ab12", value)
-    forks = classic_forks(tile, tile.name, {}, Context.from_target(target), kernel_set=True)
+    monkeypatch.setenv(f"EMMY_{family}@{tile.name}", value)
+    forks = classic_forks(tile, {}, Context.from_target(target), kernel_set=True)
     leaf = next(iter_leaves(forks), None)
     assert leaf is not None, "a partial kernel pin must find WORK in the catalog"
     assert leaf.row[family] == value
@@ -722,18 +751,16 @@ def test_a_cut_piece_keeps_its_catalog_when_published_pins_leave_it_no_row(monke
     while a kernel pin naming it still holds. A GEMM sweep's pins left two GDN pieces of a Qwen3.8 layer
     unscheduled this way on every row, and the recorded golden carried them as loops."""
     k = Axis("k", 64)
-    root = contraction(
-        k, Load(name="a_e", input="a", index=(Var("m"), Var("k"))), (Load(name="b_e", input="b", index=(Var("k"), Var("n"))), "acc")
-    )
+    root = contraction(k, slab("a_e", "a", "m", "k"), (slab("b_e", "b", "k", "n"), "acc"))
     tile = TileOp(op=root, place=Placement(free=(Axis("m", 64), Axis("n", 64))), axes=(Axis("m", 64), Axis("n", 64), k))
     target = Context.from_target((7, 0))
     monkeypatch.setenv("EMMY_STAGE", "d1/smem")
-    assert tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, published=True)))
+    assert tuple(iter_leaves(classic_forks(tile, {}, target, kernel_set=True, published=True)))
     with pytest.raises(ValueError, match="does not resolve"):  # a kernel of its own is held to the pin, loudly
-        tuple(iter_leaves(classic_forks(tile, "k", {}, target)))
+        tuple(iter_leaves(classic_forks(tile, {}, target)))
 
-    monkeypatch.setenv("EMMY_WORK@place_ab12", "t16x16")
-    leaves = tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, node="out__place_ab12_0")))
+    monkeypatch.setenv(f"EMMY_WORK@{tile.name}", "t16x16")
+    leaves = tuple(iter_leaves(classic_forks(tile, {}, target, kernel_set=True)))
     assert leaves and {leaf.schedule.kernel.work.spell() for leaf in leaves} == {"t16x16"}
 
 
@@ -778,6 +805,8 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
     )
     target = Context.from_target((12, 0))
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [Stage.parse("d1/smem-async")])
+    # The copy stage alone: the bf16 cell of a product of f32 operands stages through the compute fill instead.
+    monkeypatch.setenv("EMMY_F32_AS_BF16_MMA", "0")
     offers = _offers(tile, target)
     context = _plain(tile, target)
 
@@ -800,7 +829,13 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
     computed_a = projection(
-        (), (Load(name="score", input="scores", index=(Var("m"), Var("k"))), Assign(name="prob", op="exp", args=("score",)))
+        (),
+        parse_body(
+            """
+            score = load scores[m, k]
+            prob = exp(score)
+            """
+        ),
     )
     tile = _matmul(
         m,
@@ -847,7 +882,13 @@ def test_computed_f16_tma_needs_a_stored_slab_to_copy(monkeypatch) -> None:
 
     def exp_of(name: str, *index: str):
         return projection(
-            (), (Load(name=f"{name}_v", input=name, index=tuple(Var(i) for i in index)), Assign(f"{name}_e", "exp", (f"{name}_v",)))
+            (),
+            parse_body(
+                f"""
+                {name}_v = load {name}[{", ".join(index)}]
+                {name}_e = exp({name}_v)
+                """
+            ),
         )
 
     tile = TileOp(
@@ -873,8 +914,7 @@ def _two_root_projection(m: Axis, n: Axis, body, results: tuple[str, ...], outpu
     k0, k1 = Axis("k0", 132), Axis("k1", 132)
 
     def channel(k: Axis, a: str, b: str, acc: str):
-        a_edge = Load(name=f"{a}_e", input=a, index=(Var("m"), Var(k.name)))
-        return contraction(k, a_edge, (Load(name=f"{b}_e", input=b, index=(Var(k.name), Var("n"))), acc))
+        return contraction(k, slab(f"{a}_e", a, "m", k.name), (slab(f"{b}_e", b, k.name, "n"), acc))
 
     root = projection((channel(k0, "a0", "b0", "acc0"), channel(k1, "a1", "b1", "acc1")), body, results)
     shapes = {"a0": (128, 132), "b0": (132, 128), "a1": (128, 132), "b1": (132, 128)}
@@ -914,17 +954,16 @@ def _cooperative_root_sets(tile: TileOp, target, monkeypatch) -> set[tuple[int, 
 
 def test_shared_output_projection_refuses_fragment_atoms(monkeypatch) -> None:
     """One output reads both roots, so either fragment would have a serial reduction in its epilogue."""
-    from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import OutputSpec
 
     m, n = Axis("m", 128), Axis("n", 128)
     tile = _two_root_projection(
         m,
         n,
-        (Assign("v", "multiply", ("acc0", "acc1")),),
+        parse_body("v = multiply(acc0, acc1)"),
         ("v",),
         {"out": Tensor("out", (128, 128), "f16")},
-        (OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="v")),),
+        (OutputSpec(parse_body("out[m, n] = v")[0]),),
     )
     assert _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch) == {()}
 
@@ -932,17 +971,16 @@ def test_shared_output_projection_refuses_fragment_atoms(monkeypatch) -> None:
 def test_shared_output_projection_offers_at_most_one_cooperative_root(monkeypatch) -> None:
     """A cooperative reduction selects the same kernel root as an output tile, so a projection
     that does not partition by root may not offer cooperative plans for two roots at once."""
-    from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import OutputSpec
 
     m, n = Axis("m", 128), Axis("n", 128)
     tile = _two_root_projection(
         m,
         n,
-        (Assign("v", "multiply", ("acc0", "acc1")),),
+        parse_body("v = multiply(acc0, acc1)"),
         ("v",),
         {"out": Tensor("out", (128, 128), "f16")},
-        (OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="v")),),
+        (OutputSpec(parse_body("out[m, n] = v")[0]),),
     )
     roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
     assert _cooperative_root_sets(tile, Context.from_target((12, 0)), monkeypatch) == {(), (roots[0],), (roots[1],)}
@@ -951,20 +989,21 @@ def test_shared_output_projection_offers_at_most_one_cooperative_root(monkeypatc
 def test_partitioned_projection_still_offers_both_roots_output_tiled(monkeypatch) -> None:
     """Each output reads its own accumulator: the projection partitions by root, the binder binds
     both output-tiled roots into one kernel, and the offer keeps that row."""
-    from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import OutputSpec
 
     m, n = Axis("m", 128), Axis("n", 128)
     tile = _two_root_projection(
         m,
         n,
-        (Assign("v0", "copy", ("acc0",)), Assign("v1", "copy", ("acc1",))),
+        parse_body(
+            """
+            v0 = copy(acc0)
+            v1 = copy(acc1)
+            """
+        ),
         ("v0", "v1"),
         {"out0": Tensor("out0", (128, 128), "f16"), "out1": Tensor("out1", (128, 128), "f16")},
-        (
-            OutputSpec(Write(output="out0", index=(Var("m"), Var("n")), value="v0")),
-            OutputSpec(Write(output="out1", index=(Var("m"), Var("n")), value="v1")),
-        ),
+        tuple(OutputSpec(write) for write in parse_body("out0[m, n] = v0\nout1[m, n] = v1")),
     )
     roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
     assert roots in _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch)
@@ -976,26 +1015,17 @@ def test_fragment_domain_includes_the_reduction_in_a_sibling_projection():
     from tests.compiler.terms import reduction
 
     m, n, k, r = Axis("m", 32), Axis("n", 32), Axis("k", 64), Axis("r", 32)
-    matmul = contraction(
-        k,
-        Load(name="av", input="a", index=(Var("m"), Var("k"))),
-        (Load(name="bv", input="b", index=(Var("k"), Var("n"))), "acc"),
-    )
-    statistic = reduction(
-        r,
-        (Load(name="xv", input="x", index=(Var("m"), Var("r"))),),
-        (Assign("sum__v", "multiply", ("xv", "xv")),),
-        ("sum",),
-    )
-    scale = projection((statistic,), (Assign("scale", "rsqrt", ("sum",)),), ("scale",))
-    root = projection((matmul, scale), (Assign("y", "multiply", ("acc", "scale")),), ("y",))
+    matmul = contraction(k, slab("av", "a", "m", "k"), (slab("bv", "b", "k", "n"), "acc"))
+    statistic = reduction(r, (slab("xv", "x", "m", "r"),), parse_body("sum__v = multiply(xv, xv)"), ("sum",))
+    scale = projection((statistic,), parse_body("scale = rsqrt(sum)"), ("scale",))
+    root = projection((matmul, scale), parse_body("y = multiply(acc, scale)"), ("y",))
     tile = TileOp(
         op=root,
         place=Placement(free=(m, n)),
         axes=(m, n, k, r),
         inputs={name: Tensor(name, shape, "f16") for name, shape in {"a": (32, 64), "b": (64, 32), "x": (32, 32)}.items()},
         outputs={"out": Tensor("out", (32, 32), "f16")},
-        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="y")),),
+        output_specs=(OutputSpec(parse_body("out[m, n] = y")[0]),),
     )
     assert not classic._warp_atoms(tile, Context.from_target((8, 9)), matmul)
 
@@ -1004,20 +1034,31 @@ def test_fragment_domain_includes_the_reduction_in_a_sibling_projection():
 def test_grouped_matvec_does_not_tile_two_axes_of_one_operand(heads):
     """A vector times per-head weights tiles a unit row and channels, never heads and channels."""
     head, channel, k = Axis("head", heads), Axis("channel", 128), Axis("k", 64)
-    root = contraction(
-        k,
-        Load(name="xv", input="x", index=(Var("k"),)),
-        (Load(name="wv", input="w", index=(Var("head"), Var("channel"), Var("k"))), "acc"),
-    )
+    root = contraction(k, slab("xv", "x", "k"), (slab("wv", "w", "head", "channel", "k"), "acc"))
     tile = TileOp(
         op=root,
         place=Placement(free=(head, channel)),
         axes=(head, channel, k),
         inputs={"x": Tensor("x", (64,), "f16"), "w": Tensor("w", (heads, 128, 64), "f16")},
         outputs={"out": Tensor("out", (heads, 128), "f32")},
-        output_specs=(OutputSpec(Write(output="out", index=(Var("head"), Var("channel")), value="acc")),),
+        output_specs=(OutputSpec(parse_body("out[head, channel] = acc")[0]),),
     )
     assert tile.contractions and tile.family_sites["TILE"]
     row, column = tile.grid_sched._mn_for(tile.op)
     assert row.extent.as_static() == 1 and column.name == "channel"
     assert heads == 1 or row.name != "head"
+
+
+def test_two_output_tiled_roots_merge_into_one_grid_binding() -> None:
+    """The binder merges two roots bound on one grid into a single kernel Tile holding both bodies."""
+    from importlib import import_module
+
+    from emmy.compiler.ir.kernel import Tile as KernelTile
+
+    factor = import_module("emmy.compiler.pipeline.passes.lowering.kernel._factor")
+    m = Axis("m", 8)
+    merged = factor._merge_root_tiles(
+        (KernelTile(axes=(m,), body=parse_body("v0 = copy(x)")), KernelTile(axes=(m,), body=parse_body("v1 = copy(y)")))
+    )
+    assert merged.axes == (m,)
+    assert [stmt.defines() for stmt in merged.body] == [("v0",), ("v1",)]

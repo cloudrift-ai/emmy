@@ -2,7 +2,7 @@
 
 The release pipeline for **one model on one GPU**, served by `EmmyGenModel`, with the compiled CUDA kernels
 (**cubins**), the **HF model snapshot**, and the **execution-plan pack** (`emmy/compiler/backend/pack.py`) baked in.
-Cold-start pays zero `nvcc` compiles, zero HF downloads, and — on a pack hit — none of the compiler frontend either
+Cold-start pays zero `ptxas` runs, zero HF downloads, and — on a pack hit — none of the compiler frontend either
 (no trace / pass pipeline / fork resolution / codegen; boot collapses from ~25 min to ~weight-load time), so
 `docker run --gpus all --ipc=host -p 8000:8000
 cloudriftai/vllm-emmy-<slug>:<runtime-version>-<source-sha>` serves with no `HF_TOKEN` and no network dependency on
@@ -16,7 +16,8 @@ deterministic, tokenless boot.
 cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>
 ```
 
-The supported runtime families are `vllm-emmy` and `1cat-vllm`. The tag records the runtime release and its source
+The supported runtime families are `vllm-emmy` and `1cat-vllm`, beside the native lane's `emmy-native`
+([emmy-native](../emmy-native/ARCHITECTURE.md)). The tag records the runtime release and its source
 revision; the target GPU, zero-recompile result, cache manifests, serving shape, and checkpoint revision belong in
 labels and qualification evidence, not mutable or hardware-specific tag suffixes. The model slug names the pinned
 config as well as the image repository:
@@ -62,25 +63,23 @@ and target GPU, and `make serve-models` lists the models that already have a pin
 
 ## Why a "warm" step exists: the cache-key parity contract
 
-**Why not just cross-compile?** `nvcc` targets any arch from any machine, but the cache is **content-addressed, not
-searched**: at boot the server generates each kernel's source,
-computes `sha1(source, name, arch, toolkit_tag, flags)` (see `emmy/compiler/backend/cuda/nvcc.py`), and looks up
-that exact file. A cubin built from source that differs by one character has a different hash and is simply never
+**Why not just cross-compile?** `ptxas` assembles for any arch on any machine, but the cache is **content-addressed,
+not searched**: at boot the server generates each kernel's PTX, computes `sha1(ptx, arch, ptxas_version)` (see
+`emmy/compiler/backend/cuda/ptxas.py`), and looks up that exact file. A cubin built from PTX that differs by one
+character has a different hash and is simply never
 found — locally-produced cubins aren't "slightly worse", they're invisible. So the image doesn't need "kernels that
 run on the target card"; it needs **the exact kernels the released server will ask for**, and two of the hash inputs can't be
 reproduced off the card:
 
-- the kernel **source** — the compiler picks each kernel's schedule partly from the **live-probed** GPU features; a
-  memorized-spec cross-compile can drift on any feature that steers a pick, changing the source text and the hash;
+- the kernel's **PTX** — the compiler picks each kernel's schedule partly from the **live-probed** GPU features; a
+  memorized-spec cross-compile can drift on any feature that steers a pick, changing the text and the hash;
 - the kernel **set** — the programs are enumerated by an actual `emmy serve --generate` boot (48 layers × symbolic +
   decode twins at the pinned config), which must load the ~24 GB model — a serving run, not a compile.
 
 Hence the warm: one real serving run on the target card, inside the image. The full contract it satisfies:
 
-- `source` — live-probed target-card featurization + the real program enumeration (above).
-- `toolkit_tag` is the compiling nvcc — the warm must run **inside the image**, not on the host toolchain.
-- `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set to a non-deployable opt level (it would
-  poison the key).
+- `ptx` — live-probed target-card featurization + the real program enumeration (above).
+- `ptxas_version` is the assembling ptxas — the warm must run **inside the image**, not on the host toolchain.
 - The serving config (model / revision / dtype / max-model-len / max-num-batched-tokens / decode bucket / cudagraph
   capture ladder / any pinned flag that moves the plugin's path, such as `--kv-cache-dtype`) changes **which
   programs exist and their shapes** — warm and release must use identical values. The revision is the one whose
@@ -148,10 +147,11 @@ the same cubins and the standard-lane pack never exists.
   `SERVE_GPU_MEM_UTIL`, `SERVE_DECODE_BUCKET`, `SERVE_GPU`); the rest are per-checkpoint opt-ins whose defaults
   reproduce a dense,
   unquantized, default-branch release exactly — `SERVE_WARM_SHAPES`, `SERVE_REVISION`, `SERVE_QUANT`,
-  `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
-  (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the qualified vLLM runner
-  opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`, `SERVE_ENV` (word-split
-  `NAME=value` pairs `serve.sh` exports before the exec: a fork's own switches, `EMMY_STRICT_EVIDENCE=1`;
+  `SERVE_ARCHITECTURE`, `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
+  (`SERVE_EMBED_GPU`, `SERVE_VISION_GPU`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the
+  qualified vLLM runner opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`,
+  `SERVE_ENV` (word-split `NAME=value` pairs `serve.sh` exports before the exec: a fork's own switches,
+  `EMMY_STRICT_EVIDENCE=1`;
   `EMMY_COLD_CACHE=1` among them declares the cache regime every lane compiles in and records its rows under), and
   `SERVE_BASE_IMAGE` / `SERVE_RUNTIME_VERSION` for a model served on a runtime other than stock vLLM (DeepSeek V4 on
   the 1Cat Volta fork, by digest): the plain image then builds FROM it under a model-scoped `-base` tag, and the
@@ -168,9 +168,11 @@ the same cubins and the standard-lane pack never exists.
   compilation-config (its fused `rotary_embedding` CustomOp is now redundant), `--no-enable-prefix-caching`, + the
   `SERVE_*` config; keep in sync with `_gen_graph_args` / `build_serve_cmd` in `emmy/commands/serve.py`). What the
   CLI decides by probing the checkpoint, this script reads from the config, because the config is what the bake
-  seals: `SERVE_QUANT=exl3` adds `"quantization_config": null` beside the architectures override (vLLM has no EXL3
-  quantization method and refuses the boot at config parsing, though nothing in the engine needs one — emmy owns
-  every coded weight), and `SERVE_CAPTURE_SIZES` replaces the power-of-two capture ladder, which an **MoE model must
+  seals: `SERVE_QUANT` names a coded scheme emmy's loader owns and adds `"quantization_config": null` beside the
+  architectures override (vLLM has no EXL3 quantization method and refuses the boot at config parsing, or would stand
+  up a quantizer of its own, though nothing in the engine needs one — emmy owns every coded weight),
+  `SERVE_ARCHITECTURE=EmmyGenHybridModel` routes a checkpoint with Gated DeltaNet layers to the class that declares
+  their per-request state, and `SERVE_CAPTURE_SIZES` replaces the power-of-two capture ladder, which an **MoE model must
   cap**: at `[1]` on a rank holding whole experts, at the decode bucket where tensor parallelism gives each rank a
   slice of every expert. Those steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
   while wider decode steps keep the routed dispatch, which host-syncs and stays eager. `SERVE_V2_MODEL_RUNNER=1`

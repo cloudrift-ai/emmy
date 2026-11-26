@@ -23,7 +23,7 @@ Every context prefix and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non
 containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `random_step(rng)` is
 the third operation, one option `extensions` would yield, already composed, or `None`: the step of a random descent.
 It costs what it touches: the default materializes the frontier and extends one pick, which is right only where the
-frontier is small by construction (the cut pass's structural choices, the register tier's one kernel choice), and a
+frontier is small by construction (the cut pass's structural choices), and a
 family whose frontier is a product of factors draws factor by factor, deriving only what the draw reaches and never a
 site's product.
 `extend` is also the validation boundary for a complete classic schedule supplied directly by a pinned golden, even
@@ -92,7 +92,9 @@ The classic family is the `classic/` package, one role per module: `schedule` (t
 spellings and keys), `refusals` (every per-choice legality rule), `sites` (the source),
 `context` (the join), `codec` (the wire boundary) and `materialize` (the lowering boundary). Imports flow in that
 order and nothing in the package imports the tile package at module level, which is what lets `ir/tile/ops` read
-the choice types and key spellings through the package.
+the choice types and key spellings through the package. [`classic/ARCHITECTURE.md`](classic/ARCHITECTURE.md) holds
+this family against the best known hand-written kernels: which a row reproduces, which it beats, and where the space
+has a gap.
 
 `ClassicProblem` (`classic/sites`) is `p + t` and the row: the unscheduled TileOp, its target, and the knob row
 whose values its sites offer where it names them. `ClassicScheduleContext` is the immutable `c + p + t` prefix over
@@ -145,14 +147,21 @@ stores mask padded rows. The row count does not change a copy's K-inner stride o
 row extent because its box transport does not use that clamp. Runtime row counts must be positive. With a static
 unit N, the shared-memory fill clamps every padded row to the sole input row, and the output stores mask the padded
 columns. This masked N is legal for cp.async: padding never changes a K-contiguous copy's address or alignment.
-Other masked N extents and masked TMA boxes remain unsupported. K and the code/scale spans must still satisfy the
-stage's divisibility and 16-byte copy alignment rules; the ring may finish after any whole K tile, including a partial
-cycle of its depth.
+Other masked N extents and masked TMA boxes remain unsupported for this stage, though an ordinary warp tile's TMA
+and cp.async stages take a masked N when B is N-major (its box rows past N read as zeros, its copied rows clamp).
+K and the code/scale spans must still satisfy the stage's divisibility and 16-byte copy alignment rules; the ring
+may finish after any whole K tile, including a partial cycle of its depth.
 
 Classic domain projection, move catalogs, packed-operand readings, staging resolution, materialization, and
 compatibility all live in `ir/schedule`. The sites are the only source of choices; pipeline search neither defines
 nor filters them. `ir/schedule` may import other IR modules but never the pipeline layer. The pipeline retains only
 knob/pin reads (folded into the row), pool identity, sampling, and the generic lazy-Fork adapter.
+
+A 1-byte scalar A (either FP8 format, `u8`, `bool`) paired with a 16-bit B rides the shared-memory compute fill. The
+fill stages its bytes as they are stored, and the `mma.sync` fragment loads convert each one to the atom's 16-bit type,
+as they already do for a 1-byte B. A `wgmma` descriptor and Volta's paired layouts would read that slab as 16-bit
+values, so those atoms refuse such an A. Two 1-byte operands of one dtype keep their byte-atom choices. The new
+schedules sit beside the scalar ones, and evidence chooses among them.
 
 Fragment epilogue legality checks lowered work outside roots the binder can compute together, including boundary stores.
 A grid's free axes are already bound during that check, including a unit row that only an output store reads.
@@ -165,7 +174,9 @@ nodes the binder builds the kernel around — the roots it peels from the root p
 contraction's root, every one of them for a multi-output kernel, else the first operand) and the folds those roots'
 cones close over (`ops.chain_members`, which the binder's chain arm strides around one shared lane axis). A reduce
 NESTED under one of those lowers serially inside its reader, so it carries the serial fold only, as does a node whose
-reduce reads a boundary store's output sweep. An observed root without a provider chain also offers cooperative
+reduce reads a boundary store's output sweep. The same sweep rules out an output tile on a root: sibling roots
+whose stores ride sweeps of different widths keep both sweeps serial, so a root's own output coordinate is no grid
+axis and no register cell can own it. An observed root without a provider chain also offers cooperative
 widths up to one warp, with no register partials or transposition: the materializer retains every inclusive prefix.
 Whether a fill takes a root's cone over is the
 SCHEDULE's answer and not the term's, so a contraction a tier could fold whole still offers its own row statistic the
@@ -188,13 +199,21 @@ untiled arm, so the context refuses a partitioned chain member beside an output-
 the cone per cell, statistic included, and the member's partition would realize as nothing — an unreproducible pin
 rather than a refusal. And the binder lowers a `TILE` below a kernel root (a node the binder builds the kernel
 around, `ops.kernel_roots`) only inside a root it output-tiles, that is, lowers through the tier that tiles its
-`(m, n)` output — and even there only where that tier folds the nested site (the chunked carrier's score). Any other
-root lowers its subtree serially, which would drop the tile, so the context refuses a tiled site below a root that is
-not output-tiled (`nested_tiles`), checked at whichever site of the pair is decided second. The NVFP4 scale — the
-maximum over each 16-element NVFP4 scale group of the gate/up contraction's output — used to be offered such rows,
-the prior ranked one tiled variant after another first, and the greedy compile spent a whole resolve (one pipeline
-pass over the whole program under the current blocklist) on each refusal at materialize until its retry budget ran
-out.
+`(m, n)` output — and even there only where that tier folds the nested site: the chunked carrier's score, under the
+tensor-core tier. Any other root lowers its subtree serially, and an output-tiled one evaluates any other nested site
+per cell in its fill; either would drop the tile. So the context refuses a tiled site below a root unless the root
+folds it (`nested_tiles` records which pairs it does) and takes a tensor-core tile, checked at whichever site of the
+pair is decided second. The NVFP4 scale — the maximum over each 16-element NVFP4 scale group of the gate/up
+contraction's output — used to be offered such rows, the prior ranked one tiled variant after another first, and the
+greedy compile spent a whole resolve (one pipeline pass over the whole program under the current blocklist) on each
+refusal at materialize until its retry budget ran out. The rows that tiled a contraction nested under an output-tiled
+root were accepted and built without the tile, so their measurements belonged to another schedule (the Qwen3.8 NVFP4
+gdn16 recurrence piece stamped two nested tiles and a TMA stage, and ran serial per-cell loops).
+
+A site below a kernel root takes no `STAGE` either (`nested_sites`): the binder reads a transport only at the root it
+builds around, and the chunk tier stages its score's operands through the carrier's own. A score's stage used to be
+offered, and every value built the same kernel. That also exempts a warp-group score from the rule that a `wgmma`
+tile needs a shared-memory stage: its descriptors read the carrier's slabs.
 
 A CHUNKED carrier's seam is stricter than an ordinary consumer's. The ordinary need tolerates an untiled producer;
 this one is built on the fragment, since the chunk's score IS the producer's tile — so the producer must be
@@ -202,14 +221,18 @@ warp-tiled at the same atom, one warp column wide, with the chunk as its N tile 
 (`_fragment_agreements`). That equation is FlashAttention's own shape, and stating it here is what keeps the tier
 from being offered a row its emission would have to ignore. The chunk is the consumer `TILE` atom's K width, not a
 staging slab, and must contain a complete logical C fragment so its score can repack into the paired contraction's A
-operand. Coordinate masks remain eligible only when their complementary branches form an additive cell mask.
+operand. Coordinate masks remain eligible only when their complementary branches form an additive cell mask, whose
+predicate reads the score's coordinates and uniform values (a position loaded from memory) and nothing else.
 
 The tier also demands the score's own contraction extent be STATIC: the chunk covers it in one pass and holds a query
 fragment per atom-K step, so a symbolic extent there has no step count to hold them at. And the ATOM it names is the
 EXPECTATION's — the score keeps that atom's f32 sibling (`wide_accumulate`), so the reduced-accumulate cell can run
 the expectation's mma chain at the consumer-die full rate without moving the softmax's running max and denominator off
 f32; the chunk partial promotes into the f32 carrier once per chunk, which is the promote cadence. The streamed
-value selects the multiplicand dtype; the score's wider accumulator does not select a different atom family. How many
+value selects the multiplicand dtype — except a 1-byte one, which takes the 16-bit families, since the weight
+repacks from f32 registers into a 16-bit fragment whatever the value stores and the value converts per element in
+its fragment load: gmem-direct, or on cp.async from a byte slab (`chunk_slab_dtype`); the score's wider accumulator
+does not select a different atom family. How many
 register columns of those partials are live at once is one rule the offer and the emitter both ask
 (`chunk_partial_columns`): the whole row while the thread's register envelope holds it, else one column pair. At head
 width 256 the row is 32 fragments, and with every partial live beside the carrier and the hoisted query the thread
@@ -221,7 +244,16 @@ PREFIX — the carrier's lift cut to its score role, which is where an SDPA mask
 loader needs a gmem address: whatever supplies the pivot, and the streamed value. The prefix's remaining leaves are
 read once ahead of the chunk loop, so a mask's fill / zero constants may be a computed pair with no slab at all, and
 its statements may include a `Select` on the score fragment's OWN coordinates, which the emitter evaluates per element.
-Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole.
+Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole. An operand with
+no free axis is uniform, as it always was, and so is a leaf that holds nothing but loads indexed by no coordinate and
+values computed from them, the carrier's own coordinates and literals (`Fold.uniform_leaf`): the coordinates fold
+into the mask's predicate and the rest is read once. That
+is how a mask the loop lowering hoisted over the row axis — the row alias beside the position, or the position
+times a constant where the rows fold a group of query heads — keeps the carrier bilinear and the chunk tier offered. An alias is any `Let` over the coordinates and the cell-uniform names, so a key
+split's piece, whose sliced lift binds the absolute key as the partition times the slice length plus the slice
+coordinate, folds that expression into its predicate. The cell-uniform names (`cell_uniform`) are what the carrier's
+uniform leaves expose, the coordinates the launch fixes per CTA — the contraction's batch axes and a key split's
+partition — and the symbolic extents, read off the kernel's axis table so the gate and the emission agree.
 
 A `wgmma` atom is a 16×8 warp sub-cell like `mma_m16n8k16`, but its instruction is issued by four M-adjacent warps
 over 64 rows and N columns, so `_wgmma_refusal` narrows the row it can hold: a `w<4k>x1` warp grid (the unit decode
@@ -242,6 +274,15 @@ The synchronous fill checks copied-operand cover when constructing its slabs, in
 contractions. A copied N-contiguous slab needs complete N tiles: clamping a vector's start to the last scalar breaks
 alignment and crosses the row. A transposed B copies along K and can clamp whole outer N rows. Dividing tiles remain
 available on the same fused contraction.
+
+A vector copy (cp.async or the blocking vector load) moves `copy_width` elements from where the slab's load index puts
+them, so its gmem address must start on that width. Every stage resolver that offers one for a stored operand proves
+it first (`vector_copies_aligned`): the operand's whole flat address, with the copy axis at any copy start, must be a
+provable multiple of the width. A slice's offset, a row stride off the grid, or a copy axis split across dims at a
+pitch off it leaves a term the proof cannot clear, and the resolver declines the copy; a dense reshape's quotient and
+remainder recombine and pass. The warp tier's plain, packed and block-scaled stages, the scalar tier and the compute
+fill ask it, and so do the chunk tier's key and value and the query a warp-group score copies (a query off the grid
+keeps the `mma.sync` score). A TMA box takes element coordinates and needs no such proof.
 
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the
@@ -275,11 +316,17 @@ in the enumeration where a pin is decided across sites rather than at one. Readi
 it unsatisfiable on exactly the kernels that need it most: attention spells `TILE` at its score contraction and at
 its chunked value channel, and no schedule carries one mma tile at both.
 
-The precision policy (`allow_f16_accumulate`, `allow_fp8`) filters the CATALOG: an f16-accumulate or FP8 atom is
-offered unpinned only where the compile allowed it. A hand pin naming such a tile is an authored, legal choice and
+The precision policy (one flag of the problem per atom gate, `space.ATOM_GATES`) filters the CATALOG: an
+f16-accumulate, FP8 or TF32 atom is offered unpinned only where the compile allowed it. The TF32 atoms are the cells of
+a product whose operands are all f32; an f32 operand beside a 16-bit one keeps the 16-bit cell that converts it. A
+product of f32 operands is offered the bf16 atoms too, every operand rounded to bf16 in the compute fill, and the gate
+of that offer speaks for a node, where the others speak for an atom. The priors' reading of tensor-core eligibility
+counts none of the cells of a product of f32 operands. A hand pin naming such a tile is an authored, legal choice and
 bypasses the policy; a row a descent follows (`with_row` — measured evidence) does not, so an FP16-accumulate row
 recorded or measured in the standard lane cannot deploy there. Likewise a transposed raster (`gn4`, `gn8`) is never the catalog's own offer and is taken only
-where a row names it.
+where a row names it. The split TF32 atom is taken the same way (`AtomKind.row_only`): it trades no precision, so no
+gate speaks for it and a followed row deploys it in either lane, and the priors cannot tell it from the TF32 atom, so
+no enumeration offers it.
 
 `ClassicScheduleCodec` is the concrete strict wire boundary. Its public encode and decode operations validate through
 one `ClassicScheduleContext`; private syntax-only parsing and encoding let graph reconstruction attach materialization
@@ -294,8 +341,8 @@ Transposed cooperative reductions use 32 output lanes by default. Volta's catalo
 output lanes, with the remaining threads partitioning the reduction. `/v<n>` still names adjacent columns per lane.
 On an ordinary `coop` band, `/v<n>` names the adjacent reduce elements a lane reads per step, so a contiguous operand
 reads as one vector; the lane strides by `coop · n`. A prefix scan does not take it: the scan keeps one inclusive
-state per lane. The catalog does not offer `coop/v<n>` itself, since the prior cannot tell it from the plain band; a
-row or a pin names it.
+state per lane. The catalog offers every plain band's runs (`COOP_RUNS`), and the prior reads the run
+(`D_reduce_run`), so a band and its runs rank apart.
 Both layouts use the same reduction choice, codec and materializer. The worker count is divisible by the output lane
 count.
 
@@ -304,21 +351,31 @@ ordered domains: stored-Fold-edge placement first, then cross-CTA reduction spli
 fresh piece re-enters the same rule. `030_cut` presents its restricted structural frontier through a schedule context;
 `040_schedule` supplies a `ClassicScheduleContext`. Both passes use the same generic `schedule` traversal.
 
-## Register storage across ordered steps
+## Storage of a carried state
+
+`STAGE` names where a site keeps a value it reads more than once: an operand reused along an axis, or the state a
+kernel carries across the steps of a loop. A carrying kernel therefore has one more `STAGE` site, the kernel site's
+own, keyed at the state's route, `map.1/scan` (`classic_state_keys`; bare when the row has no other `STAGE` site). It
+takes three values. Empty keeps the state in a global buffer, one launch per step. `d1/smem` keeps it in shared
+memory and runs the steps inside one launch; the schedule offers it where the state reads prove CTA ownership, both
+buffers fit the card's shared memory, and the row runs a one-dimensional cooperative thread tile (`holds_state`).
+`d1/reg` keeps it in registers, one slot without prefetch.
 
 The `reg` transport names stored register intermediates. Reuse can span consumers or loop iterations; recurrence
-is not part of the transport's meaning. `d1/reg` provides one slot without prefetch. The current implementation
-supports this transport through the ordered matrix-loop schedule below; other schedules do not yet offer it.
+is not part of the transport's meaning. The current implementation supports this transport through the ordered
+matrix-loop schedule below; other schedules do not yet offer it.
 
-`RegisterContext` uses the same problem, site, codec, and lazy enumeration interfaces as the classic schedule.
-It offers one kernel choice for a static ordered loop with one matrix state, pointwise operations, and additive
-matrix contractions, read off the fold that carries the state (`Fold.carries`, its `cells` ending in the column
-and the warp-owned row). The structural reading proves that each warp's rows are independent through every
-contraction, that every carrier read takes the previous step at the warp's own rows, and that output matrices
+Register storage is a choice of the classic kernel site, not a schedule model of its own. It is offered for a static
+ordered loop with one matrix state, pointwise operations, and additive
+matrix contractions, read off the kernel's step and its state's update (`TileOp.resident_state`: the state's cells
+end in the column and the warp-owned row). The row spells the register geometry as the `TILE` of the state's route
+(`classic_state_tile_keys`) and leaves every site of the step off, since the loop runs inside the CTA and the step
+is not scheduled apart. The structural reading proves that each warp's rows are independent through every
+contraction, that every load of the state takes the previous step at the warp's own rows, and that output matrices
 share the same batch coordinates. Other recurrences retain the classic schedule, which realizes the carrying loop
 as one launch per step over a state buffer. A zero-axis root derived from a step keeps the time coordinate as a
 trailing lambda parameter whenever its body still reads it. Unit batch coordinates are omitted only from ownership
-matching, after checking their external extents; the stored output indices remain unchanged. Both schedule families
+matching, after checking their external extents; the stored output indices remain unchanged. Both storages
 restore omitted unit coordinates against the seed tensor's bound shape before computing its address.
 
 `WORK=w<M>x1` assigns independent groups of sixteen value rows to warps. `TILE` names an FP16 atom with both
@@ -329,7 +386,10 @@ operations, and products share FP32 register results within a step. Operand conv
 to shorten their live ranges. All reads finish before the carried slot is updated.
 
 The catalog offers FP32 accumulation and FP16 partial accumulation under `F16_MMA_F32_ACC` (also enabled by
-`FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. For FP16 accumulation,
+`FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. Under `TF32_MMA` it also
+offers the TF32 atom, whose operands are the state's FP32 fragments as they are, moved between lanes
+(`AtomKind.resident_operands`); a row may name its split, which keeps the recurrence as close to the exact one as FP32
+arithmetic does. For FP16 accumulation,
 `TILE`'s K chunk is the promotion interval in atom steps: `k4` promotes and clears the partial accumulator every
 64 products on m16n8k16 or 16 on Volta m8n8k4, including a shorter final chunk. An explicit tile row can select
 the arithmetic directly. Register pressure and numerical error depend on the shape and inputs.

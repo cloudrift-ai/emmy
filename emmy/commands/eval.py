@@ -23,6 +23,7 @@ from emmy.commands.table import GREEN as _GREEN
 from emmy.commands.table import RED as _RED
 from emmy.commands.table import YELLOW as _YELLOW
 from emmy.commands.table import Col, col_widths, knob_columns, render_table
+from emmy.compiler.pipeline.search import progress
 from emmy.compiler.pipeline.search.prior import report as report_mod
 from emmy.compiler.pipeline.search.prior.reproduce import knob_eq
 
@@ -107,8 +108,8 @@ def _load_prior(space: str, path: str | None = None):
 def _measured_report(args, halves, dataset, source: str):
     """``eval prior --pools measured`` — the report over the dataset's measured pools: every benched row of the DB
     the export read, grouped by ``db/export.measured_groups`` (one op, one card, one regime). The header names the
-    sources the rows came from: two reports are comparable only when computed over the same rows, and a freeze's
-    digest in the source name is what says so.
+    sources the rows came from: two reports are comparable only when computed over the same rows, and a source's
+    digest in its name is what says so.
 
     ``--kernel`` matches the op LABEL, since a pool's own op identity is a digest with nothing readable in it. The
     label is a function of the ``S_*`` stamps every row of one pool shares — read off the pool's first row — so a
@@ -142,7 +143,7 @@ def _golden_report(args, halves, dataset, source: str):
     each ranked among the candidates its kernel offers — the groups ``emmy fit`` trains on, over the FULL
     featurization rather than the fit's ``D_*`` view. The view is a property of the model being fitted, and this
     command scores the model the artifact names, which may read ``S_*`` / ``H_*`` columns a narrow view drops and would
-    otherwise be asked about a kernel with no shape. ``--kernel`` keeps the pools whose kernel's C name contains it
+    otherwise be asked about a kernel with no shape. ``--kernel`` keeps the pools whose kernel's name contains it
     — a view; each retained pool's rank is unchanged by it."""
     from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries  # noqa: PLC0415
 
@@ -171,11 +172,21 @@ def handle_eval_prior(args) -> None:
     from emmy.compiler.pipeline.search.dataset import Dataset  # noqa: PLC0415
 
     resolve_offline_arg(args)
-    try:
-        dataset = Dataset.load(args.dataset)
-    except (OSError, ValueError) as exc:
-        logger.error("%s", exc)
-        sys.exit(2)
+    with progress.recording("emmy eval prior") as timing:
+        try:
+            with progress.phase("load dataset"):
+                dataset = Dataset.load(args.dataset)
+        except (OSError, ValueError) as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
+        result = _eval_prior(args, dataset)
+    timing.log()
+    if args.json_out:
+        storage.write_json(Path(args.json_out), {**result, "timing": timing.to_json()}, indent=2)
+        logger.info("wrote %s", args.json_out)
+
+
+def _eval_prior(args, dataset) -> dict:
     space = dataset.provenance.get("space", "schedule")
     current = _load_prior(space)
     halves = [("offline", current)]
@@ -185,7 +196,8 @@ def handle_eval_prior(args) -> None:
             logger.error("--compare-to requires golden pools and a rank improvement between 0 and 1")
             sys.exit(2)
         halves = [("current", current), ("candidate", _load_prior(space, args.compare_to))]
-    report = (_golden_report if golden else _measured_report)(args, halves, dataset, str(args.dataset))
+    with progress.phase("score pools"):
+        report = (_golden_report if golden else _measured_report)(args, halves, dataset, str(args.dataset))
     _emit_report(report)
     result = report.to_json()
     if args.compare_to:
@@ -201,9 +213,7 @@ def handle_eval_prior(args) -> None:
         else:
             verdicts = _emit_golden_deploy_check(args, [pool for group in dataset.golden for pool in group.pools])
         result["pools"] = [_pool_entry(v) for v in verdicts]
-    if args.json_out:
-        storage.write_json(Path(args.json_out), result, indent=2)
-        logger.info("wrote %s", args.json_out)
+    return result
 
 
 def _pick_us(verdict) -> float | None:
@@ -244,7 +254,7 @@ def _emit_placement_deploy_check(args, dataset, prior) -> list:
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement  # noqa: PLC0415
 
     pools = list({(pool.gpu, pool.regime, pool.name): pool for group in dataset.golden for pool in group.pools}.values())
-    verdicts = reproduce_placement(pools, prior, kernel=args.kernel)
+    verdicts = reproduce_placement(pools, prior, kernel=args.kernel, jobs=config.workers())
     logger.info("Golden reproduction — the placement prior's pick at each placement fork vs the golden's arm:")
     width = max((len(v.pool.name) for v in verdicts), default=6)
     logger.info("  %-*s  %-4s  %s", width, "kernel", "ok", "pick -> golden")
@@ -270,7 +280,7 @@ def _metric(block: dict, key: str, fmt: str) -> str:
 # decision made here and not a side effect of dict insertion.
 _REPORT_TABLES = {
     "measured": (
-        ["half", "gpu", "H_opt"],
+        ["half", "gpu"],
         [
             ("rho", lambda c: _metric(c.metrics["spearman"], "median", "{:+.2f}")),
             ("regret@1", lambda c: _metric(c.metrics["regret1"], "median", "{:.2f}x")),

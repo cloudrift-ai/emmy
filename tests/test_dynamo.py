@@ -137,7 +137,7 @@ def test_inputs_that_share_memory_after_compiling_go_unnoticed_as_with_inductor(
 @requires_cuda
 def test_settings_reach_the_compile():
     model = torch.nn.Sequential(torch.nn.Linear(32, 32), torch.nn.GELU()).cuda()
-    _compare(model, torch.randn(4, 32, device="cuda"), knobs={"FAST_MATH": "0"}, nvcc_flags="-lineinfo")
+    _compare(model, torch.randn(4, 32, device="cuda"), knobs={"FAST_MATH": "0"})
 
 
 @requires_cuda

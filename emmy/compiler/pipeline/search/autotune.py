@@ -1,7 +1,11 @@
-"""Autotuning one kernel: which complete schedule rows to measure next, given the ones already measured.
+"""Autotuning: which complete schedule rows of a kernel to measure next, given the ones already measured, and which
+kernels a tune of a whole program measures.
 
-``emmy run --tune N`` drives it: the program's one scheduled kernel is enumerated under the greedy kernel set
-(:func:`schedule_space`), the prior's ten best rows are measured first, then each batch is the rows with the highest
+``emmy run --tune N`` drives it. A program's tune is the tune of its kernels, each alone: the kernels of the kernel set
+a greedy compile takes, and the kernels of every kernel-set arm that compile met and did not take
+(:func:`kernel_set`), so the compile that follows compares kernel sets whose pieces were all tuned. One kernel's tune
+enumerates it under the greedy kernel set (:func:`schedule_space`) — every complete schedule row, a carried state's
+storage among its sites — measures the prior's ten best rows first, then each batch is the rows with the highest
 expected improvement under a Gaussian process fit to the log latencies measured so far (Bayesian optimization). The
 caller measures — this module never touches the GPU.
 
@@ -15,39 +19,114 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import dataclass
 
 import numpy as np
 
+from emmy import config
 from emmy.compiler.pipeline.search.features import Featurizer
 
 #: Rows the prior picks before the process has anything to fit.
 START = 10
+#: The untaken arms of one kernel-set fork a program's tune measures, the placement prior's best first.
+ARMS = 8
+#: The rounds a program's tune takes at most: a round measures the forks of the kernel set the last one left.
+ROUNDS = 4
 #: Random rows scored per proposal, beside the best row's one-part neighbours.
 _SCORED = 8000
 _PART = re.compile(r"^([a-z_]*?)(\d+)(?:x(\d+))?$")
 
 
 def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
-    """The one scheduled kernel of ``graph`` and every complete schedule row its fork offers, under the kernel set
-    the greedy compile takes. A program with several scheduled kernels is refused: a bare pin reaches them all."""
+    """The one scheduled kernel of ``graph`` and every complete row its forks offer, under the kernel set the greedy
+    compile takes, walked on ``EMMY_WORKERS`` processes. A program with
+    several scheduled kernels is refused: a bare pin reaches them all."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import parallel_leaf_rows  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.greedy import _schedule_fork, greedy_decide  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
 
-    greedy = greedy_decide(db=db)
+    greedy = greedy_decide(db=db, prior=None)  # the walk wants the kernel and its rows: no schedule is ranked
     pools: dict[str, tuple[object, list[dict]]] = {}
 
     def decide(fp):
         if _schedule_fork(fp) and fp.node_id not in pools:
-            pools[fp.node_id] = (fp.root_op, [row for leaf in iter_leaves(fp.options) if WORK.name in (row := leaf_knobs(leaf))])
+            rows = parallel_leaf_rows(fp.options, workers=config.workers())
+            pools[fp.node_id] = (fp.root_op, [row for row in rows if WORK.name in row])
         return greedy(fp)
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx, db=db).resolve(graph, decide)
     if len(pools) != 1:
         raise ValueError(f"--tune tunes a program with one scheduled kernel; this one has {len(pools)}")
-    return next(iter(pools.values()))
+    ((op, rows),) = pools.values()
+    return op, rows
+
+
+@dataclass(frozen=True)
+class KernelSet:
+    """What a greedy compile of a program ends with: each scheduled kernel beside the program that is that kernel
+    alone (``kernels``); each kernel-set fork it met (``forks``) as the fork's kernel by exact identity, that kernel
+    alone as it stood there, the arms the fork offered by the placement prior, best first, and the one taken; and
+    the decisions taken, as the splice watcher reports them (``decisions``)."""
+
+    kernels: tuple[tuple[object, object], ...]
+    forks: tuple[tuple[str | None, object, tuple[dict, ...], dict], ...]
+    decisions: tuple[tuple[object, dict, list], ...]
+
+
+def kernel_set(graph, ctx, db=None, take: dict | None = None) -> KernelSet:
+    """The kernel set a greedy compile of ``graph`` takes (measured evidence, then the priors), with the first
+    kernel-set fork it meets decided as ``take`` (an arm's knobs) when one is given: how a tune prices an arm the
+    compile did not take, on the fork's kernel alone. A kernel alone is the program a tune of it measures, and its
+    rows land under the identity the whole program's compile asks for (``slice.single_node_graph``). ``graph`` is
+    lowered in place."""
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._cut import PIECE  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import Run, _structural_domain  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.inventory import KernelInventory  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import KERNEL_SET_DOMAINS  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.policy.greedy import (  # noqa: PLC0415
+        _load_placement_prior,
+        _schedule_fork,
+        greedy_decide,
+        kernel_set_ranking,
+    )
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    placement = _load_placement_prior()
+    greedy = greedy_decide(db=db, prior=None, placement_prior=placement)  # no schedule is ranked: the kernels are the answer
+    failed = db.failed(ctx) if db is not None else set()
+    kernels: dict[str, tuple[object, object]] = {}
+    forks: list[tuple[str | None, object, tuple[dict, ...], dict]] = []
+    decisions: list[tuple[object, dict, list]] = []
+    forced = [take]
+
+    def alone(fp):
+        """The fork's kernel as a program of its own; a piece of a cut stays one, so a pin reads it as the compile does."""
+        sliced = single_node_graph(fp.match.graph, fp.node_id)
+        if fp.match.root.hints.has(PIECE):
+            sliced.nodes[fp.node_id].hints.set(PIECE, True)
+        return sliced
+
+    def decide(fp):
+        if _schedule_fork(fp):
+            kernels.setdefault(fp.node_id, (fp.root_op, alone(fp)))
+            return greedy(fp)
+        if _structural_domain(fp.options) not in KERNEL_SET_DOMAINS:
+            return greedy(fp)
+        kernel, program = fp.root_op.identity_key(structural=False, with_io=True), alone(fp)
+        ranked = kernel_set_ranking(fp, placement, failed)
+        arms = tuple(leaf_knobs(leaf) for leaf in ranked)
+        want, forced[0] = forced[0], None
+        chosen = greedy(fp) if want is None else ranked[arms.index(want)]
+        forks.append((kernel, program, arms, leaf_knobs(chosen)))
+        return chosen
+
+    watcher = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: decisions.append((parent, arm, pieces)))
+    Run(pipeline=Pipeline.build(TILE_PASSES).with_strategies(watcher), ctx=ctx, db=db).resolve(graph, decide)
+    return KernelSet(tuple(kernels.values()), tuple(forks), tuple(decisions))
 
 
 def _parts(row: dict) -> dict:
@@ -67,7 +146,8 @@ def _parts(row: dict) -> dict:
 
 def _encode(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
     """Each row as level indices per part (for neighbours) and as a point the process measures distance in: a
-    number by its log2 scaled to [0, 1], a token one-hot, an absent part as its own level."""
+    number by its log2 scaled to [0, 1] (a zero one step below one, so a 0/1 knob's arms stay apart), a token
+    one-hot, an absent part as its own level."""
     parts = [_parts(r) for r in rows]
     names = sorted({k for p in parts for k in p})
     if rows and not names:
@@ -80,7 +160,7 @@ def _encode(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
         col = np.array([index.get(v, 0) for v in values])
         levels.append(col)
         if all(isinstance(v, int) for v in present):
-            logs = np.array([0.0] + [math.log2(max(v, 1)) for v in present])
+            logs = np.array([0.0] + [math.log2(v) if v else -1.0 for v in present])
             span = max(np.ptp(logs[1:]), 1.0) if present else 1.0
             points += [((logs - (logs[1:].min() if present else 0.0)) / span)[col][:, None], (col == 0).astype(float)[:, None]]
         else:
@@ -94,14 +174,27 @@ def _erf(x: np.ndarray) -> np.ndarray:
     return np.sign(x) * y
 
 
+#: The rows one forked worker featurizes at a time.
+_FEATURIZED = 512
+
+
+def _featurize(kernel: tuple, start: int) -> list:
+    featurizer, op, rows = kernel
+    return [featurizer.features(op, row) for row in rows[start : start + _FEATURIZED]]
+
+
 def prior_scores(op, rows: list[dict], ctx) -> list[float]:
-    """The schedule prior's score of every row, lower is better."""
+    """The schedule prior's score of every row, lower is better. The rows are featurized on ``EMMY_WORKERS`` forked
+    processes and scored here."""
+    from emmy.compiler.pipeline.fork import forked  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
-    prior, featurizer = load_prior(), Featurizer.of(ctx)
+    prior = load_prior()
+    chunks = forked(_featurize, range(0, len(rows), _FEATURIZED), config.workers(), shared=(Featurizer.of(ctx), op, rows))
+    features = [f for chunk in chunks for f in chunk]
     scores: list[float] = []
     for i in range(0, len(rows), 4096):
-        scores += prior.mean_scores_features([featurizer.features(op, r) for r in rows[i : i + 4096]])
+        scores += prior.mean_scores_features(features[i : i + 4096])
     return scores
 
 

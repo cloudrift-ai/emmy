@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -303,16 +305,99 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     return LayerWrapper()
 
 
-def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Module:
+#: The Gated DeltaNet rule's chunk, Transformers' default: a program wider than it scans several chunks.
+CHUNK = 64
+
+
+def _chunk_rule_scan_then_read(
+    scope,
+    query,
+    key,
+    value,
+    g,
+    beta,
+    chunk_size=CHUNK,
+    initial_state=None,
+    output_final_state=False,
+    use_qk_l2norm_in_kernel=False,
+    **kwargs,
+):
+    """Transformers' ``torch_chunk_gated_delta_rule`` (``scope`` is its module) with the outputs read after the scan
+    and every pointwise scale applied to the small side of a product.
+
+    The scan keeps the state each chunk starts from and the chunk's new values; the output of every chunk is then
+    ``query @ state + intra @ new_values`` over the stacked chunks at once. ``beta``, the decay and the query scale
+    multiply the ``chunk x chunk`` matrices and the rows of a product's result, never the queries, keys or values:
+    those stay the operands they were loaded as, which is what a tensor-core tile reads. The sums are the
+    reference's; a scale meets its product on the other side, so the rounding differs in the last place."""
+    import torch
+    import torch.nn.functional as F
+
+    dtype = query.dtype
+    batch, length, _, k_dim = key.shape
+    v_heads, v_dim = value.shape[-2:]
+    query, key, value, beta, g = (
+        x.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format) for x in (query, key, value, beta, g)
+    )
+    if use_qk_l2norm_in_kernel:
+        query, key = scope["l2norm"](query, dim=-1, eps=1e-6), scope["l2norm"](key, dim=-1, eps=1e-6)
+    scale = query.shape[-1] ** -0.5
+    pad = (chunk_size - length % chunk_size) % chunk_size
+    query, key, value = (F.pad(x, (0, 0, 0, pad)) for x in (query, key, value))
+    beta, g = (F.pad(x, (0, pad)) for x in (beta, g))
+    query, key, value = (x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, value))
+    beta, g = (x.reshape(x.shape[0], x.shape[1], -1, chunk_size) for x in (beta, g))
+    chunks = query.shape[2]
+    upper = torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device).triu(1)
+    cum = g.cumsum(dim=3)
+    pairwise = (cum.unsqueeze(4) - cum.unsqueeze(3)).masked_fill(upper, float("-inf")).exp()
+    system = (key @ key.transpose(-1, -2)) * (pairwise * beta.unsqueeze(4))
+    eye = torch.eye(chunk_size, dtype=system.dtype, device=system.device)
+    if not scope["is_torchdynamo_exporting"]():
+        inverse = torch.linalg.solve_triangular(system, eye.expand_as(system), upper=False, unitriangular=True)
+    else:
+        inverse = -system.tril(-1)
+        for i in range(1, chunk_size):
+            row = inverse[..., i, :i].clone()
+            sub = inverse[..., :i, :i].clone()
+            inverse[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+        inverse = inverse + eye
+    new_values = (inverse * beta.unsqueeze(3)) @ value
+    k_cumdecay = (inverse * (beta * cum.exp()).unsqueeze(3)) @ key
+    intra = (query @ key.transpose(-1, -2)) * (pairwise * scale)
+    state = new_values.new_zeros((batch, v_heads, k_dim, v_dim)) if initial_state is None else initial_state.to(new_values)
+    query_row = (cum.exp() * scale).unsqueeze(4)
+    key_row = (cum[..., -1:] - cum).exp().unsqueeze(4)
+    chunk_decay = cum[..., -1].exp()[..., None, None]
+    starts, news = [], []
+    for i in range(chunks):
+        starts.append(state)
+        news.append(new_values[:, :, i] - k_cumdecay[:, :, i] @ state)
+        state = state * chunk_decay[:, :, i] + key[:, :, i].transpose(-1, -2) @ (news[-1] * key_row[:, :, i])
+    out = (query @ torch.stack(starts, dim=2)) * query_row + intra @ torch.stack(news, dim=2)
+    out = out.reshape(batch, v_heads, -1, v_dim)[:, :, :length]
+    return out.transpose(1, 2).to(dtype, memory_format=torch.contiguous_format), state if output_final_state else None
+
+
+def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool = False) -> nn.Module:
     """Expose a GDN block as ``(x, state, history) -> (y, state, history)`` without input mutation.
 
     State is the FP32 recurrent matrix; history holds the last convolution-kernel-width projected
     inputs. Zero tensors start a request. Batch rows own independent state and history. The block's
     installed forward supplies both the prefill and single-token decode math.
 
+    With ``rows`` the block takes one request (batch 1) and returns the state and history after each of
+    its ``T`` tokens, ``[T, ...]`` each, instead of after the last: a speculative verify step keeps the
+    state after its last accepted token. The block runs its single-token rule once per token.
+
     With ``float32_residual`` the residual stream enters and leaves in FP32 and each projection is
     fed the model dtype — the seam form of the attention split, so both layer types meet at one
     seam dtype.
+
+    A block whose MLP is a token-choice MoE returns ``(h, xn, state, history)`` instead: the mixer's
+    residual with the shared expert folded in, and the normalized ``xn`` the routed experts read, as
+    the ``post`` program of :func:`build_moe_split_wrapper` does, so the routed experts run outside.
+    With ``float32_residual`` too, ``h`` is FP32 and ``xn`` is in the model dtype, as that ``post`` returns them.
     """
     import torch
     import torch.nn as nn
@@ -321,6 +406,7 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
     if mixer is None:
         raise ValueError("a GDN state wrapper requires a linear_attn block")
     dtype = mixer.in_proj_qkv.weight.dtype
+    routed = moe_block_parts(block.mlp) is not None
 
     class State:
         # The installed Transformers decides the cache protocol: through 5.14 the block prepends the history itself
@@ -342,6 +428,7 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
                 return value
             full = torch.cat([self.conv_states[0], value], dim=-1)
             self.conv_states[0] = full[..., -conv_kernel_size:]
+            self.window = full
             return full
 
         def update_recurrent_state(self, value, layer_idx, state_idx=0):
@@ -354,13 +441,79 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
 
         def forward(self, x, state, history):
             cache = State(state, history)
-            if not float32_residual:
-                y = self.block(x, position_embeddings=None, past_key_values=cache)
-            else:
-                # The block's own forward, with the residual adds in FP32.
-                h = x + self.block.linear_attn(hidden_states=self.block.input_layernorm(x).to(dtype), cache_params=cache)
-                y = h + self.block.mlp(self.block.post_attention_layernorm(h).to(dtype))
-            return y, cache.recurrent_states[0], cache.conv_states[0]
+            # One row's state is the final state, so a single row is the plain program.
+            if rows and x.shape[1] > 1:
+                return self._rows(x, cache)
+            if x.shape[1] > CHUNK:
+                return self._chunks(x, cache)
+            return (*self._block(x, cache), cache.recurrent_states[0], cache.conv_states[0])
+
+        def _chunks(self, x, cache):
+            # Several chunks: the scan over them carries only the state and each chunk's new values, and every
+            # chunk's output is read from the stacked states afterwards, one batched product, the same arithmetic
+            # as the block's own rule. Written inside the scan, each output would trace as one branch per chunk
+            # of a select every output cell evaluates.
+            scope = sys.modules[type(mixer).__module__].__dict__
+            saved = scope["torch_chunk_gated_delta_rule"]
+            scope["torch_chunk_gated_delta_rule"] = partial(_chunk_rule_scan_then_read, scope)
+            try:
+                outs = self._block(x, cache)
+            finally:
+                scope["torch_chunk_gated_delta_rule"] = saved
+            return (*outs, cache.recurrent_states[0], cache.conv_states[0])
+
+        def _block(self, x, cache):
+            if not routed and not float32_residual:
+                return (self.block(x, position_embeddings=None, past_key_values=cache),)
+
+            # The block's own forward; with ``float32_residual`` the residual adds run in FP32 and each
+            # norm's output is fed to its projections in the model dtype.
+            def narrow(t):
+                return t.to(dtype) if float32_residual else t
+
+            h = x + self.block.linear_attn(hidden_states=narrow(self.block.input_layernorm(x)), cache_params=cache)
+            xn = narrow(self.block.post_attention_layernorm(h))
+            if not routed:
+                return (h + self.block.mlp(xn),)
+            mlp = self.block.mlp
+            shared = next((m for a in ("shared_experts", "shared_expert") if (m := getattr(mlp, a, None)) is not None), None)
+            if shared is not None:
+                gate = getattr(mlp, "shared_expert_gate", None)
+                h = h + (shared(xn) if gate is None else torch.sigmoid(gate(xn)) * shared(xn))
+            return h, xn
+
+        def _rows(self, x, cache):
+            # Both of the mixer's rules become its single-token rule run once per token, keeping each
+            # token's state; the convolution input the cache returns holds every token's window.
+            scope = sys.modules[type(mixer).__module__].__dict__
+            single = scope["torch_recurrent_gated_delta_rule"]
+            states = []
+
+            def per_token(query, key, value, g, beta, initial_state=None, **kwargs):
+                kwargs.update(output_final_state=True, cu_seqlens=None)
+                outs = []
+                for t in range(query.shape[1]):
+                    step = slice(t, t + 1)
+                    out, initial_state = single(
+                        query[:, step], key[:, step], value[:, step], g[:, step], beta[:, step], initial_state, **kwargs
+                    )
+                    outs.append(out)
+                    states.append(initial_state)
+                return torch.cat(outs, dim=1), initial_state
+
+            kernel = mixer.conv_kernel_size
+            cache.record_past = True
+            saved = {name: scope[name] for name in ("torch_recurrent_gated_delta_rule", "torch_chunk_gated_delta_rule")}
+            scope.update(dict.fromkeys(saved, per_token))
+            try:
+                outs = self._block(x, cache)
+            finally:
+                scope.update(saved)
+            window = getattr(cache, "window", None)
+            if window is None:
+                raise NotImplementedError("per-token GDN states need Transformers 5.16+, whose cache prepends the history")
+            histories = [window[..., t + 1 : t + 1 + kernel] for t in range(x.shape[1])]
+            return (*outs, torch.cat(states, dim=0), torch.cat(histories, dim=0))
 
     return StatefulGDN()
 
@@ -944,7 +1097,11 @@ def slice_routed_experts(model, rank: int, world: int) -> None:
     keep the same intermediate rows, down the matching columns, so a rank's expert output is a partial
     sum the group all-reduce completes and every rank runs the same picks. A meta parameter is
     re-declared at the sliced shape; a real one keeps its sliced values. Only the concatenated, biasless
-    ``F.linear`` layout (DeepSeek, OLMoE) is sliced."""
+    ``F.linear`` layout (DeepSeek, OLMoE) is sliced.
+
+    A Qwen4Exp block's shared expert is sliced the same way: its ``post`` returns the shared expert's output
+    apart (:func:`_build_gated_residual_split`), so that partial joins the routed one ahead of the all-reduce,
+    as the 1Cat fork's does. Its gate stays whole."""
     from torch import nn  # noqa: PLC0415
 
     trunk = getattr(model, "model", model)
@@ -953,6 +1110,10 @@ def slice_routed_experts(model, rank: int, world: int) -> None:
         parts = moe_block_parts(block.mlp) if hasattr(block, "mlp") else None
         if parts is None:
             continue
+        if getattr(block, "attn_hyper_connection", None) is not None:
+            shared = block.mlp.shared_expert
+            for linear, name in ((shared.gate_proj, "w_gate"), (shared.up_proj, "w_up"), (shared.down_proj, "w_down")):
+                linear.weight = nn.Parameter(expert_intermediate_slice(name, linear.weight, rank, world), requires_grad=False)
         experts = parts[1]
         if moe_expert_layout(experts) != (False, False, False):
             raise NotImplementedError(
@@ -1169,14 +1330,18 @@ def hyper_connection_seam(block):
     return None
 
 
-def place_routed_streams(mixed, routed, mix):
+def place_routed_streams(mixed, routed, mix, out=None):
     """Close the hyper-connection MoE seam: ``mixed[T, hc·H] + mix[T, hc] ⊗ routed[T, H]``.
 
-    The post program already placed the shared expert and mixed the streams (``post ⊗ shared +
-    combᵀ · streams``); the routed combine runs in torch afterwards and lands on the streams through the
-    same per-stream ``post`` weights, which the program returns as ``mix``."""
+    The post program already mixed the streams, and DeepSeek V4's placed its shared expert there (``post ⊗ shared +
+    combᵀ · streams``); the routed combine (with Qwen4Exp's shared expert added) runs in torch afterwards and lands
+    on the streams through the same per-stream ``post`` weights, which the program returns as ``mix``. ``out``, a
+    ``[T, hc·H]`` tensor of the result's dtype, receives the sum: the next program's own input buffer, so its
+    upload copies nothing."""
+    import torch
+
     t = routed.shape[0]
-    return mixed + (mix.unsqueeze(-1) * routed.unsqueeze(-2)).reshape(t, -1)
+    return torch.add(mixed, (mix.unsqueeze(-1) * routed.unsqueeze(-2)).reshape(t, -1), out=out)
 
 
 def _build_hyper_connection_split(block):
@@ -1245,10 +1410,11 @@ def _build_gated_residual_split(block):
 
     - ``pre(hidden[T, hc·H]) -> x[T, H]`` — the attention-site gated residual's mixed input, what the Gated
       DeltaNet or sparse-attention sublayer consumes.
-    - ``post(attn_out[T, H], residual[T, hc·H]) -> (mixed[T, hc·H], xn[T, H], mix[T, hc])`` — the mixer output
-      injected into the streams (the injection weights are recomputed from ``residual``), the MLP-site gated
-      residual's mixed input ``xn`` for the router and the experts, the gated shared expert injected into the
-      streams, and the MLP-site injection weights that place the routed combine (:func:`place_routed_streams`).
+    - ``post(attn_out[T, H], residual[T, hc·H]) -> (mixed[T, hc·H], xn[T, H], mix[T, hc], shared[T, H])`` — the
+      mixer output injected into the streams (the injection weights are recomputed from ``residual``), the MLP-site
+      gated residual's mixed input ``xn`` for the router and the experts, the MLP-site injection weights, and the
+      gated shared expert's output. The runner adds ``shared`` to the routed combine, ahead of the all-reduce when
+      both are a rank's slice (:func:`slice_routed_experts`), and places the sum (:func:`place_routed_streams`).
 
     Both call the block's own gated-residual modules, as ``Qwen4ExpTextDecoderLayer.forward`` does. Layer 2's
     n-gram embedding is added to the carrier ahead of ``pre`` and is not part of either program."""
@@ -1276,8 +1442,7 @@ def _build_gated_residual_split(block):
             _mixed, streams, inject = self.attn_hyper_connection(residual)
             streams = streams + (attn_out.unsqueeze(-2) * inject.unsqueeze(-1)).flatten(-2)
             xn, streams, inject = self.mlp_hyper_connection(streams)
-            shared = torch.sigmoid(self.shared_expert_gate(xn)) * self.shared_expert(xn)
-            return streams + (shared.unsqueeze(-2) * inject.unsqueeze(-1)).flatten(-2), xn, inject
+            return streams, xn, inject, torch.sigmoid(self.shared_expert_gate(xn)) * self.shared_expert(xn)
 
     return Pre(), Post()
 
@@ -1287,12 +1452,43 @@ def _build_gated_residual_split(block):
 EXPERT_WEIGHT_INPUTS = frozenset({"w_gate", "w_up", "w_gate_up", "w_down", "b_gate_up", "b_down"})
 
 
+def _picked(weight, sel):
+    """``weight[e]`` for every expert ``e`` in ``sel``, gathered along the expert axis (``index_select``, which reads a
+    paged tensor page by page): ``[k, ...]`` for one row's picks ``sel[k]``, ``[T, k, ...]`` for a chunk's ``sel[T, k]``."""
+    if sel.dim() == 1:
+        return weight.index_select(0, sel)
+    return weight.index_select(0, sel.reshape(-1)).unflatten(0, sel.shape)
+
+
 def _picked_linear(x, weight, sel):
     """``F.linear(x, weight[e])`` for every expert ``e`` in ``sel``, as one batched product over the picks:
-    ``x[1, in]`` against the ``(out, in)`` weights gathered along the expert axis gives ``[k, out]``."""
+    ``x[1, in]`` against the ``(out, in)`` weights gathered along the expert axis gives ``[k, out]``, and a chunk's
+    ``x[T, in]``, each row against its own picks ``sel[T, k]``, gives ``[T, k, out]``."""
     import torch
 
-    return torch.matmul(weight.index_select(0, sel), x.reshape(-1, 1)).squeeze(-1)
+    if sel.dim() == 1:
+        return torch.matmul(_picked(weight, sel), x.reshape(-1, 1)).squeeze(-1)
+    return torch.matmul(_picked(weight, sel), x.view(x.shape[0], 1, -1, 1)).squeeze(-1)
+
+
+def build_mtp_prologue(norm, size: int, eps: float):
+    """The prologue of a Qwen multi-token-prediction head: ``(embeds, hidden) -> fc(cat(norm(embeds), norm(hidden)))``,
+    the token's embedding and the target's last hidden state, each normalized by its own ``norm(size, eps=eps)``,
+    projected to the head layer's ``[T, size]`` input. Its weights load as ``mtp.pre_fc_norm_embedding``,
+    ``mtp.pre_fc_norm_hidden`` and ``mtp.fc``."""
+    import torch
+    import torch.nn as nn
+
+    class Prologue(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm_embedding, self.norm_hidden = norm(size, eps=eps), norm(size, eps=eps)
+            self.fc = nn.Linear(2 * size, size, bias=False)
+
+        def forward(self, embeds, hidden):
+            return self.fc(torch.cat([self.norm_embedding(embeds), self.norm_hidden(hidden)], dim=-1))
+
+    return Prologue()
 
 
 def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_residual: bool = False):
@@ -1322,7 +1518,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
       strided in-graph. Every form also has ``slots(x[1, H], sel[k], *stacked)``: the k routed experts of one
       row at once, each weight gathered from the E-stacked expert tensor along the expert axis
       (``index_select``, which reads a paged tensor page by page) and the projections batched over the
-      picks, giving ``[k, H]`` — the serving runner's fixed-slot decode program.
+      picks, giving ``[k, H]`` — the serving runner's fixed-slot decode program. The ``F.linear`` forms also take
+      a chunk, ``slots(x[T, H], sel[T, k], *stacked)``, every row's k experts at once, giving ``[T, k, H]``.
       ``split_gate_up`` takes gate and up as SEPARATE forward args instead
       (``expert(x, w_gate, w_up, w_down)``) — the EXL3 form, where each coded linear carries its
       own input-side channel vector, so the merged weight has no single basis to restore and the
@@ -1331,11 +1528,11 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
       expert). A marked EXL3 architecture can instead fold it into router weights when fp16
       partials cannot safely carry the factor.
 
-    The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
-    torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
-    block layout only; the Gemma 4-norm MoE form is rejected loudly, and so is Qwen-MoE's GATED shared
-    expert (``shared_expert_gate``) outside the hyper-connection seam, whose ``post`` applies the gate —
-    a silent pass would drop (or mis-weight) the shared term from every layer's output."""
+    The router (linear + softmax/sigmoid + top-k) and the weighted combine stay outside the wrapper: the
+    serving runner runs them in torch, and native generation compiles its own router and combine programs
+    (``emmy.serving.native.prepare``). Token-choice top-k MoE with the 2-norm (Llama-style)
+    block layout only; the Gemma 4-norm MoE form is rejected loudly. Qwen-MoE's shared expert is scaled by
+    its per-token sigmoid gate (``shared_expert_gate``) before the fold."""
     import torch
     import torch.nn as nn
 
@@ -1344,11 +1541,6 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
         raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (router, experts) MoE interface")
     gate, experts = parts
     hyper = _build_hyper_connection_split(block) if hyper_connection_seam(block) is not None else None
-    if hyper is None and getattr(block.mlp, "shared_expert_gate", None) is not None:
-        raise NotImplementedError(
-            "build_moe_split_wrapper: block.mlp carries a `shared_expert_gate` (Qwen-MoE gated shared expert) — "
-            "the ungated shared-experts fold below would silently drop the gate, mis-weighting every layer's output"
-        )
     shared_experts = next((m for a in ("shared_experts", "shared_expert") if (m := getattr(block.mlp, a, None)) is not None), None)
     raw_routed_scale = getattr(block.mlp, "routed_scaling_factor", 1.0)
     routed_scaling_factor = float(1.0 if raw_routed_scale is None else raw_routed_scale)
@@ -1358,7 +1550,9 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
         raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
     if hyper is not None and (float32_residual or split_gate_up):
         raise NotImplementedError("build_moe_split_wrapper: the hyper-connection seam has no coded-trunk or float32-residual form")
-    pre = hyper[0] if hyper is not None else _build_pre_wrapper(block, float32_residual=float32_residual)
+    # A GDN block's mixer and residual are its state wrapper's (:func:`build_gdn_state_wrapper`); only the experts split.
+    gdn = getattr(block, "linear_attn", None) is not None
+    pre = hyper[0] if hyper is not None else None if gdn else _build_pre_wrapper(block, float32_residual=float32_residual)
     attn = getattr(block, "self_attn", None)  # a hyper-connection layer's mixer is the fork's: PostAttn alone reads it
 
     class PostAttn(nn.Module):
@@ -1372,6 +1566,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             # consuming the same normed xn. Folding it into h keeps the runner's
             # route-and-combine half seam-free: layer_out = h + Σ w_e · expert_e(xn).
             self.shared_experts = shared_experts
+            # Qwen-MoE scales its shared expert by a per-token sigmoid gate.
+            self.shared_expert_gate = getattr(block.mlp, "shared_expert_gate", None)
             self._emmy_shared_expert_float32 = shared_experts is not None and routed_scale_folded and float32_residual
             self._emmy_laguna_exl3_post = "sparse" if float32_residual else None
 
@@ -1393,6 +1589,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                 xn = xn.to(attn_out.dtype)
             if self.shared_experts is not None:
                 shared = self.shared_experts(xn)
+                if self.shared_expert_gate is not None:
+                    shared = torch.sigmoid(self.shared_expert_gate(xn)) * shared
                 if self._emmy_shared_expert_float32:
                     return h, xn, shared
                 h = h + shared
@@ -1430,7 +1628,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             def slots(self, x, sel, w_gate, w_up, w_down):
                 gate = _picked_linear(x, w_gate, sel)
                 up = _picked_linear(x, w_up, sel)
-                output = torch.matmul(w_down.index_select(0, sel), (self.act_fn(gate) * up).unsqueeze(-1)).squeeze(-1)
+                output = torch.matmul(_picked(w_down, sel), (self.act_fn(gate) * up).unsqueeze(-1)).squeeze(-1)
                 return output if expert_scaling_factor == 1.0 else output * expert_scaling_factor
 
     elif transposed and has_bias and clamped:
@@ -1481,7 +1679,21 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                     gate = gate.clamp(max=limit)
                     up = up.clamp(min=-limit, max=limit)
                 hidden = self.act_fn(gate) * up
-                return torch.matmul(w_down.index_select(0, sel), hidden.unsqueeze(-1)).squeeze(-1) * expert_scaling_factor
+                return torch.matmul(_picked(w_down, sel), hidden.unsqueeze(-1)).squeeze(-1) * expert_scaling_factor
+
+            def slots_sum(self, x, sel, scores, shared, w_gate_up, w_down):
+                # Each row's picks weighted by its router scores (in the model dtype) and summed, plus the shared
+                # expert's output: the layer's routed sum, in the program.
+                picks = self.slots(x, sel, w_gate_up, w_down)
+                return torch.matmul(scores.unsqueeze(-2), picks).reshape(shared.shape) + shared
+
+            def blocks(self, x, sel, w_gate_up, w_down):
+                gate, up = torch.matmul(x, _picked(w_gate_up, sel).transpose(-1, -2)).chunk(2, dim=-1)
+                if limit is not None:
+                    gate = gate.clamp(max=limit)
+                    up = up.clamp(min=-limit, max=limit)
+                hidden = self.act_fn(gate) * up
+                return torch.matmul(hidden, _picked(w_down, sel).transpose(-1, -2)) * expert_scaling_factor
 
     else:
         raise NotImplementedError(
@@ -1490,7 +1702,25 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             f"and gpt-oss (x @ W, biased, clamped-SwiGLU) forms are spelled"
         )
 
-    return pre, hyper[1] if hyper is not None else PostAttn(), ExpertFFN()
+    return pre, hyper[1] if hyper is not None else None if gdn else PostAttn(), ExpertFFN()
+
+
+def build_moe_slots_wrapper(expert, form="slots"):
+    """The fixed-slot program's module: ``slots(x[1, H], sel[k], *stacked) -> [k, H]`` of one expert form
+    (:func:`build_moe_split_wrapper`), or a chunk's ``[T, k, H]`` from ``x[T, H]`` and ``sel[T, k]``, traced with the
+    E-stacked expert tensors as inputs. It carries the expert's float32-output contract."""
+    import torch.nn as nn
+
+    class Slots(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.expert = expert
+            self._emmy_output_float32 = getattr(expert, "_emmy_output_float32", False)
+            # The form's own method is the forward: its parameter names become the plan's input names, the
+            # names the layer's stacked tensors and the pager bind under.
+            self.forward = getattr(expert, form)
+
+    return Slots()
 
 
 def promote_shared_expert_float32(graph) -> None:
@@ -2077,6 +2307,16 @@ def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:
         setattr(mlp, name, RoutedScoreScale(router, total_scale))
 
 
+#: The prefix :func:`load_quantized_split` gives a checkpoint key no module of its twin holds.
+_NOT_OWNED = "<not owned>."
+
+
+def is_mtp_key(key: str) -> bool:
+    """Whether a checkpoint key belongs to a multi-token-prediction head: a separate speculative-decoding model
+    that no twin instantiates, so its keys are never the trunk's."""
+    return key.startswith("mtp.") or ".mtp." in key
+
+
 def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include_norm: bool, hosted=()) -> bool:
     """Whether one PP stage needs a quantized checkpoint leaf.
 
@@ -2093,7 +2333,7 @@ def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include
 
     ``hosted`` names module prefixes the serving engine runs instead of Emmy; their leaves are never owned.
     """
-    if key.startswith("mtp.") or ".mtp." in key or key.startswith(hosted):
+    if key.startswith(_NOT_OWNED) or is_mtp_key(key) or key.startswith(hosted):
         return False
     if layer_range is None:
         return True
@@ -2119,6 +2359,10 @@ def load_quantized_split(
     include_norm=True,
     expert_slice=None,
     hosted_by_engine=False,
+    config=None,
+    mtp=False,
+    experts=True,
+    trunk=True,
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
@@ -2172,14 +2416,24 @@ def load_quantized_split(
     per-expert-module checkpoints are sliced; an E-stacked or EXL3 expert table is refused.
 
     ``hosted_by_engine=True`` (the serving runner) leaves unread what the serving engine runs in Emmy's
-    place: a hyper-connection layer's attention sublayer and its n-gram PLE (Qwen3.8-Flash-Next's table
-    is about 51 GB). Those parameters stay meta.
+    place: the output head, a hyper-connection layer's token mixer (attention or Gated DeltaNet) and its
+    n-gram PLE (Qwen3.8-Flash-Next's table is about 51 GB). Those parameters stay meta.
+
+    ``config`` replaces the checkpoint's own config for the twin. ``mtp=True`` loads the checkpoint's
+    multi-token-prediction head instead of its trunk: ``config`` is a one-layer text config, the head's
+    ``mtp.layers.0.`` and ``mtp.norm.`` leaves fill the twin's layer and final norm, and no trunk leaf is read.
+
+    ``experts=False`` reads no routed expert: they stay meta on the twin and the store holds none, for a caller
+    that streams them one layer at a time rather than holding every expert at once. ``experts="meta"`` reads their
+    headers alone: the store holds every routed expert on the meta device, at the shape and dtype a read would give,
+    and no expert byte is read. ``trunk=False`` reads nothing else, so a stream reads one layer's experts alone
+    (``layer_range``).
 
     Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "mxfp4" | "nvfp4" | "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
     ``"codebooks": {layer_index: {input_name: cb}}`` on the EXL3 path (the codebook id the
-    speller stamps on each decode), ``"dir"`` (the resolved checkpoint directory) and
-    ``"trunk"`` (``"values"`` or ``"codes"``).
+    speller stamps on each decode), ``"dir"`` (the resolved checkpoint directory),
+    ``"trunk"`` (``"values"`` or ``"codes"``) and ``"keys"`` (each module key → the checkpoint key it loads from).
     """
     from pathlib import Path  # noqa: PLC0415
 
@@ -2208,7 +2462,7 @@ def load_quantized_split(
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
     model_dir = Path(model_dir)
-    config = _auto_config_from_pretrained(model_dir)
+    config = config if config is not None else _auto_config_from_pretrained(model_dir)
     if getattr(config, "quantization_config", None) is not None:
         delattr(config, "quantization_config")
     with torch.device("meta"):
@@ -2238,6 +2492,10 @@ def load_quantized_split(
     plural_shared = any(name.endswith("mlp.shared_experts") for name, _ in model.named_modules())
 
     def rename(key: str) -> str:
+        if mtp:
+            # The head's layer and norm take the one-layer twin's places; every other key is the trunk's, never owned.
+            head = re.sub(r"^mtp\.(layers|norm)\.", r"model.\1.", key)
+            return head if head != key else f"{_NOT_OWNED}{key}"
         key = to_twin(to_module(key))
         return _checkpoint_to_model_key(key) if plural_shared else key
 
@@ -2248,9 +2506,9 @@ def load_quantized_split(
         f"{name}.{part}."
         for name, block in (model.named_modules() if hosted_by_engine else ())
         if hyper_connection_seam(block) is not None
-        for part in ("self_attn", "ple")
+        for part in ("self_attn", "linear_attn", "ple")
         if getattr(block, part, None) is not None
-    )
+    ) + (("lm_head.",) if hosted_by_engine else ())
 
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
@@ -2290,6 +2548,7 @@ def load_quantized_split(
                     include_norm=include_norm,
                     hosted=hosted,
                 )
+                and (trunk if _expert_slot(rename(key)) is None else experts)
             ]
             if not owned_keys:
                 continue
@@ -2326,7 +2585,10 @@ def load_quantized_split(
                     layer, name, expert = slot
                     if expert_slice is not None and expert is None:
                         raise NotImplementedError(f"slicing an E-stacked expert table across ranks is not supported: {k!r}")
-                    t = f.get_tensor(k)
+                    view = f.get_slice(k)
+                    # A header read: the empty leading slice reads no byte, and a scalar is read whole.
+                    meta = experts == "meta" and view.get_shape()
+                    t = torch.empty(view.get_shape(), dtype=view[:0].dtype, device="meta") if meta else f.get_tensor(k)
                     if native_experts:
                         # The published MXFP4 dialect: ``I8 [out, in/2]`` nibble pairs beside
                         # ``F8_E8M0 [out, in/32]`` exponents. Both are raw byte carriers, so VIEW
@@ -2471,10 +2733,10 @@ def load_quantized_split(
             if param is not None:
                 state[key] = torch.empty(param.shape, dtype=dtype, device="cpu")
 
-    if expert_slice is not None:
-        slice_routed_experts(model, *expert_slice)
     _trim_padded_weights(model, state)  # EXL3 pads both dims of every coded linear to 128
     missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
+    if expert_slice is not None:  # after the load: a sliced shared expert is read whole (the routed ones are in the store)
+        slice_routed_experts(model, *expert_slice)
     if unexpected:
         logger.warning("quantized split load: %d unexpected checkpoint tensors (e.g. %s)", len(unexpected), unexpected[0])
     # DeepSeek/GLM/Laguna routers register this correction as a buffer.  Leaving it META when
@@ -2483,7 +2745,9 @@ def load_quantized_split(
     # checkpoint stores the source-layout ``mlp.experts`` spelling, translated above; check the
     # actual load result rather than the logical quantization sidecar (which need not list it).
     owned_missing = [
-        m for m in missing if _quantized_stage_owns(m, layer_range, include_embed=include_embed, include_norm=include_norm, hosted=hosted)
+        m
+        for m in missing
+        if trunk and _quantized_stage_owns(m, layer_range, include_embed=include_embed, include_norm=include_norm, hosted=hosted)
     ]
     missing_routing_biases = [m for m in owned_missing if m.endswith(".mlp.gate.e_score_correction_bias")]
     if missing_routing_biases:
@@ -2504,6 +2768,7 @@ def load_quantized_split(
         "codebooks": codebooks,
         "dir": str(model_dir),
         "trunk": "codes" if coded_trunk else "values",
+        "keys": {name: key for name, key in renamed.items() if not name.startswith(_NOT_OWNED)},
     }
 
 

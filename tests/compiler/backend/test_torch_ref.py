@@ -9,9 +9,9 @@ from emmy.compiler.backend import torch_ref
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp, ScatterOp
 
 # torch is only needed to build reference tensors / call the evaluator; the
 # emmy imports above are torch-free, so gate after them.
@@ -259,7 +259,7 @@ def test_where_accepts_bool_scalar_broadcast_through_triangular_indexmap():
                 IndexSource(
                     input_idx=0,
                     coord_map=(Literal(0, "int"),),
-                    select=BinaryExpr(">=", placeholder(1), placeholder(0)),
+                    select=BinaryExpression(">=", placeholder(1), placeholder(0)),
                 ),
                 IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
             ),
@@ -440,13 +440,36 @@ def test_indexmap_broadcast_then_rotary_slice_compiles():
     torch.testing.assert_close(actual, rotated(*inputs), rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize("rows", [36, 37, 64])
+def test_indexmap_broadcast_of_a_sliced_intermediate_compiles(rows):
+    """The GDN chunk spelling: a computed tensor, sliced along its last axis, unsqueezed and broadcast. Built from view
+    ops, the map reads the same values under torch.compile as in eager, whatever layout Inductor gives the slice."""
+    from emmy.compiler.ir.frontend.ir import SliceOp, UnsqueezeOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, 48, 1, 64)), node_id="x")
+    graph.add_node(ElementwiseOp(op="exp"), ["x"], Tensor("e", (1, 48, 1, 64)), node_id="e")
+    graph.add_node(SliceOp((1, 48, 1, rows), dim=3, start=0), ["e"], Tensor("s", (1, 48, 1, rows)), node_id="s")
+    graph.add_node(UnsqueezeOp(dim=4), ["s"], Tensor("u", (1, 48, 1, rows, 1)), node_id="u")
+    coords = (placeholder(0), placeholder(1), placeholder(2), placeholder(3), Literal(0, "int"))
+    wide = IndexMapOp(out_shape=(1, 48, 1, rows, rows), sources=(IndexSource(input_idx=0, coord_map=coords),))
+    graph.add_node(wide, ["u"], Tensor("o", (1, 48, 1, rows, rows)), node_id="o")
+    graph.inputs, graph.outputs = ["x"], ["o"]
+    x = torch.randn(1, 48, 1, 64, device="cuda")
+    fn, inputs = torch_ref.build_callable(graph, {"x": x})
+
+    expected = torch.exp(x)[..., :rows, None].expand(1, 48, 1, rows, rows)
+    torch.testing.assert_close(torch.compile(fn, fullgraph=True)(*inputs), expected, rtol=1e-6, atol=1e-6)
+
+
 def test_indexmap_cat_with_select():
     # output (4,4): a1<2 → in0[a0,a1]; a1>=2 → in1[a0,a1-2]
     s0 = IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1)), select=placeholder(1).lt(Literal(2, "int")))
     s1 = IndexSource(
         input_idx=1,
         coord_map=(placeholder(0), placeholder(1) - Literal(2, "int")),
-        select=BinaryExpr(">=", placeholder(1), Literal(2, "int")),
+        select=BinaryExpression(">=", placeholder(1), Literal(2, "int")),
     )
     g = _imap_graph([(4, 2), (4, 2)], (4, 4), (s0, s1))
     _assert_matches_numpy(g, {"in0": _rng().standard_normal((4, 2)), "in1": _rng().standard_normal((4, 2))})
@@ -455,9 +478,9 @@ def test_indexmap_cat_with_select():
 def test_indexmap_recurrence_patch_uses_tensor_ternary_coordinates():
     # Insert a two-cell recurrence update into columns 1:3 of a larger carried state.
     column = placeholder(1)
-    bounds = BinaryExpr("&&", BinaryExpr(">=", column, Literal(1, "int")), column.lt(Literal(3, "int")))
-    in_patch = BinaryExpr("&&", Literal(True, "bool"), bounds)
-    patch_column = TernaryExpr(in_patch, column - Literal(1, "int"), Literal(0, "int"))
+    bounds = BinaryExpression("&&", BinaryExpression(">=", column, Literal(1, "int")), column.lt(Literal(3, "int")))
+    in_patch = BinaryExpression("&&", Literal(True, "bool"), bounds)
+    patch_column = TernaryExpression(in_patch, column - Literal(1, "int"), Literal(0, "int"))
     sources = (
         IndexSource(input_idx=0, coord_map=(placeholder(0), patch_column), select=in_patch),
         IndexSource(input_idx=1, coord_map=(placeholder(0), column)),
@@ -470,10 +493,10 @@ def test_indexmap_recurrence_patch_uses_tensor_ternary_coordinates():
 
 
 @pytest.mark.parametrize(("condition", "expected"), [(1, 7), (0, 9)])
-def test_index_expr_ternary_preserves_scalar_condition(condition, expected):
-    expr = TernaryExpr(Literal(condition, "int"), Literal(7, "int"), Literal(9, "int"))
+def test_index_expression_ternary_preserves_scalar_condition(condition, expected):
+    expression = TernaryExpression(Literal(condition, "int"), Literal(7, "int"), Literal(9, "int"))
 
-    assert torch_ref._idx_expr(expr, {}) == expected
+    assert torch_ref._idx_expression(expression, {}) == expected
 
 
 def test_symbolic_shapes_resolve_from_input_tensors():
@@ -520,6 +543,36 @@ def test_gather_matches_numpy(data_shape, index_shape, axis):
     assert torch_ref.is_runnable(g)
     fn, inputs = torch_ref.build_callable(g, {"x": torch.from_numpy(data), "idx": torch.from_numpy(indices)})
     torch.testing.assert_close(fn(*inputs), torch.from_numpy(expected), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "dest_shape,indices,values_shape,axis",
+    [
+        ((4, 6), [[0, 5, -1], [6, 2, 3], [1, 6, 0], [-6, 4, 2]], (4, 3), 1),  # same rank; 6 is the extent: no write
+        ((5, 3, 2), [4, -5, 5, 2], (4, 3, 2), 0),  # rows; 5 skips its row
+        ((2, 5, 3), [3, 5, -1], (2, 3, 1), 1),  # rows along an inner axis, values broadcast over the last
+        ((3, 4), 1, (4,), 0),  # one row named by a scalar index
+    ],
+)
+def test_scatter_matches_numpy(dest_shape, indices, values_shape, axis):
+    """``ScatterOp``'s twin writes a copy of the destination exactly as the op's ``forward``: negative indices count
+    from the end and an index equal to the axis extent writes nothing."""
+    rng = np.random.default_rng(2)
+    dest = rng.standard_normal(dest_shape).astype(np.float32)
+    indices = np.asarray(indices, dtype=np.int64)
+    values = rng.standard_normal(values_shape).astype(np.float32)
+    expected = ScatterOp(axis=axis).forward(dest, indices, values)
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("dest", dest_shape), node_id="dest")
+    g.add_node(InputOp(), [], Tensor("idx", indices.shape, "i64"), node_id="idx")
+    g.add_node(InputOp(), [], Tensor("vals", values_shape), node_id="vals")
+    g.add_node(ScatterOp(axis=axis), ["dest", "idx", "vals"], Tensor("o", dest_shape), node_id="o")
+    g.inputs, g.outputs = ["dest", "idx", "vals"], ["o"]
+    assert torch_ref.is_runnable(g)
+    tensors = {"dest": torch.from_numpy(dest), "idx": torch.from_numpy(indices), "vals": torch.from_numpy(values)}
+    fn, inputs = torch_ref.build_callable(g, tensors)
+    torch.testing.assert_close(fn(*inputs), torch.from_numpy(expected), rtol=0, atol=0)
+    torch.testing.assert_close(tensors["dest"], torch.from_numpy(dest), rtol=0, atol=0)  # the destination is not written
 
 
 def test_fp4_rounding_boundaries_and_all_codes():

@@ -1,0 +1,160 @@
+model:
+  huggingface: zai-org/GLM-5.2-FP8
+  revision: f33c6dc501ee5a2c7e35155653b1b1abbc320951
+  task: generate
+engine:
+  llm:
+    tensor_parallel_size: 1
+    data_parallel_size: 8
+    context_length: 98304
+    gpu_memory_utilization: 0.95
+    max_concurrent_requests: 16
+    vllm:
+      image: vllm/vllm-openai:v0.32.0
+      extra_args: >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+benchmark:
+  random_input_len: 32000
+  random_output_len: 330
+  random_prefix_len: 256
+  session_calls: 12
+  session_new_tokens: 512
+  session_affinity: true
+  session_concurrencies: [16, 32, 64, 96, 128]
+  num_prompts: 1536
+  seed: 1729
+  repeats: 1
+matrices:
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: initial
+    scenario: [median, p90, ratio130]
+    benchmark.seed: [1729, 104729, 204729]
+    benchmark.random_input_len: [32000, 60000, 42900]
+    benchmark.random_output_len: [330, 590, 330]
+    benchmark.session_calls: [12, 28, 12]
+    benchmark.num_prompts: [1536, 3584, 1536]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: refinement
+    scenario: [median, p90, ratio130]
+    benchmark.seed: [4001729, 4104729, 4204729]
+    benchmark.random_input_len: [32000, 60000, 42900]
+    benchmark.random_output_len: [330, 590, 330]
+    benchmark.session_calls: [12, 28, 12]
+    benchmark.num_prompts: [1536, 3584, 1536]
+    benchmark.session_concurrencies: [[56, 64, 72], [24, 32, 40], [40, 48, 56]]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: prefill
+    scenario: median
+    prefill_tokens: [2048, 8192, 16384]
+    engine.llm.vllm.extra_args:
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 8192 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 16384 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: [8003265, 8001729, 8000193]
+    benchmark.session_concurrencies: [[64], [48, 64], [32, 48]]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: controls
+    scenario: median
+    mtp: [3, 0, 0]
+    prefill_tokens: [2048, 2048, 8192]
+    engine.llm.gpu_memory_utilization: [0.96, 0.95, 0.95]
+    engine.llm.max_concurrent_requests: [16, 24, 24]
+    engine.llm.vllm.extra_args:
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 8192 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: [10001729, 11001729, 11000193]
+    benchmark.session_concurrencies: [[72, 80], [64, 96, 128], [48, 64]]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: tuning
+    scenario: median
+    mtp: [3, 0, 3, 3, 1]
+    prefill_tokens: [2048, 2048, 2048, 4096, 2048]
+    engine.llm.tensor_parallel_size: [1, 1, 2, 2, 1]
+    engine.llm.data_parallel_size: [8, 8, 4, 4, 8]
+    engine.llm.max_concurrent_requests: [16, 24, 24, 24, 16]
+    engine.llm.vllm.extra_args:
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 4096 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 1
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: [8003265, 11003265, 13001729, 13000193, 8003265]
+    benchmark.session_concurrencies: [[64, 72], [80], [48, 64], [32, 48], [64, 80]]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: host_cache
+    scenario: median
+    benchmark.num_prompts: 4608
+    cpu_cache_gib_per_dp_engine: [64, 0]
+    engine.llm.vllm.extra_args:
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+        --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":68719476736,"offload_prompt_only":false}}'
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: [8003265, 8007873]
+    benchmark.session_concurrencies: [[64, 96], [96]]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: confirmation
+    scenario: median
+    cpu_cache_gib_per_dp_engine: 0
+    benchmark.num_prompts: 4608
+    benchmark.seed: 28001729
+    benchmark.session_concurrencies: [[64]]

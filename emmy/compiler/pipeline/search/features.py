@@ -20,9 +20,7 @@ from sys import float_info
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.stmt import Body
-from emmy.compiler.ir.stmt.blocks import Cond, Loop
-from emmy.compiler.ir.stmt.leaves import Assign, binary
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Loop
 from emmy.compiler.pipeline.knob import _SITE_FAMILIES, KnobType, axis_of, family_of, family_value, get
 from emmy.compiler.wire import kernel_tile
 
@@ -71,18 +69,20 @@ CTX_PREFIX = "H_"
 # coordinate, changing schedule eligibility without changing the stored computation or exact identity.
 # Version 11 is the Affine normal form: every sum, difference, negation and product with a literal in a stored body
 # is one ``Affine`` statement, counted here as its binary spelling. Earlier datasets and weights must be rebuilt.
-FEATURIZER_VERSION = 11
+# Version 12 lets a 1-byte scalar A pair with a 16-bit B through the converting shared-memory fill. Stored kernels
+# that read such an A (an FP8 weight against an f16 activation) can thereby gain a tensor-core schedule and change
+# S_warp_eligible without changing their exact kernel identity.
+# Version 13 is the one-scalar-definition normal form: an ``Assign`` holds one operation (a sum in affine form one node),
+# an ``Accum`` sums a name or a literal, and the pointwise work is the operation nodes of every ``Assign`` and ``Accum``
+# value. Earlier datasets and weights must be rebuilt.
+# Version 14 drops ``H_opt``: ptxas assembles every kernel, so there is no compiler opt level to feature. Earlier
+# datasets and weights must be rebuilt.
+# Version 15 adds ``S_ext_varying_trips``, a kernel's work with each statement run only as often as its value changes.
+FEATURIZER_VERSION = 15
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
 # spelling, so a dataset can read it without importing a model; the model splits on it like any column.
-#: The ``H_opt`` value of the DEPLOYABLE regime — the nvcc opt level ``compile`` / ``run`` / ``tune``
-#: all compile at, and therefore the only one a measurement is worth anything under. Rows carrying
-#: any other value came from a deliberately pinned sweep or from the era when tuning ranked at
-#: ``-Xcicc -O1``; nothing trains on them and no deploy reads them. Spelled here because both the
-#: data layer and the model layer test against it and neither may import the other.
-DEPLOYABLE_OPT = 3.0
-
 ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
 
 
@@ -178,8 +178,6 @@ def _stage_features(knobs: dict) -> dict[str, float]:
     st = _parsed_stage(str(spec))
     if st is None:
         return {}
-    if st.transport == "reg":
-        return {"D_stage_reg": 1.0}  # register storage has no shared-memory pipeline
     return {
         "D_stage_depth": float(st.depth),
         "D_stage_async": 1.0 if st.is_async else 0.0,
@@ -428,6 +426,16 @@ def knob_features(knobs: dict) -> dict[str, float]:
     return feats
 
 
+def _state_key(kernel: Op, knobs: Mapping) -> str | None:
+    """The key ``knobs`` spells the storage of ``kernel``'s one carried state under, or ``None``: the carrying
+    fold's route, or the bare ``STAGE`` of a kernel whose step stages no operand."""
+    tile = kernel_tile(kernel)
+    routes = tile.state_routes if tile is not None else ()
+    if len(routes) != 1:
+        return None
+    return next((key for key in (f"STAGE@{routes[0]}", "STAGE") if key in knobs), None)
+
+
 class Featurizer:
     """The one featurizer every prior reads: a candidate's row is the card's ``H_*`` features, the decided kernel's
     stamps (:func:`stamps`), whether its schedule space holds a warp plan, and the candidate's knobs
@@ -452,29 +460,36 @@ class Featurizer:
         base = {**self.base, **stamps(kernel)}
         if pieces is None and self.warp_eligible(kernel):
             base["S_warp_eligible"] = 1.0
+        if (key := _state_key(kernel, knobs)) is not None:
+            # A carried state's storage is no operand fill: the row prices it as its own facts.
+            base["D_state_shared"] = float(knobs[key] == "d1/smem")
+            base["D_state_reg"] = float(knobs[key] == "d1/reg")
+            knobs = {name: value for name, value in knobs.items() if name != key}
         left = [(kernel, None)] if pieces is None else kernel_pieces(pieces)
-        return {**knob_features({**base, **knobs}), **piece_features(left)}
+        of_pieces = piece_features(left)
+        if base.get("S_ext_trips"):
+            # The work the candidate's kernels do against the work the kernel it decides does: 1 where the kernel
+            # stays whole, below it where a cut computes a cone once that the whole kernel recomputed per output.
+            of_pieces["P_trips_ratio"] = of_pieces["P_sum_ext_trips"] / base["S_ext_trips"]
+            # The same against the work that is left once nothing is recomputed (``_varying_trips``): far above 1
+            # where the pieces do work the kernel never did, as dense maps composed for a rank-one step.
+            of_pieces["P_varying_ratio"] = of_pieces["P_sum_ext_varying_trips"] / base["S_ext_varying_trips"]
+        return {**knob_features({**base, **knobs}), **of_pieces}
 
     def warp_eligible(self, kernel: Op) -> bool:
         """Whether the classic schedule space of ``kernel`` holds a warp plan on this card — the scheduling
-        problem's own answer, under the live precision pins. A schedule row reads it: a scalar tile on such a
+        problem's own answer, whatever the precision pins are. A schedule row reads it: a scalar tile on such a
         kernel competes against tensor cores. ``False`` for a kernel no tile stands behind and for a featurizer
         given no context. Computed once per kernel."""
         from emmy.compiler.ir.schedule.classic import ClassicProblem  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.tile._fromloop import scheduled_form  # noqa: PLC0415
 
         tile = kernel_tile(kernel)
         if tile is None or tile.op is None or self.ctx is None:
             return False
         if (known := self._warp_eligible.get(id(tile))) is not None:
             return known[1]
-        problem = ClassicProblem(
-            serial_form(tile, tile.name) if tile.carries else tile,
-            self.ctx,
-            allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
-            allow_fp8=precision_pin(FP8_MMA) is True,
-        )
+        problem = ClassicProblem(scheduled_form(tile, tile.name), self.ctx)
         self._warp_eligible[id(tile)] = (tile, problem.warp_eligible)  # the tile is held, so its id is not reused
         return problem.warp_eligible
 
@@ -577,8 +592,8 @@ class _Decomp:
     # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
     # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU golden files).
     coop_transposed: bool = False
-    # The lane's contiguous run (``/v<n>``): identity only, no feature reads it, so a ``coop/v8``
-    # golden row matches its own candidate rather than the first band of the same width.
+    # The lane's contiguous run (``/v<n>``; the output columns a ``coop-t`` lane owns): part of the identity, so a
+    # ``coop/v8`` golden row matches its own candidate, and read by ``D_reduce_run`` on a ``coop`` band.
     columns: int = 1
 
 
@@ -718,8 +733,9 @@ def _geom_feats(
         # KERNEL combine (``c<cta>k``), 0.0 = in-place ATOMIC (``c<cta>a`` / bare). The
         # offline prior's split-K gate reads it.
         "D_finalize_kernel": 1.0 if (splitk > 1 and finalize == "kernel") else 0.0,
-        # A scalar tile on a warp-ELIGIBLE contraction (16-bit operands, atoms offered —
-        # ``Featurizer.warp_eligible``) competes against tensor cores: the
+        # A scalar tile on a warp-ELIGIBLE contraction (operands of 16 bits or fewer, atoms offered —
+        # ``Featurizer.warp_eligible``, which does not count the TF32 atom of an fp32 product) competes against
+        # tensor cores: the
         # roofline bar none of the flat geometry terms can see. 0 on warp rows and on kernels
         # with no warp offer, so fp32 / non-contraction ranking is untouched.
         "D_scalar_on_warp_eligible": 1.0 if (not warp and float(knobs.get("S_warp_eligible", 0.0) or 0.0) > 0) else 0.0,
@@ -826,6 +842,9 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
     # byte-identically. Coop moves enumerate on the TILE-less / per-cell tier only, so this block
     # is the one place the letter needs to surface.
     out["D_reduce_transposed"] = 1.0 if d.coop_transposed else 0.0
+    # A ``coop/v<n>`` lane reads ``n`` adjacent reduce elements per step, one vector load where the operand is
+    # contiguous along the reduction: the same threads and split as its plain band, a different kernel.
+    out["D_reduce_run"] = 0.0 if d.coop_transposed else math.log2(max(float(d.columns), 1.0))
     return out
 
 
@@ -975,11 +994,12 @@ def _skeleton(body: Body, buffers: Mapping | None) -> dict[str, float]:
     feats["S_n_write"] = len(body.writes)
     feats["S_n_accum"] = len(body.accums)
     feats["S_n_cond"] = len(body.iter_of_type(Cond))
-    # A sum is one ``Affine`` statement in the stored body; the work it stands for is its binary spelling.
-    assigns = [s for s in binary(body.iter()) if isinstance(s, Assign)]
-    feats["S_n_assign"] = len(assigns)
-    for s in assigns:
-        feats[f"S_pw_{s.op.name}"] += 1
+    # A definition holds a tree in the stored body; the work it stands for is its operation nodes, one each.
+    values = [s.value for s in body.iter() if isinstance(s, (Assign, Accum))]
+    operations = [node.operation for value in values for node in value.subterms() if node.operation is not None]
+    feats["S_n_assign"] = len(operations)
+    for op in operations:
+        feats[f"S_pw_{op.name}"] += 1
     for s in body.accums:
         feats[f"S_reduce_{s.op.name}"] += 1
     loops = body.loops
@@ -1026,10 +1046,8 @@ def _serial_cell_work(body: Body) -> float:
     enclosing reduce is priced by the trips a thread actually serializes (DeepSeek-V4
     ``post4096``'s elected consumer piece recomputed a 16384-step statistics contraction inside a
     4096-step reduce: flat product 2^36-blind, nest product the honest 2^30). Free and sweep
-    loops are excluded (grid-distributed / conservative), a symbolic extent contributes no
-    factor, and so does a ``StridedLoop`` (like everywhere else in this feature block — a
-    strided respelling can therefore evade the count, in the conservative direction), so the
-    value is a lower bound; saturates at the largest finite float."""
+    loops are excluded (grid-distributed / conservative) and a symbolic extent contributes no
+    factor, so the value is a lower bound; saturates at the largest finite float."""
     best = 1.0
     for s in body:
         if isinstance(s, Loop):
@@ -1042,6 +1060,55 @@ def _serial_cell_work(body: Body) -> float:
             for nested in s.nested():
                 best = max(best, _serial_cell_work(nested))
     return best
+
+
+def _trips(body: Body) -> float:
+    """The statement executions ``body`` performs: every leaf statement once per trip of the static loops around it,
+    free and reduce alike, so a cone recomputed inside an output loop is counted once per output. A symbolic extent
+    counts one trip, so the value is a lower bound;
+    saturates at the largest finite float. Where :func:`_serial_cell_work` says how long one thread's cell takes,
+    this says how much work the kernel does in all, which is what a cut that computes a cone once instead of per
+    output removes."""
+    total = 0.0
+    for s in body:
+        if isinstance(s, Loop):
+            ext = s.axis.extent
+            total += _bounded_mul(_trips(s.body), float(ext.as_static()) if ext.is_static else 1.0)
+        else:
+            nested = s.nested()
+            total += sum(_trips(inner) for inner in nested) if nested else 1.0
+    return min(total, float_info.max)
+
+
+def _varying_trips(body: Body) -> float:
+    """The statement executions ``body`` performs where each statement runs only as often as its value changes: a
+    leaf once per trip of the static loops around it whose axis it depends on (``Body.axis_dependencies``; a load of
+    a carried state reads the step, the axis of the loop that carries it). :func:`_trips` charges a statement every loop around it,
+    so a contraction that sits inside an output loop it does not read is a matrix of work per step there and a row
+    here. That is what tells a recurrence whose step is a rank-one update from one whose step is a dense product:
+    their loop nests agree, and composing the first costs a matrix product where its walk paid a row. Symbolic
+    extents count as in :func:`_trips`."""
+    depends = body.axis_dependencies
+
+    def walk(stmts: Body, around: tuple[tuple[str, float], ...]) -> float:
+        total = 0.0
+        for s in stmts:
+            if isinstance(s, Loop):
+                ext = s.axis.extent
+                total += walk(s.body, (*around, (s.axis.name, float(ext.as_static()) if ext.is_static else 1.0)))
+            elif nested := s.nested():
+                total += sum(walk(inner, around) for inner in nested)
+            else:
+                reads = set(s.deps()).union(*(e.free_vars() for e in s.expressions()))
+                axes = reads.union(*(depends.get(name, ()) for name in reads))
+                runs = 1.0
+                for name, extent in around:
+                    if name in axes:
+                        runs = _bounded_mul(runs, extent)
+                total += runs
+        return min(total, float_info.max)
+
+    return walk(body, ())
 
 
 def _extents(body: Body) -> dict[str, float]:
@@ -1074,4 +1141,6 @@ def _extents(body: Body) -> dict[str, float]:
         "S_ext_reduce_max": float(max(reduce_)) if reduce_ else 0.0,
         "S_ext_n_symbolic_axis": float(n_symbolic),
         "S_ext_serial_cell_work": _serial_cell_work(body),
+        "S_ext_trips": _trips(body),
+        "S_ext_varying_trips": _varying_trips(body),
     }

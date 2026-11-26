@@ -30,6 +30,11 @@ def _classify_create_failure(stderr: str) -> Exception:
     return TerminalProvisionError(f"gcloud create failed: {stderr.strip()}")
 
 
+def _is_not_found(stdout: str, stderr: str) -> bool:
+    """Whether a failed gcloud describe says the instance does not exist."""
+    return "not found" in f"{stdout}\n{stderr}".lower()
+
+
 # ── Command builders ───────────────────────────────────────────────
 
 
@@ -146,19 +151,25 @@ async def wait_for_status(instance, zone, target_status, timeout, interval=10, d
     """Poll instance status until it matches target_status or timeout.
 
     Returns:
-        True if target status reached, False on timeout.
+        True if target status reached, False on timeout or once a seen instance is gone.
     """
     if dry_run:
         cmd = _gcloud_status_cmd(instance, zone)
         logger.info(f"[dry-run] Poll every {interval}s (up to {timeout}s): {' '.join(cmd)} -> {target_status}")
         return True
 
-    elapsed = 0
+    elapsed, seen = 0, False
     while elapsed < timeout:
-        rc, stdout, _ = await run_shell_cmd(_gcloud_status_cmd(instance, zone))
+        rc, stdout, stderr = await run_shell_cmd(_gcloud_status_cmd(instance, zone))
         status = stdout.strip()
         if rc == 0 and status == target_status:
             return True
+        if rc == 0:
+            seen = True
+        elif seen and _is_not_found(stdout, stderr):
+            # GCP removes a FLEX_START request it gave up on (e.g. a stockout before the request expired).
+            logger.error(f"Instance '{instance}' disappeared while waiting for status '{target_status}'")
+            return False
         await asyncio.sleep(interval)
         elapsed += interval
 
@@ -195,12 +206,11 @@ async def create_instance(
     machine_type,
     provisioning_model="FLEX_START",
     max_run_duration="7d",
-    request_valid_for_duration="2h",
     termination_action="DELETE",
     image_family="debian-12",
     image_project="debian-cloud",
     extra_gcloud_args=None,
-    timeout=14400,
+    timeout=3600,
     wait_ssh=False,
     wait_ssh_timeout=300,
     ssh_gateway=None,
@@ -217,6 +227,8 @@ async def create_instance(
 
     Args:
         provisioning_model: FLEX_START, SPOT, or STANDARD.
+        timeout: seconds to wait for RUNNING. A FLEX_START request is valid for the same time, so GCP stops
+            queueing it when the wait ends.
         allocation_observer: optional observer notified as soon as a deletion
             handle exists.
 
@@ -232,7 +244,7 @@ async def create_instance(
         machine_type,
         provisioning_model=provisioning_model,
         max_run_duration=max_run_duration,
-        request_valid_for_duration=request_valid_for_duration,
+        request_valid_for_duration=f"{timeout}s",
         termination_action=termination_action,
         image_family=image_family,
         image_project=image_project,
@@ -290,8 +302,7 @@ async def instance_is_active(instance, zone):
     rc, stdout, stderr = await run_shell_cmd(_gcloud_status_cmd(instance, zone))
     if rc == 0:
         return True
-    lowered = f"{stdout}\n{stderr}".lower()
-    if "not found" in lowered or "was not found" in lowered:
+    if _is_not_found(stdout, stderr):
         return False
     raise RuntimeError(f"Could not audit GCP VM {instance} in {zone}: {stderr.strip()}")
 

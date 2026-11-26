@@ -1,48 +1,70 @@
 # Kernel lowering — `TileOp` → `KernelOp`
 
 This stage turns a scheduled `TileOp` into a `KernelOp` (a thread-bound CUDA-IR body), then runs a short chain of
-Kernel-IR peepholes over it. The CUDA lowering (`lowering/cuda`) renders the `KernelOp` to a `__global__` source string
-afterwards.
+Kernel-IR peepholes over it. The CUDA lowering (`lowering/cuda`) compiles the `KernelOp` to PTX afterwards, after one
+rule of its own: `007_decode_grid` turns the `Tile` into a `Grid` whose axes hold their decode as
+expressions over `thread_idx.x` and `block_idx.x` (`decode_tile`), its tail guard a `Cond` where the launch does not
+cover the cells exactly. The `Grid` states its launch's ranges of the built-ins, so the optimization the op takes at
+construction reads a block axis off `blockIdx.x` alone and a thread axis off `threadIdx.x` alone, and an emitter has
+no decode of its own to spell. A thread's lane and warp are decoded the same way: a body that reads `lane` or `warp`
+(the cross-warp combine does) gets a `Let` of each at the top of the `Grid`, `thread_idx.x % 32` and `thread_idx.x /
+32`, so they are values under the launch's ranges and no emitter declares them. The rule runs after the ones that
+read the `Tile` (the kernel cache, the zero-init delegation), so `--ir kernel` and the diagnostics see the `Tile`.
+
+`008_flat_indices` follows it: every `Load`, `Write` and `CpAsyncCopy` takes one flat element index into its buffer
+(`address.flat_index`: row-major over the buffer's shape, symbolic sizes included, each coordinate widened to 64 bits
+where the buffer can pass the 32-bit range), and a `FlatIndex` a staging pass left in a value becomes that arithmetic
+too. The body's optimization then simplifies the index under the ranges in scope, so `(128 * a0_b + 64 * a0_u) * 132
++ a2` reaches the code generator as `16896 * a0_b + 8448 * a0_u + a2`, which takes it as given. The pass
+stands here, past every kernel pass, for two reasons. The kernel passes read the coordinates: the vector passes prove
+alignment over them and the staging passes tile them. And which buffers are paged is a fact of the graph, which a
+kernel taken from the kernel cache does not know: an access of a paged buffer keeps one index per dimension, since
+its index along the paged axis picks the page, and so does whatever else its dimensions define — a
+`Write` under a Volta slab layout, the shared-memory side of a `CpAsyncCopy` that carries a lane offset, the fragment
+statements (`LdmatrixLoad`, `FragmentLoad`, `BlockScaleLoad`, a `FragmentApply`'s gathered operand, `RegStore` and
+the loads of its epilogue) and `TmaLoad`. `010_lower_kernelop` then checks the body (`check_input`): typed in full,
+one flat index per access outside those, no loop asking for unrolling, and every fragment statement naming a row of
+the lane-to-element table.
+
+The PTX compiler then computes every index division and remainder by a constant over a non-negative dividend as a
+shift, a mask or a multiply-high: the Kernel IR keeps `/` and `%`, which the simplifier reads.
 
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 
 `010_materialize` is a thin wrapper: after the split-survivor assert it makes **one** call to `_factor.factorize(tile,
-root)`, the entry to the recursive emitter, spells every `Affine` statement of the finished body as its binary
-`Assign`s over `Let`-bound literals — Kernel IR evaluates one operation at a time, so no kernel pass meets a sum —
-then passes it through `_drop_repeated_declarations` — the emitted body's one legality guard. Operand cones splice
+root)`, the entry to the recursive emitter, and builds the `KernelOp` from the finished body. Operand cones splice
 INDEPENDENTLY (`Fold.spliced_step`), so two sibling cones reading one shared broadcast constant each carry their own
-copy of its `buf[0]` `Load`, under the same SSA name and at the same address; flattened into one loop body that is two
-C declarations of one name, which nvcc rejects (*already declared in the current scope*). The repeat binds nothing
-new, so it is dropped with NO rewrite — which is what keeps the guard narrow enough to run over a WHOLE kernel body.
-The renaming forms (`_atom._dedup_loads`, `stmt.normalize.place_values`) collapse two DIFFERENT names at one address,
-which needs a memory-effect reading neither has: a `Write` or an async fill between two identical loads of a staged
-buffer makes the second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope
-is already illegal. A same-dtype `copy` of a value already bound to what its name holds is the same repeat in another
-spelling (a placement cut drops a workspace read's identity cast in one cone and keeps it in a sibling), and is
-dropped too. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
-Repeated `Let` bindings follow the same rule: their expression representation and declared dtype must agree. Signed
-zero remains distinct, and an incompatible repeated declaration still surfaces as an SSA fault.
+copy of its `buf[0]` `Load`, under the same SSA name and at the same address, and a cone that derives a value from
+one carries its own copy of the `Assign`. The body's normal form (below) is what makes that one declaration: a name
+bound twice reads lexically, the two bindings are one value, and the value is held once. A name bound to two
+DIFFERENT values keeps both, under two names.
 
 When a projection recomputes only some outputs of an already bound reduction, its smaller loop is a distinct
 statement. Its exported accumulators receive distinct names through the same positional renaming used for other
 rebound values. Whole-loop equality alone cannot detect this partial overlap.
 
 The finished body then answers the complementary question, `_unbound_names`: does it read anything its launch never
-supplies? A well-formed kernel reads its own buffers, the symbolic extents passed beside them and the renderer's CTA
-helpers (`lane` / `warp`), and nothing else — every other name is bound by a statement or an enclosing axis, which is
-what `free_names` subtracts. What survives is a value some emission referred to under a spelling nothing defines: a
+supplies? A well-formed kernel reads its own buffers, the symbolic extents passed beside them and the thread
+coordinates the grid decode binds (`lane` / `warp`), and nothing else — every other name is bound by a statement or
+an enclosing axis, which is what `free_names` subtracts. What survives is a value some emission referred to under a spelling nothing defines: a
 per-cell rename whose shared coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read
-a boundary store was not re-spelled for. Each of those reached nvcc as *identifier "x" is undefined*, a hundred
-errors deep in a generated source and charged to whichever candidate the bench happened to be running. Asserting it
+a boundary store was not re-spelled for. Each of those used to surface as an undefined identifier deep in a
+generated kernel, charged to whichever candidate the bench happened to be running. Asserting it
 here names the kernel and the value instead, in the pass that built them.
 
+The reverse fault is an output the kernel declares and no statement writes: a store the emission lost (a scatter fused
+beside a store over another sweep). Nothing downstream notices — the kernel compiles and leaves the buffer unwritten —
+so the materializer declines the row as a rejecting skip, like `UnbindableProjection`. The greedy retry moves to the
+next row, and when no row keeps the store, the `LoweringError` names the kernel and the output. A register
+materialization returns before this check: its state port has no store by design, and `_drop_private_ports` removes it.
+
 For a register materialization, `factorize` emits the same Fold tree as C fragments through `_register`.
-The ordered axis becomes a `StridedLoop` inside the CTA, enclosed by FP32 state declarations. Equal fragment
+The ordered axis becomes a `Loop` inside the CTA, enclosed by FP32 state declarations. Equal fragment
 expressions share results. The schedule proves row ownership before lowering; the emitter uses the atom's
 geometry with existing `FragmentApply`, `MmaSyncPtx`, `FragmentPromote`, and `RegStore` nodes. `FragmentRepack`
 supplies C→A and C→B conversion, with every warp lane participating. Loads clamp padded coordinates, stores guard
 them, and partial operands are zero-masked before MMA. Loads and packs stay beside their consuming MMA to limit
-register lifetimes. Materialized B operands reuse `LdmatrixLoad` and its address analysis when they have unit
+register lifetimes. Materialized B operands reuse `FragmentLoad` and its address analysis when they have unit
 stride; computed or strided operands use C-fragment gather and repack. FP16 promotion is shared with classic
 schedules, and Volta repacking shuffles packed FP16 pairs to reduce the shuffle count.
 
@@ -126,13 +148,16 @@ dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `
 
 ### The one factorizer
 
-The scalar binding arm refuses a row that selects a contraction tile inside the subtree it lowers serially. The
-schedule offer applies the same rule (`TileOp.nested_tiles`), so an enumerated row should not reach this refusal,
-and a pin that names such a tile is refused at the offer with the rule's reason. The binder keeps the check for the
-cases the offer does not see: a root whose row tiles it but that still lowers serially here (its tile has no placed
-`(m, n)` axes, or the grid has fewer than two axes), a `TILE` at that root itself, and a root the binder peels to
-under that schedule that differs from the one `ops.kernel_roots` reads from the term. The greedy's rejected-row
-path then retries another schedule.
+Both binding arms refuse a row that selects what they would drop. The serial arm lowers its whole subtree per cell,
+so it refuses a contraction tile anywhere in it, its root's included. The output-tiled arm evaluates its cone per cell
+in the fill, so it refuses a tile below its root except the chunked carrier's score, which the tensor-core tier folds.
+Either arm refuses a `STAGE` below its root, since only the root's transport is read. The schedule offer applies the
+same rules (`TileOp.nested_tiles`), so an enumerated row should not reach these refusals, and a pin that names such a
+tile is refused at the offer with the rule's reason. The binder keeps the checks for the cases the offer does not
+see: a root whose row tiles it but that still lowers serially here (its tile has no placed `(m, n)` axes, or the grid
+has fewer than two axes), a `TILE` at that root itself, and a root the binder peels to under that schedule that
+differs from the one `ops.kernel_roots` reads from the term. The greedy's rejected-row path then retries another
+schedule.
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
 binds a wholly serial tree directly, so shared carriers are lowered together. A schedule that tiles an output or
@@ -219,7 +244,8 @@ fill→drain skeleton — and the atom contributes only leaves, never a loop. Th
 sink so a paired Volta operand layout and its accumulator map remain one coupled lowering choice. Per-atom diff:
 
 - **mma** (`_MmaOps`) — atom `(16, 8, 16)`, `lanes == 32`. The UNIT is a **warp**; its leaves emit `RegFragment` /
-  `LdmatrixLoad` / `MmaSyncPtx` / `RegStore` and decode the atom-lane offset at render. `RegStore` derives both
+  a fragment load (`LdmatrixLoad` for a staged 16-bit slab, else `FragmentLoad`) / `MmaSyncPtx` / `RegStore` and
+  leave the atom-lane offset to the PTX compiler, which expands each fragment per lane. `RegStore` derives both
   algebraic M/N strides from the full physical output address, including composite coordinate coefficients:
   contiguous N keeps packed stores, while a reversed physical orientation
   uses scalar strided stores. On Volta, each adjacent accumulator pair stays packed under an M-only tail guard; an N
@@ -264,7 +290,10 @@ The score's own fragments are never copied: they repack in registers out of
 the chunk's C fragments, or come off a stored probability tile at the fragment lane map, and that shape has no key at
 all — the value then stages alone. The QUERY is not staged either, for the opposite reason: its index never carries the
 carrier's key, so it is loop-INVARIANT and rides hoisted registers instead, one A fragment per score-K step read once
-ahead of the chunk loop. Depth is the ordinary budget clamp, so a ring deeper than one prefetches the next chunk's key
+ahead of the chunk loop. A warp-group score reads descriptors only, so there the query is copied once into a slab of its
+own ahead of the loop; a tile that overhangs the query rows clamps that fill onto the last valid row, as every slab
+does for an outer stream its chunk does not divide, and the store guard discards the rows. A stored score has no query
+and fills none. Depth is the ordinary budget clamp, so a ring deeper than one prefetches the next chunk's key
 and value ACROSS the softmax between this chunk's fill and drain — the longest overlap this tier has to offer, on a
 STATIC extent. Its key extent may be SYMBOLIC, which every other staged operand refuses: a
 K-major value rows its slab by key and runs its copy chunks along the head dim, so the extent enters neither the chunk
@@ -377,27 +406,34 @@ retain the cooperative gather path. Newer instruction families stay disabled. Th
 additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
 are never offered and a `smem-tma` pin refuses — Ada/Ampere have no
-`cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the
+`cp.async.bulk.tensor` and ptxas has no `sm_89a` target, so a TMA kernel there would fail to assemble. Unpinned, the
 schedule fork enumerates the resolver-gated stage grid (`ir/schedule/catalog.stage_moves`) alongside the tile / reduce
 moves;
-an `EMMY_STAGE` pin stays authoritative.
+an `EMMY_STAGE` pin stays authoritative. A warp tile's TMA and cp.async stages also take an N that ends inside the
+tile when B is N-major (a transposed B, or a weight read in its source layout): the box rows past N read as zeros, a
+copied row past N clamps to the last one as a masked M row does, and the stores mask their columns. A Qwen3.5 vision
+MLP's fc1 (N = 4304, no tile divides it) had no staged schedule before, and keeps a cp.async one once its weight is
+paged, which TMA cannot read. A K-major B with a masked N still keeps direct loads.
 
 **Slab addresses.** A swizzled slab's element index is permuted by an XOR of its own row bits into its 16-byte
 chunk bits, and that XOR is linear over bit-disjoint parts: `swz(a | b) = swz(a) ^ swz(b)`. Every staged address is
 such a sum — a tile base the IR spells (a fragment's row block and K step, a copy stripe's base row, a ring slot's
-row offset) plus the lane's own offset the render adds — and a base whose row is a multiple of the lane's row span
+row offset) plus the lane's own offset the PTX compiler adds — and a base whose row is a multiple of the lane's row span
 and whose column clears the lane's column bits shares no bit with it. So the drain reads
 `(swz(lane) ^ swz(col)) + row·ldm` and an evenly striped cp.async fill, unrolled per stripe, writes
-`swz(lane) + base` (`swizzled_slab_index`): the lane's swizzle is one hoisted per-lane value, the column's a
-constant nvcc folds, the row an immediate of the load. Re-applying the swizzle to every load's whole index had nvcc
-recompute the XOR from `threadIdx` per load — a fifth of an attention chunk's instructions on the A100, and the
-spills that came with holding the results. A base the reading cannot prove keeps the whole-index form.
+`swz(lane) + base` (`swizzled_slab_index`): the lane's swizzle is one hoisted per-lane value, the column's a constant
+the compiler folds, the row an immediate of the load. Re-applying the swizzle to every load's whole index had the kernel
+recompute the XOR from `threadIdx` per load — a fifth of an attention chunk's instructions on the A100, and the spills
+that came with holding the results. A base the reading cannot prove keeps the whole-index form.
 
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
-producer in registers. Warp rows place a producer either in a synchronous shared-memory slab or, when the child is a
-scheduled contraction, directly in fragments before storing the slab consumed by `ldmatrix`. Materialized peers keep
-using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
-materializer do not recognize operation families.
+producer in registers. Warp rows place a producer in a synchronous shared-memory slab, evaluated per cell in the
+fill; a contraction nested there is a serial loop and takes no `TILE` or `STAGE` of its own (only the chunk tier's
+score does, see "The one factorizer"). Each fill thread writes a run of up to 16 B of cells, and the run's reads of
+one gmem operand along K merge into one vector load only where `copies_aligned` proves every run starts on that
+width, the proof every vector copy takes (the schedule `ARCHITECTURE.md`). A 260-wide bf16 row puts every odd row
+8 B off, so its reads stay per cell. Materialized peers keep using the ordinary vectorized copy transports. These are
+residence choices over the same Fold tree; the scheduler and materializer do not recognize operation families.
 
 **A carrier the tiers cannot fold WHOLE is no tile site.** `Fold.tiles_whole` asks whether the tile's accumulators can
 BE the carrier: for a planar one, that every carried state is a bilinear channel; for a twisted one, that the recipe
@@ -424,7 +460,7 @@ reduce, the channel patterns, the repack — reads the same C fragments either w
 
 Where the edge is not a bindable contraction (or the atom has no modeled C layout) it stays per-cell: spliced into the
 fill's cell and evaluated inline from lowered loop IR, a scalar dot per slab cell. Geometry: exact cover on N only. A
-masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
+masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `clamp_to`; the overhang store is discarded by
 the `RegStore` guard). A symbolic **K** rides the fill's own **K MASK** — the same clamp-to-identity discipline on the
 contraction axis: the cone's reads clamp in-bounds and every slab lane whose k index reaches past the runtime extent
 stores the additive fold identity 0 (`_atom._k_masked`; the bilinear reading pins ⊕ = add, so a zero operand folds to
@@ -435,9 +471,9 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 `(b, acc)` channels over one shared A edge, either a computed cone or a materialized load; `_AtomOps.channels` reads
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
-epilogue `Lambda` (`extra_frags`). Epilogue loads substitute the cell base plus each lane's row and column offsets
+epilogue (`extra_frags`). Epilogue loads substitute the cell base plus each lane's row and column offsets
 inside their source index expressions, so block-scale quotients and split quotient/remainder coordinates retain
-their arithmetic. FP4 conversion helper emission reads the rendered kernel body, including these fused epilogues.
+their arithmetic.
 Materialized A copies into the same single A slab; computed A evaluates into it. A
 computed A always takes the synchronous compute fill, as anywhere else, while its stored B slabs copy beside it with
 cp.async (`smem`) or TMA box copies (`smem-tma`, depths 1 and 2, with or without `/p2`); a materialized A stages
@@ -456,6 +492,10 @@ reading then names the tensor's trailing extent as `ldm` and calls the operand N
 reduction axis. Both are wrong, the fragment reads the wrong elements, and nothing raises. `_direct_operand` takes both
 from the operand's FLAT address — each dim's addends scaled by that dim's element stride and simplified — so a reshape
 that splits one coordinate across dims (`x[m / 2, (m % 2) * 128 + k]`) still reads as the `128·m + k` it sums to.
+A split piece, read through the masked form, reaches a symbolic stream through a clamp onto its last position
+(`address.clamp_to`), which is no
+stride: the loader reads the leading dimension off the position itself and bounds its lanes by the clamp's extent,
+so the overhang zero-fills instead of stepping by the buffer's trailing extent.
 The flash tier's gmem reads take theirs the same way — the hoisted query fragments and the unstaged key and value:
 a query stored `[seq, head, dim]` strides its rows by every head's dim, and read at its trailing extent the Qwen3-0.6B
 layer's flash piece disagreed with eager on 487k of 524k outputs.
@@ -463,7 +503,9 @@ Wherever the dims separate the two coordinates this says exactly what the dim po
 unit-stride raises rather than emitting an address the loader cannot express; a symbolic extent leaves the strides of
 every earlier dim unknown and keeps the dim-position reading. The staged transports have their own contracts: a TMA box
 is a rectangle in the descriptor's coordinates, so an operand whose trailing dims do not each hold one tile coordinate
-affinely declines it, and a cp.async or blocking fill copies A in chunks along K, so an A whose K is not the gmem inner
+affinely declines it (the packed byte-slab stage asks the same of A: a width-1 product reading its activation as a
+bare vector has no rows a box can address, so it keeps cp.async), and a cp.async or blocking fill copies A in chunks
+along K, so an A whose K is not the gmem inner
 dim declines those. A stored B whose K and N coordinates both have non-unit element strides instead uses the
 existing synchronous operand fill to gather each cell. Copy coverage, dtype checks, shared-memory accounting and
 TMA descriptor selection all use that same transport decision; a contiguous copy cannot represent the gather.
@@ -482,10 +524,11 @@ under the edge split, symbolic-seq SDPA lowered a kernel reading twelve names it
 **A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
 prologue and a per-cell body. Only external cell reads load bridged results; locally defined values are not reloaded.
 The smem rows declare each bridged value's dtype (`cone_stat_dtypes`, typed the way `edge_dtypes`
-types an edge's results; a name whose statement kind carries no dtype keeps the float default). Declaring every row
+types an edge's results; a name whose statement type carries no dtype keeps the float default). Declaring every row
 `float` decides the CELL's arithmetic too: a value that crosses as an integer — a pack's shift amount, a nibble
-mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
-rather than computing something wrong.
+mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to compile
+rather than computing something wrong. The cell's read of a row is typed where it is created, for the same reason:
+an integer row reads back as its integer, a float row at the cell's f32.
 
 **The prologue's statistic is summed cooperatively, and its fold is found by the seam's own order.** A warp's 32
 lanes stride the statistic's reduce and close it with the fold's shuffle butterfly (`sync_stat_fill`); without the
@@ -506,7 +549,7 @@ the block.
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
 16-element chunks. ldmatrix is b16-only below sm_100a, so the drain is a **cooperative byte gather** instead
-(`LdmatrixLoad(byte_slab=True)`): the gmem fragment loaders' lane→element map pointed at the slab — under a 16-bit
+(a staged `FragmentLoad`): the gmem fragment loaders' lane→element map pointed at the slab — under a 16-bit
 atom (W8A16, the fp8-B mul-hoist form) converting per element, with the transposed-B slab's contiguous (k, k+1)
 pair loading as ONE fp8x2 and converting with one hardware `cvt.rn.f16x2.e4m3x2` (`emmy_mma_load_b_smem_trans_f8_f16`);
 under the fp8 k32 atoms (W8A8) repacking raw bytes, contiguous-K lanes as single u32 loads (`_smem_b8v`). Staged is
@@ -515,7 +558,33 @@ ldmatrix XOR is b16-indexed); the cp.async byte slab instead pads each row by `_
 every chunk 16 B-aligned and takes the drain from 4-way bank conflicts to ≤ 2-way per the lane→bank oracle), and a
 TMA byte slab (the U8 `CUtensorMap`) deposits dense and eats the measured conflicts. Legality
 (`resolve_warp_stage`'s byte arm): 16-divisible inner spans (and, canonical-B, a 16-divisible gmem row stride N);
-the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements.
+the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements. The chunk tier stages an
+FP8 key-value cache the same way, its key and its value both, on cp.async only (`chunk_slab_dtype`): an f16 cell
+converts the key's (k, k+1) pairs with one fp8x2 convert, and a bf16 cell's key and every K-major value element
+convert one by one. A warp-group score cannot read that key, since its descriptor converts nothing
+(`_wgmma_slab_refusal`). Like every vector copy a stage makes, each 16 B copy must start on its own width in gmem
+(`vector_copies_aligned`, the schedule `ARCHITECTURE.md`), so a key or value sliced one byte into a padded row reads
+gmem-direct. Read gmem-direct, the cache cost one byte load per element — about 1,150 loads
+a thread per 64-key chunk at head width 256, each holding a register until it converts — and every attention fold sat
+at 255 registers with spills. Staged, the 27B one-row decode piece at 131,072 cached tokens runs 431 us against 845 on
+an RTX 4080, about 87% of the card's bandwidth.
+
+**A stored operand of another dtype (the converting fill).** A copy transport moves bytes, so a stored operand that
+holds another dtype than its slab's rides the compute fill as a computed one does: the fill evaluates its load cell
+by cell and the typed store into the slab converts it. A stored A of another dtype asks for the fill
+(`staging.converting_a`), and under the fill a stored B of another dtype is converted the same way
+(`staging.copied_b`). That is what lets a bf16 atom take a product of two f32 operands: both slabs are filled with the
+operands rounded to bf16 and drained by `ldmatrix`. A stored B alone does not ask for the fill: beside a stored A of
+the atom's dtype it keeps its converting load from global memory. A slab of bytes is no such case, since its fragment
+loads convert it.
+
+**Staged f32 operand slabs (the TF32 atoms).** An f32 operand stages as a slab of f32 and drains through the same
+staged `FragmentLoad`, one 32-bit element to a fragment register, as the f32 it is. The product rounds its operands
+itself, in its PTX lowering (`cvt.rna.tf32.f32`): the instruction drops the low mantissa bits, which leaves every
+product a little small. The split atom (`mma_m16n8k8_tf32x3_f32`) is the same statement under another token: the
+lowering also rounds what each rounding left and multiplies `hi*lo + lo*hi + hi*hi`, summed for one step from zero
+and added to the accumulator with a float add, because the instruction truncates as it accumulates.
+`ldmatrix` takes no slab of f32, so the slab is NONE-swizzle like a byte slab and takes no pad.
 
 **Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
 the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading
@@ -534,17 +603,14 @@ The scale slab is `tile_n × bk_elems/block` and single-buffer: its fill is comp
 threads, so ringing it buys no overlap. Evaluating the scale cone at ONE k per block instead of at every k is
 exactly the block-invariance the matcher proved.
 
-The drain is one loader reading both slabs (`LdmatrixLoad.scale_buffer`, rendered as
-`emmy_mma_load_b_smem_trans_f4s_<dtype>`): per fragment element pair it reads one byte, looks both 4-bit codes up in
-a constant value table, and multiplies each by the block's scale. The mma B fragment's own lane map is what makes
-the byte read whole: a lane's two adjacent K positions ARE a stored pair. `render._f4_staged_prelude` emits one
-loader per fragment dtype the kernel actually drains — f16 and bf16, since every e2m1 value is exact in both (the
-format's largest magnitude is 6 and its finest step 0.5, so one mantissa bit carries it). The tables are generated
-from `dtype.F4_VALUES`, so the kernels and the numpy decode stay one table of values, and an f16 kernel never
-carries the bf16 form. Legality (`resolve_warp_stage`'s packed arm) scopes the stage to what those loaders are
-written for — a copy transport, an N-major weight of 16-value blocks under an f16 or bf16 atom whose K step is that
-same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8
-slab has. Everything outside the scope declines and keeps the general reading.
+The drain is one fragment load reading both slabs (`FragmentLoad.scale_buffer`): per fragment element pair it reads
+one byte, decodes both 4-bit codes, multiplies each by the block's scale in f32 and rounds once into the fragment. The
+mma B fragment's own lane map is what makes the byte read whole: a lane's two adjacent K positions ARE a stored pair.
+The fragment dtype is f16 or bf16, since every e2m1 value is exact in both (the format's largest magnitude is 6 and
+its finest step 0.5, so one mantissa bit carries it). Legality (`resolve_warp_stage`'s packed arm) scopes the stage to
+what the PTX compiler's rule is written for — a copy transport, an N-major weight of 16-value blocks under an f16 or
+bf16 atom whose K step is that same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the
+same chunking reason the fp8 slab has. Everything outside the scope declines and keeps the general reading.
 
 **Block-scaled fp8 weights use the same slabs per channel.** The reading also takes a single fp8 byte per element:
 a stored fp8 load whose own decode cast feeds the multiply by a block-guarded factor (`PackedKBlockB.per_byte == 1`). The bits slab is
@@ -640,7 +706,7 @@ the fragment seam already ties the two together — the score's N tile must equa
 wide (`_fragment_agreements`), which is exactly FlashAttention's shape — so the enumeration needed no rule of its own
 and the tier realizes the agreement rather than assuming it. The chunk contains at least one complete logical C
 fragment, which lets the WEIGHT reach the expectation's `mma.sync` through `FragmentRepack`, in registers, with no
-shared-memory round trip. And `_residence` evaluates a recipe pattern, coordinate mask, merge, and projection
+shared-memory round trip. And `_residence` evaluates a recipe pattern, merge, and projection
 epilogue at whatever residence each value has — a C fragment, the per-lane registers a row rides in, or cell-uniform
 — so none is written for one atom family; the atom's fragment-layout descriptor supplies the element, row, and
 shuffle geometry.
@@ -648,7 +714,7 @@ shuffle geometry.
 Two of the tier's registers are held ACROSS the chunk loop rather than per chunk. The QUERY fragments are one: their
 gmem index never carries the carrier's key, so reading them inside the loop re-issued the same loads once per chunk
 (64 times on a 4096-key stream). They ride hoisted instead, one A fragment per score-K step, which is why those steps
-go straight-line — a rolled loop has nowhere to keep them, and `LOOPIFY` re-rolls the run for a readable listing. The
+go straight-line — a rolled loop has nowhere to keep them. The
 CARRIER is the other, and it is f32 whatever the expectation's cell accumulates in: on the reduced-accumulate cell the
 expectation's `mma.sync` targets a packed f16 fragment and one `FragmentPromote` per chunk folds it here, so the mma
 chain runs at the consumer-die full rate while the running sum stays f32. While the row's partials fit the thread's
@@ -666,21 +732,43 @@ row pair into a fragment and takes the same fragment store, which is what lets t
 (`REDUCE@map.1/twist=g<n>k`, FlashAttention-2's split-KV) keep the chunk tier for its partial: decode's few query
 rows then spread over `n` times the CTAs, and the finalize folds the per-cell states through the recipe's merge.
 
-The score's own PREFIX — the carrier's lift cut to its score role — is where an SDPA mask arrives, and it takes two
-readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand that feeds
-one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
-and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
-carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
-coordinate-masking `FragmentApply` under the same coordinate substitution the boundary mask performs. The same `Select`s are also read
-ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`). Expression normalization may
-reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. A mask whose
-masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every
-row the CTA holds, so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every
-key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
+A term that walks a RANGE reaches the lowering with the range on it (`TileOp.scheduled`), and a tier reads the range
+itself. A causal or a sliding-window attention states the keys a row folds as its carrier's range: `_outside` turns
+it into one comparison for each bound, where the carrier folds nothing — `row < key` past the causal end, `key < row
+− W + 1` ahead of a window's start — and the chunk tier reads those twice: for the chunks every row of the CTA skips
+(`_key_bounds`), and as one coordinate-masking `FragmentApply` per bound on each score fragment, the fill the
+pivot's identity. A scalar walk reads a range, a carrier's or a plain fold's, as its loop's bounds and masks
+nothing: the reduce loop the term lowers to states the range, and the kernel's one loop statement carries it to the
+PTX compiler. A cooperative reduce reads it the same way: each lane takes every `coop`-th position from its own
+start past the range's start to the range's end, an ILP copy past the end is masked as a ragged tail always was
+(`_register_copies`), and a prefix scan covers the range in lane groups. A transposed band walks the range at the
+cell each lane owns, and takes one column on a fold that walks one. A tile folds a rectangle of every position, so
+no tile is offered on a term that walks a range beside the chunk tier's carrier (`TileOp.contracts`,
+`_chunk_refusal`), and a register-held recurrence refuses a product that walks one.
+
+The score's own PREFIX — the carrier's lift cut to its score role — reads no coordinate. Its LEAVES are read once
+ahead of the chunk loop, so an operand that feeds one needs no gmem address at all, and only the pivot source and the
+streamed value are ever asked for a slab. A mask a PROGRAM wrote over the coordinates never reaches it: native's
+causal attention spells `key − row <= position` as a comparison and a `where` added to the score, the position
+loaded from memory, and the form every tier takes reads that mask as the carrier's range (`keys_ranged` in
+`ir/schedule/mask.py`, called by `TileOp.scheduled`). It folds the `Let` aliases of the coordinates into the
+predicate, takes the bound the predicate states of the key (`0 .. min(window, row + position + 1)`), and drops the
+mask's statements from the lift; the position stays an operand's value, which the range reads and the lowering
+places ahead of the loop. A fill above `-1e4`, or a predicate that scales the key, is not read: that mask stays
+arithmetic in the lift, and the chunk tier's gate refuses a prefix that still reads a coordinate. A key split's
+piece binds the absolute key as an expression over its partition coordinate, uniform per CTA like the batch axes and
+the symbolic extents (`cell_uniform`), so its range carries the partition. The range's bounds are also read ONCE,
+ahead of the loop, for what they say about whole chunks (`_key_bounds`); on a split piece the bound carries the
+partition, so each slice stops at the block end plus the position minus its own base. A bound that divides the row
+(native's verify step, whose rows fold a group of query heads) bounds no stream: it masks per element alone. A range
+whose outside reads `key > row + c` (or `>=`) with `c ≥ 0` leaves out every key from the CTA's block end onward for
+every row the CTA holds, so the chunk loop stops there; one whose outside reads `key < row − c` (or `<=`) leaves out
+every key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
 skeleton's `k_first` / `k_end`, CTA-uniform in the grid var alone, bit-identical because a masked chunk folds the carrier
-identity exactly — and derived here, stored nowhere. The mask `Select` in the body is the bound's one source: an
-axis's domain is its extent in the kernel's axis table, and a row-dependent bound is a relation between two axes
-that only becomes a range once widened to the CTA's rows, so neither the term, the loop IR nor the axis carries it.
+identity exactly — and derived here, stored nowhere. The skeleton binds `k_end` as one value ahead of the chunk loop
+(a `Let`); the loop stops at it and the prefetch clamps read it, so the bound is evaluated once and the body's normal
+form carries it like any value. The carrier's range is the bound's one source: a row-dependent bound is a relation
+between two axes that only becomes a chunk range once widened to the CTA's rows.
 A causal stream gets about half its work back that way, a banded one its band — on a launch of more CTAs than the
 card has SMs. A launch that fits in one wave takes as long as its longest CTA whatever the others skip, and the
 dynamic trip count alone cost 9% at the 128-CTA head-width-256 shape, so `_factor` marks it (`launch_ctas` against
@@ -728,16 +816,19 @@ the two apply paths stay distinct on a coop-K contraction.
 
 ## Shared carried state
 
-`035_shared_carry` offers a late storage choice for an ordered kernel whose state reads stay within independent
-leading batch coordinates. It proves ownership from each read's consuming predicates, including discarded clamped
-branches. One CTA owns each batch's complete state; the ordered axis and remaining grid axes become device loops.
+`035_shared_carry` realizes the shared storage a row's `STAGE=d1/smem` asks for, on an ordered kernel whose state
+reads stay within independent leading batch coordinates. The schedule offers the value only where ownership is
+proved from each read's consuming predicates, including discarded clamped branches, so the pass decides nothing; it
+rejects the row where the lowered kernel cannot hold the layout. One CTA owns each batch's complete state; the ordered axis and remaining grid axes become device loops.
 The scheduled reduction and its combine order remain unchanged. This changes kernel lowering, not Loop or Tile
 canonicalization, so the kernel keeps its identity.
 
 Two shared buffers separate the previous and next state. The seed initializes the first buffer, and barriers keep
 initialization, copies and updates uniform across the CTA. A wider seed retains its original first-iteration reads
 instead of rounding through shared storage early. Requested snapshots and externally read carry ports remain global
-outputs; only an unused private carry port is removed through the materializer's existing graph splice.
+outputs; only an unused private carry port is removed through the materializer's existing graph splice. A state the
+term stores every step has no port (`stored_states`): the shared buffers stand in for that output's lagged reads, and
+its per-step store stays, as the step's own output.
 
 When the next state selects between an update and the unchanged cell, the whole CTA copies the previous state and its
 snapshots before overwriting selected cells: the pass sinks each cell's private cone and stores under the predicate
@@ -746,22 +837,134 @@ per-cell path. Each shared row is padded by one column, so column-strided reads 
 The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks between
 shared and global storage; ownership, supported geometry and the card's shared-memory limit decide only legality.
 
+A store that does not read the step is the state a rolled scan ends with (`loop/fusion/_recurrence`): every
+step would write the same cells, and only the last step's are read. Both storages write it once. The ordered launches
+store it behind the last launch (`036_keep_last_store`). The shared layout stores it from its buffer after the loop
+over the steps, and declines a store that is not the state itself at the state's data type. With no snapshot left to
+store each step, the whole-CTA copy has only the two buffers to keep in agreement, and the buffer a step writes
+differs from the state it reads only in the cells the step before changed. So the seed fills both buffers, and where
+the update's predicate bounds the state's leading cell coordinate (one row of a triangular inverse), the copy covers
+that range at the step before instead of the whole state.
+
 ## Kernel-IR peepholes
+
+**A kernel body is optimized at construction.** `KernelOp` runs `optimize_body` on its body, in the base it shares
+with `LoopOp`: every expression simplified under the ranges of the `Tile`'s axes and the loops around it, each pure
+value a scope computes twice computed once (the scalar tier's copies of one fold step under `__c{i}_{j}` read one
+value), each value placed at the shallowest scope that holds its operands, congruent carried states merged, unread
+values dropped. These are the optimizing steps of the normal form a `LoopOp` takes. Its canonical steps (sibling
+reduce loops merged into one, the sibling order, the sequential names) are left out: no identity reads a kernel body,
+so its loops and statements stand as the pass that built them wrote them, under its names, and a later binder of a
+spelling takes a number (`_lane`, `_lane_1`). So no pass cleans a body up by hand, and a listing reads as the passes wrote it. What makes this sound for
+hardware statements is their declarations: a statement that updates storage in place says so (a cross-thread combine's
+states, a fragment an `mma` accumulates into), a statement that writes a buffer says so (an async copy and a TMA load
+write their slab), a barrier is ordered against every sibling, and a read of storage the body writes carries the
+version it reads and the barrier it stands behind, while a read of storage the body never writes is one value
+throughout and is shared across a barrier. An effect a statement does not declare is a wrong kernel: the slab of an
+async copy that did not declare its write read as never written, and its drain left the chunk loop.
+
+Three consequences shape every pass here:
+
+- **A pass does not decide where a pure value stands.** Placement moves one to the shallowest scope that holds its
+  operands; every other statement stays where the pass put it. An emitter whose place for a pure value was a measured
+  choice makes it structure: a staged copy carried across the chunk loop's back edge has no statement that spreads its
+  packed vector into names (where that stood decided how long the elements stayed live); its names are the vector's
+  lanes, and each read takes its lane where it stands.
+- **A name means what a statement binds it to, never what it is spelled like.** A name keeps its spelling until a
+  second binder shares it, so a name another name implies (a loop's `<axis>_end`) is bound by a statement instead.
+- **A pass that fuses statements reads the scope's ordering constraints, not positions.** The two halves of a load
+  pair can stand apart with a moved value between them, and a vector's elements in any order. `Siblings` (`_siblings.py`)
+  holds one scope's statements with their constraints: a set of statements can become one when no other statement
+  must stand between two of them, and the fused scope is written back in an order that keeps every constraint.
+  Load pairing and the vector loads and stores are built on it.
 
 Vector loads and stores share one alignment proof over the complete flattened address. Every variable coefficient
 and the constant base must be divisible by the vector width, and subsequent elements must be consecutive. An aligned
 last coordinate alone is insufficient when an outer row has an odd stride. Unknown multidimensional layouts retain
 scalar operations; split coordinates may still vectorize when simplification reconstructs an aligned flat address.
 A strided loop's variable counts as a multiple of the alignment its start and step share, so a `coop/v<n>` lane that
-starts at `lane * n` reads its run as one vector even though the variable's own coefficient is one.
+starts at `lane * n` reads its run as one vector even though the variable's own coefficient is one. A subterm of
+the flat address that is not a sum, difference or product (a gathered selector's sign wrap, a cast, a quotient)
+counts as one unknown integer per distinct subterm, so a routed expert's selector-indexed weight run still proves.
 
-`030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
+`030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements; its
+rules are `stamp_types` in `ir/types.py`. A cross-thread combine is built before its state has a dtype, so it runs at
+f32 unless its program names one; once the stamps give its states one integer dtype, the combine and its shared slabs
+take that dtype, since an integer rounds past 2**24 through f32. It runs early because the passes after it read the
+stamps and match one-operation values over the names the lowering wrote. `120_explicit_conversions` runs after them and
+completes the types (`explicit_conversions`, same module): each operation computes at one dtype, every conversion is a
+definition of its own, and a write stores a value of its buffer's element type. A `RegStore` epilogue is typed the same
+way (`epilogue_conversions`), over the f32 elements of its accumulators: a float load is widened to f32 by a conversion
+of its own and a select is f32, as the epilogue always computed. A conversion between a load and its reader would hide
+the pattern the vector passes, the shared carry and the load reuse look for, which is why it is not part of `030`. The
+body's optimization then computes each conversion once, at the shallowest scope that holds its source. `lowering/cuda`
+checks the result (`check_input`, which holds `check_types`) on every kernel before it compiles one.
+
+`117_unroll_loops` makes a loop in the body a loop in the code. A lowering site that wants a loop unrolled flags the
+statement (`unroll`): the scalar tier's inner reduce up to 64 trips, a lane loop up to 16, the tensor-core chunk and
+K loops at any length. `EMMY_UNROLL` is the budget those sites read: pinned, it replaces every site's cap, and `0`
+flags nothing. The pass spends the flag. A flagged loop of at most 64 trips becomes one copy of its body per trip, the
+axis bound to its value in each, a carrier the loop seeded seeded once ahead of the copies and each name the body
+defines given a copy of its own; a trip only some threads run (a lane loop over a row its lanes do not divide) keeps
+the loop's bound as the guard of its copy, and a guard the trip's value decides is dropped. A longer loop stays a loop
+that runs up to 32 copies of its body per trip, and says it is `unrolled`. The two numbers are target facts
+calibrated on NVIDIA's compilers: a 64-trip scalar reduce written out in full, a 128-trip tensor-core K loop as 32
+copies per trip (all 128 copies are four times the machine code). A flagged loop with no static bound on its trips
+(a symbolic extent, an early stop) stays as it is. A loop that takes copies of an inner loop's folds seeds its own
+folds as a statement ahead of itself, since a loop seeds the folds standing in its body. The unroll itself is one
+function, `_unroll.unroll_where`, which `047` calls for its short lane loops. The body's optimization then folds each copy's index and computes once what two copies share. It runs
+after the passes that match loops and the statements in them, and before `120`: a copy reads its axis as a literal,
+and a literal is typed by the operation that reads it. After it no statement carries the flag, which `lowering/cuda`
+checks (`check_input`) beside the types.
+
+`118_unroll_by_size` decides the copies of every loop no site flagged, so the code generator writes loops as they
+are. Its rule and numbers are target facts (`emmy.compiler.target`), calibrated on cicc's PTX and ptxas's machine code
+for `sm_120` across trip counts and body sizes. A body's size is the work of one trip: one per memory access, fold,
+selection and branch, one more for an access whose address changes from trip to trip, and one per operation whose
+value changes, a math function counting its instructions (`exp` 14, `log` 28, `sin` 88, `pow` 113, in the form `130`
+will pick under the live precision decisions). A serial `Loop` of `N` static trips is written out in full when
+`N·(size + 2) ≤ 480`, else steps `C` trips at a time, `C` the largest power of two dividing `N` with
+`C·(size + 2) ≤ 199` (an odd `N` stays); a stepping loop left with at most four trips of at most 128 work each is
+written out in full (`fused/norm-weight-linear-f16-computed-b`: kept rolled, its eight sibling loops each waited on
+its own chain of fused multiply-adds). A loop over a symbolic extent takes `C` copies, the largest of 16, 8, 4, 2
+with `C·(size + 7) ≤ 228` and none past a size of 89: a loop stepping `C` trips while that many are left, then the
+trips left in blocks of `C/2`, `C/4`, … copies, each under its bit of the count, the last three trips a loop of one
+copy when `C` is 16 (`_unroll._runtime`). Only bodies of target-neutral statements are sized; a loop with a barrier,
+an asynchronous copy, a shuffle or a fragment statement stays, as do strided loops over a static extent below 24
+trips. How many copies a loop takes is a decision, and it moves under the `UNROLL` knob with `117`'s two limits.
+Every loop the unroll passes leave stepping several trips says it is `unrolled`, and the PTX compiler marks it
+`.pragma "nounroll"`: unmarked, ptxas writes such compact loops out in full (`qwen3emb/sdpa-s32`: 11,344 machine
+instructions unmarked, 2,216 marked). A loop no unroll pass takes stays unmarked, and ptxas still decides its copies.
+A loop already `unrolled` is taken no further, which keeps the pass idempotent.
+
+`119_vectorize_copies` runs the two widenings of `050` and `080` again (`_vector.vectorize_loads`,
+`_vector.vectorize_stores`, under the same decisions): the copies of a read along the axis are consecutive elements,
+which cicc merged after it unrolled. A loop stepping `C` trips states its step, so the alignment proof holds on its
+copies as on any strided loop; a remainder copy's offset is the launch's and stays scalar.
+
+`125_spell_composites` follows. A composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is defined by
+primitive operations in one table, beside the operations' declarations in the crate. The pass turns each `Assign` of
+a composite into its definition, one `Assign` per primitive, so a code generator finds primitives only and the
+body's optimization shares a primitive two composites compute. It follows `120` because where a composite computes
+is decided on the whole function: an f16 `sigmoid` computes in f32 and converts once, where its primitives, typed
+one by one, would each round at f16. After `120` the `Assign` holds that dtype and its operand is already there, so
+the primitives take it. A `FragmentApply` and a carried program (a combine, a `RegStore` epilogue) keep their
+composite; the PTX compiler compiles it through the same table.
 Register-partial merges use the same accumulator policy as streaming updates: selecting folds retain the input dtype,
 while accumulating folds promote to f32. A merge reassigns the existing carrier and cannot change its declaration.
 Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /
-`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. On
+`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. A run
+of f32 elements moves as one access of two or four registers, and a run of f16 or bf16 elements as one 4-, 8- or
+16-byte access (two or four halves, or 32-bit words that hold eight). A
+`coop/v<n>` lane's run of fp8 weight bytes or packed e2m1 pairs reads as one 2-, 4-, 8- or 16-byte word (width 16
+is tried for 1-byte dtypes only), each fp8 byte converting straight to f16 and each pair byte indexing the pair
+table; a run that divides the reduce extent carries no bounds mask (the
+modulo a mask spells blocks every vector load); and before grouping, a load index `(Y + r) / d` whose `Y` is a
+non-negative multiple of a `g` dividing `d`, with `0 < r < g`, reads `Y / d`, so every element of a lane's run reads a
+block-scaled weight's scale at the run's own index and the code loads it once (V100 width-1 fp8 down projection: 181 →
+127 µs). On
 modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed B, transposed for col-adjacent canonical
 B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
 Copy fills and computed operand fills use these same coupled layouts and accumulator mapping.
@@ -772,7 +975,7 @@ and its fragment offset in one `+` chain, so the pair's row distance is read off
 (`RegStore.run`): each cell's epilogue runs as before, then three `shfl.xor` rounds transpose the quad's packed column
 pairs so lane `t` holds cell `t`'s eight columns — a quarter of the stores, every sector whole (on the H100 the
 four-byte stores cost the Qwen3-0.6B s512 layer about 3.5 µs); unguarded, non-atomic, unswizzled cells only, and a
-destination the render finds not 16-bit keeps the four ordinary stores;
+destination that is not 16-bit keeps the four ordinary stores;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
@@ -787,12 +990,13 @@ the two branches' private chains are one computation up to their load indices (a
 branch — RoPE's rotate-half negation), `045` emits the chain once with each load at `cond ? index_a : index_b`, the
 branches' own clamps folded against `cond`. An effect between the two chains, a carried load, or a predicate or
 index defined after the chains start refuses the merge. `047` then unrolls every lane-strided loop of at most eight trips (a
-cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four) and drops each load of a
-read-only buffer at an index an earlier load of the same body already read, compared after folding against the lane
-ranges. The projection reads the values the fold loaded, and a partner read resolves to another trip of the same lane.
+cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four). The normal form folds
+each trip's index against the lane ranges and keeps one load of each cell of a buffer the kernel never writes, on
+either side of the combine's barrier, so the projection reads the values the fold loaded and a partner read resolves
+to another trip of the same lane.
 Both are structural and carry no knob: they change no schedule and no identity, only the emitted body. Every kernel
-buffer parameter is `__restrict__` (a launch's output never shares memory with its inputs), which lets nvcc keep
-read-only operands in registers across the kernel's stores and read them through the non-coherent path.
+buffer an input of the launch is read through the non-coherent path (`ld.global.nc`): a launch's output never
+shares memory with its inputs.
 
 `090_guard_reductions` propagates coordinate demand backward through pure scalar expressions and selects. A scalar
 reduction whose result is read only under an enclosing-coordinate predicate becomes a zero-trip loop elsewhere.
@@ -804,39 +1008,46 @@ collectives only with predicates independent of the swept output coordinate. See
 outside the collective guard.
 
 Memory and reduction peepholes record their decisions as on-by-default BOOL policy knobs on the `KernelOp`
-(`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050`
+(`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `PAIR_LDMATRIX` — the `050`
 pattern: idempotence via the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension).
 
-`040_split_invariant_divides` replaces floating division by an axis-invariant divisor with a hoisted reciprocal and
-multiply when `FAST_MATH` is enabled. It runs after dtype stamping, preserves floating dtypes, and leaves integer or
+`040_split_invariant_divides` replaces floating division by an axis-invariant divisor with a reciprocal and a
+multiply when the division knob `FAST_DIV` is on (it follows `FAST_MATH`); the normal form moves the reciprocal out
+of the loops it does not vary with. It runs after dtype stamping, preserves
+floating dtypes, and leaves integer or
 varying division and explicit round-to-nearest f32 division alone. The latter protects FP4 encoding boundaries even
 under the default fast-math regime. Structural body normalization stays independent of arithmetic policy.
 
-`085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers
-`exp` through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence.
-The rewrite includes generated `RegStore` epilogue lambdas, each traversed in its own SSA scope. Host evaluation
-continues to use `exp`; only CUDA evaluation uses the approximate intrinsic.
-`100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a generic **loop re-roller** iterated to a fixpoint.
-Loopify folds a maximal run of ≥ `N` congruent per-fragment statements —
-an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the A-fragment
-loads, a nested contraction's K-chunks × N-atoms — into
-`#pragma unroll` `StridedLoop`s over `_r{depth}`. The matcher (`_reroll`) is node-type-agnostic: a recursive structural
-walk over each candidate window's Stmt/Expr trees returns a template ONLY when every per-iteration difference is a
-**contiguous fragment family** index (`O_i_f0 … O_i_f{N-1}` or an already-arrayed `fam[0] …`, arrayed into one
-`count`-arrayed `RegFragment` decl and indexed `fam[_r]`) or an **affine address offset** — and it peels a trailing
-`± Literal` off each index Expr so a codegen-**folded** `kv0` (really `kv0 + 0*8`) reconciles with a sibling's `kv0 + 8`.
-A family that is not `RegFragment`-declared (a scalar carrier / an inline-declared fragment) bails the run. Iterating to
-a fixpoint (fresh `_r{depth}` per pass; already-arrayed `fam[i]` refs re-parsed) turns nested runs into nested loops:
-pass k re-rolls the inner N-atoms, pass k+1 sees the resulting sibling loops as a run and wraps them. Correctness is
-structural: an unrolled congruent run executes in the SAME order as the original straight-line statements, so a template
-that reproduces every window is byte-identical after nvcc unrolls — identical SASS.
-Only the family's `RegFragment` decl carries its dtype, so a render that needs a fragment reference's dtype reads it
-off the stem (`kernel.ir.frag_dtype`) — an arrayed member is `fam[_r]`, which no declaration names.
-A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the 2-long runs).
-Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
-`#pragma unroll for (_e)` loop (the ROW operand as the row-split ternary `_e < 2 ? row0 : row1`), so a re-rolled family
-nests as `for (_r) { for (_e) … }`; and pin-gated **chain fusion** (`_fuse_chains`, before the re-roll) folds a
-`FragmentApply` immediately consumed by an in-place unary `FragmentApply` on the same fragment (`p <- s − m` then
-`p *= exp(p)`) into one node carrying the tail on its `post` field, so the softmax renders `p[_e] = expf(s[_e] − m)`.
-NOTE: the whole-body SSA rename this pass runs is why the shared `_rewrite` `Tile` handler must carry `block_threads` /
-`aux_threads` through verbatim — dropping them silently over-launches a cooperative tile.
+`083_share_rescale_exponential` computes an online softmax's two rescale factors with one exponential. The recipe's
+advance (`SOFTMAX.advance`) gives each side of a pivot pair `exp` of its distance below `gn = maximum(g, g_o)`; one
+distance is `0`, so one exponential of the other gives both factors, and a select gives the factor of a side whose
+pivot is not finite (`-inf` gives `0`, NaN gives NaN). Every factor keeps the bits the two exponentials compute,
+whichever exponential and flush mode the kernel takes, so the rewrite is exact. It runs where the exponential is the
+accurate one, which it saves for two compares and four selects; under `FAST_EXP` the exponential is one `MUFU` and
+one multiply, fewer instructions than the selects, so the pair keeps both. It reaches the per-element folds, the
+register and split merges, and a cooperative combine's merge. The recipe keeps
+both exponentials: it is Loop IR, which every attention kernel's identity reads.
+
+`130_approximate_math`, the last kernel pass, picks every approximate instruction a kernel runs. An approximate
+instruction is an operation of the body, named after the exact one (`exp_fast`, `divide_fast`, `reciprocal_fast`,
+`sqrt_fast`, `log_fast`, `sin_fast`, `cos_fast`, `tanh_fast`, `pow_fast`); no compiler flag picks one. Each class
+follows its own decision: `FAST_EXP` the exponential, `FAST_DIV` division and the reciprocal (a division of one is the
+reciprocal instruction), `FAST_SQRT` the square root, and `FAST_MATH` with `FAST_EXP` the functions no knob names
+(logarithm, sine, cosine, power, and the hyperbolic tangent from sm_75 on). The reciprocal square root has one
+instruction, the approximate one, in every regime, so it has no second form.
+
+An approximate instruction is an f32 instruction. An operation is picked where it computes in f32 and stays as it is
+where it computes natively in f16 or over integers, which is why the pass runs after `120` has typed the body and `125`
+has written the composites out. Two operations are picked at a half too, and the type rules then compute them in f32
+and round back: the exponential, by its knob's own rule, and the hyperbolic tangent, whose native form (CUDA's
+`htanh`) is the f32 function on the converted value. The pass walks the four places an operation sits: an `Assign`
+of the body, a cooperative combine's merge (`WarpShuffle` / `TreeHalve` `combine_states`), a `FragmentApply`'s
+operation with its unary tail, and an `Assign` of a `RegStore` epilogue, the stores grouped with it included, typed
+like one of the body. The last three hold one operation where the body holds a definition, so a composite stays
+whole there: a
+`reciprocal` becomes `reciprocal_fast`, and a `sigmoid` becomes `sigmoid_fast` when the exponential and the division
+are both approximate; it keeps both exact otherwise. It records `FAST_EXP` on the kernel for idempotence. Host
+evaluation computes every approximate form as the exact operation.
+
+A `FragmentApply` compiles to one operation per fragment register, at each element's own row and column (the ROW
+operand the register's row of the pair).

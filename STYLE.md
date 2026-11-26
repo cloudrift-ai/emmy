@@ -94,16 +94,19 @@ its formatting without re-measuring tests, and `make lint` checks it.
 
 ### IR statements must be frozen dataclasses
 
-Every concrete `Stmt` subclass — Loop-IR (`Loop`, `StridedLoop`, `Cond`, leaves), Tile-IR (`GridTile`, `ThreadTile`,
-`RegisterTile`, `SerialTile`, `StridedTile`, `Stage`, `StageBundle`, `AsyncWait`), Kernel-IR (`Smem`, `Sync`,
-`CpAsyncCopy`, `TmaDescriptor`, `TmaLoad`, `MbarrierInit`, …) — must be declared `@dataclass(frozen=True)`. `Body` is
-already a `tuple[Stmt, ...]` subclass, so freezing every Stmt makes the entire body tree hashable end-to-end.
+Every concrete `Statement` subclass — Loop-IR (`Loop`, `StridedLoop`, `Cond`, leaves), Tile-IR (`GridTile`,
+`ThreadTile`, `RegisterTile`, `SerialTile`, `StridedTile`, `Stage`, `StageBundle`, `AsyncWait`), Kernel-IR (`Smem`,
+`Sync`, `CpAsyncCopy`, `TmaDescriptor`, `TmaLoad`, `MbarrierInit`, …) — must be declared `@dataclass(frozen=True)`.
+`Body` is an immutable sequence of statements, so freezing every Statement makes the entire body tree hashable
+end-to-end.
 
 Why: an immutable body can safely own cached structural keys and executable normal forms. It can also be used as a
-cache key when a position-independent structural lookup genuinely needs one. A single mutable Stmt anywhere in the
+cache key when a position-independent structural lookup genuinely needs one. A single mutable Statement anywhere in the
 tree breaks both guarantees, and the surrounding code cannot degrade gracefully without losing the optimization.
 
-If you need to "edit" a frozen Stmt, return a new instance via `dataclasses.replace(stmt, field=value)`. If a
+If you need to "edit" a frozen Statement, return a new instance via `stmt.replace(field=value)`; outside `ir/stmt/`,
+`dataclasses.replace` is not called on a statement. The pure terms are the same: a `Lambda` or a `Fold` changes
+through its own `replace(field=value)`, which forms and checks the new term. If a
 `__post_init__` needs to coerce a field (e.g. `tuple → Body`), use `object.__setattr__(self, "field", coerced)` —
 that's the standard pattern for frozen dataclasses that still need light normalization at construction time. Don't
 add `try/except TypeError` fallbacks around structural caches to tolerate unhashable stmts; fix the unhashable stmt
@@ -115,7 +118,7 @@ Every `Op` dataclass is `frozen=True` as well (an architecture test ratchets it)
 clone in `LoopOp.rename_buffers` (field-level `object.__setattr__`, no `__init__`): a buffer rename must not
 renormalize, since canonical sibling order can depend on external-buffer spelling. Ops stay UNHASHABLE
 (`__hash__ = None`) — semantic comparison is `identity_key`, never `hash`. Also make sure no Op ends up as a *field
-value* of a Stmt —
+value* of a Statement —
 `Assign.op` / `Accum.op` / `Select.op` take an `ElementwiseImpl` (the lightweight value object, already hashable),
 never an `ElementwiseOp` wrapper.
 
@@ -139,7 +142,7 @@ own — takes `slots=True` as well. It drops the per-instance `__dict__`, which 
 access, and that is worth having on the leaf choice objects an enumeration builds in the millions (`Tile`, `Work`,
 `Reduce`, `Stage`, `Raster`).
 
-A BIGGER type — one that owns derived reads the rest of the compiler depends on (`Fold`, `TileOp`, `ClassicNodeSite`,
+A BIGGER type — one that owns derived reads the rest of the compiler depends on (`TileOp`, `ClassicNodeSite`,
 `ClassicScheduleContext`) — stays unslotted and declares those reads with `cached_property` or `cached_method`, per
 the next section. The two are mutually exclusive: both cache through the very `__dict__` that `slots=True` removes,
 so a slotted class raises `TypeError: No '__dict__' attribute on 'X' instance to cache 'y' property` on the first
@@ -224,12 +227,58 @@ runs on the remote Linux host it deploys to, never to the local CLI.
 
 ## Rust
 
-Use the checked-in Cargo lockfile and standard Rustfmt formatting. Keep unsafe CUDA calls inside the runtime's CUDA
-module and document the ownership and synchronization that make each call valid. Validate artifact metadata before
-submission, and keep HTTP dependencies out of the execution runtime. Run Cargo tests and Clippy for native changes.
+Use the checked-in Cargo lockfile. Keep unsafe CUDA calls inside the runtime's CUDA module and document the ownership
+and synchronization that make each call valid. Validate artifact metadata before submission, and keep HTTP
+dependencies out of the execution runtime. Run Cargo tests and Clippy for native changes (`make test-native`,
+`make lint-native`); Clippy runs with every warning an error.
+
+### Error handling
+
+Do not use `.unwrap()`, `.expect()`, `unreachable!()` or `panic!()` in library or extension code. Propagate errors
+with `?`, or handle the case explicitly: a lookup that cannot miss takes `unwrap_or` / `map_or` with the value the
+caller can live with, a poisoned lock is reopened (`lock().unwrap_or_else(PoisonError::into_inner)`), an invariant
+that holds by construction is restated as a total function rather than asserted. Exceptions:
+
+- **Tests** — `.unwrap()` is fine for brevity.
+- **Binaries** — `.expect()` is acceptable for startup configuration and argument parsing, where aborting is the
+  right answer.
+
+A PyO3 extension maps every crate error onto the Python exception of the same name (`ValueError`, `TypeError`,
+`KeyError`, `ZeroDivisionError`, `NotImplementedError`) at the boundary, once, and never panics across it.
+
+### Prefer functional style
+
+Use `Option` / `Result` combinators and iterator methods instead of verbose `match` blocks where it improves
+readability: `map`, `and_then`, `unwrap_or`, `transpose`, `filter_map`, `flat_map`, `fold`, `collect`. Use `match`
+when there are side effects, several statements per arm, or when it genuinely reads better.
+
+### Formatting and imports
+
+Rust code is formatted with the standard rustfmt configuration; run `cargo fmt --all` before committing. Group
+`use` lines in three blocks separated by a blank line — the standard library, external crates, this crate — and
+merge one crate's imports into one `use` tree per module path, as the `imports_granularity = "Crate"` and
+`group_imports = "StdExternalCrate"` rustfmt options would (they are nightly-only, so the grouping is kept by hand).
+
+### Constants
 
 Define protocol versions, resource limits, defaults, and unit conversions as named `const` values near the top of
 their owning Rust file, after imports. Ordinary indices, zero initialization, and explicit test data may stay inline.
+
+### Shared, immutable data
+
+A tree many objects hold (a body, a statement, an expression) is an `Arc`; a rebuild that changes nothing returns the
+object it was given, so a caller can tell a change by pointer. A leaf is by value where sharing buys nothing: a name is
+an interned symbol, so a copy is a word and a compare an integer. Derived readings of an immutable value live beside it
+in a `OnceLock`, computed on first use, never in a table keyed off another object.
+
+### Exit early
+
+A transform first asks whether it has anything to do, and returns its input when it has not, before any costly
+analysis: a merge of two sibling loops leaves a scope with no such pair alone without working out its ordering
+constraints. A rebuild that goes through an emptied block compares the result with the block it started from and
+returns that block when the two hold the same values, so the pointer still says whether anything changed. A fixed-point
+loop reads that answer, and a value a computation already knows (a normal form is its own) is stored where the next
+asker finds it rather than computed again.
 
 ## Commit Messages
 

@@ -26,10 +26,9 @@ from collections import Counter
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import Expr, Literal, TernaryExpr
+from emmy.compiler.ir.expression import Expression, Literal, TernaryExpression, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Let, Stmt
-from emmy.compiler.ir.stmt.leaves import Load, Select, SelectBranch
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, SelectBranch, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -44,7 +43,7 @@ def rewrite(root: Node) -> KernelOp:
     return replace(op, body=body)
 
 
-def _reads(stmt: Stmt) -> tuple[str, ...]:
+def _reads(stmt: Statement) -> tuple[str, ...]:
     """Every SSA name ``stmt`` reads, its own block bodies' reads left to their statements."""
     return tuple(stmt.deps())
 
@@ -78,7 +77,7 @@ def _cone(defs: dict[str, int], stmts: list, name: str, uses: Counter, cone: set
     if uses[name] != 1:
         return False
     cone.add(position)
-    return all(_cone(defs, stmts, arg, uses, cone) for arg in (stmt.args if isinstance(stmt, Assign) else ()))
+    return all(_cone(defs, stmts, arg, uses, cone) for arg in (sorted(stmt.value.free_vars()) if isinstance(stmt, Assign) else ()))
 
 
 def _merge(stmts: list, position: int, uses: Counter) -> list | None:
@@ -104,7 +103,7 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
     if not _match(stmts, defs, a_name, b_name, cone_a, cone_b, pairs):
         return None
     # The merged chain replaces branch A's statements in A's order; branch B's are dropped.
-    merged: dict[int, Stmt] = {}
+    merged: dict[int, Statement] = {}
     for i in sorted(cone_a):
         stmt = stmts[i]
         if isinstance(stmt, Load):
@@ -112,38 +111,52 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
             index = tuple(_select_index(cond, a, b) for a, b in zip(stmt.index, twin.index, strict=True))
             if any(defs.get(name, -1) >= i for e in index for name in e.free_vars()):
                 return None
-            merged[i] = replace(stmt, index=index)
+            merged[i] = stmt.replace(index=index)
         else:
             merged[i] = stmt
-    out: list[Stmt] = []
+    out: list[Statement] = []
     for i, stmt in enumerate(stmts):
         if i in cone_b:
             continue
         if i == position:
             if wrapped is None:
-                out.append(Assign(select.name, "copy", (a_name,)))
+                out.append(Assign(select.name, Var(a_name)))
             elif wrapped == "a":
                 # Branch A's unary op stays where it was, now over the merged chain.
-                out.append(replace(select, branches=(first, SelectBranch(a_name, other.select))))
+                out.append(select.replace(branches=(first, SelectBranch(a_name, other.select))))
             else:
                 # Branch B's unary op is re-read off the merged chain, beside the select.
-                out.append(replace(stmts[defs[other.value]], args=(a_name,)))
-                out.append(replace(select, branches=(SelectBranch(a_name, cond), other)))
+                out.append(_over(stmts[defs[other.value]], a_name))
+                out.append(select.replace(branches=(SelectBranch(a_name, cond), other)))
             continue
         if wrapped == "b" and i == defs.get(other.value):
             continue  # re-emitted beside the select, after the merged chain
         if wrapped == "a" and i == defs.get(first.value):
-            out.append(replace(stmt, args=(a_name,)))
+            out.append(_over(stmt, a_name))
             continue
         out.append(merged.get(i, stmt))
     return out
 
 
-def _safe(stmts: list, defs: dict, cone: set[int], cond: Expr) -> bool:
+def _safe(stmts: list, defs: dict, cone: set[int], cond: Expression) -> bool:
     """No effect between the two chains, and the predicate defined before them."""
     first = min(cone)
     pure = all(isinstance(s, (Assign, Let, Load, Select)) for s in stmts[first : max(cone) + 1])
     return pure and all(defs.get(name, -1) < first for name in cond.free_vars())
+
+
+def _over(stmt: Assign, name: str) -> Assign:
+    """A unary ``Assign`` re-read over ``name`` in place of its one operand."""
+    (operand,) = stmt.value.operands
+    return stmt.replace(value=stmt.value.substitute({operand.name: Var(name)}))
+
+
+def _unary_operand(stmt) -> str | None:
+    """The name a unary ``Assign`` applies its operation to, else ``None``."""
+    if not isinstance(stmt, Assign) or stmt.value.operation is None or len(stmt.value.operands) != 1:
+        return None
+    (operand,) = stmt.value.operands
+    return operand.name if isinstance(operand, Var) else None
 
 
 def _peel(stmts: list, defs: dict, a: str, b: str) -> tuple[str | None, tuple[str, str] | None]:
@@ -153,9 +166,9 @@ def _peel(stmts: list, defs: dict, a: str, b: str) -> tuple[str | None, tuple[st
     if _same_shape(stmts, defs, a, b):
         return None, (a, b)
     for side, (outer, twin) in (("a", (a, b)), ("b", (b, a))):
-        stmt = stmts[defs[outer]] if outer in defs else None
-        if isinstance(stmt, Assign) and len(stmt.args) == 1 and _same_shape(stmts, defs, stmt.args[0], twin):
-            return side, ((stmt.args[0], twin) if side == "a" else (twin, stmt.args[0]))
+        operand = _unary_operand(stmts[defs[outer]]) if outer in defs else None
+        if operand is not None and _same_shape(stmts, defs, operand, twin):
+            return side, ((operand, twin) if side == "a" else (twin, operand))
     return None, None
 
 
@@ -164,7 +177,7 @@ def _same_shape(stmts: list, defs: dict, a: str, b: str) -> bool:
         return False
     sa, sb = stmts[defs[a]], stmts[defs[b]]
     if isinstance(sa, Assign) and isinstance(sb, Assign):
-        return sa.op == sb.op and sa.dtype == sb.dtype and len(sa.args) == len(sb.args)
+        return sa.value.operation == sb.value.operation and sa.dtype == sb.dtype and len(sa.value.operands) == len(sb.value.operands)
     return isinstance(sa, Load) and isinstance(sb, Load) and sa.input == sb.input
 
 
@@ -179,8 +192,7 @@ def _match(stmts: list, defs: dict, a: str, b: str, cone_a: set, cone_b: set, pa
     if isinstance(sa, Load) and isinstance(sb, Load):
         ok = sa.input == sb.input and sa.dtype == sb.dtype and len(sa.index) == len(sb.index) and sa.is_scalar and sb.is_scalar
     elif isinstance(sa, Assign) and isinstance(sb, Assign):
-        ok = sa.op == sb.op and sa.dtype == sb.dtype and len(sa.args) == len(sb.args)
-        ok = ok and all(_match(stmts, defs, x, y, cone_a, cone_b, pairs) for x, y in zip(sa.args, sb.args, strict=True))
+        ok = sa.dtype == sb.dtype and _match_values(stmts, defs, sa.value, sb.value, cone_a, cone_b, pairs)
     else:
         ok = False
     if ok:
@@ -188,20 +200,32 @@ def _match(stmts: list, defs: dict, a: str, b: str, cone_a: set, cone_b: set, pa
     return ok
 
 
-def _select_index(cond: Expr, a: Expr, b: Expr) -> Expr:
+def _match_values(stmts: list, defs: dict, x: Expression, y: Expression, cone_a: set, cone_b: set, pairs: dict) -> bool:
+    """Whether two values are one computation up to load indices: names through their chains, literals by value,
+    operation nodes by operation and operands."""
+    if isinstance(x, Var) and isinstance(y, Var):
+        return _match(stmts, defs, x.name, y.name, cone_a, cone_b, pairs)
+    if isinstance(x, Literal) or isinstance(y, Literal):
+        return x == y
+    if x.operation is None or x.operation != y.operation or len(x.operands) != len(y.operands):
+        return False
+    return all(_match_values(stmts, defs, p, q, cone_a, cone_b, pairs) for p, q in zip(x.operands, y.operands, strict=True))
+
+
+def _select_index(cond: Expression, a: Expression, b: Expression) -> Expression:
     """``cond ? a : b`` with every select on ``cond`` inside each arm resolved to its own side."""
     if a == b:
         return a
-    return TernaryExpr(cond, _resolve(a, cond, True), _resolve(b, cond, False))
+    return TernaryExpression(cond, _resolve(a, cond, True), _resolve(b, cond, False))
 
 
-def _resolve(expr: Expr, cond: Expr, value: bool) -> Expr:
-    if isinstance(expr, TernaryExpr) and expr.cond == cond:
-        return _resolve(expr.if_true if value else expr.if_false, cond, value)
-    fields = getattr(expr, "__dataclass_fields__", {})
+def _resolve(expression: Expression, cond: Expression, value: bool) -> Expression:
+    if isinstance(expression, TernaryExpression) and expression.cond == cond:
+        return _resolve(expression.if_true if value else expression.if_false, cond, value)
+    fields = getattr(expression, "__dataclass_fields__", {})
     changed = {
-        name: _resolve(getattr(expr, name), cond, value)
+        name: _resolve(getattr(expression, name), cond, value)
         for name in fields
-        if isinstance(getattr(expr, name), Expr) and not isinstance(getattr(expr, name), Literal)
+        if isinstance(getattr(expression, name), Expression) and not isinstance(getattr(expression, name), Literal)
     }
-    return replace(expr, **changed) if changed else expr
+    return replace(expression, **changed) if changed else expression

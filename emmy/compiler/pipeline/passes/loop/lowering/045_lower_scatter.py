@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, TernaryExpr, Var, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, CastExpression, Literal, TernaryExpression, Var, placeholder
 from emmy.compiler.ir.loop import Axis, Cond, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource, ScatterOp
@@ -50,14 +50,16 @@ def rewrite(match: Match, root: Node, inp_dest: Node, inp_idx: Node, inp_values:
     axis = int(root.op.axis) % rank
     idx_shape = tuple(inp_idx.output.shape)
     value_shape = tuple(inp_values.output.shape)
-    extent = dest_shape[axis].expr
-    index = CastExpr("int", Var("idx"))
-    index = TernaryExpr(index.lt(0), index + extent, index)
+    extent = dest_shape[axis].expression
+    index = CastExpression("int", Var("idx"))
+    index = TernaryExpression(index.lt(0), index + extent, index)
 
     if len(idx_shape) == rank:
-        # torch.scatter: idx, values and the destination share a rank; the loop walks the values.
+        # torch.scatter: idx, values and the destination share a rank; the loop walks the values, and
+        # the index replaces the one coordinate along ``axis``.
         axes = tuple(Axis(name=f"a{i}", extent=d) for i, d in enumerate(idx_shape))
         idx_index = value_index = tuple(Var(a.name) for a in axes)
+        indexed = 1
     else:
         # Rows: the loop walks the cells the index fills, idx read at its own axes and the values
         # broadcast against that domain, trailing dims aligned.
@@ -71,12 +73,13 @@ def rewrite(match: Match, root: Node, inp_dest: Node, inp_idx: Node, inp_values:
             else Var(axes[i].name)
             for i in range(lead, len(filled))
         )
-    out_index = (*(Var(a.name) for a in axes[:axis]), index, *(Var(a.name) for a in axes[axis + len(idx_index) :]))
+        indexed = len(idx_shape)
+    out_index = (*(Var(a.name) for a in axes[:axis]), index, *(Var(a.name) for a in axes[axis + indexed :]))
 
     inner: Body = (
-        Load(name="idx", input=inp_idx.id, index=idx_index),
-        Load(name="val", input=inp_values.id, index=value_index),
-        Cond(cond=BinaryExpr("<", index, extent), body=(Write(output=f"loop_{root.id}", index=out_index, value="val"),)),
+        Load(names=("idx",), input=inp_idx.id, index=idx_index),
+        Load(names=("val",), input=inp_values.id, index=value_index),
+        Cond(cond=BinaryExpression("<", index, extent), body=(Write(output=f"loop_{root.id}", index=out_index, values=("val",)),)),
     )
     body: Body = inner
     for a in reversed(axes):

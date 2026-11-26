@@ -1,17 +1,18 @@
 //! One thread owns text processing and CUDA state. Channel closure cancels future steps.
 use crate::{
-    api::{ApiError, Job, Output},
-    text::{Stops, Text},
+    api::{ApiError, Job, Output, Request},
+    text::{Decoder, Text},
+    vision::Processor,
 };
-use anyhow::{Result, anyhow};
-use emmy_runtime::{cuda::Device, generation::Generator};
+use anyhow::{Result, anyhow, ensure};
+use emmy_runtime::{cuda::Device, generation::Generator, vision::Image};
 use std::{
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 
@@ -20,28 +21,68 @@ const OUTPUT_POLL: Duration = Duration::from_millis(5);
 pub struct Worker {
     generator: Generator,
     text: Text,
+    /// A pack that answers images: the processor that prepares them for its tower.
+    images: Option<Processor>,
     context: usize,
     eos: Vec<i64>,
 }
 impl Worker {
-    pub fn load(root: &Path, context: usize) -> Result<Self> {
+    /// Load the pack at `root`, serving requests of at most `context` tokens: the pack's own when
+    /// `None`; with `draft` off a pack's drafter stays unloaded.
+    pub fn load(root: &Path, context: Option<usize>, draft: bool) -> Result<Self> {
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("manifest.json"))?)?;
         let config = &manifest["key"]["generation"];
+        let capacity = config["context_length"].as_u64().unwrap_or(0) as usize;
+        let context = context.unwrap_or(capacity);
         anyhow::ensure!(
-            context > 0 && context <= config["context_length"].as_u64().unwrap_or(0) as usize,
+            context > 0 && context <= capacity,
             "invalid context capacity"
         );
         let eos = serde_json::from_value(config["eos_ids"].clone())?;
         let text = Text::load(root)?;
-        let generator = Generator::load(&Device::new(0)?, root)?;
+        let images = Processor::load(root, serde_json::from_value(config["vision"].clone())?)?;
+        let generator = Generator::load(&Device::new(0)?, root, draft)?;
         Ok(Self {
             generator,
             text,
+            images,
             context,
             eos,
         })
     }
+
+    /// A request's prompt tokens, and its image when a message carries one: the tower's inputs
+    /// and the prompt's M-RoPE positions, its placeholder grown to the image's tokens.
+    fn prompt(&self, r: &Request) -> Result<(Vec<i64>, Option<Image>)> {
+        let (ids, image) = if let Some(messages) = &r.messages {
+            let urls: Vec<&str> = messages.iter().flat_map(|m| m.images()).collect();
+            let ids = self.text.encode(&self.text.render(messages)?, true)?;
+            if let Some(&url) = urls.first() {
+                let processor = self
+                    .images
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("this model serves no images"))?;
+                ensure!(urls.len() == 1, "a request carries one image at most");
+                let (ids, image) = processor.expand(&ids, processor.prepare(url)?)?;
+                (ids, Some(image))
+            } else {
+                (ids, None)
+            }
+        } else {
+            (
+                self.text
+                    .encode(r.prompt.as_deref().unwrap_or_default(), false)?,
+                None,
+            )
+        };
+        ensure!(
+            !ids.is_empty() && ids.len() <= self.context && r.budget() <= self.context - ids.len(),
+            "prompt and output budget must fit the context"
+        );
+        Ok((ids, image))
+    }
+
     pub fn run(
         mut self,
         mut jobs: mpsc::Receiver<Job>,
@@ -67,30 +108,9 @@ impl Worker {
     }
     fn request(&mut self, job: &Job, shutdown: &AtomicBool) -> Result<()> {
         let r = &job.request;
-        let prompt = if let Some(messages) = &r.messages {
-            self.text.render(messages)
-        } else {
-            Ok(r.prompt.clone().unwrap_or_default())
-        };
-        let ids = prompt.and_then(|p| self.text.encode(&p, r.messages.is_some()));
-        let ids = match ids {
-            Ok(ids)
-                if !ids.is_empty()
-                    && ids.len() <= self.context
-                    && r.budget() <= self.context - ids.len() =>
-            {
-                ids
-            }
-            Ok(_) => {
-                send(
-                    job,
-                    Output::Error(ApiError::invalid(
-                        "prompt and output budget must fit the context",
-                    )),
-                    shutdown,
-                );
-                return Ok(());
-            }
+        let started = Instant::now();
+        let (ids, image) = match self.prompt(r) {
+            Ok(prompt) => prompt,
             Err(e) => {
                 send(
                     job,
@@ -114,64 +134,55 @@ impl Worker {
             );
             return Ok(());
         }
-        self.generator.start(&ids, r.sampling())?;
-        let mut decoder = self.text.tokenizer.decode_stream(true);
-        let mut stops = Stops::new(r.stops());
-        let mut tokens = Vec::new();
-        let mut emitted = String::new();
-        let mut reason = "length";
-        while tokens.len() < r.budget() && !cancelled(job, shutdown) {
-            if let Some(token) = self.generator.advance(true, r.ignore_eos)? {
-                tokens.push(token as u32);
-                if !r.ignore_eos && self.eos.contains(&token) {
-                    reason = "stop";
-                    break;
+        match &image {
+            Some(image) => {
+                let prepared = started.elapsed();
+                self.generator
+                    .start_image(&ids, image, true, r.sampling())?;
+                // What an image costs before prefill: the adapter's processing and the tower's run.
+                eprintln!(
+                    "image: {} tokens, prepared in {:.1} ms, tower {:.1} ms",
+                    image.tokens,
+                    prepared.as_secs_f64() * 1e3,
+                    (started.elapsed() - prepared).as_secs_f64() * 1e3
+                );
+            }
+            None => self.generator.start(&ids, r.sampling())?,
+        }
+        self.generate(job, shutdown)
+    }
+
+    fn generate(&mut self, job: &Job, shutdown: &AtomicBool) -> Result<()> {
+        let r = &job.request;
+        let eos = if r.ignore_eos { &[][..] } else { &self.eos };
+        let mut decoder = Decoder::new(&self.text.tokenizer, eos, r.stops());
+        // A verify step may return several tokens; the output budget takes only the leading ones.
+        'steps: while decoder.token_count() < r.budget() && !cancelled(job, shutdown) {
+            for token in self.generator.advance(true, r.ignore_eos)? {
+                if decoder.token_count() == r.budget() {
+                    break 'steps;
                 }
-                if let Some(text) = decoder
-                    .step(token as u32)
-                    .map_err(|e| anyhow!("decode: {e}"))?
-                {
-                    emitted += &text;
-                    let text = stops.push(&text);
-                    if !text.is_empty() && !send(job, Output::Text(text), shutdown) {
-                        return Ok(());
-                    }
-                    if stops.stopped {
-                        reason = "stop";
-                        break;
-                    }
+                let text = decoder.push(token)?;
+                if !text.is_empty() && !send(job, Output::Text(text), shutdown) {
+                    return Ok(());
+                }
+                if decoder.stopped() {
+                    break 'steps;
                 }
             }
         }
         if cancelled(job, shutdown) {
             return Ok(());
         }
-        if !stops.stopped {
-            // decode_stream holds incomplete UTF-8. At EOS/length, match complete decoding,
-            // including a replacement character for a genuinely unfinished byte sequence.
-            let full = self
-                .text
-                .tokenizer
-                .decode(&tokens, true)
-                .map_err(|e| anyhow!("decode: {e}"))?;
-            let tail = full
-                .strip_prefix(&emitted)
-                .ok_or_else(|| anyhow!("non-monotonic text decoder"))?;
-            let mut text = stops.push(tail);
-            if stops.stopped {
-                reason = "stop";
-            } else {
-                text += &stops.finish();
-            }
-            if !text.is_empty() && !send(job, Output::Text(text), shutdown) {
-                return Ok(());
-            }
+        let text = decoder.finish()?;
+        if !text.is_empty() && !send(job, Output::Text(text), shutdown) {
+            return Ok(());
         }
         send(
             job,
             Output::Finished {
-                completion_tokens: tokens.len(),
-                reason,
+                completion_tokens: decoder.token_count(),
+                reason: decoder.reason(),
             },
             shutdown,
         );

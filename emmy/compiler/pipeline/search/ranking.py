@@ -16,8 +16,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import Counter, defaultdict
-from collections.abc import Sequence
-from concurrent.futures import ProcessPoolExecutor
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from multiprocessing import get_context
 
@@ -28,6 +27,7 @@ from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import Candidates, PoolSample
+from emmy.compiler.pipeline.search.progress import timed_map
 
 logger = logging.getLogger(__name__)
 
@@ -38,29 +38,31 @@ def pool_context(pool: GoldenPool) -> Context:
     return Context.from_target(pool.cap, gpu_name=pool.gpu, precision=pool.pins)
 
 
-def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[str] | None = None) -> Candidates:
+def enumerate_graph(
+    graph, ctx: Context, *, family: str = "", passes: Sequence[str] | None = None, prefer: Mapping | None = None
+) -> Candidates:
     """The planner's candidate enumeration for any ``graph`` — the SAME rows the scheduler's fork
-    tree offers a live compile, captured by resolving the graph through ``passes`` (the whole tile
-    pipeline by default; the tile lowering alone for a kernel's definition, which the Loop passes would
-    normalize into another kernel) with a decide that flattens each fork's leaves. Every leaf encodes one
+    tree offers a live compile, captured by resolving the graph through ``passes`` (the whole pipeline
+    to the kernel lowering by default; from the tile lowering for a kernel's definition, which the Loop passes
+    would normalize into another kernel) with a decide that flattens each fork's leaves. Every leaf encodes one
     accepted classic ``Schedule`` with bare kernel keys and exact ``@n`` / ``@n.e`` sites, which is exactly
     what ``tile_signature`` joins a golden against. ``family`` keeps only rows carrying that knob
     family (``"TILE"`` for a contraction pool); ``""`` keeps every row with a per-node schedule
-    knob (a reduce's ``REDUCE`` fork). The one live-fork capture the matmul
-    offline fitter and record evaluator share.
+    knob (a reduce's ``REDUCE`` fork). ``prefer`` is the schedule row the walk continues through where a fork
+    offers it (a golden row's); the first leaf otherwise. The one live-fork capture the matmul offline fitter and record evaluator share.
 
     Returns :class:`~.pool.Candidates` — the rows beside what they were ranked among. Under
     ``ctx.pool_sample`` the rows are a DRAW (seeded descents through each schedule tree, the golden rows
     kept — ``PoolSample.draw``) and ``total`` is the draw's size; BOTH count the same population: distinct
     schedule-space stamps. Equal problems produce the same stamp, so their identical draw and total are
     collected once. With no sample the rows are every kernel's fork rows and ``total`` is ``len(rows)``."""
-    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import leaf_for, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
 
-    rows: list[dict] = []
+    rows_of: dict[str, list[dict]] = {}  # a scheduled kernel's node -> its schedule rows
     wanted = (family,) if family else ("TILE", "REDUCE", "STAGE")
     # The sample's size sink is PER CALL: the enumerator writes each pool's exact size there as it
     # goes (a fork tree has no channel to return it through), so it is cleared before the walk and
@@ -71,6 +73,9 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
     seen_pools: set[str] = set()
 
     def decide(fp):
+        node = fp.node_id if fp.match is not None else ""
+        if rows_of.get(node):
+            return _first(fp)  # a fork past the schedule of a kernel whose rows this walk already holds
         if sample is not None:
             # One contribution per schedule-space stamp, matching the totals sink's keyed dedupe:
             # an equal problem overwrites the same total, and appending its identical draw again
@@ -84,11 +89,10 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
             # A schedule row always spells the kernel-global ``WORK``; a structural arm's knob
             # delta (a cut, the cross-CTA split's g-half or the unsplit receipt) never does — the
             # stated row-identity marker (the classic scheduler's leaf boundary).
-            if WORK.name not in row:
-                continue
-            if any(family_of(k) in wanted for k in row):
-                rows.append(row)
-        return _first(fp)
+            if WORK.name in row and any(family_of(k) in wanted for k in row):
+                rows_of.setdefault(node, []).append(row)
+        preferred = leaf_for(fp.options, dict(prefer)) if prefer is not None else None
+        return preferred[0] if preferred is not None else _first(fp)
 
     def _first(fp):
         # A pin may empty an early lazy branch while leaving a later sibling live. Walk to the
@@ -101,31 +105,34 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
             return NO_OPTION
         return option
 
-    terminal, _ = Run(pipeline=Pipeline.build(list(passes) if passes is not None else TILE_PASSES), ctx=ctx).resolve(graph, decide)
+    terminal, _ = Run(pipeline=Pipeline.build(list(passes) if passes is not None else KERNEL_PASSES), ctx=ctx).resolve(graph, decide)
+    rows = [row for node_rows in rows_of.values() for row in node_rows]
     if sample is None:
         # A fully pinned classic problem can collapse without opening a policy-visible fork. Its
         # complete row still belongs to the enumeration: read it from the realized kernel set so
         # multi-kernel structural targets expose every independently scheduled problem.
-        from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
         from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES  # noqa: PLC0415
 
         for node in terminal.nodes.values():
-            if not isinstance(node.op, TileOp) or WORK.name not in node.op.knobs:
+            knobs = getattr(node.op, "knobs", None) or {}
+            if WORK.name not in knobs:
                 continue
-            row = {key: value for key, value in node.op.knobs.items() if family_of(key) in SCHEDULE_FAMILIES}
+            row = {key: value for key, value in knobs.items() if family_of(key) in SCHEDULE_FAMILIES}
             if any(family_of(key) in wanted for key in row) and row not in rows:
                 rows.append(row)
-    return Candidates(rows, sum(sample.totals.values()) if sample is not None else len(rows))
+        return Candidates(rows, len(rows))
+    return Candidates(rows, sum(sample.totals.values()))
 
 
 def enumerate_pool(pool: GoldenPool, ctx: Context) -> Candidates:
-    """``pool``'s candidates: its kernel's definition at the pool's sizes through the tile lowering under the
-    regime's pins alone — the wire is the kernel itself, so a live kernel-decision pin means nothing on it."""
-    from emmy.compiler.pipeline import TILE_LOWERING  # noqa: PLC0415
+    """``pool``'s candidates: its kernel's definition at the pool's sizes through the tile and kernel lowering under
+    the regime's pins alone — the wire is the kernel itself, so a live kernel-decision pin means nothing on it."""
+    from emmy.compiler.pipeline import LOWERING_PASSES  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import unpinned_decisions  # noqa: PLC0415
 
+    prefer = pool.rows[0].knobs if pool.rows else None
     with pinned_knobs(pool.pins), unpinned_decisions():
-        return enumerate_graph(pool.kernel.program(pool.bindings), ctx, passes=TILE_LOWERING)
+        return enumerate_graph(pool.kernel.program(pool.bindings), ctx, passes=LOWERING_PASSES[:-1], prefer=prefer)
 
 
 def _shape_group(shape: ShapeKey) -> str:
@@ -150,8 +157,11 @@ class _Packed:
     tier: str
     shape: str
     packed: tuple
+    rows: int
     total: int
     goldens: list[int]
+    negatives: list[int]
+    measured: list[int]
     pools: list[GoldenPool]
 
 
@@ -165,6 +175,12 @@ def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
     report axes. Requiring them to agree can only hold two pools apart, never fuse two that differ."""
     names, matrix, dynamic = packed
     return (gpu, tier, shape, dynamic, names, hashlib.blake2b(matrix, digest_size=16).digest())
+
+
+#: How much slower than the fastest verified row of its pool a verified row may measure and still train as a positive:
+#: the spread two records of one row show across days on one card. A row measured beyond it — a verified row or a
+#: candidate — is a labeled negative (:class:`~.prior.fit.catboost.CatBoostTrainer`).
+POSITIVE_WITHIN = 1.1
 
 
 def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str, str]], str | None]:
@@ -192,13 +208,23 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     # Each golden row locates itself in the pool by schema-agnostic structural signature (free-axis slots +
     # reduce decomp + atom): the candidate rows use the native ``MOVE@element`` keys while a golden may
     # record legacy GEMM-letter keys, so comparing key-value tuples directly never matches.
-    goldens, skipped = [], []
-    for row in pool.schedule_rows():
-        want = features.tile_signature(row)
-        gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
+    # A pool's positives are its fastest verified rows. A row measured slower than them by more than measurement
+    # noise — a verified row another one beats, or a candidate — is a labeled negative; a candidate within the noise,
+    # or faster (a stale golden), is neither. Every measured row stays out of the uniform draw.
+    index = {}
+    for i, r in enumerate(rows):
+        index.setdefault(features.tile_signature(r), i)
+    goldens, negatives, measured, skipped = [], [], [], []
+    for verified, row in [*((True, row) for row in pool.rows), *((False, row) for row in pool.candidates)]:
+        gidx = index.get(features.tile_signature(row.knobs))
         if gidx is None:
-            skipped.append((pool.gpu, pool.name, f"golden not in {len(rows)} candidates"))
-        else:
+            if verified:
+                skipped.append((pool.gpu, pool.name, f"golden not in {len(rows)} candidates"))
+            continue
+        measured.append(gidx)
+        if row.us > POSITIVE_WITHIN * pool.emmy_us:
+            negatives.append(gidx)
+        elif verified:
             goldens.append(gidx)
     if not goldens:
         return None, skipped, f"golden not in {len(rows)} candidates"
@@ -209,7 +235,28 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     # Featurized under the pool's regime, as it was enumerated: what a schedule space offers depends on it.
     with pinned_knobs(pool.pins):
         feats = [featurizer.features(kernel, r) for r in rows]
-    return _Packed(pool, tier, _shape_group(shape), pack_features(feats), candidates.total, goldens, [pool]), skipped, None
+    packed = _Packed(
+        pool, tier, _shape_group(shape), pack_features(feats), len(rows), candidates.total, goldens, negatives, measured, [pool]
+    )
+    return packed, skipped, None
+
+
+def describe_pool(pool: GoldenPool) -> dict:
+    """A pool as one of a phase's slowest tasks names it (``progress.timed_map``): its kernel, card, regime and
+    sizes."""
+    return {"kernel": pool.kernel.name, "card": pool.gpu, "regime": pool.regime or "default", "sizes": dict(pool.bindings)}
+
+
+def _describe_packed(task: tuple, result: tuple) -> dict:
+    """One golden pool as the slowest tasks list it: the pool, and how many schedule rows it enumerated — ``rows``,
+    the rows drawn and featurized, and ``total``, what the group records it was ranked among."""
+    entry, _missed, note = result
+    out = describe_pool(task[0])
+    if entry is not None:
+        out.update(rows=entry.rows, total=entry.total)
+    elif note is not None:
+        out["skipped"] = note
+    return out
 
 
 def build_golden_groups(
@@ -242,7 +289,7 @@ def build_golden_groups(
     golden row recorded on the pool's card and regime is reached by its own descent whatever the draw picks,
     so a golden that misses its pool still means what it always meant: a pin or dtype mismatch.
 
-    ``kernel`` keeps only pools whose kernel's C name contains it — a narrowing VIEW, for iterating on one kernel
+    ``kernel`` keeps only pools whose kernel's name contains it — a narrowing VIEW, for iterating on one kernel
     without paying for the rest. Each retained pool's rank is unchanged by it: the keep-set is computed over every
     pool given, so a pool retains the same rows under the same draw; what changes is the group and positive counts,
     so only an unfiltered run compares against a fit.
@@ -260,7 +307,8 @@ def build_golden_groups(
     keeps: dict[tuple, set] = defaultdict(set)
     if sample > 0:
         for pool in pools:
-            keeps[(pool.gpu, pool.regime)].update(tuple(sorted(row.items())) for row in pool.schedule_rows())
+            rows = (*pool.schedule_rows(), *(row.knobs for row in pool.candidates))
+            keeps[(pool.gpu, pool.regime)].update(tuple(sorted(row.items())) for row in rows)
     tasks = []
     for pool in pools:
         if kernel is not None and kernel not in pool.kernel.name:
@@ -269,13 +317,17 @@ def build_golden_groups(
             skipped.extend((pool.gpu, pool.name, "kernel formed from no loop op") for _ in pool.rows)
             continue
         tasks.append((pool, tuple(sorted(keeps.get((pool.gpu, pool.regime), ()))), sample, seed))
-    if jobs == 1:
-        results = map(_enumerate_packed, tasks)
-    else:
-        # Spawned: the one start method every platform has, and a fresh interpreter per worker, so what a worker
-        # imports is the whole contract (the kernel definition imports the IR it decodes with).
-        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
-            results = list(workers.map(_enumerate_packed, tasks, chunksize=1))
+    # Spawned: the one start method every platform has, and a fresh interpreter per worker, so what a worker
+    # imports is the whole contract (the kernel definition imports the IR it decodes with).
+    results = timed_map(
+        _enumerate_packed,
+        tasks,
+        name="golden pools",
+        jobs=jobs,
+        mp_context=get_context("spawn"),
+        describe=_describe_packed,
+        card=lambda task: task[0].gpu,
+    )
     packed_pools: dict[tuple, _Packed] = {}
     for (pool, *_), (entry, missed, note) in zip(tasks, results, strict=True):
         skipped.extend(missed)
@@ -292,6 +344,8 @@ def build_golden_groups(
             packed_pools[identity] = entry
         else:
             found.goldens.extend(entry.goldens)
+            found.negatives.extend(entry.negatives)
+            found.measured.extend(entry.measured)
             found.pools.append(pool)
 
     # Every pool now knows every golden in it, so each becomes ONE group whose labels are final at
@@ -311,6 +365,8 @@ def build_golden_groups(
                 entry.goldens,
                 entry.total,
                 pools=entry.pools,
+                negatives=entry.negatives,
+                measured=entry.measured,
             )
         )
     logger.info(
@@ -327,11 +383,13 @@ PLACEMENT_PASSES = ("tile/lift", "tile/cut")
 
 @dataclass(frozen=True)
 class PlacementFork:
-    """One kernel-set fork as the walk saw it: its domain's tier, each arm's feature row and its label (``fuse`` or
-    the seams a cut cuts, ``unsplit`` or a split's width, a layout), the arms on the golden's path (``positives``)
-    and the arm the walk itself took (``pick``)."""
+    """One kernel-set fork as the walk saw it: its domain's tier, whether the kernel it decides has a symbolic axis
+    (``dynamic``: a piece a cut leaves may be static under a symbolic root, and is its own regime), each arm's feature
+    row and its label (``fuse`` or the seams a cut cuts, ``unsplit`` or a split's width, a layout), the arms on the
+    golden's path (``positives``) and the arm the walk itself took (``pick``)."""
 
     tier: str
+    dynamic: bool
     feats: list[dict]
     labels: list[str]
     positives: list[int]
@@ -339,17 +397,17 @@ class PlacementFork:
 
 
 def _place_ballot(
-    leaves: list, rows: list[dict], identity: str, name: str, pending: Counter | None, continued: frozenset[str]
+    leaves: list, rows: list[dict], identity: str, pending: Counter | None, continued: frozenset[str]
 ) -> tuple[list[int], list[str], list]:
     """A placement fork's ballot as ``(positives, labels, carved)``: the arms on the golden's path, every arm's
-    label, and per arm the pieces it carves (every kernel it leaves but the remainder, the one keeping the fork
-    kernel's ``name``), by exact identity with multiplicity. ``pending`` is what the golden's kernel set still holds
-    below this kernel: ``None`` where the golden cut nothing here, which keeps the kernel whole, as does a kernel
-    that is itself a pending piece. Otherwise an arm is positive when every piece it carves is pending or is a
-    kernel the golden cut in its turn (``continued``), whose own fork carries the walk on; an arm leaving exactly
-    the pending kernels is positive instead of those (a complete natural cut over its single seams). No positive:
-    the golden's kernel set is not reached one seam at a time from here. Equivalent cuts may spell different
-    seams, which is why a piece counts by identity and never by spelling."""
+    label, and per arm the pieces it carves — the kernels it leaves that are pending or that the golden cut in its
+    turn (``continued``) — by exact identity with multiplicity. ``pending`` is what the golden's kernel set still
+    holds below this kernel: ``None`` where the golden cut nothing here, which keeps the kernel whole, as does a
+    kernel that is itself a pending piece. Otherwise an arm is positive when it carves something, and no pending
+    kernel more often than the set holds it; the other kernels it leaves carry the walk on, owing what is left. An arm
+    leaving exactly the pending kernels is positive instead of those (a complete natural cut over its single seams).
+    No positive: the golden's kernel set is not reached one seam at a time from here. Equivalent cuts may spell
+    different seams, which is why a piece counts by identity and never by spelling."""
     fused = next(i for i, row in enumerate(rows) if "fuse" in row.values())
     # An arm spells every occurrence of each seam; the seams themselves are the keys its aliases map onto.
     aliases = {alias: key for leaf in leaves for alias, key in (getattr(leaf, "aliases", None) or {}).items()}
@@ -362,16 +420,12 @@ def _place_ballot(
     for i in range(len(rows)):
         if i == fused:
             continue
-        pieces = [(op.name, op.identity_key(structural=False, with_io=True)) for op, _ in features.kernel_pieces(leaves[i].expand()[0])]
-        whole[i] = Counter(key for _, key in pieces if key)
-        carved[i] = Counter(key for piece, key in pieces if key and piece != name)
+        pieces = features.kernel_pieces(leaves[i].expand()[0])
+        whole[i] = Counter(key for op, _ in pieces if (key := op.identity_key(structural=False, with_io=True)))
+        carved[i] = Counter({key: n for key, n in whole[i].items() if key in pending or key in continued})
     complete = [i for i in whole if whole[i] == pending]
     positives = complete or [
-        i
-        for i in whole
-        if carved[i]
-        and Counter({key: n for key, n in carved[i].items() if key not in continued}) <= pending
-        and all(key in pending or key in continued for key in carved[i])
+        i for i in whole if carved[i] and Counter({key: n for key, n in carved[i].items() if key not in continued}) <= pending
     ]
     # Deepest seam first: a cone is carved before the cone containing it, so the outer piece reads the inner
     # workspace — the kernel a composed cut of both leaves — and a seam's spelling never moves under the walk.
@@ -439,10 +493,10 @@ def walk_placement(
     """One pool's kernel-set forks (``pins.KERNEL_SET_DOMAINS``: placement cuts, cross-CTA and carry splits,
     layouts), in walk order, and the kernels whose recorded decision the walk could not take (a stale spelling, or
     a kernel set no single-seam walk reaches). The walk cuts one seam at a time, as a deploy with no recorded route
-    does: where the golden cut the pool's kernel, an arm is positive when every piece it carves belongs to the
-    kernel set the golden left (:func:`_recorded_kernel_set`), and the remainder re-enters the walk owing what is
-    still to carve, until it is itself a piece of that set and stays whole; a split or layout fork's positive is
-    the arm the golden recorded on that kernel (``decisions``: a kernel's exact identity to the kernel-set arm
+    does: where the golden cut the pool's kernel, an arm is positive when it carves a piece of the kernel set the
+    golden left (:func:`_recorded_kernel_set`), and each kernel it leaves that the set does not hold yet re-enters the
+    walk owing what is still to carve, until it is itself a piece of that set and stays whole; a split or layout
+    fork's positive is the arm the golden recorded on that kernel (``decisions``: a kernel's exact identity to the kernel-set arm
     recorded on it; unsplit and folded where none is). An arm carving a kernel the golden cut on the way to its
     set is positive too: that kernel's own fork carries the walk on. The walk takes the first positive at every
     fork, so its forks are the dataset's groups; a placement ``prior`` records at each of them the arm it ranks
@@ -483,7 +537,7 @@ def walk_placement(
         rows = [leaf_knobs(leaf) for leaf in leaves]
         carved: list = []
         if tier == "place":
-            positives, labels, carved = _place_ballot(leaves, rows, identity, root.name, owed, continued)
+            positives, labels, carved = _place_ballot(leaves, rows, identity, owed, continued)
             if not positives:
                 unmatched.append(identity[:12])
                 return leaves[0]
@@ -496,7 +550,7 @@ def walk_placement(
                 chosen = 0
             positives = [chosen]
             labels = [" ".join(str(v) for v in row.values() if v) or "unsplit" for row in rows]
-        # Featurized as a deploy featurizes them (``policy/greedy._kernel_set_pick``): an arm that keeps the kernel
+        # Featurized as a deploy featurizes them (``policy/greedy.kernel_set_ranking``): an arm that keeps the kernel
         # leaves the kernel itself.
         feats = [
             featurizer.features(root, row, pieces=leaf.expand()[0] if leaf.structural else root)
@@ -504,16 +558,16 @@ def walk_placement(
         ]
         followed = positives[0]
         pick = followed if prior is None else min(range(len(leaves)), key=prior.mean_scores_features(feats).__getitem__)
-        forks.append(PlacementFork(tier, feats, labels, positives, pick))
+        forks.append(PlacementFork(tier, ShapeKey.from_s_features(features.stamps(root)).is_dyn, feats, labels, positives, pick))
         if tier == "place" and carved[followed] is not None:
             left = owed - carved[followed]
             fragment = leaves[followed].expand()[0]
             for node_id, node in fragment.nodes.items():
                 if isinstance(node.op, TileOp) and (
-                    node.op.name == root.name or node.op.with_io(fragment, node).identity_key(structural=False, with_io=True) in continued
+                    (key := node.op.with_io(fragment, node).identity_key(structural=False, with_io=True)) in continued or key not in owed
                 ):
-                    # The remainder and a piece the golden cut in its turn are cut further; the splice promotes
-                    # a piece onto the buffer it replaces.
+                    # A piece the golden cut in its turn, or one the set does not hold yet, is cut further; the
+                    # splice promotes a piece onto the buffer it replaces.
                     pending[node_id] = pending[node_id.removesuffix("__placed")] = left
         return leaves[followed]
 
@@ -548,12 +602,11 @@ def _walk_packed(task: tuple) -> tuple[list[GoldenGroup], list[tuple[str, str, s
     skipped = [(pool.gpu, pool.name, f"recorded cut not reached on {', '.join(unmatched)}")] if unmatched else []
     if not forks:
         return [], [*skipped, (pool.gpu, pool.name, "no kernel-set fork")], None
-    shape_key = ShapeKey.from_s_features(features.stamps(pool.kernel.op(pool.bindings)))
-    shape = _shape_group(shape_key)
+    shape = _shape_group(ShapeKey.from_s_features(features.stamps(pool.kernel.op(pool.bindings))))
     groups = []
     for n, fork in enumerate(forks, 1):
         key = f"{pool.gpu}/{pool.name}" + (f"@{n}" if n > 1 else "")
-        tier = "dyn" if shape_key.is_dyn else fork.tier
+        tier = "dyn" if fork.dynamic else fork.tier
         groups.append(
             GoldenGroup.over(
                 key, pool.name, tier, pool.gpu, shape, pack_features(fork.feats), fork.positives, len(fork.feats), pools=(pool,)
@@ -573,7 +626,8 @@ def build_placement_groups(pools: Sequence[GoldenPool], *, jobs: int = 1) -> tup
     ``REDUCE`` split; none: it stayed one kernel. The walk runs the tile lift and the cut pass only
     (``PLACEMENT_PASSES``) and cuts one seam at a time, as a deploy with no recorded route does
     (:func:`walk_placement`): a several-seam decision is the kernel set it left, and every fork on the way to that
-    set is a group — the kernel's, then each remainder's, until the remainder is itself a piece of the set — with
+    set is a group — the kernel's, then that of each kernel a cut leaves on the way, until it is itself a piece of the
+    set — with
     the arms carving pieces of it marked. A piece's own fork, where it stays whole, is a group too, as is a split
     or layout fork with the arm the decision names marked, and the first arm marked where nothing was recorded. A
     kernel set no single-seam walk reaches is counted out by name: a deploy cannot take it either. ``jobs`` walks that
@@ -586,11 +640,15 @@ def build_placement_groups(pools: Sequence[GoldenPool], *, jobs: int = 1) -> tup
             skipped.append((pool.gpu, pool.name, "kernel formed from no loop op"))
             continue
         tasks.append((pool, placement_decisions(pools, pool)))
-    if jobs == 1:
-        results = map(_walk_packed, tasks)
-    else:
-        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
-            results = list(workers.map(_walk_packed, tasks, chunksize=1))
+    results = timed_map(
+        _walk_packed,
+        tasks,
+        name="placement pools",
+        jobs=jobs,
+        mp_context=get_context("spawn"),
+        describe=lambda task, result: {**describe_pool(task[0]), "forks": len(result[0]), "arms": sum(g.total for g in result[0])},
+        card=lambda task: task[0].gpu,
+    )
     for (pool, _), (found, missed, note) in zip(tasks, results, strict=True):
         if note is not None:
             logger.warning("  !! %s: %s", pool.name, note)

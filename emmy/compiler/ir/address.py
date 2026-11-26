@@ -1,4 +1,4 @@
-"""Flat-address `Expr` builders — fold-aware `sum` / `product` over int / `Expr` terms, plus
+"""Flat-address `Expression` builders — fold-aware `sum` / `product` over int / `Expression` terms, plus
 `split_pair` / `split_addressable` — the re-fused
 split-store spelling of an axis across two buffer dims, and whether per-atom-origin addressing is
 exact for one — and `gmem_axis_step` / `gmem_row_stride` — how a gmem `Load`'s flat address moves
@@ -11,8 +11,17 @@ from __future__ import annotations
 
 import math
 
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, affine_form
-from emmy.compiler.ir.stmt import Load
+from emmy.compiler.dim import DYNAMIC_DIM_MAX
+from emmy.compiler.ir.expression import (
+    BinaryExpression,
+    CastExpression,
+    Expression,
+    Literal,
+    SimplifyCtx,
+    TernaryExpression,
+    Var,
+)
+from emmy.compiler.ir.stmt import Body, Load, Statement, Write
 
 # Row pad (in ELEMENTS = bytes) for a cp.async-staged 1-byte (fp8) operand slab. The cooperative
 # byte-gather drain (no ldmatrix below sm_100a — the fragment loads are per-lane byte gathers)
@@ -28,20 +37,55 @@ from emmy.compiler.ir.stmt import Load
 BYTE_SLAB_PAD = 16
 
 
-def add(*terms) -> Expr:
-    """Sum int / Expr terms into one Expr (dropping literal zeros)."""
+def add(*terms) -> Expression:
+    """Sum int / Expression terms into one Expression (dropping literal zeros)."""
     out = None
     for t in terms:
         e = Literal(t, "int") if isinstance(t, int) else t
         if isinstance(e, Literal) and e.value == 0:
             continue
-        out = e if out is None else BinaryExpr("+", out, e)
+        out = e if out is None else BinaryExpression("+", out, e)
     return out if out is not None else Literal(0, "int")
 
 
-def mul(a, b: int) -> Expr:
-    """``a · b`` as an Expr, folding the ``b in {0, 1}`` degenerate cases."""
-    return add() if b == 0 else (a if b == 1 else BinaryExpr("*", a if not isinstance(a, int) else Literal(a, "int"), Literal(b, "int")))
+def mul(a, b: int) -> Expression:
+    """``a · b`` as an Expression, folding the ``b in {0, 1}`` degenerate cases."""
+    return (
+        add() if b == 0 else (a if b == 1 else BinaryExpression("*", a if not isinstance(a, int) else Literal(a, "int"), Literal(b, "int")))
+    )
+
+
+def clamp_to(position: Expression, extent: Expression) -> Expression:
+    """``position`` clamped onto a stream's last position — ``position < extent ? position : extent − 1`` — the
+    index an overhanging read takes through a stream or an output sweep: the read stays in bounds with a duplicate,
+    and the fold masks what it folds there or the guard discards the store. :func:`clamped` reads it back."""
+    return TernaryExpression(BinaryExpression("<", position, extent), position, BinaryExpression("-", extent, Literal(1, "int")))
+
+
+def clamped(expression: Expression) -> tuple[Expression, Expression] | None:
+    """``(position, extent)`` when ``expression`` is :func:`clamp_to` of them, else ``None``."""
+    if not isinstance(expression, TernaryExpression) or not isinstance(expression.cond, BinaryExpression) or expression.cond.op != "<":
+        return None
+    position, extent = expression.cond.left, expression.cond.right
+    if expression.if_true == position and expression.if_false == BinaryExpression("-", extent, Literal(1, "int")):
+        return position, extent
+    return None
+
+
+def unclamped(load: Load) -> Load:
+    """``load`` reading every clamped position as the position itself — the address a loader strides, bounded
+    by :func:`clamp_bound` instead."""
+    return Load(load.names, load.input, tuple(c[0] if (c := clamped(e)) is not None else e for e in load.index))
+
+
+def clamp_bound(load: Load, axis_name: str) -> Expression | None:
+    """How far along ``axis_name`` ``load`` reads in bounds, from the axis's own origin: the clamp's extent less the
+    position at ``axis_name = 0``. ``None`` when no component of the index clamps a position over ``axis_name``."""
+    for e in load.index:
+        c = clamped(e)
+        if c is not None and axis_name in c[0].free_vars():
+            return BinaryExpression("-", c[1], c[0].substitute({axis_name: Literal(0, "int")}))
+    return None
 
 
 def gmem_axis_step(load: Load, axis_name: str, inputs) -> tuple[int, int] | None:
@@ -104,22 +148,37 @@ def gmem_row_stride(load: Load, axis_name: str, inputs) -> int | None:
     return step[0] if step is not None and step[1] == 0 and step[0] > 0 else None
 
 
-def reads_declared_rows(load: Load, axis_name: str) -> bool:
-    """Whether the operand's row step IS the buffer's DECLARED trailing extent — the reading a
-    loader falls back on when it is handed no stride (``ir._resolve_ldm``), and the only one that
-    survives a SYMBOLIC extent, which no integer derivation can name. True exactly when the axis
-    rides the penultimate index component alone at coefficient 1: then the flat row step is the
-    product of the extents after it, which IS the declared trailing extent.
+def copy_width(slab_cols: int, elem_bytes: int) -> int:
+    """Elements per vector copy (``cp.async`` or the blocking vector load) of a slab row ``slab_cols`` elements
+    wide: the widest run whose byte size is a legal copy width (16, 8 or 4) and that divides the row, so a copy
+    never straddles one. A byte slab's rows are 16-divisible by its staging rules, so it copies 16 elements. The
+    staging lowering copies at this width and the stage resolvers prove :func:`copies_aligned` at it."""
+    for nbytes in (16, 8, 4):
+        v = nbytes // elem_bytes
+        if v >= 1 and slab_cols % v == 0:
+            return v
+    return 1  # elem_bytes > 16 — never (1/2/4-byte element dtypes only)
 
-    The escape hatch for :func:`gmem_row_stride` declining on a symbolic dim — a masked / dynamic-M
-    matmul reads canonical rows and always did. Not a substitute for the derivation: it says the
-    declaration happens to be right here, nothing about any other index."""
-    if len(load.index) < 2:
+
+def copies_aligned(load: Load, inner: str, chunk: int, inputs, *, per: int = 1) -> bool:
+    """Whether every ``chunk``-element copy ``load`` makes along ``inner`` starts on a ``chunk``-element boundary of
+    its buffer — the source alignment a vector copy of that width needs. A copy starts where ``inner`` is a multiple
+    of ``chunk · per`` (``per`` is how many ``inner`` positions one stored element holds: two for a packed byte), so
+    the flat address at ``inner = chunk · per · j`` must be a provable multiple of ``chunk`` for every ``j``. The
+    proof reads the whole address, simplified: a slice's offset, a row stride off the grid, and ``inner`` split across
+    dims at a pitch off it (a slice reshaped flat) each leave a term it cannot prove, while a dense reshape's quotient
+    and remainder recombine. A symbolic dim is an unknown factor of the strides before it, and the buffer's own base
+    is aligned, as an allocation is. ``False`` for an unknown buffer."""
+    t = inputs.get(load.input) if inputs else None
+    if t is None or len(load.index) != len(tuple(t.shape)):
         return False
-    form = affine_form(load.index[-2], {axis_name})
-    if form is None or form[1].get(axis_name, 0) != 1:
-        return False
-    return not any(axis_name in e.free_vars() for i, e in enumerate(load.index) if i != len(load.index) - 2)
+    start = {inner: BinaryExpression("*", Literal(chunk * per, "int"), Var("__copy"))}
+    address, stride = Literal(0, "int"), Literal(1, "int")
+    for pos in reversed(range(len(load.index))):
+        address = BinaryExpression("+", address, BinaryExpression("*", load.index[pos].substitute(start), stride))
+        dim = t.shape[pos]
+        stride = BinaryExpression("*", stride, Literal(dim.as_static(), "int") if dim.is_static else Var(f"__dim{pos}"))
+    return _divisible(address.simplify(SimplifyCtx.empty()), chunk)
 
 
 def _run_gcd(a: int, b: int) -> int:
@@ -129,24 +188,38 @@ def _run_gcd(a: int, b: int) -> int:
     return b if a == 0 else a if b == 0 else math.gcd(a, b)
 
 
-def _int_lit(e: Expr) -> int | None:
+def _int_lit(e: Expression) -> int | None:
     """``e``'s value when it is an integer :class:`Literal`, else ``None``."""
     return e.value if isinstance(e, Literal) and isinstance(e.value, int) and not isinstance(e.value, bool) else None
 
 
-def _divisible(expr: Expr, n: int) -> bool:
-    """Whether ``expr`` is PROVABLY a multiple of ``n`` — every additive term literal-``n``-divisible
-    or carrying a literal factor that is. Conservative: an opaque var answers no."""
-    if (v := _int_lit(expr)) is not None:
+def _divisible(expression: Expression, n: int) -> bool:
+    """Whether ``expression`` is PROVABLY a multiple of ``n``: every additive term is; a product's literal factor
+    ``c`` leaves ``n / gcd(c, n)`` to the other factor, and any other product needs one factor that is; a quotient
+    ``a / c`` is when ``a`` is a multiple of ``c · n``, a remainder ``a % c`` when both ``a`` and ``c`` are. Each rule
+    holds for any integer operands under C's truncating division. Conservative: an opaque var answers no."""
+    if n == 1:
+        return True
+    if (v := _int_lit(expression)) is not None:
         return v % n == 0
-    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
-        return _divisible(expr.left, n) and _divisible(expr.right, n)
-    if isinstance(expr, BinaryExpr) and expr.op == "*":
-        return _divisible(expr.left, n) or _divisible(expr.right, n)
+    if not isinstance(expression, BinaryExpression):
+        return False
+    if expression.op in ("+", "-"):
+        return _divisible(expression.left, n) and _divisible(expression.right, n)
+    if expression.op == "*":
+        for side, other in ((expression.left, expression.right), (expression.right, expression.left)):
+            if (c := _int_lit(other)) is not None:
+                return _divisible(side, n // math.gcd(c, n))
+        return _divisible(expression.left, n) or _divisible(expression.right, n)
+    if (c := _int_lit(expression.right)) is not None and c > 0:
+        if expression.op == "/":
+            return _divisible(expression.left, c * n)
+        if expression.op == "%":
+            return c % n == 0 and _divisible(expression.left, n)
     return False
 
 
-def _axis_step(expr: Expr, axis: str) -> tuple[int, int] | None:
+def _axis_step(expression: Expression, axis: str) -> tuple[int, int] | None:
     """``(delta, run)`` for ONE index component — see :func:`gmem_axis_step`. ``None`` when the
     component's dependence on ``axis`` is not a step at all (a clamp, a gather, ``axis·axis``).
 
@@ -158,40 +231,40 @@ def _axis_step(expr: Expr, axis: str) -> tuple[int, int] | None:
     by one, each over an ``n``-aligned ``n``-window.
 
     Both readings take the operand NON-NEGATIVE, which a buffer coordinate is (the same assumption
-    ``expr._div_mod_decompose`` states as a range check); C truncation toward zero would break the
+    ``expression._div_mod_decompose`` states as a range check); C truncation toward zero would break the
     window argument below zero."""
-    if axis not in expr.free_vars():
+    if axis not in expression.free_vars():
         return 0, 0
-    if isinstance(expr, Var):
+    if isinstance(expression, Var):
         return 1, 0
-    if not isinstance(expr, BinaryExpr):
+    if not isinstance(expression, BinaryExpression):
         return None
-    if expr.op in ("+", "-"):
-        left, right = _axis_step(expr.left, axis), _axis_step(expr.right, axis)
+    if expression.op in ("+", "-"):
+        left, right = _axis_step(expression.left, axis), _axis_step(expression.right, axis)
         if left is None or right is None:
             return None
-        return left[0] + (right[0] if expr.op == "+" else -right[0]), _run_gcd(left[1], right[1])
-    if expr.op == "*":
-        for side, other in ((expr.left, expr.right), (expr.right, expr.left)):
+        return left[0] + (right[0] if expression.op == "+" else -right[0]), _run_gcd(left[1], right[1])
+    if expression.op == "*":
+        for side, other in ((expression.left, expression.right), (expression.right, expression.left)):
             if axis in other.free_vars():
                 continue
             mult = _int_lit(other)
             step = _axis_step(side, axis) if mult is not None else None
             return None if step is None else (step[0] * mult, step[1])
         return None  # axis · axis — not a step
-    if expr.op in ("/", "%") and (n := _int_lit(expr.right)) is not None and n > 0:
-        step = _axis_step(expr.left, axis)
+    if expression.op in ("/", "%") and (n := _int_lit(expression.right)) is not None and n > 0:
+        step = _axis_step(expression.left, axis)
         if step is None:
             return None
         delta, run = step
         if delta % n == 0:  # whole blocks: the block index steps, the offset holds still
-            return (delta // n, run) if expr.op == "/" else (0, run)
-        if delta == 1 and run == 0 and _divisible(expr.left.substitute({axis: Literal(0, "int")}), n):
-            return (0, _run_gcd(run, n)) if expr.op == "/" else (1, _run_gcd(run, n))
+            return (delta // n, run) if expression.op == "/" else (0, run)
+        if delta == 1 and run == 0 and _divisible(expression.left.substitute({axis: Literal(0, "int")}), n):
+            return (0, _run_gcd(run, n)) if expression.op == "/" else (1, _run_gcd(run, n))
     return None
 
 
-def _delinearized(index: tuple, shape: tuple) -> Expr | None:
+def _delinearized(index: tuple, shape: tuple) -> Expression | None:
     """The ONE flat source coordinate a DELINEARIZING index map re-reads, or ``None`` when
     ``index`` is not such a map.
 
@@ -219,11 +292,11 @@ def _delinearized(index: tuple, shape: tuple) -> Expr | None:
         if dims[j].as_static() == 1:
             continue  # a size-1 source dim reads Literal(0) and strides nothing
         if j > 0:  # every non-leading coordinate carries its own ``% dim_j``
-            if not (isinstance(e, BinaryExpr) and e.op == "%" and _int_lit(e.right) == dims[j].as_static()):
+            if not (isinstance(e, BinaryExpression) and e.op == "%" and _int_lit(e.right) == dims[j].as_static()):
                 return None
             e = e.left
         if strides[j] != 1:
-            if not (isinstance(e, BinaryExpr) and e.op == "/" and _int_lit(e.right) == strides[j]):
+            if not (isinstance(e, BinaryExpression) and e.op == "/" and _int_lit(e.right) == strides[j]):
                 return None
             e = e.left
         if flat is None:
@@ -234,7 +307,7 @@ def _delinearized(index: tuple, shape: tuple) -> Expr | None:
 
 
 def split_pair(index: tuple, name: str) -> int | None:
-    """``Q`` when the exprs of ``index`` mentioning ``name`` are exactly one integer quotient and one
+    """``Q`` when the expressions of ``index`` mentioning ``name`` are exactly one integer quotient and one
     ``name % Q`` (the split-store spelling a re-fused axis reaches a buffer with, in either dim
     order), else ``None``."""
     carrying = [e for e in index if name in e.free_vars()]
@@ -242,7 +315,7 @@ def split_pair(index: tuple, name: str) -> int | None:
         return None
     parts: dict[str, int] = {}
     for e in carrying:
-        if not (isinstance(e, BinaryExpr) and e.op in ("/", "//", "%") and e.left == Var(name) and isinstance(e.right, Literal)):
+        if not (isinstance(e, BinaryExpression) and e.op in ("/", "//", "%") and e.left == Var(name) and isinstance(e.right, Literal)):
             return None
         parts["/" if e.op == "//" else e.op] = int(e.right.value)
     return parts["/"] if set(parts) == {"/", "%"} and parts["/"] == parts["%"] else None
@@ -261,7 +334,7 @@ def split_addressable(index: tuple, shape, name: str, atom_ext: int, trailing: b
         return True
     q = split_pair(index, name)
     inner = index[dims[1]]
-    if q is None or not (isinstance(inner, BinaryExpr) and inner.op == "%"):
+    if q is None or not (isinstance(inner, BinaryExpression) and inner.op == "%"):
         return False  # not a bare f/Q, f%Q pair, or the quotient dim is the inner one
     if trailing and dims[1] != len(index) - 1:
         return False  # the remainder dim is not the contiguous one
@@ -273,3 +346,77 @@ def split_addressable(index: tuple, shape, name: str, atom_ext: int, trailing: b
         if strides[dims[0]] == q * strides[dims[1]]:
             return True  # row-major recomposition — the address is affine in the axis
     return q % atom_ext == 0
+
+
+_INT_MAX = 2**31 - 1
+
+
+def exceeds_int_range(shape) -> bool:
+    """Whether this buffer's element count can pass ``INT_MAX``, so its addresses need 64-bit
+    arithmetic.
+
+    A flat address is a sum of ``index * stride`` terms, and C evaluates it in ``int`` unless an
+    operand is wider. Past ``INT_MAX`` the sum wraps NEGATIVE and the access lands outside the
+    allocation — an illegal access that poisons the whole CUDA context, not a wrong answer. It is
+    not hypothetical: a 4x512-token Qwen3 trunk plans a 2^32-element activation buffer.
+
+    A symbolic dim is taken at ``DYNAMIC_DIM_MAX``, the exported bound on every ``--dynamic`` axis,
+    so the answer is an upper bound over every shape the program can legally be resolved at rather
+    than a guess about the one in front of us. (``Dim.hint`` is NOT usable here: it is advisory and
+    a run may exceed it.) Buffers that stay inside the range keep their 32-bit addressing, which is
+    most of them — 64-bit index math is not free."""
+    numel = 1
+    for dim in shape:
+        size = getattr(dim, "expression", dim)
+        if isinstance(size, Literal) and isinstance(size.value, int):
+            size = size.value
+        numel *= size if isinstance(size, int) else DYNAMIC_DIM_MAX
+        if numel > _INT_MAX:
+            return True
+    return False
+
+
+def flat_index(index: tuple[Expression, ...], shape) -> Expression:
+    """The row-major element index of ``index`` into a buffer of ``shape``, symbolic sizes included: the one
+    flattening of an access. One index is a flat index already, and none is element zero.
+
+    Where the buffer can pass ``INT_MAX`` elements (:func:`exceeds_int_range`) each coordinate is widened before it
+    meets its stride. The cast sits on the TERM, not on the finished sum: ``(long long)(a*b + c*d)`` computes the
+    whole sum in ``int`` and widens a result that already wrapped."""
+    if len(index) < 2:
+        return index[0] if index else Literal(0, "int")
+    if shape is None or len(shape) != len(index):
+        raise ValueError(f"{len(index)} indices for a buffer of shape {shape} — an index spells every dim of its buffer")
+    wide = exceeds_int_range(shape)
+    sizes = [dim.expression if hasattr(dim, "expression") else Literal(int(dim), "int") for dim in shape]
+    flat: Expression | None = None
+    for position, coordinate in enumerate(index):
+        stride: Expression = Literal(1, "int")
+        for size in sizes[position + 1 :]:
+            stride = BinaryExpression("*", stride, size)
+        stride = stride.simplify(SimplifyCtx.empty())
+        term = CastExpression("long long", coordinate) if wide else coordinate
+        if stride != Literal(1, "int"):
+            term = BinaryExpression("*", term, stride)
+        flat = term if flat is None else BinaryExpression("+", flat, term)
+    return flat
+
+
+def flat_accesses(body: Body, shapes, keeps=lambda stmt: False) -> Body:
+    """``body`` with the index of every ``Load`` and ``Write`` one flat element index into its buffer
+    (:func:`flat_index` over ``shapes``, each buffer's shape by name). ``keeps`` names the accesses that stay as
+    they are: the ones their dimensions define, and a load of a carried state, whose index is the step and the cell."""
+    states = {carry.name for carry in body.carries}
+
+    def flat(stmt: Statement) -> Statement:
+        if isinstance(stmt, Load) and stmt.input in states:
+            return stmt
+        if isinstance(stmt, (Load, Write)) and len(stmt.index) != 1 and not keeps(stmt):
+            buffer = stmt.input if isinstance(stmt, Load) else stmt.output
+            try:
+                return stmt.replace(index=(flat_index(stmt.index, shapes.get(buffer)),))
+            except ValueError as exc:
+                raise ValueError(f"{buffer}: {exc}") from exc
+        return stmt
+
+    return body.map(flat)

@@ -43,12 +43,17 @@ def is_repository_golden_path(path: str | Path) -> bool:
         return len(relative.parts) >= 2 and relative.parts[1] == _RECIPE_GOLDEN_DIR
 
 
+def hardware_golden_paths() -> list[Path]:
+    """The maintained hardware goldens, one file per exact card."""
+    return sorted(_RECORDS_DIR.glob("*.json"))
+
+
 @contextmanager
 def repository_golden_paths():
     """Yield hardware goldens plus the model goldens of maintained recipes: what a compile reads as evidence, a refit
     trains on and the tests check. Another recipe's golden is evidence only where a caller names it."""
     with default_recipe_root() as recipe_root:
-        paths = list(_RECORDS_DIR.glob("*.json"))
+        paths = hardware_golden_paths()
         if recipe_root is not None:
             paths.extend(
                 path for path in recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.json") if _is_maintained(path.parent.parent / "recipe.yaml")
@@ -146,8 +151,8 @@ def documents_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[Gold
 
 def scope_digest(gpu_name: str) -> str:
     """A digest of the golden files :func:`documents_for_card` would load for ``gpu_name`` — over file bytes where
-    they come from files, so it costs no parse. A serving pack keys on it: plans compiled from other rows are not
-    what this compile would deploy."""
+    they come from files, so it costs no parse. A serving pack keeps it: while it holds, no entry's golden rows can
+    have moved (``backend.pack``)."""
     sha = hashlib.sha256()
     with _scope(gpu.canonical_name(gpu_name)) as (documents, paths):
         for document in documents or []:

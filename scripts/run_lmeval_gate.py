@@ -37,7 +37,7 @@ def completions_url(base_url, chat=False):
     return url if url.endswith(path) else url + path
 
 
-def build_model_args(base_url, model, chat=False):
+def build_model_args(base_url, model, chat=False, num_concurrent=NUM_CONCURRENT):
     """Constructor args for lm-eval's `local-completions` model (untokenized requests, fixed
     concurrency). The explicit timeout overrides TemplateAPI's 300 s default: the emmy lane's
     slower prefill pushed request tails past it, and the resulting tenacity retry storm died on
@@ -45,10 +45,18 @@ def build_model_args(base_url, model, chat=False):
     return {
         "base_url": completions_url(base_url, chat),
         "model": model,
-        "num_concurrent": NUM_CONCURRENT,
+        "num_concurrent": num_concurrent,
         "tokenized_requests": False,
         "timeout": 900,
     }
+
+
+def build_gen_kwargs(gen_kwargs=None, chat_template_kwargs=None):
+    """The generation arguments lm-eval sends with every request, or None to keep the task's own."""
+    merged = dict(gen_kwargs or {})
+    if chat_template_kwargs:
+        merged["chat_template_kwargs"] = chat_template_kwargs
+    return merged or None
 
 
 def extract_metrics(results, task):
@@ -80,12 +88,36 @@ def main():
     parser.add_argument("--seed", type=int, default=0, help="Seed for all lm-eval RNGs (default: %(default)s)")
     parser.add_argument("--num-fewshot", type=int, default=None, help="Few-shot count (default: task default)")
     parser.add_argument("--out", type=Path, default=None, help="JSON output path (default: stdout)")
+    parser.add_argument(
+        "--num-concurrent",
+        type=int,
+        default=NUM_CONCURRENT,
+        help="Requests in flight (default: %(default)s); 1 for a server that answers one request at a time and refuses "
+        "the next with HTTP 429, as the native server does",
+    )
     parser.add_argument("--label", default="unlabeled", help="Config label recorded in the output, e.g. emmy-fastmath")
     parser.add_argument(
         "--chat",
         action="store_true",
         help="Score through /chat/completions with the model's chat template, whose special tokens a raw prompt can "
         "miss (DeepSeek V4's tokenizer adds no start-of-sequence token to one); few-shot examples become turns",
+    )
+    parser.add_argument(
+        "--chat-template-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object forwarded as chat_template_kwargs in every chat request (with --chat), e.g. "
+        "'{\"enable_thinking\": false}' for a model whose template defaults to thinking: the hidden "
+        "reasoning otherwise spends the task's generation budget and the content comes back empty",
+    )
+    parser.add_argument(
+        "--gen-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object of lm-eval generation arguments that override the task's own, e.g. "
+        "'{\"max_gen_toks\": 1024}' when the task's 256-token budget cuts a worked answer short of its final line, "
+        'or \'{"until": ["<|im_end|>"]}\' with thinking on: the server applies a stop string to the hidden '
+        'reasoning too, and GSM8K\'s "Question:" ends a response there with empty content',
     )
     args = parser.parse_args()
 
@@ -94,9 +126,10 @@ def main():
     logger.info("Evaluating %s (%s) on %s [limit=%d] via %s", args.model, args.label, args.task, args.limit, args.base_url)
     results = lm_eval.simple_evaluate(
         model="local-chat-completions" if args.chat else "local-completions",
-        model_args=build_model_args(args.base_url, args.model, args.chat),
+        model_args=build_model_args(args.base_url, args.model, args.chat, args.num_concurrent),
         apply_chat_template=args.chat,
         fewshot_as_multiturn=args.chat,
+        gen_kwargs=build_gen_kwargs(args.gen_kwargs, args.chat_template_kwargs),
         tasks=[args.task],
         num_fewshot=args.num_fewshot,
         limit=args.limit,

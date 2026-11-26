@@ -1,19 +1,19 @@
 """Bench-to-DB recording — ``run --bench`` measurements become ``perf`` rows in the tune DB.
 
-A ``run --bench`` invocation that benched pinned rows (a golden, an ``--ab`` row) or the greedy
-pick records each clean measurement as per-kernel ``perf`` rows through the tuner's own writer, so a
-replayed golden or a hand-pinned row becomes what the next ``compile`` / ``run`` / ``serve`` deploys,
-and — once the tune DB is imported into a dataset instance — a training row like any tune
-measurement. A greedy pick whose bench failed records the kernel the failure blames as a
-``bench_fail`` row, exactly as the tuner files a hung terminal.
+A ``run --bench`` invocation that benched pinned rows (a golden, an ``--ab`` or ``--tune`` row) or the greedy
+pick records each clean measurement as per-kernel ``perf`` rows, so a replayed golden or a hand-pinned row
+becomes what the next ``compile`` / ``run`` / ``serve`` deploys, and — once the tune DB is imported into a
+dataset instance — a training row. A greedy pick whose bench failed records the kernel the failure blames as a
+``bench_fail`` row.
 Recording is **default-on behind a quality bar** (:func:`meets_quality_bar`; ``run --no-record-evidence``
 opts out). The caller (``emmy/commands/run.py``) owns which rows are honest enough to record — never a
 ``pin_unmatched`` row (the claimed config never ran) or one carrying an integrity flag (wrong answer,
 intensity floor); this module records what it is given.
 
-The row writers live here too: :func:`persist_kernel_perf` is the ONE writer for a kernel measurement and
-:func:`persist_bench_failure` the one for a failed bench, so ``run --bench``'s pinned rows and the golden
-import are indistinguishable to the evidence pick.
+The row writers live here too: :func:`persist_kernel_perf` is the ONE writer for a measurement of a compiled
+kernel and :func:`persist_bench_failure` the one for a failed bench. The golden import files a stored row under the
+same key (``golden.evidence.import_rows``), so a replayed golden and a hand-pinned row are indistinguishable to the
+evidence pick.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import statistics
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from emmy.compiler.pipeline.search.db import KernelDef, PerfStats, knobs_json
+from emmy.compiler.pipeline.search.db import KernelDef
 from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel_wire
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 # The pinned-bench measurement standard (``CudaBackend.bench_pinned_async`` defaults). A run benched
 # below it is a quick look, not a measurement — recording it would let a noisy drive-by median
-# displace a recorded row (the upsert keeps the lowest).
+# displace a recorded row (the row written last wins).
 MIN_RECORD_WARMUP = 5
 MIN_RECORD_ITERS = 20
 
@@ -56,15 +56,9 @@ def record_bench_perf(db_path: Path | str, ctx: Context, compiled, bench) -> int
     db = SearchDB(Path(db_path))
     written = 0
     try:
-        for node, launch in zip(nodes, per_launch, strict=True):
-            written += persist_kernel_perf(
-                db,
-                ctx,
-                node.op,
-                stats=stats_from_launch(launch),
-                status="ok",
-                captured=bool(getattr(bench, "captured", False)),
-            )
+        with db.transaction():
+            for node, launch in zip(nodes, per_launch, strict=True):
+                written += persist_kernel_perf(db, ctx, node.op, us=launch_us(launch), status="ok")
     finally:
         db.close()
     return written
@@ -119,33 +113,14 @@ def measured_schedules(db_path: Path | str, ctx: Context, cuda_ops) -> list[int 
     keys = [kernel_key(op) for op in cuda_ops]
     db = SearchDB(Path(db_path))
     try:
-        schedules: dict[tuple, set[str]] = {}
-        for row in db.iter_perf(ctx):
-            if row.status == "ok":
-                schedules.setdefault((row.kernel, knobs_json(row.bindings)), set()).add(knobs_json(row.knobs))
+        return [(len(db.measured(ctx, key[1], bindings=key[2])) or 1) if key else None for key in keys]
     finally:
         db.close()
-    return [(len(schedules.get((key[1], knobs_json(key[2])), ())) or 1) if key else None for key in keys]
 
 
-def point_stats(us: float) -> PerfStats:
-    """A single-sample ``PerfStats`` — the shape a whole-graph time takes when no per-launch samples exist."""
-    return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
-
-
-def stats_from_launch(lt) -> PerfStats:
-    """``PerfStats`` for one benched launch: over its samples when it carries them, else the point time."""
-    if lt.samples and len(lt.samples) >= 1:
-        us = [s * 1000.0 for s in lt.samples]
-        return PerfStats(
-            median=statistics.median(us),
-            min=min(us),
-            max=max(us),
-            mean=statistics.fmean(us),
-            variance=statistics.pvariance(us) if len(us) > 1 else 0.0,
-            n_samples=len(us),
-        )
-    return point_stats(lt.time_ms * 1000.0)
+def launch_us(launch) -> float:
+    """One benched launch's microseconds: the median of its samples when it carries them, else its point time."""
+    return (statistics.median(launch.samples) if launch.samples else launch.time_ms) * 1000.0
 
 
 def kernel_key(cuda_op) -> tuple | None:
@@ -158,11 +133,10 @@ def kernel_key(cuda_op) -> tuple | None:
     return None if identity is None else (tile, identity, kernel_bindings(tile))
 
 
-def kernel_row(tile, name: str) -> KernelDef:
-    """The ``kernel`` row of a tile kernel: its wire, the C name it was rendered under and whether the wire is
-    the body it was formed from, keyed by the tile's own exact identity — which lifting the wire again computes
-    too (``KernelDef.exact_identity``)."""
-    row = KernelDef(loop_ir=kernel_wire(tile), name=name, formed=formed_from(tile) is not None)
+def kernel_row(tile) -> KernelDef:
+    """The ``kernel`` row of a tile kernel: its wire and whether the wire is the body it was formed from, keyed by
+    the tile's own exact identity — which lifting the wire again computes too (``KernelDef.exact_identity``)."""
+    row = KernelDef(loop_ir=kernel_wire(tile), formed=formed_from(tile) is not None)
     return row.keyed(tile.identity_key(structural=False, with_io=True))
 
 
@@ -171,50 +145,33 @@ def persist_kernel_perf(
     ctx,
     cuda_op,
     *,
-    stats,
+    us: float,
     status: str,
-    captured: bool = False,
     error: str | None = None,
     knobs: dict | None = None,
-    source: str = "measured",
-    name: str | None = None,
     sizes: dict[str, int] | None = None,
 ) -> bool:
-    """Persist one measured kernel as deploy evidence: its ``kernel`` row (the definition the
-    measurement is of) and its ``perf`` row under ``ctx``'s card and regime (the row written last wins, see
-    :meth:`SearchDB.record_perf`). The ONE writer for a kernel measurement — ``run --bench``'s
-    pinned rows and the golden import both come here, so a replayed golden and a recorded pick are
-    indistinguishable to the evidence pick. The row is the op's knobs — the decisions taken on it —
-    unless ``knobs`` says otherwise — a golden's recorded schedule row, stored as written rather
-    than as the import's lowering realized it; ``source`` names where the measurement came from; ``name`` the name
-    the kernel was built under, the CUDA op's kernel name unless given; ``sizes`` what the bench bound the symbolic
-    dims to, their hints unless given. Returns whether a row was written (a kernel no tile stands behind persists
-    nothing)."""
+    """Persist one kernel a bench here measured as deploy evidence: its ``kernel`` row (the definition the
+    measurement is of) and its ``perf`` row under ``ctx``'s card and regime, at ``us``, the median of its timed
+    launches (the row written last wins, see :meth:`SearchDB.record_perf`). The ONE writer for a measurement of a
+    compiled kernel. The row is the op's knobs — the decisions taken on it — unless ``knobs`` says otherwise;
+    ``sizes`` is what the bench bound the symbolic dims to, their hints unless given. Returns whether a row was
+    written (a kernel no tile stands behind persists nothing)."""
     key = kernel_key(cuda_op)
     if key is None:
         return False
     tile, identity, bindings = key
     bindings = {var: (sizes or {}).get(var, size) for var, size in bindings.items()}
-    db.record_kernel(kernel_row(tile, name or cuda_op.kernel_name))
+    db.record_kernel(kernel_row(tile))
     if knobs is None:
         knobs = getattr(cuda_op, "knobs", None) or {}
-    db.record_perf(
-        ctx,
-        identity,
-        bindings=bindings,
-        knobs=knobs,
-        status=status,
-        stats=stats,
-        captured=captured,
-        error=error,
-        source=source,
-    )
+    db.record_perf(ctx, identity, bindings=bindings, knobs=knobs, status=status, us=us, error=error)
     return True
 
 
 #: The kernel a failure message NAMES — ``kernel "k_foo" did not complete …`` from the runtime's
-#: watchdog (Rust's ``{:?}`` quotes it), ``nvcc compile failed for kernel 'k_foo': …`` from the
-#: compiler. The exception class does not survive the bench worker's pipe (it arrives wrapped in a
+#: watchdog (Rust's ``{:?}`` quotes it), ``ptxas failed for kernel 'k_foo': …`` from the
+#: assembler. The exception class does not survive the bench worker's pipe (it arrives wrapped in a
 #: ``BenchWorkerJobError`` carrying the child exception's ``repr``), so the label is recovered from
 #: the text — and ``repr`` escapes a quote that matches its own, so either quote is matched with or
 #: without its backslash.
@@ -239,11 +196,12 @@ def persist_bench_failure(db, ctx, cuda_nodes, exc, fail_us: float) -> list:
     so such a slice is spent for this session and benched again, at the run budget, by the next."""
     named = _NAMED_KERNEL.search(str(exc))
     if named is not None:
-        blamed = [n for n in cuda_nodes if getattr(n.op, "kernel_name", "") == named.group(1)]
+        # The watchdog names the launch symbol: the kernel's name, suffixed where the plan launches other code under it.
+        symbol = named.group(1)
+        blamed = [n for n in cuda_nodes if symbol == n.op.kernel_name or symbol.startswith(f"{n.op.kernel_name}_")]
     else:
         blamed = list(cuda_nodes) if len(cuda_nodes) == 1 else []
-    stats = point_stats(fail_us)
     error = f"{type(exc).__name__}: {exc}"
     for node in blamed:
-        persist_kernel_perf(db, ctx, node.op, stats=stats, status="bench_fail", error=error)
+        persist_kernel_perf(db, ctx, node.op, us=fail_us, status="bench_fail", error=error)
     return blamed

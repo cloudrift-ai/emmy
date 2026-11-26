@@ -57,3 +57,35 @@ def clamp_dummy_run_seq_lens() -> None:
 
     GPUModelRunner._build_attention_metadata = build_with_clamped_seq_lens
     GPUModelRunner._emmy_seq_lens_clamped = True
+
+
+def one_token_prompt_rows_replay_decode_graphs() -> None:
+    """vLLM's Model Runner V2 (the 1Cat fork's 1.5.1) refuses its whole-step decode graphs to any step that still holds
+    a prompt token, so the last token of a prompt runs eager even when every row of the step is one token wide.
+    Prefix caching ends a prompt that way: under ``--mamba-cache-mode align`` a 4K prompt runs as steps of 3,920, 175
+    and 1 tokens. Eager, Emmy's runner calls its programs one at a time from the host, and on Qwen3.8-Flash-Next on four
+    V100s that 1-token step took about 0.18 s against a decode step's 17 ms.
+
+    The refusal guards speculative decoding: a prompt chunk of ``1 + k`` tokens has a verify step's shape but must start
+    the recurrent state with prefill semantics. Without speculative decoding a decode row is one token, and the backends
+    the graph holds already run a 1-token prompt row as a decode row: the Gated DeltaNet builder classes rows by query
+    length unless speculative decoding is on, and the sparse attention has no separate prefill path. So with no
+    speculative tokens, a step whose every row is one token is a uniform decode step whatever its phase, and replays the
+    graph of its width. Drop this patch when the runner classes such a step as a decode itself."""
+    try:
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    except ImportError:  # a vLLM without Model Runner V2
+        return
+
+    # vLLM 0.25.1, the RTX 5090 recipes' plugin lane, has Model Runner V2 but not this method.
+    if getattr(GPUModelRunner, "_emmy_one_token_prompt_rows", False) or not hasattr(GPUModelRunner, "_get_uniform_decode_token_count"):
+        return
+    orig = GPUModelRunner._get_uniform_decode_token_count
+
+    def uniform_decode_token_count(self, scheduler_output, dummy_run):
+        if self.num_speculative_steps == 0 and set(scheduler_output.num_scheduled_tokens.values()) == {1}:
+            return 1
+        return orig(self, scheduler_output, dummy_run)
+
+    GPUModelRunner._get_uniform_decode_token_count = uniform_decode_token_count
+    GPUModelRunner._emmy_one_token_prompt_rows = True

@@ -17,6 +17,7 @@ import pytest
 from emmy.compiler.pipeline.search import golden
 from emmy.compiler.pipeline.search.golden import GoldenFile, restamp, scope_digest
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, document_of, repository_golden_paths
+from tests.compiler.helpers import golden_lane
 
 
 def _golden_id(path: Path) -> str:
@@ -29,7 +30,7 @@ def _program_parameters():
     with repository_golden_paths() as paths:
         for path in sorted(paths, key=_golden_id):
             for index in sorted({kernel.traced for kernel in document_of(path).targets()}):
-                parameters.append(pytest.param(path, index, id=f"{_golden_id(path)}/program-{index}"))
+                parameters.append(pytest.param(path, index, id=f"{_golden_id(path)}/program-{index}", marks=golden_lane(path)))
     return parameters
 
 
@@ -41,7 +42,83 @@ def test_a_repository_golden_is_the_fresh_lowering(path: Path, traced: int) -> N
     re-record a stale row, not to detect one."""
     document = document_of(path)
     fresh, report = restamp(document, traced=traced)
-    assert fresh == document, "\n".join(report.lines())
+    # Compared outside the assert: a failure prints the report, where pytest would print both whole files.
+    unchanged = fresh == document and not report.changed
+    assert unchanged, "\n".join(report.lines())
+
+
+def test_a_cut_piece_is_the_kernel_its_stored_definition_lifts_to() -> None:
+    """A cut forms its pieces from bare loop nests, and a piece's stored definition is that nest, lifted again over
+    its own buffers. Both lifts bind a size-one output row the same way, so each piece of a decision has the identity
+    its definition lifts to: the identity the file's rows and routes are keyed by is the one the compile meets. The
+    5090 Qwen3.6 gdn2rows twin's first cut was the case: its pieces bound no row as minted and the row once lifted
+    again, so the compile never met the route the file records."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
+    from emmy.compiler.pipeline.search.golden.restamp import mint
+
+    document = GoldenFile.load(Path(__file__).resolve().parents[4] / "recipes/Qwen3.6-35B-A3B-FP8/golden/rtx5090_sm120.json")
+    root = document.kernels[7]  # the gdn2rows twin's linear norm reduction
+    assert root.name == "k_ae929c4f42fd"
+    route = next(route for route in document.routing if route.parent == root.ref)
+    [(_, _, pieces)] = mint(root, [route], Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name))
+    assert len(pieces) == len(route.children)
+    for piece in pieces:
+        assert piece.exact_identity == KernelDef(loop_ir=piece.loop_ir, formed=piece.formed).exact_identity, piece.name
+
+
+def test_restamp_respells_a_rows_site_keys_as_it_does_a_seam() -> None:
+    """A row's scoped schedule keys address sites by operand position, as a seam does. A node the lift forms before
+    the site moves the address: the key is re-spelled to the one offered key of its kind one segment away (the GDN
+    state recurrence's nested reduce, ``inner.2`` → ``inner.1`` under the lift's one-node rule), and a key no such
+    rule maps is dropped from its row, named, rather than guessed."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.golden.format import Measurements
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = GoldenFile.load(Path(__file__).resolve().parents[2] / "realization/cases/fused/gdn-recurrence-state-kv.json")
+    (row,) = document.rows
+    nested = max((key for key in row.knobs if key.startswith("TILE@")), key=len).partition("@")[2]
+    assert {key for key in row.knobs if nested in key} == {f"{family}@{nested}" for family in ("TILE", "REDUCE", "STAGE")}
+    head, _, tail = nested.partition("/map.3")  # ``map.1/inner.N``: the nested reduce one operand index over
+    moved = f"{head[:-1]}{int(head[-1]) + 1}/map.3{tail}"
+    shifted = {key.replace(nested, moved): value for key, value in row.knobs.items()}
+    measured = replace(row, knobs=shifted, measurements=Measurements(emmy_us=12.5))
+    fresh, report = restamp(replace(document, rows=[measured]))
+    assert fresh.rows[0].knobs == row.knobs and not report.dropped_rows
+    assert report.respelled_rows == [f"{row.name} {old} -> {new}" for old, new in zip(shifted, row.knobs, strict=True) if old != new]
+    assert len(report.respelled_rows) == 3
+    # A re-spelled key is a nearest-address match, not proof: the row keeps its schedule and loses its measurement.
+    assert report.demoted == [row.name] and fresh.rows[0].measurements is None
+    unmapped = {key.replace(nested, f"{nested}9"): value for key, value in row.knobs.items()}
+    fresh, report = restamp(replace(document, rows=[replace(row, knobs=unmapped, measurements=Measurements(emmy_us=12.5))]))
+    assert fresh.rows[0].knobs == {key: value for key, value in row.knobs.items() if nested not in key}
+    families = ("TILE", "REDUCE", "STAGE")
+    assert report.dropped_keys == [
+        f"{row.name}: {family}@{nested}9 names no site of {document.kernel(row.kernel).name}" for family in families
+    ]
+    # A row that lost a key is not the schedule that was measured either.
+    assert report.demoted == [row.name] and fresh.rows[0].measurements is None
+    assert not restamp(document)[1].changed
+
+
+def test_restamp_keys_a_carried_kernels_rows_against_its_serial_form() -> None:
+    """A kernel that carries a state is scheduled as its serial form (one launch per step), and its rows' scoped keys
+    address that form's sites; a restamp offers the row those keys, not the lifted tile's (whose ``scan`` the serial
+    form has already peeled), so the row keeps every key and its measurement."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = GoldenFile.load(Path(__file__).resolve().parents[4] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
+    kernel = document.kernels[615]  # a kernel that carries a state
+    assert kernel.name == "k_74ddd76a8cb7"
+    rows = [row for row in document.rows if row.kernel == kernel.ref and any("@" in key for key in row.knobs)]
+    assert rows and all(any(key.startswith("REDUCE@") for key in row.knobs) for row in rows)
+    fresh, report = restamp(replace(document, kernels=[kernel], routing=[], rows=rows))
+    assert not report.dropped_keys and not report.respelled_rows, report.lines()
+    assert [row.knobs for row in fresh.rows] == [row.knobs for row in rows]
 
 
 def test_lora_serving_golden_replays_nested_cuts() -> None:
@@ -50,12 +127,13 @@ def test_lora_serving_golden_replays_nested_cuts() -> None:
     )
     document = GoldenFile.load(path, repository=False)
     fresh, report = restamp(document, traced=1)
-    assert fresh == document, "\n".join(report.lines())
+    unchanged = fresh == document
+    assert unchanged, "\n".join(report.lines())
 
 
 def _file_parameters():
     with repository_golden_paths() as paths:
-        return [pytest.param(path, id=_golden_id(path)) for path in sorted(paths, key=_golden_id)]
+        return [pytest.param(path, id=_golden_id(path), marks=golden_lane(path)) for path in sorted(paths, key=_golden_id)]
 
 
 @pytest.mark.parametrize("path", _file_parameters())
@@ -151,6 +229,35 @@ def test_a_scope_reads_a_file_only_on_the_card_that_measured_it(caplog) -> None:
     assert f"measured on {sxm2} are no evidence on {sxm3}" in caplog.text
 
 
+def test_a_piece_a_new_program_lowers_to_whole_becomes_its_target() -> None:
+    """Appending a program whose one kernel is a stored cut piece (one kernel by identity) makes the piece that
+    program's target under the program's own body, so the fresh lowering of the program writes its outputs and a
+    restamp keeps it. The H100 golden's sdpa prefill route stores the piece a plain f16 linear lowers to; the golden
+    also records that linear as a program of its own, so the piece's provenance is cleared first."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.pipeline.search.golden.working import _append
+
+    document = GoldenFile.load(_RECORDS_DIR / "h100_sm90.json")
+    index = next(i for i, kernel in enumerate(document.kernels) if kernel.name == "k_bd48bb693056")
+    document.kernels[index] = piece = replace(document.kernels[index], traced=None)
+    program = {
+        "inputs": ["x0", "x1"],
+        "outputs": ["linear"],
+        "nodes": [
+            {"id": "x0", "op": "input", "outputs": [["x0", "f16", [512, 3072]]]},
+            {"id": "x1", "op": "input", "outputs": [["x1", "f16", [1024, 3072]]]},
+            {"id": "linear", "op": "torch.linear", "inputs": ["x0", "x1"], "outputs": [["linear", "f16", [512, 1024]]]},
+        ],
+    }
+    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name)
+    assert _append(Graph.from_wire(program), ctx=ctx, document=document) == 0, "the program's kernel is the stored piece"
+    target = document.kernel(piece.ref)
+    assert target.traced is not None and target.name == piece.name
+    fresh, report = restamp(document, traced=target.traced)
+    assert not report.changed, "\n".join(report.lines())
+
+
 def test_restamp_drops_what_the_fresh_lowering_no_longer_writes(tmp_path) -> None:
     """A target no fresh kernel writes is dropped with its rows; a kernel whose body changed keeps its rows as
     proposals; a decision whose parent is gone goes with it. Staged on the smallest hardware golden."""
@@ -188,3 +295,37 @@ def test_restamp_drops_what_the_fresh_lowering_no_longer_writes(tmp_path) -> Non
     again, report2 = restamp(fresh)
     assert again == fresh and not report2.changed, "a restamped file is current"
     fresh.dump(tmp_path / "golden.json", repository=True)
+
+
+def test_a_files_identities_are_the_same_on_forked_workers(monkeypatch) -> None:
+    """A loaded file's kernel identities are computed on ``EMMY_WORKERS`` forked processes and kept on the kernels:
+    the same identities one process computes, under the same refs."""
+    path = _RECORDS_DIR / "rtx4080_sm89.json"
+    monkeypatch.setenv("EMMY_WORKERS", "1")
+    serial = GoldenFile.load(path).identities()
+    monkeypatch.setenv("EMMY_WORKERS", "3")
+    document = GoldenFile.load(path)
+    assert len(serial) > 1
+    assert document.identities() == serial
+    assert all(kernel.__dict__["exact_identity"] == serial[kernel.ref] for kernel in document.kernels)
+
+
+def test_a_record_stores_the_same_kernels_on_forked_workers(monkeypatch) -> None:
+    """``add_kernel`` finds a stored kernel through the file's identities, computed once on ``EMMY_WORKERS`` forked
+    processes: a kernel the file stores, added again from its wire alone, is the stored one under its ref; a kernel
+    the file no longer stores takes a new ref; the same at one worker and at several."""
+    from emmy.compiler.pipeline.search.golden.format import Kernel
+
+    def added(workers):
+        monkeypatch.setenv("EMMY_WORKERS", str(workers))
+        document = GoldenFile.load(_RECORDS_DIR / "rtx4080_sm89.json")
+        stored, gone = document.kernels[1:], document.kernels[0]
+        document.kernels[:] = stored
+        again = [document.add_kernel(Kernel(loop_ir=kernel.loop_ir, formed=kernel.formed)) for kernel in (*stored[::-1], gone)]
+        return [kernel.ref for kernel in stored], [kernel.ref for kernel in again], document.identities()
+
+    serial = added(1)
+    stored, again, identities = serial
+    assert again[:-1] == stored[::-1], "every stored kernel is found under its own ref"
+    assert again[-1] not in stored and identities[again[-1]] not in {identities[ref] for ref in stored}
+    assert added(3) == serial

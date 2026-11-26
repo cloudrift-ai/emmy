@@ -10,11 +10,12 @@ from emmy.compiler.dtype import BF16, F16, F32, F64, I32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Write
-from emmy.compiler.ir.stmt import Let
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.stmt import Let, Load, parse_body
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import compile_with_kernels, statements
 
 _RULE = "095_bind_scalar_constants"
 
@@ -24,14 +25,12 @@ def _program(value=0.1, *, dtype=F32, shape=(1,), producer=None, name="constant"
     producer = producer if producer is not None else ConstantOp(name, value=value)
     graph.add_node(producer, [], Tensor(name, shape, dtype), node_id=name)
     kernel = LoopOp(
-        body=(
-            Loop(
-                Axis("i", 4),
-                (
-                    Load("loaded", name, tuple(Literal(0, "int") for _ in shape), dtype=dtype),
-                    Write("out", (Var("i"),), "loaded", value_dtype=dtype),
-                ),
-            ),
+        body=parse_body(
+            f"""
+            for i in 0..4:
+                {dtype.name} loaded = load {name}[{", ".join("0" for _ in shape)}]
+                {dtype.name} out[i] = loaded
+            """
         ),
     )
     graph.add_node(kernel, [name], Tensor("out", (4,), dtype), node_id="out")
@@ -116,32 +115,28 @@ def test_both_signed_zeros_survive_fusion_and_common_subexpressions():
     graph.add_node(ConstantOp("negative", value=-0.0), [], Tensor("negative", (1,), F32), node_id="negative")
     graph.add_node(InputOp(), [], Tensor("x", (4,), F32), node_id="x")
     positive = LoopOp(
-        body=(
-            Loop(
-                Axis("i", 4),
-                (
-                    Load("element", "x", (Var("i"),), dtype=F32),
-                    Load("zero", "positive", (Literal(0, "int"),), dtype=F32),
-                    Assign("quotient", "divide", ("element", "zero"), dtype=F32),
-                    Write("positive_values", (Var("i"),), "quotient", value_dtype=F32),
-                ),
-            ),
+        body=parse_body(
+            """
+            for i in 0..4:
+                f32 element = load x[i]
+                f32 zero = load positive[0]
+                f32 quotient = divide(element, zero)
+                f32 positive_values[i] = quotient
+            """
         )
     )
     graph.add_node(positive, ["x", "positive"], Tensor("positive_values", (4,), F32), node_id="positive_values")
     negative = LoopOp(
-        body=(
-            Loop(
-                Axis("i", 4),
-                (
-                    Load("element", "x", (Var("i"),), dtype=F32),
-                    Load("zero", "negative", (Literal(0, "int"),), dtype=F32),
-                    Load("positive_value", "positive_values", (Var("i"),), dtype=F32),
-                    Assign("quotient", "divide", ("element", "zero"), dtype=F32),
-                    Write("out_positive", (Var("i"),), "positive_value", value_dtype=F32),
-                    Write("out_negative", (Var("i"),), "quotient", value_dtype=F32),
-                ),
-            ),
+        body=parse_body(
+            """
+            for i in 0..4:
+                f32 element = load x[i]
+                f32 zero = load negative[0]
+                f32 positive_value = load positive_values[i]
+                f32 quotient = divide(element, zero)
+                f32 out_positive[i] = positive_value
+                f32 out_negative[i] = quotient
+            """
         )
     )
     graph.add_node(
@@ -168,18 +163,23 @@ def test_scalar_binding_removes_only_its_cuda_argument(monkeypatch):
     graph.add_node(ConstantOp("constant", value=0.1), [], Tensor("constant", (1,), F32), node_id="constant")
     graph.add_node(InputOp(), [], Tensor("x", (4,), F32), node_id="x")
     graph.inputs = ["x"]
-    body = (
-        Load("loaded", "constant", (Literal(0, "int"),), dtype=F32),
-        Load("element", "x", (Var("i"),), dtype=F32),
-        Assign("sum", "add", ("loaded", "element"), dtype=F32),
-        Write("out", (Var("i"),), "sum", value_dtype=F32),
+    kernel = LoopOp(
+        body=parse_body(
+            """
+            for i in 0..4:
+                f32 loaded = load constant[0]
+                f32 element = load x[i]
+                f32 sum = add(loaded, element)
+                f32 out[i] = sum
+            """
+        )
     )
-    kernel = LoopOp(body=(Loop(Axis("i", 4), body),))
     graph.add_node(kernel, ["constant", "x"], Tensor("out", (4,), F32), node_id="out")
     graph.outputs = ["out"]
     with pinned_knobs({"PLACE": "fuse", "WORK": "t32", "REDUCE": "", "LOOPIFY": 0}):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+        lowered, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
     (cuda,) = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda.arg_order == ("x", "out")
-    assert "constant[" not in cuda.kernel_source
-    assert "0.10000000149011612" in cuda.kernel_source
+    assert not [load for load in statements(kernels, Load) if load.input == "constant"]
+    # The constant is an immediate of the code: 0.1 as the nearest f32.
+    assert "0f3DCCCCCD" in cuda.kernel_source

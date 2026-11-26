@@ -1,6 +1,6 @@
 """``measured_groups`` — measured ``perf`` rows packed into comparison sets.
 
-A group here is the set of configs that genuinely competed: one op, one card, one nvcc regime. What makes
+A group here is the set of configs that genuinely competed: one op, one card, one precision regime. What makes
 that non-trivial is that three plausible spellings of "one op" are wrong, and two kinds of row carry a
 number that is not a measurement. Each is pinned below, because every one of them fails silently — a
 misgrouped or mislabelled pool still produces a confident-looking correlation.
@@ -43,7 +43,7 @@ def test_configs_that_competed_land_in_one_group():
 
 def test_cold_and_hot_measurements_form_separate_groups():
     hot = _row("a", us=200.0, knobs=_feats())
-    cold = replace(hot, cold_cache=True, stats=replace(hot.stats, median=400.0))
+    cold = replace(hot, cold_cache=True, us=400.0)
     groups, dropped = measured_groups([hot, cold], _stamped)
     assert not dropped
     assert len(groups) == 2
@@ -51,20 +51,14 @@ def test_cold_and_hot_measurements_form_separate_groups():
     assert len({group.key for group in groups}) == 2
 
 
-def test_cards_never_pool_and_a_non_deployable_regime_never_arrives():
-    """Two axes, two fates. Cards never pool — they are different tuning problems. A row from a
-    non-deployable regime does not reach a pool at all: the shared admission filter
-    (``freeze_reason``) drops it, because a measurement taken where nothing deploys answers a
-    question nothing asks. The ``H_opt`` key stays part of the grouping key anyway — it is the
-    pool's honest label of what it was measured under, a report cell reads it, and it is what would
-    catch a regression that let a second regime back in."""
+def test_cards_never_pool():
+    """Cards are different tuning problems, so the same kernel measured on two cards is two pools."""
     rows = [
-        _row("a", us=200.0, knobs=_feats(), opt=3),
-        _row("b", us=300.0, knobs=_feats(), opt=1),  # same kernel, non-deployable regime
-        _row("d", us=500.0, knobs=_feats(), opt=3, gpu=_GPU2),
+        _row("a", us=200.0, knobs=_feats()),
+        _row("d", us=500.0, knobs=_feats(), gpu=_GPU2),
     ]
     groups, dropped = measured_groups(rows, _stamped)
-    assert dropped == {"non-deployable regime (H_opt=1)": 1}
+    assert not dropped
     assert len(groups) == 2 and all(len(g.feats) == 1 for g in groups)
 
 
@@ -74,7 +68,7 @@ def test_the_same_kernel_from_two_sites_is_one_tuning_problem():
     A kernel minted by a cross-CTA split has its own structure, so tuning it is the same
     question as tuning a standalone kernel of that structure: the two share a pool whatever their exact
     identities. Keyed on the site that offered them the two
-    land in different pools and get searched twice: on the RTX 5090 measurement freeze 73 structures
+    land in different pools and get searched twice: among the RTX 5090's measured rows 73 structures
     were fragmented like that, the losing pool's best coming in a median 1.46x behind the winning
     pool's."""
     rows = [
@@ -91,7 +85,7 @@ def test_one_offer_site_over_different_work_is_not_one_group():
     computed, so one site can be realized as a single kernel or as several — and then both rows are honest
     measurements, of a whole op and of a piece of one, while comparing their latencies is not.
 
-    Left merged this cost a real number: nine pools of the RTX 5090 freeze paired a fused rms_norm->linear
+    Left merged this cost a real number: nine pools of the RTX 5090's rows paired a fused rms_norm->linear
     megakernel with one kernel of the same op's unfused realization, and the report priced a 5.9 µs norm
     kernel against a 131 ms whole-op row as a 22 221x miss."""
     shapes = {
@@ -140,13 +134,12 @@ def test_every_row_is_either_grouped_or_counted():
     rows = [
         _row("a", us=500.0, knobs=_feats()),
         _row("b", us=1e9, knobs=_feats(TILE="f4x4"), status="bench_fail"),
-        _row("c", us=200.0, knobs=_feats(TILE="f8x8"), opt=1),
         _row("d", us=300.0, knobs=_feats(TILE="f8x8"), precision={"FAST_MATH": True}),  # the other precision regime: its own pool
-        _row("e", us=400.0, knobs=_feats(TILE="f2x4"), flags="-lineinfo"),  # not a regime: pools with the plain row
+        _row("e", us=400.0, knobs=_feats(TILE="f2x4")),
     ]
     groups, dropped = measured_groups(rows, _stamped)
     assert sum(len(g.feats) for g in groups) + sum(dropped.values()) == len(rows)
-    assert dropped == {"bench_fail": 1, "non-deployable regime (H_opt=1)": 1}
+    assert dropped == {"bench_fail": 1}
     assert [g.latency_us.tolist() for g in groups] == [[500.0, 400.0], [300.0]]
 
 
@@ -168,19 +161,6 @@ def test_only_a_golden_pool_can_be_asked_which_rows_are_the_answer():
     assert not hasattr(golden, "latency_us")  # and the reverse: a golden pool has no measurement to report
 
 
-def test_a_measured_pool_carries_the_regime_it_was_measured_under():
-    """``h_opt`` rides on the group rather than being recovered from its packed columns: a report keys
-    a cell on it, so it has to survive the trip from the row to the pool. Only the deployable regime
-    reaches a pool, so today every cell reads the same value — the field says which one, instead of
-    leaving a reader to assume."""
-    rows = [
-        _row("a", us=200.0, knobs=_feats(), opt=3),
-        _row("b", us=300.0, knobs=_feats(), opt=1),
-    ]
-    groups, _ = measured_groups(rows, _stamped)
-    assert [g.h_opt for g in groups] == [3.0]
-
-
 def test_measured_pools_do_not_combine_independent_precision_regimes():
     rows = [
         _row("same", us=200.0 + i * 100, precision=pins)
@@ -200,13 +180,12 @@ def test_goldens_go_in_as_row_indices_and_come_back_as_row_indices():
     assert GoldenGroup.from_dicts("g/y", "y", "warp", "g", "y", (4, 2, 4), feats).golden_ids == (2, 4)
 
 
-def test_a_row_the_freeze_would_refuse_is_refused_here_too():
-    """Admission is ``freeze_reason``, not a second list of rules — which matters most for the row it adds.
+def test_a_row_the_admission_rule_refuses_is_refused_here():
+    """Admission is ``admission_reason``, not a second list of rules — which matters most for the row it adds.
 
     An implausibly fast row is far worse than the ``bench_fail`` sentinel this module excludes by hand: the
     sentinel makes ONE row rank last, while a phantom optimum becomes the group's ``min`` and makes every
-    other row in the pool look bad. It is invisible on freeze input — a freeze passed this filter at write
-    time — so only an imported tune DB can produce it, and only a test like this one can show it."""
+    other row in the pool look bad. An imported tune DB can hold one, and only a test like this one can show it."""
     rows = [
         _row("honest", us=500.0, knobs=_feats()),
         _row("phantom", us=0.05, knobs=_feats(TILE="f8x8")),
@@ -214,3 +193,20 @@ def test_a_row_the_freeze_would_refuse_is_refused_here_too():
     groups, dropped = measured_groups(rows, _stamped)
     assert [g.latency_us.tolist() for g in groups] == [[500.0]]
     assert sorted(dropped) == ["implausible value"]
+
+
+def test_the_groups_are_the_same_at_any_worker_count():
+    """The export featurizes the groups one per worker process; the groups, their order and every feature row
+    are those one process builds."""
+    import numpy as np
+
+    rows = [
+        _row(f"n{i}", us=200.0 + 10 * i, knobs=_feats(TILE=f"f2x{2 + i % 3}"), gpu=gpu, precision=pins)
+        for i, (gpu, pins) in enumerate([(_GPU, {}), (_GPU2, {}), (_GPU, {"FAST_EXP": True})] * 2)
+    ]
+    serial, dropped = measured_groups(rows, _stamped)
+    parallel, dropped_parallel = measured_groups(rows, _stamped, jobs=2)
+    assert len(serial) == 3 and dropped == dropped_parallel
+    for one, other in zip(serial, parallel, strict=True):
+        assert (one.key, one.feat_names, one.latency_us.tolist()) == (other.key, other.feat_names, other.latency_us.tolist())
+        assert np.array_equal(one.feats, other.feats, equal_nan=True)
