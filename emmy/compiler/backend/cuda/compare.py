@@ -158,17 +158,33 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
 def _scatter_index_inputs(graphs) -> dict[str, list]:
     """The inputs a scatter reads as its rows (``index_copy`` / ``x[idx] = v``: a 1-D index), each with the extents of
     the destination axes it names. Rows are distinct in a real program, as a KV-cache slot mapping or a page table
-    is; drawn at unit std they repeat, and two writes of different values to one row land in either order."""
+    is; drawn at unit std they repeat, and two writes of different values to one row land in either order. A lowered
+    kernel holds no scatter node: its rows are the inputs a store's index loads (``table[row] = v`` under ``row = load
+    slot[a0]``), which is all a target with no Torch twin to run has."""
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Load, Write  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import ScatterOp  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
 
     extents: dict[str, list] = {}
+
+    def rows(graph, source: str, dest, axis: int) -> None:
+        index = graph.nodes.get(source)
+        if index is not None and dest is not None and isinstance(index.op, InputOp) and len(index.output.shape) == 1:
+            extents.setdefault(index.id, []).append(dest.shape[axis])
+
     for graph in graphs:
         for node in graph.nodes.values():
-            index = graph.nodes.get(node.inputs[1]) if isinstance(node.op, ScatterOp) else None
-            if index is not None and isinstance(index.op, InputOp) and len(index.output.shape) == 1:
+            if isinstance(node.op, ScatterOp):
                 dest = graph.buffer(node.inputs[0])
-                extents.setdefault(index.id, []).append(dest.shape[int(node.op.axis) % len(dest.shape)])
+                rows(graph, node.inputs[1], dest, int(node.op.axis) % len(dest.shape))
+            elif (tile := kernel_tile(node.op)) is not None:
+                body = tile.loop_body
+                loaded = {name: load.input for load in body.iter_of_type(Load) for name in load.names}
+                for write in body.iter_of_type(Write):
+                    for axis, index in enumerate(write.index):
+                        for name in index.free_vars() & loaded.keys():
+                            rows(graph, loaded[name], graph.buffer(write.output), axis)
     return extents
 
 

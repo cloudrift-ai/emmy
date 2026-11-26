@@ -242,6 +242,32 @@ def test_scatter_row_inputs_are_drawn_distinct():
     assert len(set(_distinct_rows(np.random.default_rng(7), 8, 33))) == 8
 
 
+def test_a_kernels_scatter_rows_are_read_off_its_stores():
+    """A stored kernel benched with no Torch twin to run (a paging program's table update) holds no scatter node: its
+    rows are the inputs a store's index loads, and they are drawn distinct like a traced scatter's."""
+    from emmy.compiler.backend.cuda.compare import _scatter_index_inputs
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import parse_body
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.tensor import Tensor
+
+    body = """
+for a0 in 0..65:
+  row = load slot[a0]
+  v = load value[a0]
+  if row < 33:
+    out[row] = v
+"""
+    graph = Graph()
+    for name, shape in (("table", (33,)), ("slot", (65,)), ("value", (65,))):
+        graph.add_node(InputOp(), [], Tensor(name, shape, "i64"), node_id=name)
+    graph.add_node(LoopOp(body=parse_body(body)), ["table", "slot", "value"], Tensor("out", (33,), "i64", alias="table"), node_id="out")
+    graph.inputs, graph.outputs = ["table", "slot", "value"], ["out"]
+    assert _scatter_index_inputs([Pipeline.build(["tile/lift"]).run(graph)]) == {"slot": [33]}
+
+
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0
