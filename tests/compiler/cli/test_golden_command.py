@@ -343,6 +343,7 @@ def test_list_reads_each_measured_row_beside_torch_compile(golden, capsys):
 def test_list_missing_names_each_proposal_and_each_target_with_no_torch_compile_time(golden, capsys):
     from emmy.commands.golden import handle_golden_list
     from emmy.compiler.pipeline.search.golden import Latency
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, precision_default
 
     with GoldenFile.edit(golden) as document:
         proposal, timed = document.rows[0], document.rows[1]
@@ -350,6 +351,10 @@ def test_list_missing_names_each_proposal_and_each_target_with_no_torch_compile_
         document.rows[1] = replace(
             timed, latency={"NVIDIA GeForce RTX 4080": Latency(emmy_us=3.0, tcompile_us=2.0, kernels=(timed.kernel,))}
         )
+        # A record's rows spell every precision gate where the seed row spells the umbrella alone: one regime.
+        spelled = {knob.name: precision_default(knob, umbrella=False) for knob in PRECISION_KNOBS}
+        document.rows.append(replace(timed, name=f"{timed.name}.spelled", pins=spelled, latency=None))
+        document.rows.append(replace(timed, name=f"{timed.name}.fm", pins={"FAST_MATH": True}, latency=None))
     targets = len(GoldenFile.load(golden).target_rows())
 
     handle_golden_list(Namespace(paths=[str(golden)], gpu=None, kernel=None, behind=False, missing=True, json_out="-"))
@@ -357,5 +362,7 @@ def test_list_missing_names_each_proposal_and_each_target_with_no_torch_compile_
 
     assert [(entry["row"], entry["missing"]) for entry in entries if entry["missing"] == "emmy"] == [(proposal.name, "emmy")]
     tcompile = {entry["row"] for entry in entries if entry["missing"] == "tcompile"}
-    assert len(tcompile) == targets - 2, "the proposal's target is measured by its record, the timed target needs nothing"
+    assert len(tcompile) == targets - 3, "the proposal's target is measured by its record, the timed target needs nothing"
     assert proposal.name not in tcompile and timed.name not in tcompile
+    assert f"{timed.name}.spelled" not in tcompile, "the timed seed's regime, spelled gate by gate, is timed"
+    assert f"{timed.name}.fm" in tcompile, "the fast-math lane of the same target is another regime"
