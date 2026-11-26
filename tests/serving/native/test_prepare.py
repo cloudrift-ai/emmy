@@ -392,6 +392,26 @@ def test_the_expert_budget_pages_a_layer_only_below_its_expert_count(monkeypatch
         config.gen_expert_slots(8, 2)
 
 
+def test_a_drafted_export_slots_every_pick_of_its_verify_step(tmp_path, monkeypatch):
+    """The slots hold every page one decode launch lists, so no verify step reads an expert in place over the link: one
+    row's two picks without a drafter, the three verify rows' six with one, from the same budget of seven. The
+    drafter's own experts stay on the device."""
+    import torch
+
+    from emmy.serving.native.prepare import load_drafter, trace_programs
+
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "7")
+    model = qwen3_5_moe_model().to(torch.bfloat16)
+    model.save_pretrained(tmp_path / "mtp")
+    add_mtp_head(tmp_path / "mtp")
+    drafter, _ = load_drafter(str(tmp_path / "mtp"), None, model, 2)
+    for draft, slots in ((None, 2), (drafter, 6)):
+        traced = trace_programs(model, prefill_size=3, decode_width=4, drafter=draft)
+        paged = {name: graph.hints.get("cuda.paged_buffers", ()) for name, graph in traced.items() if name.startswith("experts")}
+        assert paged.pop("experts3-native1", ()) == ()
+        assert paged and all(hint == (("w_gate_up", 0, 1, slots), ("w_down", 0, 1, slots)) for hint in paged.values()), paged
+
+
 def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     """The programs an export compiles, traced and not compiled, one per kind, width and shape, in the model dtype:
     the twins ``SERVE_NATIVE`` adds to a serving config, each reached in the config's lane at its own width."""

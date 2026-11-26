@@ -354,9 +354,9 @@ def paged_split(budget: int | None, pages: int, listed: int) -> tuple[int, int] 
 
 
 def gen_expert_slots(experts: int, picks: int) -> tuple[int, int] | None:
-    """The ``(slots, resident)`` split (:func:`paged_split`) a MoE layer of ``experts`` routed experts, ``picks`` of
-    them routed per token, takes under :func:`gen_experts_gpu`, or ``None`` when the device holds every one. A decode
-    launch reads one token's picks."""
+    """The ``(slots, resident)`` split (:func:`paged_split`) a MoE layer of ``experts`` routed experts takes under
+    :func:`gen_experts_gpu`, or ``None`` when the device holds every one. ``picks`` is the most one decode launch lists:
+    one token's, or a verify step's rows' together."""
     return paged_split(gen_experts_gpu(), experts, picks)
 
 

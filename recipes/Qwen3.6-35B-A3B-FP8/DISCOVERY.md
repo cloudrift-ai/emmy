@@ -1,5 +1,48 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## The expert slots hold a verify step's picks (2026-11-25)
+
+Milestone 12 of the native parity plan. One RTX 5090 rented for about an hour, on a host whose pinned-memory-to-card
+link copies 48.3 GB/s. Main at b968a0ce9 and the branch of #1478 were both exported strictly on the card, drafter on,
+with the recipe's flags and fast math off. Neither export needed a new row: the slot count sizes only the plan's
+paging, so no kernel and no twin changed.
+
+With a drafter, a decode launch lists 3 rows x 8 picks. Main's pager kept 8 of the 128 device pages a layer as slots,
+so a verify step's picks past the 8th were read in place over the link. The branch keeps 24 slots and 104 resident:
+the same device memory, and every page list a verify launch names fits.
+
+Each pack served random 256-token prompts with 256 new tokens, one at a time, greedy, through vLLM 0.25.1's client:
+10 prompts for the cells, then 3 under nsys per step kind. The step splits are nsys medians, in ms; tracing makes
+the steps slower than they run in the cells.
+
+| | main, verify | branch, verify | main, one row | branch, one row |
+| --- | --- | --- | --- | --- |
+| Gated DeltaNet programs | 5.28 | 5.28 | 2.83 | 2.79 |
+| attention and rotary | 0.20 | 0.20 | 0.14 | 0.13 |
+| routers | 1.82 | 1.82 | 0.48 | 0.47 |
+| expert programs | 19.20 | 3.00 | 1.15 | 1.14 |
+| paging programs | 1.41 | 1.51 | 1.40 | 1.50 |
+| page copies | 11.50 | 7.04 | 6.66 | 3.20 |
+| the rest | 3.57 | 3.57 | 1.72 | 1.71 |
+| the step, start to end | 42.63 | 22.67 | 14.61 | 11.15 |
+
+The one-row columns are the same packs booted with the drafter off. The trace cannot tell an in-place read from
+compute inside an expert program. On the branch, the verify step's expert programs take 3.00 ms, 2.6 times the
+one-row step's 1.14 ms for three rows' picks, so no in-place read is left; on main they took 19.2 ms. The gate,
+paging programs and in-place expert reads together at most 2 ms of the verify step, is met: 1.51 ms. The one-row
+step gains as well, since 24 slots evict less often across steps: its page copies halve.
+
+| 256-token prompt, 10 requests | main | branch |
+| --- | --- | --- |
+| time per output token | 16.17 ms | 8.99 ms |
+| first token | 5.34 s | 2.94 s |
+| one row a step (drafter off), time per output token | 14.80 ms | 12.16 ms |
+
+The tokens of all 10 prompts are the same on both trees. The first token moves too because the prefill programs
+take the same slot count. The bar's time per output token is 13.2 ms; milestone 16 decides that cell. Not run: `emmy
+eval golden`, which needs the 5090. This change leaves the golden and the twins unchanged, and the strict export
+passed on the card.
+
 ## Every serving twin recorded, and the pack exports strictly (2026-11-25)
 
 One rented RTX 5090 (2 h 39 min), on main at f0be9d75b, with fast math off as the recipe serves. Before the run, on
