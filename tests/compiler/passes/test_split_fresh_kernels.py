@@ -470,7 +470,11 @@ def test_a_split_piece_computes_a_per_chunk_statistic_once_a_block(monkeypatch) 
         "(x * (x.square().mean(-1, keepdim=True) + 1e-6).rsqrt()).reshape(4, 2048) @ w"
     )
     partial, _merge = _tile_pieces(graph_from_code(code)[0])
-    assert "load x[a1, a0 / 2, a4]" in partial.scheduled().pretty_body()
+    tile = partial.scheduled()
+    assert "load x[a1, a0 / 2, a4]" in tile.pretty_body()
+    # The statistic says so too: a tier puts ahead of its staging loop only what does not name the block's axis.
+    statistic = tile.op.operands[0].operands[0]
+    assert sorted(map(str, statistic.free_axes)) == ["a0", "a1"]
 
 
 @pytest.mark.parametrize("stat_axis", ["k", "r"])
