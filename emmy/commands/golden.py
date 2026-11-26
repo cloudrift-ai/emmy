@@ -212,8 +212,15 @@ def missing(path: Path, document) -> list[dict]:
     measurement — ``piece`` when its kernel is a cut piece, which replays under its route), then each target and input
     regime with no ``torch.compile`` time on any of its rows (``tcompile``: named by its shortest row name, the
     realization ``run --golden PATH`` benches it as). A target with a proposal is measured by the proposal's record,
-    which times ``torch.compile`` too, so it is not listed twice."""
+    which times ``torch.compile`` too, so it is not listed twice. A regime is the one the pins spell
+    (:func:`~emmy.compiler.pipeline.search.space.regime_pins`): a record's rows spell every precision gate, its seed row
+    the ``FAST_MATH`` umbrella alone, and both are one regime."""
+    from emmy.compiler.pipeline.search.space import regime_pins  # noqa: PLC0415
+
     targets = {kernel.ref for kernel in document.targets()}
+    groups: dict[tuple, list] = {}
+    for (root, pins, sizes), rows in document.target_rows().items():
+        groups.setdefault((root, tuple(sorted(regime_pins(dict(pins)).items())), sizes), []).extend(rows)
 
     def entry(row, what: str) -> dict:
         return {
@@ -228,7 +235,7 @@ def missing(path: Path, document) -> list[dict]:
         }
 
     out, timed = [], []
-    for rows in document.target_rows().values():
+    for rows in groups.values():
         proposals = [row for row in rows if row.measurements is None and not row.latency]
         out.extend(entry(row, "emmy") for row in proposals)
         if not proposals and not any(latency.tcompile_us for row in rows for latency in (row.latency or {}).values()):
