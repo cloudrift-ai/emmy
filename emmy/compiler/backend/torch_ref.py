@@ -10,6 +10,10 @@ gather over coordinate grids, so HF norms/RoPE (which trace to primitive
 sequences, not fused aten ops) are torch-comparable. ``GatherOp`` supports both
 element selection and table lookup, including packed NVFP4 decode tables;
 ``ScatterOp`` is its mirror, written into a copy of the destination.
+
+The module holds no generator expression: ``torch.compile`` traces this code, and on torch 2.14, the last wheel with
+sm_70 kernels, Dynamo refused one in a CUDA twin ("Attempt to trace generator"), so a V100 record had no
+``torch.compile`` time. A list comprehension traces.
 """
 
 from __future__ import annotations
@@ -225,7 +229,7 @@ def _shape_ints(shape, sym_env: dict[str, int]) -> tuple[int, ...]:
     """Resolve a (possibly symbolic) ``Dim`` shape to concrete ints. Symbolic
     dims eval over ``sym_env`` — the name → runtime-extent map read off the
     supplied input tensors in :func:`build_callable`."""
-    return tuple(d.as_static() if d.is_static else int(d.expression.eval(sym_env)) for d in shape)
+    return tuple([d.as_static() if d.is_static else int(d.expression.eval(sym_env)) for d in shape])
 
 
 def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
@@ -243,7 +247,7 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
         data, indices = ins[0], ins[1].long()
         axis = op.axis % data.ndim
         indices = torch.where(indices < 0, indices + data.shape[axis], indices)
-        if data.ndim == indices.ndim and all(indices.shape[k] == data.shape[k] for k in range(data.ndim) if k != axis):
+        if data.ndim == indices.ndim and all([indices.shape[k] == data.shape[k] for k in range(data.ndim) if k != axis]):
             return torch.gather(data, axis, indices)
         shape = (*data.shape[:axis], *indices.shape, *data.shape[axis + 1 :])
         return torch.index_select(data, axis, indices.reshape(-1)).reshape(shape)
@@ -368,7 +372,7 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
         return t[tuple(idx)]
     if name == "CatOp":
         tensors = [i for i in ins if isinstance(i, torch.Tensor)]
-        dim = next((int(i) for i in ins if not isinstance(i, torch.Tensor)), -1)
+        dim = next(iter([int(i) for i in ins if not isinstance(i, torch.Tensor)]), -1)
         return torch.cat(tensors, dim=dim)
     if name == "IndexMapOp":
         return _index_map(op, ins, sym_env, device)
@@ -454,10 +458,10 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
                 mapped.append(axis)
             else:
                 view = tensor[tuple(index)].permute(tuple(sorted(range(len(mapped)), key=mapped.__getitem__)))
-                return view[tuple(slice(None) if axis in mapped else None for axis in range(len(out_shape)))].expand(out_shape)
+                return view[tuple([slice(None) if axis in mapped else None for axis in range(len(out_shape))])].expand(out_shape)
     # device / dtype from the first tensor-valued source (a source can be a
     # scalar constant — stored as a python float).
-    base = next((ins[s.input_idx] for s in op.sources if torch.is_tensor(ins[s.input_idx])), None)
+    base = next(iter([ins[s.input_idx] for s in op.sources if torch.is_tensor(ins[s.input_idx])]), None)
     # No tensor-valued source (every source is a scalar constant) → fall back to the device the
     # RUN is on, threaded down from ``build_callable``. Guessing from CUDA availability can put an
     # all-constant map on the GPU while the graph's own inputs sit on the CPU.
@@ -553,7 +557,7 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor], *, comp
     # everything downstream of a mixed-dtype op at fp32.
     # One device for the whole reference run. Every step that invents a tensor (a range or an
     # all-constant index map) uses the device of the graph's inputs, or CPU when there are none.
-    run_device = next((tensor.device for tensor in input_tensors.values() if torch.is_tensor(tensor)), torch.device("cpu"))
+    run_device = next(iter([tensor.device for tensor in input_tensors.values() if torch.is_tensor(tensor)]), torch.device("cpu"))
     compute_steps: list[tuple[str, Callable, list[str], torch.dtype | None]] = []
     for nid in order:
         node = graph.nodes[nid]
@@ -596,6 +600,6 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor], *, comp
             env[nid] = v if out_dtype is None else v.to(out_dtype)
         if len(out_ids) == 1:
             return env[out_ids[0]]
-        return tuple(env[out_id] for out_id in out_ids)
+        return tuple([env[out_id] for out_id in out_ids])
 
     return fn, tensors
