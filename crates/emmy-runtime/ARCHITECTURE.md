@@ -262,6 +262,10 @@ as JSON numeric arrays. Responses carry `version` and either `result` or `error`
 reserved for frames. Any failed native request exits the process; no failed job is replayed automatically. One caller
 submits one job at a time.
 
+The worker binary keeps framing, responses, and process retirement in its main loop. Its worker state owns the
+device, executor, and generator, and dispatches each command to a separate method. Release drops the loaded program
+but keeps the device; normal shutdown drops programs before the device.
+
 `compiler/backend/native.py::NativeWorker` reuses the existing asynchronous benchmark supervisor's process ownership,
 device environment, bounded stderr drain, deadlines, kill/reap, and clean respawn. It changes the executable and codec
 and disables retries. Cancellation and malformed responses also retire the child. The Python worker retains its
