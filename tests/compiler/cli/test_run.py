@@ -907,6 +907,9 @@ def test_strict_correctness_proof_accepts_a_mask_that_matches_its_reference():
     assert strict_correctness_proof({"o": np.array([0.0005, -np.inf], dtype=np.float32)}, mask)["status"] == "pass"
     for wrong in ([0.0, np.inf], [-np.inf, 0.0], [0.0, np.nan]):
         assert strict_correctness_proof({"o": np.array(wrong, dtype=np.float32)}, mask)["status"] == "fail"
+    # The verdict says which side holds them: a NaN the reference alone computes is the reference's fault to find.
+    theirs = strict_correctness_proof({"o": np.array([0.0, 1.0], dtype=np.float32)}, {"o": np.array([0.0, np.nan], dtype=np.float32)})
+    assert theirs["status"] == "fail" and "Emmy's 0, the eager one 1" in theirs["error"]
 
 
 def test_strict_correctness_proof_weighs_a_rounding_flip_against_fp64():

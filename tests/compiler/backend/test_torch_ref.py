@@ -367,6 +367,32 @@ def test_dynamic_w8a8_torch_compile_is_fullgraph():
     torch.testing.assert_close(actual, eager, rtol=1e-3, atol=1e-3)
 
 
+def test_a_copy_typed_at_an_fp8_format_encodes_its_value():
+    """A trace spells ``x.to(torch.float8_e4m3fn)`` as a copy whose output is typed FP8, as native serving's key-value
+    cache store is: the row it writes holds the FP8 codes of the values. A cast to the uint8 carrier would truncate
+    each number to an integer, and a negative one to a code that decodes to NaN."""
+    from emmy.compiler.dtype import F8E4M3, F32
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, 4), F32), node_id="x")
+    g.add_node(InputOp(), [], Tensor("cache", (3, 4), F8E4M3), node_id="cache")
+    g.add_node(InputOp(), [], Tensor("row", (1,), "i64"), node_id="row")
+    copy = IndexMapOp(out_shape=(1, 4), sources=(IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1))),))
+    g.add_node(copy, ["x"], Tensor("bits", (1, 4), F8E4M3), node_id="bits")
+    g.add_node(ScatterOp(axis=0), ["cache", "row", "bits"], Tensor("cache_next", (3, 4), F8E4M3), node_id="cache_next")
+    g.inputs, g.outputs = ["x", "cache", "row"], ["cache_next"]
+
+    x = torch.tensor([[-1.5, 0.375, 2.0, -448.0]])
+    cache = torch.full((3, 4), 1.0).to(torch.float8_e4m3fn).view(torch.uint8)
+    fn, inputs = torch_ref.build_callable(g, {"x": x, "cache": cache, "row": torch.tensor([1])})
+    out = fn(*inputs)
+
+    assert out.dtype == torch.uint8
+    torch.testing.assert_close(out.view(torch.float8_e4m3fn).float(), torch.tensor([[1.0] * 4, x[0].tolist(), [1.0] * 4]), rtol=0, atol=0)
+    exact, _ = torch_ref.build_callable(g, {"x": x, "cache": cache, "row": torch.tensor([1])}, compute_dtype=torch.float64)
+    torch.testing.assert_close(exact(*inputs), out, rtol=0, atol=0)
+
+
 def test_matmul_softmax():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (4, 8)), node_id="a")
