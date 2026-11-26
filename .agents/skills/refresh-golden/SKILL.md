@@ -197,6 +197,11 @@ When the restamp leaves nothing, or drops the kernels a deploy needs (a serving 
   was compiling); bench that root first. A re-keyed reduce comes out of the prior on a thread tile, often a hundred
   times slow: tune it alone (`--kernel NAME --tune N` without `--realization`, which pins the schedule) and record
   the target again. Keep a record only where the root is no slower than the unchanged compiler on the same card.
+- **A program nothing writes any more** (the code that traced it now spells it another way, so its kernel is one no
+  deploy compiles) — `GoldenFile.drop_program(index)` inside `GoldenFile.edit(path)` removes the traced program, its
+  targets, the pieces only it reaches, their decisions and their rows. Trace the program as it is written today and
+  add it as an unmeasured seed, the way a promotion adds one, then record it on the card. Give the candidate file its
+  golden's tables again (`emmy candidates build GOLDEN`).
 - **No longer relevant** (an experiment's card, a retired quantization) — `git rm` the file and its nodes' entries in
   `tests/durations.json`, and say in the PR what evidence went with it. That call is the author's; propose it, do not
   make it.
