@@ -279,8 +279,13 @@ def test_a_wide_chunk_runs_its_experts_in_blocks_of_one_expert():
     np.testing.assert_allclose(result.outputs[graph.outputs[0]], outputs.numpy(), rtol=1e-4, atol=1e-5)
     # The combine reads each pick's partial from its place, as the fixed-slot combine reads it from the pick.
     residual, scores = torch.randn(rows, 64), torch.rand(rows, k)
-    combined = _eager_and_traced(combine_module(grouped=True), (residual, scores, outputs, place))[0]
-    np.testing.assert_allclose(combined, combine_module()(residual, scores, expected).numpy(), rtol=1e-5, atol=1e-5)
+    combine, examples = combine_module(grouped=True), (residual, scores, outputs, place)
+    graph = trace_module_with_constants(combine, examples)[0]
+    feed = dict(zip(graph.inputs, (t.numpy() for t in examples), strict=True))
+    combined = NumpyBackend().run(graph, input_data=feed)[0].outputs[graph.outputs[0]]
+    with torch.no_grad():
+        np.testing.assert_allclose(combined, combine(*examples).numpy(), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(combined, combine_module()(residual, scores, expected).numpy(), rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("model", [qwen3_5_model, qwen3_5_moe_model])
