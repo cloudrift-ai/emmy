@@ -98,9 +98,11 @@ def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
         )
     transposed_ok = _transposed_reduction_ok(tile) and is_root
     lanes = (32, 8) if target.compute_capability == (7, 0) else (32,)
-    # A transposed band folds the columns a lane owns in one loop, so a fold that walks a range takes one column:
-    # its range may differ from one column to the next.
-    columns_ok = node.range is None
+    # A transposed band folds the columns a lane owns in one loop, so a fold whose range reads an output axis takes
+    # one column: its range may differ from one column to the next. A range over the serial axes alone (a rolled
+    # recurrence's step) is one range for every cell.
+    walked = {name for bound in node.range or () for name in bound.free_vars()}
+    columns_ok = walked.isdisjoint(axis.name for axis in tile.place.free)
     return (
         Reduce(),
         *(

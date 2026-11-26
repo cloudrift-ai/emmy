@@ -971,10 +971,10 @@ def _tile_reduce_axis_transposed(
     uniform = uniform_parts(predicate) if predicate is not None else ()
     axis = rloop.axis
     stride = k_ways * reg
-    # One loop folds every column a lane owns, and a range may differ between them: the schedule offers a fold
-    # that walks one a single column (``refusals._reductions``).
-    if rloop.range is not None and columns > 1:
-        raise UnbindableProjection(f"a coop-t band folds its {columns} columns in one loop, and {axis.name!r} walks a range")
+    # One loop folds every column a lane owns, and a range that reads an output axis may differ between them: the
+    # schedule offers a fold that walks one a single column (``refusals._reduction_domain``).
+    if columns > 1 and any(a.name in bound.free_vars() for a in ctx.free for bound in rloop.range or ()):
+        raise UnbindableProjection(f"a coop-t band folds its {columns} columns in one loop, and {axis.name!r} walks a range over its cell")
 
     n_lane = Axis(name=f"{out_ax.name}_ln", extent=lanes_n)
     k_co = Axis(name=f"{axis.name}_co", extent=k_ways) if k_ways > 1 else None
