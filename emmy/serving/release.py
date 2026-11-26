@@ -23,6 +23,17 @@ EXPERT_PREFILL_M = 256
 EXPERT_GROUP = 32
 
 
+def native_prefill_widths(widest: int, plugin: int) -> tuple[int, ...]:
+    """Native generation's own chunk widths above the plugin's chunk ``plugin``, widest first: ``widest`` and each
+    quarter of it that stays wider than the plugin's. A model with carried state runs a prompt's tail in chunks the
+    prompt fills, so each narrower width takes at most three chunks of what the wider ones leave. Without a plugin
+    chunk, ``widest`` alone."""
+    widths = [widest]
+    while plugin and widths[-1] // 4 > plugin:
+        widths.append(widths[-1] // 4)
+    return tuple(widths)
+
+
 def slot_widths(bucket: int) -> tuple[int, ...]:
     """The fixed-slot program's widths past one row, on experts sliced across ranks: the decode bucket and its halvings
     down to two rows. A decode step runs the narrowest that holds its rows, so it reads no more experts than it must."""
@@ -285,10 +296,10 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
         if min(decode, prefill) < 0 or maximum <= 0:
             raise ValueError(f"{source}: warm shape {spec!r} requires non-negative buckets and positive max tokens")
         lanes.append((decode, prefill, maximum, lane_pins[lane == "fm"]))
-    # Native generation's wider chunk: the trunk's static twins at it, in the server's lane, and no any-width row.
+    # Native generation's wider chunks: the trunk's static twins at each, in the server's lane, and no any-width row.
     native_prefill = _integer(values, "SERVE_NATIVE_PREFILL", default=0, minimum=0)
     if native_prefill:
-        lanes.append((0, native_prefill, 0, lane_pins[False]))
+        lanes.extend((0, width, 0, lane_pins[False]) for width in native_prefill_widths(native_prefill, pinned_prefill))
 
     standard_m1 = (1, 0, 1, lane_pins[False])
     if static_only and any(lane != standard_m1 for lane in lanes):
