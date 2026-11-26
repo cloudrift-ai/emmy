@@ -159,14 +159,14 @@ const PARAMS: super::common::Params = &[
 #[test]
 fn a_volta_kernel_converts_without_cvt_and_assembles() {
     let body = format!("{GRID}\n{}", super::common::indented(SELECTION));
-    let volta = listing(&lowered(&body, PARAMS, Target { sm: 70 }, EXACT).unwrap());
+    let volta = listing(&lowered(&body, PARAMS, Target::Sm(70), EXACT).unwrap());
     assert!(
         volta.iter().all(|line| !line.contains("bf16")),
         "{volta:#?}"
     );
     assert!(volta.iter().any(|line| line.starts_with("setp.gt.u32")));
     for sm in [80, 120] {
-        let ampere = listing(&lowered(&body, PARAMS, Target { sm }, EXACT).unwrap());
+        let ampere = listing(&lowered(&body, PARAMS, Target::Sm(sm), EXACT).unwrap());
         assert!(ampere.iter().any(|line| line.starts_with("cvt.f32.bf16")));
         assert!(
             ampere
@@ -196,7 +196,7 @@ fn a_volta_integer_conversion_goes_through_f32() {
         ("a", Input, Some(DType::I32)),
         ("o", Output, Some(DType::I32)),
     ];
-    let volta = listing(&lowered(&body, params, Target { sm: 70 }, EXACT).unwrap());
+    let volta = listing(&lowered(&body, params, Target::Sm(70), EXACT).unwrap());
     assert!(
         volta.iter().all(|line| !line.contains("bf16")),
         "{volta:#?}"
@@ -205,7 +205,7 @@ fn a_volta_integer_conversion_goes_through_f32() {
         volta.iter().any(|line| line.starts_with("cvt.rn.f32.s32")),
         "{volta:#?}"
     );
-    let ampere = listing(&lowered(&body, params, Target { sm: 80 }, EXACT).unwrap());
+    let ampere = listing(&lowered(&body, params, Target::Sm(80), EXACT).unwrap());
     assert!(
         ampere
             .iter()
@@ -218,7 +218,7 @@ fn a_volta_integer_conversion_goes_through_f32() {
             .all(|line| !line.contains("bf16.s32") && !line.contains("s32.bf16")),
         "{ampere:#?}"
     );
-    let hopper = listing(&lowered(&body, params, Target { sm: 90 }, EXACT).unwrap());
+    let hopper = listing(&lowered(&body, params, Target::Sm(90), EXACT).unwrap());
     assert!(
         hopper
             .iter()

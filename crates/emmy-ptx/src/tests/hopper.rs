@@ -24,7 +24,7 @@ fn group(statements: &str, sm: u32) -> emmy_ir::Result<Module> {
     let grid = "Grid(axes=(r in 0..4, t in 0..128), decode=(block_idx.x, thread_idx.x), block_threads=128):";
     let interface = super::common::interface(PARAMS);
     let body = format!("{grid}\n{}", super::common::indented(statements));
-    lowered_in(&body, &interface, Target { sm }, EXACT)
+    lowered_in(&body, &interface, Target::Sm(sm), EXACT)
 }
 
 fn refusal(statements: &str, sm: u32) -> String {

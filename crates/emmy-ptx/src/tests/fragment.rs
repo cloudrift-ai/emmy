@@ -33,7 +33,7 @@ fn kernel(statements: &str, params: Params, sm: u32) -> emmy_ir::Result<Module> 
         ..super::common::interface(params)
     };
     let body = format!("{GRID}\n{}", super::common::indented(statements));
-    lowered_in(&body, &interface, Target { sm }, EXACT)
+    lowered_in(&body, &interface, Target::Sm(sm), EXACT)
 }
 
 /// How many instructions of `module` start with `prefix`, past the guard they run under.
@@ -284,7 +284,7 @@ fn a_transposed_store_steps_by_both_strides_of_its_output() {
         "
     );
     let body = format!("{GRID}\n{}", super::common::indented(&statements));
-    let module = lowered_in(&body, &interface, Target { sm: 80 }, EXACT).unwrap();
+    let module = lowered_in(&body, &interface, Target::Sm(80), EXACT).unwrap();
     let listed = listing(&module);
     assert_eq!(count(&module, "st.global.f32"), 4, "{listed:#?}");
     assert_eq!(count(&module, "st.global.v2"), 0, "{listed:#?}");
@@ -498,7 +498,7 @@ fn byte_floats_convert_store_and_decode() {
         ..interface.params[1].clone()
     };
     let body = format!("{GRID}\n{}", super::common::indented(statements));
-    let module = lowered_in(&body, &interface, Target { sm: 120 }, EXACT).unwrap();
+    let module = lowered_in(&body, &interface, Target::Sm(120), EXACT).unwrap();
     assert_eq!(count(&module, "cvt.rn.satfinite.e4m3x2.f32"), 1);
     assert_eq!(count(&module, "cvt.rn.f16x2.e4m3x2"), 1);
     assert_eq!(count(&module, "st.global.u8"), 2);
@@ -506,7 +506,7 @@ fn byte_floats_convert_store_and_decode() {
     // The table is never read: the one global load is `x`'s.
     assert_eq!(count(&module, "ld.global"), 1);
     // Before the card has the conversion, the encode is computed from the bits of the f32.
-    let older = lowered_in(&body, &interface, Target { sm: 80 }, EXACT).unwrap();
+    let older = lowered_in(&body, &interface, Target::Sm(80), EXACT).unwrap();
     assert_eq!(count(&older, "cvt.rn.satfinite.e4m3x2.f32"), 0);
     assert_eq!(count(&older, "st.global.u8"), 2);
 }
@@ -530,7 +530,7 @@ fn a_pair_of_codes_decodes_to_halves_by_its_byte() {
     let mut interface = super::common::interface(params);
     interface.params[1].pair_table = true;
     let body = format!("{GRID}\n{}", super::common::indented(statements));
-    let module = lowered_in(&body, &interface, Target { sm: 70 }, EXACT).unwrap();
+    let module = lowered_in(&body, &interface, Target::Sm(70), EXACT).unwrap();
     let lines = listing(&module);
     assert_eq!(count(&module, "ld.global"), 1, "{lines:#?}");
     assert_eq!(count(&module, "setp"), 0, "{lines:#?}");

@@ -1097,9 +1097,9 @@ fn the_cooperative_forms_follow_the_target() {
         f32 o[t] += acc
         ";
     for sm in [80, 90] {
-        row_kernel(statements, A_O, 64, &[], Target { sm }).unwrap();
+        row_kernel(statements, A_O, 64, &[], Target::Sm(sm)).unwrap();
     }
-    let message = row_kernel(statements, A_O, 64, &[], Target { sm: 75 })
+    let message = row_kernel(statements, A_O, 64, &[], Target::Sm(75))
         .unwrap_err()
         .to_string();
     assert!(

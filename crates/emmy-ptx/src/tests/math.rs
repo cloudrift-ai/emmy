@@ -288,9 +288,9 @@ fn an_approximate_operation_is_the_hardware_instruction_of_its_row() {
             "ex2.approx.f32 %f4, %f3"
         ]
     );
-    let turing = lowered(&kernel("tanh_fast", 1), A_O, Target { sm: 75 }, EXACT);
+    let turing = lowered(&kernel("tanh_fast", 1), A_O, Target::Sm(75), EXACT);
     assert!(turing.is_ok());
-    let volta = lowered(&kernel("tanh_fast", 1), A_O, Target { sm: 70 }, EXACT);
+    let volta = lowered(&kernel("tanh_fast", 1), A_O, Target::Sm(70), EXACT);
     let message = volta.unwrap_err().to_string();
     assert!(
         message.contains("no PTX rule for tanh_fast on sm_70"),

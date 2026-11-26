@@ -316,14 +316,14 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         lowerer.declare_pool(kernel.body)?;
     }
     // A kernel waits for the grid launched ahead of it before it reaches any memory that grid may write.
-    if target.sm >= SM_HOPPER {
+    if target.sm() >= SM_HOPPER {
         let wait = Inst::new(Opcode::GridWait, Ty::Pred, Vec::new(), Vec::new());
         lowerer.b.emit(wait);
     }
     let params = lowerer.parameters(kernel)?;
     lowerer.body(kernel.body, &SimplifyCtx::empty())?;
     let mut code = lowerer.b.finish()?;
-    code.items = bf16::legalize(code.items, &mut code.registers, target.sm);
+    code.items = bf16::legalize(code.items, &mut code.registers, target.sm());
     Ok(Module {
         version: lowerer.version,
         target: target.text(lowerer.arch_specific),
@@ -350,7 +350,7 @@ impl Lowerer {
     /// An error where the target lacks the instruction `needs` describes; the module's version is raised to the
     /// one that names it, and its target is the arch-specific one where the instruction is of that set alone.
     fn requires(&mut self, needs: &Needs) -> Result<()> {
-        let (what, sm) = (needs.what, self.target.sm);
+        let (what, sm) = (needs.what, self.target.sm());
         if !needs.sm.contains(&sm) {
             let suffix = if needs.arch_specific { "a" } else { "" };
             let (first, last) = (needs.sm.start(), needs.sm.end());
@@ -359,7 +359,8 @@ impl Lowerer {
                 last if last / 10 == first / 10 => format!("sm_{first}{suffix}"),
                 last => format!("sm_{first}{suffix} to sm_{last}{suffix}"),
             };
-            return Err(self.no_rule(format_args!("{what} on sm_{sm}, which needs {has}")));
+            let target = self.target;
+            return Err(self.no_rule(format_args!("{what} on {target}, which needs {has}")));
         }
         self.arch_specific |= needs.arch_specific;
         self.version = self.version.max(needs.version);

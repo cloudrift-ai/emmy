@@ -1,11 +1,13 @@
-//! The compiler from Kernel IR to NVIDIA PTX. A translation: it reads a kernel body that is already typed and flat,
-//! writes one instruction list through a builder, checks it, and prints it. It makes no decision of its own; the
-//! kernel's two precision decisions reach it as input. ptxas assembles the text it returns.
+//! The compiler from Kernel IR to NVIDIA PTX, and to LLVM IR for an AMD card. A translation: it reads a kernel body
+//! that is already typed and flat, writes one instruction list through a builder, checks it, and prints it with the
+//! target's printer. It makes no decision of its own; the kernel's two precision decisions reach it as input. ptxas
+//! assembles the PTX it returns, AMD's `llc` the LLVM IR.
 
 mod builder;
 mod inst;
 mod lower;
 mod print;
+mod print_amdgcn;
 #[cfg(test)]
 mod tests;
 mod verify;
@@ -82,28 +84,49 @@ pub struct Kernel<'a> {
     pub interface: &'a Interface,
 }
 
-/// The card the kernel is assembled for, by compute capability: `120` is `sm_120`.
+/// The card the kernel is written for: an NVIDIA one by compute capability (`Sm(120)` is `sm_120`), written as PTX,
+/// or an AMD one by processor (`Gfx(942)` is `gfx942`, the MI300X), written as LLVM IR.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Target {
-    pub sm: u32,
+pub enum Target {
+    Sm(u32),
+    Gfx(u32),
 }
 
 /// The first compute capability whose target needs the later PTX version.
 const SM_BLACKWELL: u32 = 100;
 
 impl Target {
-    /// The target as ptxas spells it, with the suffix of the arch-specific instruction set when the kernel needs it.
+    /// The compute capability the rules ask their instructions of. An AMD card has none, so it is below every
+    /// one: a rule that needs an NVIDIA instruction refuses it by name.
+    pub fn sm(self) -> u32 {
+        match self {
+            Target::Sm(sm) => sm,
+            Target::Gfx(_) => 0,
+        }
+    }
+
+    /// The target as its assembler spells it, with the suffix of the arch-specific instruction set when an NVIDIA
+    /// kernel needs it.
     pub fn text(self, arch_specific: bool) -> String {
-        format!("sm_{}{}", self.sm, if arch_specific { "a" } else { "" })
+        format!("{self}{}", if arch_specific { "a" } else { "" })
     }
 
     /// The lowest PTX version that names the target and every instruction the compiler writes: an older toolkit's
     /// ptxas refuses a version past its own.
     pub fn version(self) -> (u32, u32) {
-        if self.sm >= SM_BLACKWELL {
+        if self.sm() >= SM_BLACKWELL {
             (8, 7)
         } else {
             (7, 8)
+        }
+    }
+}
+
+impl std::fmt::Display for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Target::Sm(sm) => write!(f, "sm_{sm}"),
+            Target::Gfx(gfx) => write!(f, "gfx{gfx}"),
         }
     }
 }
@@ -125,22 +148,26 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
     Ok(module)
 }
 
-/// A kernel's PTX: the text, and whether the kernel waits on the grid launched ahead of it, so it may be launched as
-/// a programmatic dependent launch.
+/// A kernel's code: the text its target's assembler takes (PTX for ptxas, LLVM IR for AMD's `llc`), and whether the
+/// kernel waits on the grid launched ahead of it, so it may be launched as a programmatic dependent launch.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Ptx {
+pub struct Code {
     pub text: String,
     pub waits_on_grid: bool,
 }
 
-/// The PTX of `kernel` for `target`.
-pub fn compile(kernel: &Kernel, target: Target, precision: Precision) -> Result<Ptx> {
+/// The code of `kernel` for `target`.
+pub fn compile(kernel: &Kernel, target: Target, precision: Precision) -> Result<Code> {
     let module = lower(kernel, target, precision)?;
     let waits_on_grid = module
         .instructions()
         .any(|inst| inst.opcode == Opcode::GridWait);
-    Ok(Ptx {
-        text: print::print(&module),
+    let text = match target {
+        Target::Sm(_) => print::print(&module),
+        Target::Gfx(_) => print_amdgcn::print(&module)?,
+    };
+    Ok(Code {
+        text,
         waits_on_grid,
     })
 }

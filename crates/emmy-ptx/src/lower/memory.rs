@@ -228,10 +228,10 @@ impl Lowerer {
 
     /// An error where the target is older than `sm`, which `what` needs.
     pub(super) fn needs(&self, sm: u32, what: &str) -> Result<()> {
-        if self.target.sm >= sm {
+        if self.target.sm() >= sm {
             return Ok(());
         }
-        Err(self.no_rule(format_args!("{what} on sm_{}", self.target.sm)))
+        Err(self.no_rule(format_args!("{what} on {}", self.target)))
     }
 
     // --- shared memory -----------------------------------------------------------------------------------
