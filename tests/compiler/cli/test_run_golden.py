@@ -419,7 +419,8 @@ def test_record_latency_of_two_measured_schedules_lands_on_the_faster(monkeypatc
     _live_lane(monkeypatch, False)
     args = SimpleNamespace(golden="working.json", realization="mm")
     with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
-        run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [_timed_row({"WORK": "w4x4"}, 12.0), _timed_row({"WORK": "w4x2"}, 10.0)])
+        rows = [_timed_row({"WORK": "w4x4"}, 12.0), _timed_row({"WORK": "w4x2"}, 10.0)]
+        run_mod._record_golden_latency(args, {"torch.compile": 9.0}, rows)
 
     assert seen["emmy_us"] == pytest.approx(10.0) and seen["knobs"] == {"WORK": "w4x2"} and seen["tcompile_us"] == 9.0
 
