@@ -919,6 +919,39 @@ def test_random_block_fp8_scales_match_the_synthesized_weights():
 
 
 @requires_cuda
+def test_a_capture_outlives_garbage_whose_finalizer_cuda_refuses_while_capturing():
+    """Inductor's autotune leaves the kernels it dropped dead in reference cycles, and a kernel's finalizer unloads
+    its CUDA module, a call CUDA refuses while a stream captures. A garbage collection that runs inside the capture
+    of any backend's closure then invalidates it, and the whole table falls back to uncaptured timing. The capture
+    collects what is dead before it begins."""
+    import gc
+
+    from emmy.compiler.backend.cuda.compare import _capture_torch_fn
+
+    class Dropped:
+        """Stands for a dropped kernel: dead in a cycle, with a finalizer a capturing stream refuses."""
+
+        def __init__(self):
+            self.cycle = self
+
+        def __del__(self):
+            torch.cuda.synchronize()
+
+    x, out = torch.ones(8, device="cuda"), torch.zeros(8, device="cuda")
+
+    def forward():
+        if torch.cuda.is_current_stream_capturing():
+            gc.collect()  # a forward that allocates enough starts a collection inside the capture
+        out.copy_(x * 2)
+
+    Dropped()
+    replay = _capture_torch_fn(forward)
+    out.zero_()
+    replay()
+    assert out.tolist() == [2.0] * 8
+
+
+@requires_cuda
 def test_bf16_bits_bind_by_reinterpretation_for_the_eager_reference():
     """A folded BF16 table evaluates to its bits on a ``uint16`` carrier; converting them would read each bit pattern
     as a number, and the eager reference would disagree with every NVFP4 kernel by orders of magnitude."""

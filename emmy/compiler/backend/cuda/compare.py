@@ -8,6 +8,7 @@ mixes timing semantics. Nothing here prints: the caller owns the table.
 
 from __future__ import annotations
 
+import gc
 import logging
 
 from emmy import config
@@ -690,7 +691,12 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str], check:
 
 
 def _capture_torch_fn(fn, batch_size=1):
-    """Capture a complete batch of fixed-input forwards; one replay submits the whole window."""
+    """Capture a complete batch of fixed-input forwards; one replay submits the whole window.
+
+    What is dead is collected before the capture begins. Inductor's autotune leaves the kernels it dropped in dead
+    reference cycles, and a kernel's finalizer unloads its CUDA module, which CUDA refuses while a stream captures:
+    a collection that started inside the capture, of any backend's closure, invalidated it. PyTorch's own collection
+    ahead of a capture is off by default (``torch.compiler.config.force_cudagraph_gc``)."""
     import torch
 
     side = torch.cuda.Stream()
@@ -699,6 +705,7 @@ def _capture_torch_fn(fn, batch_size=1):
         for _ in range(3):
             fn()
     torch.cuda.current_stream().wait_stream(side)
+    gc.collect()
     g = torch.cuda.CUDAGraph()
     with torch.no_grad(), torch.cuda.graph(g):
         for _ in range(batch_size):
