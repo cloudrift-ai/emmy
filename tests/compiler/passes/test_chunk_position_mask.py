@@ -25,7 +25,7 @@ from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.trace.torch import trace_module
-from emmy.serving.native.prepare import WINDOW, attend_module
+from emmy.serving.native.prepare import MASK_FILL, WINDOW, attend_module
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
 HEADS, KV, D, ROWS, CONTEXT = 4, 2, 128, 64, 1024
@@ -246,13 +246,61 @@ def test_a_warp_group_score_takes_a_query_slice_only_on_the_16_byte_grid(query, 
     assert bool(statements(kernel, WgmmaMma)) is wgmma
 
 
-def _matches_the_twin(module, compiled, cache, heads: int) -> None:
+VERIFY = 3  # a verify step's query rows
+
+
+class _RowsOnTheGrid(torch.nn.Module):
+    """A verify step spelled per key-value head with its query rows an axis of their own, as native spelled it before
+    it folded the rows into the group (:func:`attend_module`): the fold's rows are the group's query heads, and the
+    launch puts each query row on the grid, the row the causal range reads."""
+
+    def forward(self, q, keys, values, position):
+        group, window = HEADS // KV, keys.shape[0]
+        q4 = q.view(VERIFY, KV, group, D).float()
+        k3, v3 = keys.float().transpose(0, 1), values.float().transpose(0, 1)
+        index = torch.arange(window)
+        keep = index.unsqueeze(0) - index[:VERIFY].unsqueeze(1) <= position
+        scores = torch.matmul(q4, k3.transpose(1, 2)) * D**-0.5 + torch.where(keep, 0.0, MASK_FILL)[:, None, None, :]
+        return torch.matmul(torch.softmax(scores, dim=-1), v3).to(q.dtype)
+
+
+def _rows_on_the_grid():
+    module = _RowsOnTheGrid()
+    window = torch.export.Dim(WINDOW, min=ROWS, max=CONTEXT)
+    shapes = {"q": {}, "keys": {0: window}, "values": {0: window}, "position": {}}
+    cache = (torch.zeros(512, KV, D, dtype=torch.bfloat16), torch.zeros(512, KV, D, dtype=torch.bfloat16))
+    examples = (torch.zeros(VERIFY, HEADS * D, dtype=torch.bfloat16), *cache, torch.zeros(1, dtype=torch.int64))
+    return module, trace_module(module, examples, dynamic_shapes=shapes)
+
+
+def _compile_rows_on_the_grid(ctx=None):
+    module, graph = _rows_on_the_grid()
+    pins = {**_flash("mma_m16n8k16_bf16_f32", None), "WORK": "w2x1"}
+    with pinned_knobs(pins):
+        compiled, kernels = compile_with_kernels(graph, ctx=ctx)
+    (kernel,) = kernels.values()
+    return module, compiled, kernel
+
+
+def test_a_query_row_on_the_grid_bounds_the_chunk_tiers_keys() -> None:
+    """GPU-free. The tile holds the group's query heads as its rows; the causal range reads the query row, which the
+    launch fixes per CTA, so the tier masks by it as it masks by the position."""
+    _, graph = _rows_on_the_grid()
+    *_, twist, tile = _twist(graph)
+    assert [str(bound) for bound in twist.range] == ["0", "minimum(cache_tokens, a0 + in0 + 1)"]
+    assert len(twist.as_contraction().left_axes) == 2, "the query row and the group's heads"
+    assert refusals._chunk_refusal(tile, twist) is None
+    *_, kernel = _compile_rows_on_the_grid(Context.from_target((8, 0)))
+    assert statements(kernel, MmaSyncPtx) and any("__ck" in loop.axis.name for loop in statements(kernel, Loop))
+
+
+def _matches_the_twin(module, compiled, cache, heads: int, rows: int = ROWS) -> None:
     """The compiled attention against its torch twin at every position and window a step can set, one the key
     slices of a split overhang included."""
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
     rng = np.random.default_rng(7)
-    query = torch.from_numpy(rng.normal(size=(ROWS, heads * D)).astype(np.float32)).to(torch.bfloat16)
+    query = torch.from_numpy(rng.normal(size=(rows, heads * D)).astype(np.float32)).to(torch.bfloat16)
     stored = torch.from_numpy(rng.normal(size=(2, CONTEXT, KV, D)).astype(np.float32)).to(cache)
 
     def bits(t):
@@ -263,17 +311,25 @@ def _matches_the_twin(module, compiled, cache, heads: int) -> None:
         program = CompiledProgram.build(
             compiled, {"q": bits(query), "position": np.array([0], np.int64), "keys": bits(stored[0]), "values": bits(stored[1])}
         )
-        for position in (0, 100, 937, CONTEXT - ROWS):
+        for position in (0, 100, 937, CONTEXT - rows):
             # The step's 512-wide buckets, the whole context, and a window no split width divides.
-            for span in sorted({-(-(position + ROWS) // 512) * 512, CONTEXT, max(position + ROWS, 1001)}):
+            for span in sorted({-(-(position + rows) // 512) * 512, CONTEXT, max(position + rows, 1001)}):
                 program.set_sym_values({WINDOW: span})  # the window moves the buffers, so the cache uploads after it
                 program.upload_prefix(
                     {"position": np.array([position], np.int64), "keys": bits(stored[0][:span]), "values": bits(stored[1][:span])}
                 )
                 program.run_once()
-                actual = decode_bf16(program.outputs()[compiled.outputs[0]]).reshape(ROWS, heads * D)
+                actual = decode_bf16(program.outputs()[compiled.outputs[0]]).reshape(rows, heads * D)
                 expected = module(query, stored[0][:span], stored[1][:span], torch.tensor([position])).float().numpy()
-                np.testing.assert_allclose(actual, expected, rtol=3e-2, atol=3e-2)
+                np.testing.assert_allclose(actual, expected.reshape(rows, heads * D), rtol=3e-2, atol=3e-2)
+
+
+@requires_cuda
+def test_a_query_row_on_the_grid_masks_the_keys_past_its_own_position() -> None:
+    """Each query row of a verify step folds the keys at or before its own position: the row a CTA holds bounds the
+    stream as the position does, at every position and window the step can set."""
+    module, compiled, _ = _compile_rows_on_the_grid()
+    _matches_the_twin(module, compiled, torch.bfloat16, HEADS, rows=VERIFY)
 
 
 @requires_cuda

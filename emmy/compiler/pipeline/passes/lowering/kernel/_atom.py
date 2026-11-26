@@ -3000,7 +3000,9 @@ class _FlashOps(_MmaOps):
             "the chunk tier reads the score's prefix leaves once, ahead of the chunk loop"
         )
         coord_axes = {self.c.axis, *self.c.as_contraction().left_axes}
-        uniform = cell_uniform(self.axes, self.c, coord_axes)
+        # The tile holds one row axis of the contraction; any other (a verify step's query token) is a coordinate the
+        # launch fixes, one value per CTA, as the gate reads it.
+        uniform = cell_uniform(self.axes, self.c, coord_axes) | (coord_axes - {self.c.axis, m.axis.name})
         pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
         pre += self._query_slab(mn) if self._score_atom.is_wgmma else self._query(offset, mn)
         scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
