@@ -181,8 +181,9 @@ place keeps its name whether or not a statement in scope declares it.
 The crate names no kernel statement type for any of it. The numbering, the ordering constraints and placement read a
 kernel statement through the protocol like any other, so a name a statement defines at each of several positions is a
 value apart, a name it reads and defines again (storage it updates in place) is read as the value it held where the
-read stands, a state a loop updates is read inside the loop as the step before, and a block holding an ordered
-protocol (a barrier) stays where it is. A read of storage the body writes carries the version it reads and the barrier
+read stands, a state a loop updates is read inside the loop as the step before (whichever scope around the loop
+updates it too, as a cooperative fold's combine does), and a block holding an ordered protocol (a barrier) stays where
+it is. A read of storage the body writes carries the version it reads and the barrier
 it stands behind, since another thread's write of the storage lands at a barrier; a read of storage nothing in the
 body writes holds one value throughout, so it is shared and placed across a barrier.
 
