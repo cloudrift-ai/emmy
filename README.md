@@ -126,6 +126,8 @@ emmy run --bench --cold-cache --tune 20 -c "nn.Linear(4096,4096,bias=False)(torc
 ```
 
 Successful measurements are saved so later compiles can reuse them when the kernel and measurement settings match.
+A program of several kernels is tuned kernel by kernel, and so are the other ways the compiler could have cut it
+into kernels, so the next compile picks both the kernels and their schedules from measurements.
 
 ### Fit the priors
 

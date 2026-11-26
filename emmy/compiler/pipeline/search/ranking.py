@@ -550,7 +550,7 @@ def walk_placement(
                 chosen = 0
             positives = [chosen]
             labels = [" ".join(str(v) for v in row.values() if v) or "unsplit" for row in rows]
-        # Featurized as a deploy featurizes them (``policy/greedy._kernel_set_pick``): an arm that keeps the kernel
+        # Featurized as a deploy featurizes them (``policy/greedy.kernel_set_ranking``): an arm that keeps the kernel
         # leaves the kernel itself.
         feats = [
             featurizer.features(root, row, pieces=leaf.expand()[0] if leaf.structural else root)
