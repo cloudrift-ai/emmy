@@ -4,6 +4,9 @@
 only code generator: a statement, an operation or a target instruction it has no rule for is an error. It reads the
 statements of the `emmy-ir` crate as they are, so nothing is serialized on the way.
 
+For an AMD card it writes the same kernel as LLVM IR, which AMD's `llc` assembles ([AMD cards](#amd-cards)). The
+rules are the same ones: only the printer differs. No backend runs that code yet.
+
 **It decides nothing.** Every choice is in the Kernel IR before it runs: the schedule, the unrolled copies, the
 approximate operations, the staging. Two whole-kernel precision decisions, multiply-add fusion and flush to zero, and
 whether the launch is one wave reach it as input. ptxas keeps register allocation, instruction scheduling and the
@@ -29,9 +32,10 @@ it knows the pipeline, the search or the backend.
 
 ## Entry points
 
-- `compile(kernel, target, precision)` returns the PTX text and whether the kernel waits on the grid ahead. It is
-  the crate's one function: the instruction list, its builder, printer and verifier are the crate's own, and the
-  rule tests (`src/tests/`) read the list through the crate-private `lower`.
+- `compile(kernel, target, precision)` returns the kernel's code and whether the kernel waits on the grid ahead. It
+  is the crate's one function: the instruction list, its builder, printers and verifier are the crate's own, and the
+  rule tests (`src/tests/`) read the list through the crate-private `lower`. The `Target` is an NVIDIA card by
+  compute capability, whose code is PTX, or an AMD card by processor, whose code is LLVM IR.
 - An error is one of two kinds. `Error::NotImplemented` says the compiler has no rule yet for a statement, an
   operation or a target's instruction: the kernel is well formed, and the compiler is what is missing. Any other error
   refuses the kernel, with the statement's text: an input the compiler does not take, or the verifier's finding,
@@ -44,7 +48,7 @@ it knows the pipeline, the search or the backend.
   producer band), and the module's target is arch-specific where one of its instructions is of that set alone.
 - The `emmy.emmy_ir` extension exports `compile_ptx`, which returns the PTX text and whether the kernel waits on the
   grid launched ahead of it (the launch may then be a programmatic dependent launch), so a body crosses from Python as
-  the crate's own value. An error of the first kind is a `NotImplementedError`, every other one a `ValueError`.
+  the crate's own value. It names the card by `sm=` or by `gfx=`; the pipeline passes `sm=` alone. An error of the first kind is a `NotImplementedError`, every other one a `ValueError`.
   `emmy/compiler/ir/kernel/ptx.py` is the Python entry the lowering calls.
 
 ## What the compiler expects of a body
@@ -254,6 +258,51 @@ needs, and refuses a target that lacks it with a message naming both. The cards 
 | `setmaxnreg` | `sm_90a` and later, arch-specific only | 8.0 |
 | `wgmma` | `sm_90a` alone: refused on `sm_100a` and `sm_120a` | 8.0 |
 
+## AMD cards
+
+AMD publishes no counterpart of PTX. The lowest form its toolkit (ROCm) takes that still has unlimited registers is
+LLVM IR for the `amdgcn` target: ROCm's `llc` allocates the registers and writes the machine code, as ptxas does. So
+`Target::Gfx` (`gfx942` is the MI300X, `gfx950` the MI350X) runs the same lowering and prints the instruction list
+with a second printer. The text is all the crate makes: no LLVM library is linked.
+
+- **What the rules see.** An AMD card has no compute capability, so it reads as one below every NVIDIA card's. A rule
+  that asks the target for an instruction (`ldmatrix`, `mma.sync`, an async copy, the Hopper instructions) refuses
+  it by name, the wait on the grid ahead is not written, and `bf16` is converted with integer instructions, as on a
+  card older than `sm_80`.
+- **Registers.** The list is not in SSA form: a state is a register defined again. Every register is a stack slot
+  (`alloca`), read with `load` and defined with `store`, so the printer stays one instruction at a time. `opt
+  -passes=mem2reg` turns the slots into values before `llc` runs. That pass is the only one of LLVM's optimizer the
+  code goes through; it decides nothing about a loop or a float.
+- **Structure.** A label opens a block the one before falls into. A guarded branch forks to the block after it, and
+  any other guarded instruction is a branch around it.
+- **Types.** A register holds bits of its bank's width, as in PTX: a half is 16 bits and a double 64, converted at the
+  instruction that computes with them. An address is an integer, 64 bits in global memory and 32 in a block's shared
+  memory (AMD's local memory), made a pointer at the access.
+- **Floats.** No float instruction carries a flag, so `llc` neither fuses nor reorders, which is what `.rn` on every
+  PTX instruction says. Flush to zero is the kernel's attribute. The one multiply-add rounded down that the
+  exponential writes is computed in doubles with the sum's rounding error beside it, since LLVM IR has no mode for it.
+- **The module.** One `amdgpu_kernel` entry; a buffer is a pointer of global memory with the launch's alignment, a
+  shared buffer an array of local memory, the launch-sized pool an external one. A thread's and a block's index are
+  intrinsics; a block's extent and the grid's are read from the dispatch packet.
+
+Each instruction of the generic half maps to one LLVM instruction or intrinsic. Where PTX defines what LLVM IR leaves
+undefined, the printer writes PTX's answer:
+
+| Instruction list | LLVM IR |
+| --- | --- |
+| a conversion from a float to an integer | the rounding of its mode, then `llvm.fptosi.sat` or `llvm.fptoui.sat` |
+| a shift by a register | the shift under the width, zero (or the sign) past it |
+| a float minimum or maximum | `llvm.minnum`, `llvm.maxnum`: the operand that is a number where the other is a NaN |
+| `rsqrt` | `llvm.amdgcn.rsq`, AMD's instruction |
+| a barrier of the whole block | `llvm.amdgcn.s.barrier` |
+
+An integer division by zero is not among them: PTX defines its result and LLVM IR does not.
+
+The printer refuses, as `Error::NotImplemented` with the instruction's PTX text and the target, what only an NVIDIA
+card has and no rule asked for: a shuffle and the lane mask, a barrier of a warp, a named barrier, and the `.approx`
+instructions behind the `_fast` operations. So an AMD kernel today is a scalar one, or one that cooperates through
+shared memory and barriers.
+
 ## In the pipeline
 
 `lowering/cuda/010_lower_kernelop` generates each kernel's code here, and any refusal is an error. The CUDA backend
@@ -269,7 +318,9 @@ multiply, which the card runs two at a time. An f32 is the same in f32.
 ## Tests
 
 `cargo test -p emmy-ptx` runs without a GPU. The rule tests build bodies from the text form, compare the instruction
-list, and assemble the printed kernel with ptxas at `-O0` and `-O3` wherever ptxas is on the path. `tests/compiler/ptx/`
+list, and assemble the printed kernel with ptxas at `-O0` and `-O3` wherever ptxas is on the path. Each of those
+kernels is also lowered for `gfx942`: its LLVM IR is assembled by `opt` and `llc` at both levels wherever they are on
+the path, and a refusal must be of the first kind. No test runs AMD code: none of it has been on a card. `tests/compiler/ptx/`
 launches compiled kernels on a card, each assembled at ptxas's default level and at `-O0`, and compares them with
 NumPy bit for bit, except an atomic sum of arbitrary floats. The tensor-core tests write each fragment layout by hand,
 as the PTX reference documents it, with small integers as operands so a product is exact. `test_corpus.py` compiles

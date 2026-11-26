@@ -406,7 +406,7 @@ require CloudRift organization access.
   `Fold` term and its twist recipe, the tree normalization and the lowering to Loop IR (see
   [ARCHITECTURE.md](crates/emmy-pure/ARCHITECTURE.md))
 - [crates/emmy-ptx/](crates/emmy-ptx/) — The compiler from Kernel IR to PTX: an instruction list, its builder, printer
-  and verifier, and the rule of each statement type; scalar kernels so far, and no pipeline stage calls it yet (see
+  and verifier, and the rule of each statement type; a second printer writes the list as LLVM IR for an AMD card (see
   [ARCHITECTURE.md](crates/emmy-ptx/ARCHITECTURE.md))
 - [crates/emmy-server/](crates/emmy-server/) — Native HTTP adapter: text and image processing
   (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))

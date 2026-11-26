@@ -35,9 +35,13 @@ relevant `ARCHITECTURE.md` before answering.
 - A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime (the `emmy.emmy_runtime`
   extension), and the compiler's statements, expressions and pure terms are the `emmy.emmy_ir` extension; `make setup` builds
   both into the package. The `emmy.emmy_ir` extension also holds the Kernel IR to PTX compiler, the only code
-  generator. Use the README architecture index for their design.
+  generator; it writes the same kernel as LLVM IR for an AMD card, which nothing runs yet. Use the README
+  architecture index for their design.
 - The CUDA toolkit's `ptxas` (on `PATH` or under `CUDA_HOME`), which assembles each kernel's PTX; NVIDIA ships it in
   the `cuda-nvcc` package. nvcc itself is not used.
+- LLVM's `opt` and `llc` with the AMDGPU target on `PATH` (optional): the PTX compiler's tests assemble each
+  kernel's LLVM IR for an AMD card with them, and skip that where they are missing. `rustup component add llvm-tools`
+  installs both; ROCm's own are the reference.
 - `make setup` to create the virtual environment, install dependencies and build both Rust extensions; it runs again
   on its own after a change to `pyproject.toml` or to any Rust source
 - Docker and Docker Compose for local deployments

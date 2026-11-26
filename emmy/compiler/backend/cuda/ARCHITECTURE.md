@@ -393,7 +393,8 @@ verdict. See the runtime's architecture for the supported subset and timing boun
   instead of splicing a fresh node — see `pipeline/ARCHITECTURE.md`
   under "Rule module convention".
 - The CUDA backend imports from `ir/` and `pipeline/` but never into
-  them. A ROCm/SYCL/Metal backend replaces `program.py` only.
+  them. A ROCm/SYCL/Metal backend replaces what this directory holds: the assembler wrapper, the device probe, the
+  cache eviction kernel and `program.py`, with an executor of its own in the Rust runtime.
 
 The Python worker's protocol encoder adds the current compiler precision policy to its message. The shared process
 supervisor owns only deadlines and process lifetime; it does not inject compiler settings into native runtime
