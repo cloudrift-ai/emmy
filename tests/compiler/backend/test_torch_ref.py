@@ -162,6 +162,17 @@ def test_multi_output_preserves_declared_order_and_single_output_tensor_contract
     np.testing.assert_allclose(single.numpy(), expected["final"], rtol=1e-4, atol=1e-4)
 
 
+def test_the_module_torch_compile_traces_holds_no_generator_expression():
+    """torch.compile traces the twin this module builds, and Dynamo on torch 2.14 (the last wheel with sm_70 kernels)
+    refused a generator expression in a CUDA twin, so a V100 record had no torch.compile time."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(torch_ref))
+    lines = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.GeneratorExp)]
+    assert not lines, f"generator expressions at torch_ref.py lines {lines}"
+
+
 @pytest.mark.parametrize(("dtype_name", "torch_dtype"), [("f16", torch.float16), ("f32", torch.float32)])
 def test_zero_width_pad_is_runnable_identity(dtype_name, torch_dtype):
     g = Graph()
