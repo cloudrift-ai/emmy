@@ -66,6 +66,27 @@ def test_rehint_program_keeps_the_hint_of_a_dim_over_no_measured_name():
     assert rehint_program(graph, {"keys": 100}).nodes["x"].outputs[0].shape[0].hint == 4
 
 
+def test_rehint_program_rehints_the_loops_of_a_stored_body():
+    """A stored kernel replayed at a second size is its Loop IR rehinted. The loops take the size too: a cut builds
+    its pieces' buffers from the kernel's axes, and a piece whose first buffer is one of those was benched, filed and
+    priced at the size the kernel was stored with, whatever size the program ran at."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import parse_body
+
+    keys = Dim("keys", hint=4096)
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (keys, 8)), node_id="x")
+    body = parse_body("for a0 in 0..keys~4096:\n  for a1 in 0..8:\n    v = load x[a0, a1]\n    y[a0, a1] = v\n")
+    graph.add_node(LoopOp(body=body), ["x"], Tensor("y", (keys, 8)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+
+    rehinted = rehint_program(graph, {"keys": 131072})
+
+    assert rehinted.nodes["y"].outputs[0].shape[0].hint == 131072
+    assert [loop.axis.extent.hint for loop in rehinted.nodes["y"].op.body.loops if not loop.axis.extent.is_static] == [131072]
+    assert [loop.axis.extent.hint for loop in graph.nodes["y"].op.body.loops if not loop.axis.extent.is_static] == [4096]
+
+
 def test_specialize_program_rejects_invalid_binding_values():
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (Dim("num_tokens"),)), node_id="x")
