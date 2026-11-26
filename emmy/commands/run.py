@@ -927,13 +927,18 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     timing for a different kernel than the one the file describes.
     """
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import record_latency  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import record_latency, regime_live  # noqa: PLC0415
 
     # Only a row of the NAMED realization can carry that realization's latency. A piece's row
     # of the same target is benched beside it and holds ONE kernel of the program, so neither its
     # timing nor its schedule knobs describe the row this writes — narrowing by them selects
-    # nothing and the write is refused.
-    measured = [gb for gb in golden_benches or [] if gb.status == "ok" and gb.bench is not None and gb.sample.name == args.realization]
+    # nothing and the write is refused. A name recorded in several regimes benches a row of each,
+    # but the run deploys the live regime, so only a row of it carries the latency.
+    measured = [
+        gb
+        for gb in golden_benches or []
+        if gb.status == "ok" and gb.bench is not None and gb.sample.name == args.realization and regime_live(gb.sample.pins)
+    ]
     # Several measured schedules of one target in one regime: the evidence pick deploys the fastest, so its row
     # carries the target's latency.
     measured = sorted(measured, key=lambda gb: gb.bench.total_us or float("inf"))[:1]
