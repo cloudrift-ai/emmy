@@ -493,10 +493,12 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     verify = ["router", "experts", "combine", "rope", "attend", "unfold", "norm", "head", "greedy", "carry", "accept", "pick", "prologue"]
     chunk = ["router", "experts", "combine", "rope", "attend", "norm", "pick", "next", "prologue"]
     expected = [f"{k}1-native" for k in (*decode, "prologue")] + [f"{k}3-native" for k in verify]
-    assert sorted(drafted) == sorted([*expected, *(f"{k}{rows}-native" for rows in (8, 4) for k in chunk), "embed-sym-native"])
+    # A chunk whose picks outnumber its expert blocks sorts them first (``group``): 8 rows here, not 4.
+    grouped = [f"group{rows}-native" for rows in (16, 8)]
+    assert sorted(drafted) == sorted([*expected, *(f"{k}{rows}-native" for rows in (8, 4) for k in chunk), grouped[1], "embed-sym-native"])
     # A chunk wider than the plugin's keeps the plugin's chunk too, between it and the decode width.
     wide = trace_programs(model, prefill_size=16, prefill_bucket=8, decode_width=4, drafter=drafter)
-    assert sorted(wide) == sorted([*expected, *(f"{k}{rows}-native" for rows in (16, 8, 4) for k in chunk), "embed-sym-native"])
+    assert sorted(wide) == sorted([*expected, *(f"{k}{rows}-native" for rows in (16, 8, 4) for k in chunk), *grouped, "embed-sym-native"])
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16
     # Tracing binds no weights: a traced step never calls for a buffer's host values.

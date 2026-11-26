@@ -268,7 +268,9 @@ config with an any-width program, the grouped prefill programs (`expert-group32x
 a prefill step's experts run 32 at a time, blocks of the decode bucket's rows or of 256. They are symbolic by name
 and take the dynamic rows. The audit expects the same split per twin. A
 static-only release is accepted only when the same env proves that no wider or symbolic path is reachable. The
-resulting working file is measured and verified by `run --golden PATH [--realization NAME] --bench`.
+resulting working file is measured and verified by `run --golden PATH [--realization NAME] --bench`. With `--append`,
+the twins join an existing working golden and its rows stay: a kernel the file already holds is kept once, so a
+serving config that adds widths adds only the new kernels.
 
 `emmy golden list [PATH…]` prints every measured row — its kernel's time and reference, the schedules tried, the
 whole row's time beside `torch.compile` where a record run timed it, the note — sorted by that ratio, filterable, and as
