@@ -103,7 +103,8 @@ def test_a_piece_that_holds_the_causal_range_is_benched_at_its_programs_position
     """A cut gives the scores to one kernel and the masked softmax to another, which reads ``position`` and not the
     cache. A tune benches that piece as a program of its own: it takes the position its program's bench takes, read
     off the range the position ends. At a random position it folds a few keys, and its rows price the cut far below
-    what the two kernels take in their program."""
+    what the two kernels take in their program. The same holds for a piece that reads the position from buffers
+    another piece wrote, and for a step of one row, whose range adds a row index a leaf binds to zero."""
     from emmy.compiler.backend.cuda.compare import _chunk_position, _range_end_inputs
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
@@ -116,24 +117,33 @@ def test_a_piece_that_holds_the_causal_range_is_benched_at_its_programs_position
     from emmy.serving.native.prepare import attend_module
 
     window = torch.export.Dim("cache_tokens", min=64, max=1 << 20)
-    examples = (torch.zeros(3, 32), torch.zeros(512, 2, 8), torch.zeros(512, 2, 8), torch.zeros(1, dtype=torch.int64))
-    traced = trace_module(attend_module(4, 2, 8, 3, grouped=True), examples, dynamic_shapes={"keys": {0: window}, "values": {0: window}})
-    program = specialize_program(traced, {"cache_tokens": 4096})
+    sized = {"keys": {0: window}, "values": {0: window}}
 
-    def holder(pins: dict):
-        """The kernel that holds the range, as a program of its own, of the two a pinned compile builds."""
+    def holder(rows: int, pins: dict):
+        """The kernel that holds the range, as a program of its own, of the two a pinned compile of the step builds:
+        the one that reads the values."""
+        examples = (torch.zeros(rows, 32), torch.zeros(512, 2, 8), torch.zeros(512, 2, 8), torch.zeros(1, dtype=torch.int64))
+        traced = trace_module(attend_module(4, 2, 8, rows, grouped=True), examples, dynamic_shapes=sized)
+        program = specialize_program(traced, {"cache_tokens": 4096})
         with pinned_knobs(pins), evidence_scope([]):
-            lowered = Pipeline.build(CUDA_PASSES).run(program.copy(), ctx=Context.from_target((12, 0)), db=None)
+            lowered = Pipeline.build(CUDA_PASSES).run(program, ctx=Context.from_target((12, 0)), db=None)
         alone = [single_node_graph(lowered, nid) for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)]
         assert len(alone) == 2
-        (found,) = [kernel for kernel in alone if "position" in kernel.nodes]
+        (found,) = [kernel for kernel in alone if "values" in kernel.nodes]
         return found
 
-    piece = holder({"PLACE@map.1/twist.1/inner": "cut"})
+    piece = holder(3, {"PLACE@map.1/twist.1/inner": "cut"})
     assert "keys" not in piece.nodes and _chunk_position(piece, lambda shape: tuple(dim.as_static() for dim in shape)) is None
     assert _range_end_inputs(piece, {}) == {"position": 4096 - 3}
     # A key split walks the keys in blocks, each from zero: the value is where the last block's last row ends.
-    assert _range_end_inputs(holder({"REDUCE@map.1/twist": "g4k"}), {}) == {"position": 4096 - 3}
+    assert _range_end_inputs(holder(3, {"REDUCE@map.1/twist": "g4k"}), {}) == {"position": 4096 - 3}
+    assert _range_end_inputs(holder(1, {"PLACE@map.1/twist.1/inner": "cut"}), {}) == {"position": 4096 - 1}
+    # A cut of the position's own load leaves it and the rows' indices in two buffers of one boundary. The range
+    # ends at their sum, so one takes the value and the other is zero.
+    fed = holder(3, {"PLACE@map.1/twist.2/map": "cut"})
+    ends = _range_end_inputs(fed, {})
+    assert "position" not in fed.nodes and len(ends) == 2 and sorted(ends.values()) == [0, 4096 - 1]
+    assert all(fed.buffer(name) is not None for name in ends)
 
 
 def test_random_input_values_use_adapter_scale_and_binary_selection():
