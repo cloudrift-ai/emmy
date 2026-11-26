@@ -472,6 +472,34 @@ def test_the_executable_program_binds_a_weight_beside_the_twin(tmp_path) -> None
     assert document.reference_program(kernel).nodes["w"].op.source_path == "proj.weight"
 
 
+def test_a_kernel_reading_a_value_computed_from_constants_has_a_twin_that_binds_it(tmp_path) -> None:
+    """A trace that transposes a weight (an lm_head's ``hidden @ weight.T``) leaves the kernel reading the transposed
+    weight, a value the program computes from a constant. It is a constant to the twin, which folds it into one: the
+    kernel has a PyTorch reference, and the program a bench starts from binds that input to the folded weight, the
+    checkpoint's source tensor, not random data."""
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp, TransposeOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
+    graph.add_node(ConstantOp(name="w", source_path="head.weight"), [], Tensor("w", (8, 16), "f16"), node_id="w")
+    graph.add_node(TransposeOp(axes=(0, 1)), ["w"], Tensor("transpose", (16, 8), "f16"), node_id="transpose")
+    graph.add_node(MatmulOp(), ["x", "transpose"], Tensor("mm", (4, 8), "f16"), node_id="mm")
+    graph.inputs, graph.outputs = ["x"], ["mm"]
+    path = tmp_path / "working.json"
+    write_trace_inventory(graph, path, ctx=_TARGET_CTX)
+    document = GoldenFile.load(path)
+    (kernel,) = document.targets()
+    assert "transpose" in kernel.program({}).inputs, "the stored body reads the transposed weight as an input"
+
+    reference = document.reference_program(kernel)
+    assert reference is not None and torch_ref.is_runnable(reference)
+    executable = document.executable(kernel, {})
+    assert executable.inputs == ["x"]
+    op = executable.nodes["transpose"].op
+    assert isinstance(op, ConstantOp) and {*dict(op.source_parts or ()), op.source_path} & {"head.weight"}
+
+
 def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypatch, tmp_path) -> None:
 
     graph = Graph()
