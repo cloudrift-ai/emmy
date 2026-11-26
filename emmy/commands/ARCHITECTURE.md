@@ -458,15 +458,29 @@ job runs lives with the backend (`backend/cuda/compare.py`, the comparison; `bac
 `CommandError` with the message and the exit code; the handler logs it and exits, and the whole-file walk moves on
 to its next target.
 
-**Autotuning one kernel.** `run --bench --tune N` measures N rows of the program's one scheduled kernel
+**Autotuning.** `run --bench --tune N` measures N rows of a kernel
 (`search/autotune.py`) — every schedule row crossed with the arms of each fork the kernel lowering opens on it
 afterwards, the carried-state storage among them: the schedule prior's ten best first, then batches of eight Bayesian
-optimization proposes from the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its clean rows land in the tune DB
-through the same recording and the next compile picks the fastest; a row that fails, does not realize, or is flagged
-counts as a failure, never as a time. The CPU work of a tune runs on `EMMY_WORKERS` forked processes — the walk of
-the schedule rows, their featurizing for the prior, each batch's compiles — and the rows, their scores and their
-kernels are the same at any count. A program with several scheduled kernels is refused, because a bare pin reaches
-them all. `--kernel NAME` (with `--golden PATH`) selects a file-local kernel reference (`Kernel.ref`, which
+optimization proposes from the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its
+clean rows land in the tune DB through the same recording and the next compile picks the fastest; a row that fails,
+does not realize, or is flagged counts as a failure, never as a time. The CPU work of a tune runs on `EMMY_WORKERS`
+forked processes — the walk of the schedule rows, their featurizing for the prior, each batch's compiles — and the
+rows, their scores and their kernels are the same at any count.
+
+A program of several kernels, or of one kernel that met a kernel-set fork of several arms, is tuned kernel by kernel
+(`_tune_kernel_sets`), because a kernel set is priced as the sum of its pieces' rows and a piece measured only at the
+prior's first schedule prices its set wrong. A round compiles the program as a deploy would, tunes each kernel of
+that kernel set alone (N rows; a kernel the tune DB already holds N rows of is skipped), then takes each arm a fork
+of that compile offered and did not take — the placement prior's best eight a fork — on the fork's kernel alone,
+tunes the kernels that leaves (ten rows each at most), and stores every decision whose pieces hold rows as a routing
+row. The compile that follows picks each of those forks from measured arms; a round on its kernel set follows while
+that set changes, four at most. Each kernel alone is a program of one kernel with a bench session of its own, so its rows are checked
+against its own greedy outputs and recorded as any tune's are, and the session of the whole program reports the
+kernel set and its price after each round (`[tune]` lines) and adds no row to its table. An arm is explored one
+decision off the compiled kernel set: a kernel set two unmeasured decisions away is reached only when the first is
+measured faster. A layout arm of a weight several kernels read is measured for the fork's kernel only, and stays
+unpriced until the other readers are. A pin that leaves a fork one arm leaves nothing to explore there.
+`--kernel NAME` (with `--golden PATH`) selects a file-local kernel reference (`Kernel.ref`, which
 can distinguish kernels sharing one C name) and runs that kernel alone. A formed kernel uses its stored body
 (`GoldenFile.executable`). A derived cut piece replays its recorded parent decisions through the shared golden
 restamp replay, then takes a single-node slice of the exact piece as those decisions minted it: its own cut, layout

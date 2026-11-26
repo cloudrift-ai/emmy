@@ -1,9 +1,13 @@
-"""Autotuning one kernel: which complete schedule rows to measure next, given the ones already measured.
+"""Autotuning: which complete schedule rows of a kernel to measure next, given the ones already measured, and which
+kernels a tune of a whole program measures.
 
-``emmy run --tune N`` drives it: the program's one scheduled kernel is enumerated under the greedy kernel set
-(:func:`schedule_space`) — every complete schedule row, a carried state's storage among its sites — the prior's
-ten best rows are measured first, then each batch is the rows with the highest expected improvement under a
-Gaussian process fit to the log latencies measured so far (Bayesian optimization). The caller measures — this module never touches the GPU.
+``emmy run --tune N`` drives it. A program's tune is the tune of its kernels, each alone: the kernels of the kernel set
+a greedy compile takes, and the kernels of every kernel-set arm that compile met and did not take
+(:func:`kernel_set`), so the compile that follows compares kernel sets whose pieces were all tuned. One kernel's tune
+enumerates it under the greedy kernel set (:func:`schedule_space`) — every complete schedule row, a carried state's
+storage among its sites — measures the prior's ten best rows first, then each batch is the rows with the highest
+expected improvement under a Gaussian process fit to the log latencies measured so far (Bayesian optimization). The
+caller measures — this module never touches the GPU.
 
 A knob value is split into its parts before the process sees it (``TILE`` ``mma_m16n8k16_f16_f32/f2x4/k2`` → the
 atom, a ``2×4`` fragment count and a ``k2`` step), so two rows that differ in one tile dimension are near each other.
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -23,6 +28,10 @@ from emmy.compiler.pipeline.search.features import Featurizer
 
 #: Rows the prior picks before the process has anything to fit.
 START = 10
+#: The untaken arms of one kernel-set fork a program's tune measures, the placement prior's best first.
+ARMS = 8
+#: The rounds a program's tune takes at most: a round measures the forks of the kernel set the last one left.
+ROUNDS = 4
 #: Random rows scored per proposal, beside the best row's one-part neighbours.
 _SCORED = 8000
 _PART = re.compile(r"^([a-z_]*?)(\d+)(?:x(\d+))?$")
@@ -38,7 +47,7 @@ def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
     from emmy.compiler.pipeline.search.policy.greedy import _schedule_fork, greedy_decide  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
 
-    greedy = greedy_decide(db=db)
+    greedy = greedy_decide(db=db, prior=None)  # the walk wants the kernel and its rows: no schedule is ranked
     pools: dict[str, tuple[object, list[dict]]] = {}
 
     def decide(fp):
@@ -52,6 +61,72 @@ def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
         raise ValueError(f"--tune tunes a program with one scheduled kernel; this one has {len(pools)}")
     ((op, rows),) = pools.values()
     return op, rows
+
+
+@dataclass(frozen=True)
+class KernelSet:
+    """What a greedy compile of a program ends with: each scheduled kernel beside the program that is that kernel
+    alone (``kernels``); each kernel-set fork it met (``forks``) as the fork's kernel by exact identity, that kernel
+    alone as it stood there, the arms the fork offered by the placement prior, best first, and the one taken; and
+    the decisions taken, as the splice watcher reports them (``decisions``)."""
+
+    kernels: tuple[tuple[object, object], ...]
+    forks: tuple[tuple[str | None, object, tuple[dict, ...], dict], ...]
+    decisions: tuple[tuple[object, dict, list], ...]
+
+
+def kernel_set(graph, ctx, db=None, take: dict | None = None) -> KernelSet:
+    """The kernel set a greedy compile of ``graph`` takes (measured evidence, then the priors), with the first
+    kernel-set fork it meets decided as ``take`` (an arm's knobs) when one is given: how a tune prices an arm the
+    compile did not take, on the fork's kernel alone. A kernel alone is the program a tune of it measures, and its
+    rows land under the identity the whole program's compile asks for (``slice.single_node_graph``). ``graph`` is
+    lowered in place."""
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._cut import PIECE  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import Run, _structural_domain  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.inventory import KernelInventory  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import KERNEL_SET_DOMAINS  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.policy.greedy import (  # noqa: PLC0415
+        _load_placement_prior,
+        _schedule_fork,
+        greedy_decide,
+        kernel_set_ranking,
+    )
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    placement = _load_placement_prior()
+    greedy = greedy_decide(db=db, prior=None, placement_prior=placement)  # no schedule is ranked: the kernels are the answer
+    failed = db.failed(ctx) if db is not None else set()
+    kernels: dict[str, tuple[object, object]] = {}
+    forks: list[tuple[str | None, object, tuple[dict, ...], dict]] = []
+    decisions: list[tuple[object, dict, list]] = []
+    forced = [take]
+
+    def alone(fp):
+        """The fork's kernel as a program of its own; a piece of a cut stays one, so a pin reads it as the compile does."""
+        sliced = single_node_graph(fp.match.graph, fp.node_id)
+        if fp.match.root.hints.has(PIECE):
+            sliced.nodes[fp.node_id].hints.set(PIECE, True)
+        return sliced
+
+    def decide(fp):
+        if _schedule_fork(fp):
+            kernels.setdefault(fp.node_id, (fp.root_op, alone(fp)))
+            return greedy(fp)
+        if _structural_domain(fp.options) not in KERNEL_SET_DOMAINS:
+            return greedy(fp)
+        kernel, program = fp.root_op.identity_key(structural=False, with_io=True), alone(fp)
+        ranked = kernel_set_ranking(fp, placement, failed)
+        arms = tuple(leaf_knobs(leaf) for leaf in ranked)
+        want, forced[0] = forced[0], None
+        chosen = greedy(fp) if want is None else ranked[arms.index(want)]
+        forks.append((kernel, program, arms, leaf_knobs(chosen)))
+        return chosen
+
+    watcher = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: decisions.append((parent, arm, pieces)))
+    Run(pipeline=Pipeline.build(TILE_PASSES).with_strategies(watcher), ctx=ctx, db=db).resolve(graph, decide)
+    return KernelSet(tuple(kernels.values()), tuple(forks), tuple(decisions))
 
 
 def _parts(row: dict) -> dict:
