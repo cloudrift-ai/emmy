@@ -164,6 +164,20 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    fn from_raw(raw: RawBuffer) -> Result<Self> {
+        Ok(Self {
+            shape: raw
+                .shape
+                .iter()
+                .map(Expr::from_value)
+                .collect::<Result<_>>()?,
+            name: raw.name,
+            dtype: raw.dtype,
+            role: raw.role,
+            alias: raw.alias,
+        })
+    }
+
     pub fn is_symbolic(&self) -> bool {
         self.shape.iter().any(|d| !d.is_static())
     }
@@ -282,6 +296,60 @@ pub struct Launch {
 }
 
 impl Launch {
+    fn from_raw(raw: RawLaunch) -> Result<Self> {
+        let cpu = raw.cpu.is_some();
+        Ok(Self {
+            grid: if cpu { Vec::new() } else { factors(&raw.grid)? },
+            block: if cpu {
+                Vec::new()
+            } else {
+                factors(&raw.block)?
+            },
+            node_id: raw.node_id,
+            kernel: raw.kernel,
+            args: raw.args,
+            smem: raw.smem,
+            zero_outputs: raw.zero_outputs,
+            zero_prologues: raw.zero_prologues,
+            writes: raw.writes,
+            runtime_args: raw.runtime_args,
+            serial: raw.serial,
+            size_range: raw.size_range,
+            tma: raw
+                .cuda
+                .map(|c| c.tma)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| Tma {
+                    name: t.name,
+                    src_buf: t.src_buf,
+                    box_extents: t.box_extents,
+                    swizzle: t.swizzle,
+                })
+                .collect(),
+            cpu: raw
+                .cpu
+                .map(|c| {
+                    ensure!(
+                        ["range", "reduce"].contains(&c.mode.as_str()),
+                        "unknown cpu launch mode {}",
+                        c.mode
+                    );
+                    ensure!(
+                        (c.mode == "reduce") == (c.partial_floats > 0),
+                        "a cpu reduce launch, and only one, writes partials"
+                    );
+                    Ok(CpuLaunch {
+                        reduce: c.mode == "reduce",
+                        extent: Expr::from_value(&c.extent)?,
+                        partial_floats: c.partial_floats,
+                        parallel: c.parallel,
+                    })
+                })
+                .transpose()?,
+        })
+    }
+
     /// Whether the launch runs at `env`: at every size, or while its sized axis lies in its range.
     pub fn runs_at(&self, env: &Env) -> Result<bool> {
         let Some((name, first, last)) = &self.size_range else {
@@ -513,7 +581,10 @@ pub fn dimensions(axes: &[Vec<Expr>], env: &Env) -> Result<(u32, u32, u32)> {
 
 impl Program {
     pub fn parse(json: &str) -> Result<Self> {
-        let raw: RawPlan = serde_json::from_str(json)?;
+        Self::from_raw(serde_json::from_str(json)?)
+    }
+
+    fn from_raw(raw: RawPlan) -> Result<Self> {
         ensure!(
             SUPPORTED_PLAN_FORMATS.contains(&raw.format),
             "unsupported plan format {}",
@@ -534,7 +605,7 @@ impl Program {
             hints: BTreeMap::new(),
             caps: BTreeMap::new(),
         });
-        let mut program = Program {
+        let mut program = Self {
             format: raw.format,
             backend: raw.backend,
             inputs: raw.inputs,
@@ -542,19 +613,7 @@ impl Program {
             buffers: raw
                 .buffers
                 .into_iter()
-                .map(|b| {
-                    Ok(Buffer {
-                        shape: b
-                            .shape
-                            .iter()
-                            .map(Expr::from_value)
-                            .collect::<Result<_>>()?,
-                        name: b.name,
-                        dtype: b.dtype,
-                        role: b.role,
-                        alias: b.alias,
-                    })
-                })
+                .map(Buffer::from_raw)
                 .collect::<Result<_>>()?,
             constants: raw
                 .constants
@@ -575,52 +634,7 @@ impl Program {
                         "launch {} must carry a cpu section exactly when the plan's backend is cpu",
                         l.node_id
                     );
-                    Ok(Launch {
-                        grid: if cpu { Vec::new() } else { factors(&l.grid)? },
-                        block: if cpu { Vec::new() } else { factors(&l.block)? },
-                        node_id: l.node_id,
-                        kernel: l.kernel,
-                        args: l.args,
-                        smem: l.smem,
-                        zero_outputs: l.zero_outputs,
-                        zero_prologues: l.zero_prologues,
-                        writes: l.writes,
-                        runtime_args: l.runtime_args,
-                        serial: l.serial,
-                        size_range: l.size_range,
-                        tma: l
-                            .cuda
-                            .map(|c| c.tma)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|t| Tma {
-                                name: t.name,
-                                src_buf: t.src_buf,
-                                box_extents: t.box_extents,
-                                swizzle: t.swizzle,
-                            })
-                            .collect(),
-                        cpu: l
-                            .cpu
-                            .map(|c| {
-                                ensure!(
-                                    ["range", "reduce"].contains(&c.mode.as_str()),
-                                    "unknown cpu launch mode {}",
-                                    c.mode
-                                );
-                                ensure!(
-                                    (c.mode == "reduce") == (c.partial_floats > 0),
-                                    "a cpu reduce launch, and only one, writes partials"
-                                );
-                                Ok(CpuLaunch {
-                                    reduce: c.mode == "reduce",
-                                    extent: Expr::from_value(&c.extent)?,
-                                    partial_floats: c.partial_floats,
-                                    parallel: c.parallel,
-                                })
-                            })
-                            .transpose()?,
-                    })
+                    Launch::from_raw(l)
                 })
                 .collect::<Result<_>>()?,
             kernels: raw
