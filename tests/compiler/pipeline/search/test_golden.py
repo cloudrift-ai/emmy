@@ -297,6 +297,39 @@ def test_restamp_drops_what_the_fresh_lowering_no_longer_writes(tmp_path) -> Non
     fresh.dump(tmp_path / "golden.json", repository=True)
 
 
+def test_dropping_a_program_takes_what_only_it_reaches(tmp_path) -> None:
+    """A dropped program takes its target, the pieces the file's decisions reach from it, those decisions and their
+    rows, and nothing else: every other target still names its own program, one index up where it stood after the
+    dropped one. A piece another kernel's decision reaches too stays with its rows."""
+    from emmy.compiler.pipeline.search.db import RoutingRow
+
+    before = GoldenFile.load(_RECORDS_DIR / "v100_sm70.json")
+    document = GoldenFile.load(_RECORDS_DIR / "v100_sm70.json")
+    target = next(kernel for kernel in before.kernels if kernel.traced == 8)
+    mine = set(before.kernel_set(target.ref))
+    assert len(mine) == 3, "the program's target and the two pieces of its split"
+
+    document.drop_program(8)
+    assert len(document.programs) == len(before.programs) - 1
+    assert [kernel.ref for kernel in document.kernels] == [kernel.ref for kernel in before.kernels if kernel.ref not in mine]
+    assert document.routing == [route for route in before.routing if route.parent not in mine]
+    assert document.rows == [row for row in before.rows if row.kernel not in mine]
+    for kernel in document.targets():
+        stored = before.kernel(kernel.ref)
+        assert document.programs[kernel.traced] == before.programs[stored.traced]
+        assert replace(kernel, traced=stored.traced) == stored
+    document.dump(tmp_path / "golden.json", repository=True)
+
+    shared = GoldenFile.load(_RECORDS_DIR / "v100_sm70.json")
+    piece = next(ref for ref in shared.kernel_set(target.ref) if ref != target.ref)
+    other = next(kernel for kernel in shared.kernels if kernel.traced == 0)
+    shared.add_routing(RoutingRow(other.ref, {"PLACE": "cut"}, (piece,)))
+    shared.drop_program(8)
+    assert {kernel.ref for kernel in before.kernels} - {kernel.ref for kernel in shared.kernels} == mine - {piece}
+    assert [row for row in shared.rows if row.kernel == piece] == [row for row in before.rows if row.kernel == piece]
+    shared.dump(tmp_path / "shared.json", repository=True)
+
+
 def test_a_files_identities_are_the_same_on_forked_workers(monkeypatch) -> None:
     """A loaded file's kernel identities are computed on ``EMMY_WORKERS`` forked processes and kept on the kernels:
     the same identities one process computes, under the same refs."""
