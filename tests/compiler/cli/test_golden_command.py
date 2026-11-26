@@ -366,3 +366,19 @@ def test_list_missing_names_each_proposal_and_each_target_with_no_torch_compile_
     assert proposal.name not in tcompile and timed.name not in tcompile
     assert f"{timed.name}.spelled" not in tcompile, "the timed seed's regime, spelled gate by gate, is timed"
     assert f"{timed.name}.fm" in tcompile, "the fast-math lane of the same target is another regime"
+
+
+def test_list_missing_names_a_target_by_its_slowest_measured_row(golden, capsys):
+    """A record replays the named row's knobs on every kernel of its target, so a target with no torch.compile time is
+    named by its slowest kernel's row, whose knobs suit the big piece, never by the shortest name."""
+    from emmy.commands.golden import handle_golden_list
+
+    with GoldenFile.edit(golden) as document:
+        targets = {kernel.ref for kernel in document.targets()}
+        slow = next(row for row in document.rows if row.measurements is not None and not row.latency and row.kernel in targets)
+        quick = replace(slow.measurements, emmy_us=slow.measurements.emmy_us / 10, reference_us=slow.measurements.reference_us / 10)
+        document.rows.append(replace(slow, name="q", measurements=quick))
+
+    handle_golden_list(Namespace(paths=[str(golden)], gpu=None, kernel=None, behind=False, missing=True, json_out="-"))
+    tcompile = {entry["row"] for entry in json.loads(capsys.readouterr().out) if entry["missing"] == "tcompile"}
+    assert slow.name in tcompile and "q" not in tcompile
