@@ -210,14 +210,16 @@ def _chunk_position(graph, static) -> int | None:
 
 
 def _range_end_inputs(graph, sizes: dict[str, int]) -> dict[str, int]:
-    """The inputs a kernel reads as where a range ends (a causal step's ``position``: a row folds the keys up to its
-    own), each with the value at which the kernel's last row walks its axis to the end, in the last block where a
-    split walks the axis in blocks. It is the value :func:`_chunk_position` gives a whole step, read off the kernel:
-    a piece of a cut holds the range and not the cache its program sizes the window by, and benched as a program of
-    its own at a random value it folds a few keys, so its time says nothing of the window. ``sizes`` are the symbolic
-    sizes at the bench's bindings."""
+    """The input buffers a kernel reads as where a range ends (a causal step's ``position``: a row folds the keys up
+    to its own), each with the value at which the kernel's last row walks its axis to the end, in the last block
+    where a split walks the axis in blocks. It is the value :func:`_chunk_position` gives a whole step, read off the
+    kernel: a piece of a cut holds the range and not the cache its program sizes the window by, or reads the position
+    from a buffer another piece wrote, and benched as a program of its own at random values it folds a few keys, so
+    its time says nothing of the window. Where the end adds several inputs (the position and the row's own index, each
+    a buffer of the other piece), one takes the value and the rest are zero. A value a leaf binds (a single row's
+    index, a literal) is read as what it binds. ``sizes`` are the symbolic sizes at the bench's bindings."""
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Let, Load  # noqa: PLC0415
     from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
 
     def terms(term):
@@ -232,19 +234,28 @@ def _range_end_inputs(graph, sizes: dict[str, int]) -> dict[str, int]:
             continue
         tile = tile.scheduled()
         tree = list(terms(tile.op))
-        loaded = {name: load.input for term in tree for load in term.applied.body if isinstance(load, Load) for name in load.names}
+        stmts = [stmt for term in tree for stmt in term.applied.body]
+        loaded = {name: stmt.input for stmt in stmts if isinstance(stmt, Load) for name in stmt.names}
+        bound = {stmt.name: stmt.value for stmt in stmts if isinstance(stmt, Let)}
         for term in tree:
             end = term.applied_range[1] if term.applied_range is not None else None
-            for name in end.free_vars() & loaded.keys() if end is not None else ():
-                source = graph.nodes.get(loaded[name])
-                last = sizes | {axis.name: int(axis.extent.expression.eval(sizes)) - 1 for axis in tile.axes}
-                if source is None or not isinstance(source.op, InputOp) or not end.free_vars() <= last.keys() | {name}:
-                    continue
-                # The end of the last row's walk at three values of the input. Where the input moves it one for one,
-                # the distance from the end at zero to the end no value passes is the value that reaches it.
-                at = [int(end.eval({**last, name: value})) for value in (0, 1, 1 << 40)]
+            while end is not None and end.free_vars() & bound.keys():
+                end = end.substitute({name: bound[name] for name in end.free_vars() & bound.keys()})
+            reads = sorted(end.free_vars() & loaded.keys()) if end is not None else []
+            sources = [graph.producer(loaded[name]) for name in reads]
+            if not reads or not all(source is not None and isinstance(source.op, InputOp) for source in sources):
+                continue
+            last = sizes | {axis.name: int(axis.extent.expression.eval(sizes)) - 1 for axis in tile.axes} | dict.fromkeys(reads, 0)
+            if not end.free_vars() <= last.keys():
+                continue
+            for name in reads:
+                # The end of the last row's walk at three values of the input, the others at zero. Where the input
+                # moves it one for one, the distance from the end at zero to the end no value passes reaches it.
+                at = [int(end.eval(last | {name: value})) for value in (0, 1, 1 << 40)]
                 if at[1] - at[0] == 1:
-                    values[source.id] = max(values.get(source.id, 0), at[2] - at[0])
+                    values[loaded[name]] = max(values.get(loaded[name], 0), at[2] - at[0])
+                    values.update({loaded[other]: values.get(loaded[other], 0) for other in reads if other != name})
+                    break
     return values
 
 
@@ -371,6 +382,9 @@ async def bench_lowered_vs_torch(
                 input_tensors[nid] = to_cuda_tensor(arr, node.output.dtype)
         elif isinstance(node.op, ConstantOp) and node.op.value is not None:
             input_data[nid] = [float(node.op.value)]
+    # A piece's boundary holds every buffer the kernel before it wrote, and the loop above draws its first alone.
+    for name in placed.keys() - input_data.keys():
+        input_data[name] = np.full(_static(lowered.buffer(name).shape), placed[name])
 
     input_data.update(bind_constants(lowered, sources))
     if frontend is not None:
