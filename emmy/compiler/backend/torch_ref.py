@@ -81,6 +81,18 @@ def torch_dtype(dtype) -> torch.dtype | None:
     }.get(str(dtype))
 
 
+#: The torch float8 dtype whose bits each graph FP8 format carries.
+_FLOAT8 = {"f8e4m3": "float8_e4m3fn", "f8e5m2": "float8_e5m2"}
+
+
+def _float8_bits(value, float8):
+    """``value`` as the bits of ``float8`` when it is a float; bits already (an input, a ``to_f8*``, a moved cache) as
+    they are."""
+    import torch  # noqa: PLC0415
+
+    return value.to(float8).view(torch.uint8) if torch.is_tensor(value) and value.is_floating_point() else value
+
+
 def is_runnable(graph: Graph) -> bool:
     """True if every compute op in ``graph`` has a torch mapping."""
     from emmy.compiler.provenance import is_boundary  # noqa: PLC0415
@@ -566,6 +578,10 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor], *, comp
         out_dtype = torch_dtype(node.output.dtype)
         if compute_dtype is not None and out_dtype is not None and out_dtype.is_floating_point:
             out_dtype = compute_dtype
+        if (float8 := _FLOAT8.get(str(node.output.dtype))) is not None:
+            # A float value a node declares at an FP8 format (a copy the trace typed ``float8_e4m3fn``) is encoded,
+            # as ``to_f8*`` encodes it: the cast to the uint8 carrier below would truncate the number instead.
+            op_callable = (lambda inner, f8: lambda ins: _float8_bits(inner(ins), f8))(op_callable, getattr(torch, float8))
         compute_steps.append((nid, op_callable, list(node.inputs), out_dtype))
     out_ids = tuple(graph.outputs)
     tensors = [input_tensors[i] for i in tensor_ids]
