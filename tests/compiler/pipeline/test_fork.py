@@ -160,16 +160,26 @@ def test_admits_prunes_a_site_this_branch_already_decided_OFF() -> None:
     assert bare.admits({"REDUCE": "coop"}), "a bare family key still reads as a bare pin: OFF or the value"
 
 
-def test_a_parallel_expansion_builds_each_unbuilt_arm_on_a_worker() -> None:
+def test_a_parallel_expansion_builds_each_unbuilt_arm_on_a_worker(monkeypatch) -> None:
     """A kernel-set fork's arms are built on forked workers and memoized on the arm where its own expansion
     would build, so the parent builds none of them and a later expansion finds them; an arm already built stays
-    as it is, and one worker builds them here."""
+    as it is, and one worker builds them here. The workers are capped by the memory free for copies of this process,
+    which the test sets: late in a full suite on twelve workers there was room for none, and the arms were built
+    here. With no room for a copy that is what the cap asks for."""
+
+    def arms_of(tags: str) -> list[DeferredFork]:
+        return [DeferredFork(lambda tag=tag: made.append(tag) or {"arm": tag}, {"PLACE": tag}, structural=True) for tag in tags]
+
     made: list[str] = []
-    arms = [DeferredFork(lambda tag=tag: made.append(tag) or {"arm": tag}, {"PLACE": tag}, structural=True) for tag in "abcd"]
+    arms = arms_of("abcd")
     assert arms[0].expand() == [{"arm": "a"}] and made == ["a"]
+    monkeypatch.setattr("emmy.compiler.pipeline.fork._copies_that_fit", lambda: 8)
     parallel_expand(arms, workers=3)
     assert made == ["a"], "the children built the rest, in their own memory"
     assert [arm.expand() for arm in arms] == [[{"arm": tag}] for tag in "abcd"]
     assert made == ["a"]
-    parallel_expand([DeferredFork(lambda tag=tag: made.append(tag) or tag, {"PLACE": tag}, structural=True) for tag in "xy"], workers=1)
+    parallel_expand(arms_of("xy"), workers=1)
     assert made == ["a", "x", "y"]
+    monkeypatch.setattr("emmy.compiler.pipeline.fork._copies_that_fit", lambda: 1)
+    parallel_expand(arms_of("zw"), workers=3)
+    assert made == ["a", "x", "y", "z", "w"]
