@@ -5,6 +5,8 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expression import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
+from emmy.compiler.ir.loop.ir import LoopOp
+from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 from emmy.compiler.specialize import rehint_program, specialize_program
 
@@ -64,6 +66,21 @@ def test_rehint_program_keeps_the_hint_of_a_dim_over_no_measured_name():
 
     assert rehint_program(graph, {}).nodes["x"].outputs[0].shape[0].hint == 2
     assert rehint_program(graph, {"keys": 100}).nodes["x"].outputs[0].shape[0].hint == 4
+
+
+def test_rehint_program_rehints_the_loops_of_a_loop_ir_body():
+    """A stored kernel's loops take the sizes too, not only its buffers: a loop keeping the hint its program was
+    stored at gives a cut's intermediate that hint, and a piece's row is filed at sizes it never ran at."""
+    keys = Dim("keys", hint=64)
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (keys,)), node_id="x")
+    body = Body(parse_body("for a0 in 0..keys~64:\n  in0 = load x[a0]\n  y[a0] = in0"))
+    graph.add_node(LoopOp(body=body), ["x"], Tensor("y", (keys,)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+
+    rehinted = rehint_program(graph, {"keys": 100})
+
+    assert [loop.axis.extent.hint for loop in rehinted.nodes["y"].op.body.loops] == [100]
 
 
 def test_specialize_program_rejects_invalid_binding_values():
