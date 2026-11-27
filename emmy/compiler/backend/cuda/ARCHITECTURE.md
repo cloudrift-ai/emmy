@@ -226,6 +226,13 @@ row (`SearchDB.record_perf`): captured measurements supersede wall-semantics one
 regardless of median, never the reverse — old rows stay usable (replay, prior training) and upgrade
 in place as re-tunes measure them captured. See `tests/compiler/backend/test_graph_capture.py`.
 
+**Bench inputs (`bench_lowered_vs_torch`).** A kernel benched apart from its program draws its inputs at random, so
+three kinds are set instead. The rows a scatter writes (a scatter node's index, or the input a kernel's store indexes
+by) are drawn distinct, as a slot mapping is. An input a kernel reads as where a range ends (a causal step's position,
+or a cut piece's copy of it) takes the value at which its last row walks to the end, so a piece is timed at its
+program's window and not at a few keys. The Torch closure is captured after a garbage collection: a dead Inductor
+kernel's finalizer unloads its CUDA module, which CUDA refuses while a stream captures.
+
 **Whole-program (e2e) windows.** The per-launch windows each replay a *single* kernel back-to-back, so
 their sum is not an end-to-end time: it misses cross-kernel cache effects and inter-kernel gaps, and on
 multi-kernel programs individual per-launch numbers can mis-attribute wildly (two identical-work gemms in
