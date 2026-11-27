@@ -155,3 +155,23 @@ def test_a_programs_tune_prices_an_arm_the_compile_did_not_take_from_its_kernels
         assert identities(kernel_set(case.program(), ctx, db)) == identities(first)
         measure(other, 1.0)
         assert identities(kernel_set(case.program(), ctx, db)) == identities(other), "the measured arm must be taken"
+
+
+def test_a_kernel_alone_keeps_the_paging_of_the_buffers_it_reads():
+    """A paged buffer takes fewer schedules (no TMA), so a kernel tuned alone must stay paged as its program
+    declares, or its rows are schedules the program's compile never offers."""
+    from emmy.compiler.pipeline.search.autotune import kernel_set
+    from emmy.compiler.pipeline.search.pins import unpinned_decisions
+    from tests.compiler.pipeline.search.helpers import CARDS
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision={})
+    program = case.program()
+    name = program.inputs[0]
+    program.hints.set("cuda.paged_buffers", ((name, 0, 1), ("absent", 0, 1)))
+    with pinned_knobs(case.regime), unpinned_decisions():
+        found = kernel_set(program, ctx, None)
+    reading = [alone for _, alone in found.kernels if alone.buffer(name) is not None]
+    assert reading, "some kernel of the set reads the paged input"
+    assert all(alone.hints.get("cuda.paged_buffers", ()) == ((name, 0, 1),) for alone in reading)

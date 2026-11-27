@@ -244,25 +244,27 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
         asyncio.run(check())
 
 
-@pytest.mark.parametrize("experts_gpu", [None, 4, 1])
-def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, experts_gpu):
+@pytest.mark.parametrize(("experts_gpu", "prefill_size"), [(None, 2), (4, 2), (1, 2), (None, 8), (4, 8), (1, 8)])
+def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, experts_gpu, prefill_size):
     """Native MoE's gate on a tiny Qwen3.5-MoE whose two full-attention layers each carry eight
     routed experts (two per token) and the gated shared expert: every logit matches transformers'
     and every greedy token is its own, through sequential and chunked prefill, with capture on and
-    off; a request after a reset repeats the first. A chunk runs the fixed-slot program once over
+    off; a request after a reset repeats the first. A two-row chunk runs the fixed-slot program once over
     all its rows, and the four-token prompt's second chunk ends at its last token and generates the
-    first. The device holds every expert, or four or one of them per layer: then the pager
+    first; an eight-row chunk's picks outnumber the blocks they fill, so it runs its experts in blocks of one
+    expert. The device holds every expert, or four or one of them per layer: then the pager
     moves the experts the router picks into the slots, and with one slot the other picks are read
     in place from host memory. The experts are wide, so they dominate the worker's memory, and the
     host holds them once: the heap keeps no copy, and the load's peak never passes through one.
 
     The layers are attention only: without evidence a Gated DeltaNet layer's kernels take minutes
     to compile (the dense Qwen3.5 gate above), and a MoE layer's routed half is the same programs
-    after either mixer."""
+    after either mixer. Fast math is off: the logits are held to transformers' at 1e-3."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
     monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     if experts_gpu is not None:
         monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(experts_gpu))
     context = 10
@@ -270,7 +272,7 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
     model.config._attn_implementation = "eager"
     experts = sum(t.nbytes for layer in model.model.layers for t in (layer.mlp.experts.gate_up_proj, layer.mlp.experts.down_proj))
     with gpu_lock():
-        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=2)
+        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=prefill_size)
         monkeypatch.setenv("PATH", "/nonexistent")
 
         def reference(prefix):
