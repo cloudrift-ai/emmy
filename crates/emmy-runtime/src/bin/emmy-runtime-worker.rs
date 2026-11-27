@@ -8,10 +8,10 @@ use emmy_runtime::{
     vision::Image,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -106,11 +106,193 @@ fn drafting() -> bool {
     true
 }
 
-fn read_tokens(path: &PathBuf) -> Result<Vec<i64>> {
+fn read_tokens(path: &Path) -> Result<Vec<i64>> {
     let bytes = std::fs::read(path)?;
     let (tokens, remainder) = bytes.as_chunks::<TOKEN_BYTES>();
     ensure!(remainder.is_empty(), "invalid token payload size");
     Ok(tokens.iter().map(|&b| i64::from_le_bytes(b)).collect())
+}
+
+/// Persistent execution state. Programs drop before the device they use.
+#[derive(Default)]
+struct Worker {
+    generator: Option<Generator>,
+    executor: Option<Executor>,
+    context: Option<Device>,
+}
+
+impl Worker {
+    fn handle(&mut self, frame: &[u8]) -> Result<Value> {
+        let request: Request = serde_json::from_slice(frame)?;
+        ensure!(
+            request.version == PROTOCOL_VERSION,
+            "unsupported control protocol version"
+        );
+        match request.command {
+            Command::Load { root, program } => self.load(&root, &program),
+            Command::Bind { inputs } => self.bind(inputs),
+            Command::Run {
+                warmup,
+                iterations,
+                capture,
+                outputs,
+            } => self.run(warmup, iterations, capture, outputs),
+            Command::LoadGeneration { root, draft } => self.load_generation(&root, draft),
+            Command::StartGeneration {
+                prompt,
+                sampling,
+                image,
+            } => self.start_generation(&prompt, sampling, image),
+            Command::GenerationStep {
+                capture,
+                prefill,
+                logits,
+            } => self.generation_step(capture, prefill, logits),
+            Command::Generate {
+                prompt,
+                max_new_tokens,
+                sampling,
+                capture,
+                output,
+            } => self.generate(&prompt, max_new_tokens, sampling, capture, &output),
+            Command::Release => {
+                self.release();
+                Ok(json!({"released": true}))
+            }
+        }
+    }
+
+    fn device(&mut self) -> Result<&Device> {
+        match self.context {
+            Some(ref device) => Ok(device),
+            None => Ok(self.context.insert(Device::new(GPU_ORDINAL)?)),
+        }
+    }
+
+    fn release(&mut self) {
+        self.generator = None;
+        self.executor = None;
+    }
+
+    fn load(&mut self, root: &Path, program: &str) -> Result<Value> {
+        let started = Instant::now();
+        let artifact = Artifact::load(root, program)?;
+        let artifact_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
+        self.release();
+        let started = Instant::now();
+        let device = self.device()?;
+        let context_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
+        let executor = Executor::load(device, artifact)?;
+        let response = json!({"loaded": true, "artifact_ms": artifact_ms, "context_ms": context_ms,
+            "load_times_ms": executor.load_times_ms});
+        self.executor = Some(executor);
+        Ok(response)
+    }
+
+    fn bind(&mut self, inputs: BTreeMap<String, PathBuf>) -> Result<Value> {
+        let executor = self.executor.as_mut().context("no loaded program")?;
+        for (name, path) in inputs {
+            executor.bind(&name, &std::fs::read(path)?)?;
+        }
+        Ok(json!({"bound": true}))
+    }
+
+    fn run(
+        &mut self,
+        warmup: u32,
+        iterations: u32,
+        capture: bool,
+        outputs: BTreeMap<String, PathBuf>,
+    ) -> Result<Value> {
+        let executor = self.executor.as_mut().context("no loaded program")?;
+        let metrics = executor.execute(warmup, iterations, capture)?;
+        let started = Instant::now();
+        for (name, path) in outputs {
+            std::fs::write(path, executor.output(&name)?)?;
+        }
+        Ok(
+            json!({"time_ms": metrics.time_ms, "captured": capture, "metrics": metrics,
+            "output_ms": started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND}),
+        )
+    }
+
+    fn load_generation(&mut self, root: &Path, draft: bool) -> Result<Value> {
+        self.release();
+        self.generator = Some(Generator::load(self.device()?, root, draft)?);
+        Ok(json!({"loaded": true}))
+    }
+
+    fn start_generation(
+        &mut self,
+        prompt: &Path,
+        sampling: Sampling,
+        image: Option<ImageFiles>,
+    ) -> Result<Value> {
+        let generator = self.generator.as_mut().context("no loaded generator")?;
+        let prompt = read_tokens(prompt)?;
+        match image {
+            None => generator.start(&prompt, sampling)?,
+            Some(files) => {
+                let positions = read_tokens(&files.positions)?;
+                ensure!(positions.len() % 3 == 0, "invalid M-RoPE positions");
+                let inputs = files
+                    .inputs
+                    .iter()
+                    .map(|(name, path)| Ok((name.clone(), std::fs::read(path)?)))
+                    .collect::<Result<_>>()?;
+                let image = Image {
+                    tokens: files.tokens,
+                    inputs,
+                    positions: positions.as_chunks::<3>().0.to_vec(),
+                };
+                generator.start_image(&prompt, &image, files.capture, sampling)?;
+            }
+        }
+        Ok(json!({"started": true}))
+    }
+
+    fn generation_step(
+        &mut self,
+        capture: bool,
+        prefill: bool,
+        logits: Option<PathBuf>,
+    ) -> Result<Value> {
+        let generator = self.generator.as_mut().context("no loaded generator")?;
+        let tokens = if prefill {
+            generator.advance(capture, false)?
+        } else {
+            generator.step(capture, false)?.into_iter().collect()
+        };
+        // The logits of each generated token's row: none for a chunk that generated none.
+        if let Some(path) = logits
+            && (!prefill || !tokens.is_empty())
+        {
+            std::fs::write(path, generator.logits()?)?;
+        }
+        Ok(json!({"tokens": tokens, "position": generator.position()}))
+    }
+
+    fn generate(
+        &mut self,
+        prompt: &Path,
+        max_new_tokens: usize,
+        sampling: Sampling,
+        capture: bool,
+        output: &Path,
+    ) -> Result<Value> {
+        let tokens = self
+            .generator
+            .as_mut()
+            .context("no loaded generator")?
+            .generate(&read_tokens(prompt)?, max_new_tokens, capture, sampling)?;
+        let bytes: Vec<u8> = tokens.iter().flat_map(|(t, _)| t.to_le_bytes()).collect();
+        std::fs::write(output, bytes)?;
+        let token_ms: Vec<f64> = tokens
+            .iter()
+            .map(|(_, at)| at.as_secs_f64() * MILLISECONDS_PER_SECOND)
+            .collect();
+        Ok(json!({"generated_tokens": tokens.len(), "token_ms": token_ms}))
+    }
 }
 
 fn main() -> Result<()> {
@@ -120,139 +302,9 @@ fn main() -> Result<()> {
     );
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
-    let mut context = None;
-    let mut executor: Option<Executor> = None;
-    let mut generator: Option<Generator> = None;
+    let mut worker = Worker::default();
     while let Some(frame) = read_frame(&mut input)? {
-        let response = (|| -> Result<serde_json::Value> {
-            let request: Request = serde_json::from_slice(&frame)?;
-            ensure!(
-                request.version == PROTOCOL_VERSION,
-                "unsupported control protocol version"
-            );
-            match request.command {
-                Command::Load { root, program } => {
-                    let started = Instant::now();
-                    let artifact = Artifact::load(&root, &program)?;
-                    let artifact_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
-                    executor = None;
-                    generator = None;
-                    let started = Instant::now();
-                    if context.is_none() {
-                        context = Some(Device::new(GPU_ORDINAL)?);
-                    }
-                    let context_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
-                    executor = Some(Executor::load(context.as_ref().unwrap(), artifact)?);
-                    Ok(
-                        json!({"loaded": true, "artifact_ms": artifact_ms, "context_ms": context_ms,
-                        "load_times_ms": executor.as_ref().unwrap().load_times_ms}),
-                    )
-                }
-                Command::Bind { inputs } => {
-                    let executor = executor.as_mut().context("no loaded program")?;
-                    for (name, path) in inputs {
-                        executor.bind(&name, &std::fs::read(path)?)?;
-                    }
-                    Ok(json!({"bound": true}))
-                }
-                Command::Run {
-                    warmup,
-                    iterations,
-                    capture,
-                    outputs,
-                } => {
-                    let executor = executor.as_mut().context("no loaded program")?;
-                    let metrics = executor.execute(warmup, iterations, capture)?;
-                    let started = Instant::now();
-                    for (name, path) in outputs {
-                        std::fs::write(path, executor.output(&name)?)?;
-                    }
-                    Ok(
-                        json!({"time_ms": metrics.time_ms, "captured": capture, "metrics": metrics,
-                        "output_ms": started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND}),
-                    )
-                }
-                Command::LoadGeneration { root, draft } => {
-                    executor = None;
-                    generator = None;
-                    if context.is_none() {
-                        context = Some(Device::new(GPU_ORDINAL)?);
-                    }
-                    generator = Some(Generator::load(context.as_ref().unwrap(), &root, draft)?);
-                    Ok(json!({"loaded": true}))
-                }
-                Command::StartGeneration {
-                    prompt,
-                    sampling,
-                    image,
-                } => {
-                    let generator = generator.as_mut().context("no loaded generator")?;
-                    let prompt = read_tokens(&prompt)?;
-                    match image {
-                        None => generator.start(&prompt, sampling)?,
-                        Some(files) => {
-                            let positions = read_tokens(&files.positions)?;
-                            ensure!(positions.len() % 3 == 0, "invalid M-RoPE positions");
-                            let inputs = files
-                                .inputs
-                                .iter()
-                                .map(|(name, path)| Ok((name.clone(), std::fs::read(path)?)))
-                                .collect::<Result<_>>()?;
-                            let image = Image {
-                                tokens: files.tokens,
-                                inputs,
-                                positions: positions.as_chunks::<3>().0.to_vec(),
-                            };
-                            generator.start_image(&prompt, &image, files.capture, sampling)?;
-                        }
-                    }
-                    Ok(json!({"started": true}))
-                }
-                Command::GenerationStep {
-                    capture,
-                    prefill,
-                    logits,
-                } => {
-                    let generator = generator.as_mut().context("no loaded generator")?;
-                    let tokens = if prefill {
-                        generator.advance(capture, false)?
-                    } else {
-                        generator.step(capture, false)?.into_iter().collect()
-                    };
-                    // The logits of each generated token's row: none for a chunk that generated none.
-                    if let Some(path) = logits
-                        && (!prefill || !tokens.is_empty())
-                    {
-                        std::fs::write(path, generator.logits()?)?;
-                    }
-                    Ok(json!({"tokens": tokens, "position": generator.position()}))
-                }
-                Command::Generate {
-                    prompt,
-                    max_new_tokens,
-                    sampling,
-                    capture,
-                    output,
-                } => {
-                    let tokens = generator
-                        .as_mut()
-                        .context("no loaded generator")?
-                        .generate(&read_tokens(&prompt)?, max_new_tokens, capture, sampling)?;
-                    let bytes: Vec<u8> = tokens.iter().flat_map(|(t, _)| t.to_le_bytes()).collect();
-                    std::fs::write(output, bytes)?;
-                    let token_ms: Vec<f64> = tokens
-                        .iter()
-                        .map(|(_, at)| at.as_secs_f64() * MILLISECONDS_PER_SECOND)
-                        .collect();
-                    Ok(json!({"generated_tokens": tokens.len(), "token_ms": token_ms}))
-                }
-                Command::Release => {
-                    generator = None;
-                    executor = None;
-                    Ok(json!({"released": true}))
-                }
-            }
-        })();
+        let response = worker.handle(&frame);
         let failed = response.is_err();
         let value = match response {
             Ok(value) => json!({"version": PROTOCOL_VERSION, "result": value}),

@@ -157473,7 +157473,9 @@
   {"parent":2181,"arm":{"PLACE@inner.1/map.1/inner.1/map":"cut"},"children":[2183,2184]},
   {"parent":2184,"arm":{"PLACE@inner.1/map.1/inner":"cut"},"children":[2185,2186]},
   {"parent":2189,"arm":{"PLACE@map.1/map.1/reduce":"cut","PLACE@map.1/map.1/reduce.1/inner":"cut","PLACE@map.1/map.2/reduce.1/inner":"cut","PLACE@map.1/map.2/reduce.1/inner.1/map":"cut","PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map":"cut"},"children":[2190,2191,2192,2193,2194,2195]},
-  {"parent":2196,"arm":{"PLACE@map.1/map.1/reduce":"cut","PLACE@map.1/map.1/reduce.1/inner":"cut","PLACE@map.1/map.2/reduce.1/inner":"cut","PLACE@map.1/map.2/reduce.1/inner.1/map":"cut","PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map":"cut"},"children":[2197,2191,2192,2193,2194,2195]}
+  {"parent":2196,"arm":{"PLACE@map.1/map.1/reduce":"cut","PLACE@map.1/map.1/reduce.1/inner":"cut","PLACE@map.1/map.2/reduce.1/inner":"cut","PLACE@map.1/map.2/reduce.1/inner.1/map":"cut","PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map":"cut"},"children":[2197,2191,2192,2193,2194,2195]},
+  {"parent":245,"arm":{"REDUCE@map.1/scan":"g16k4"},"children":[246,247,180,181,182,183,185,186,187,188,248,249,250,251,252,253]},
+  {"parent":280,"arm":{"REDUCE@map.1/scan":"g4k2"},"children":[281,282,182,183,187,188,248,249,250,283]}
  ],
  "rows": [
   {"name":"linear.down.h4096.dynM.c0",
