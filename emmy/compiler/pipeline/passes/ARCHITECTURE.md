@@ -113,7 +113,13 @@ storage, one launch per step, is the third value.
 pass runs to a fixpoint over three ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
 and realization must agree). Neither is a seam whose cone holds the only term defining a value the kernel stores: the
-consumer reads back only what the cone exposes, so the cut would leave that store naming nothing. Once placement is consumed, a weight whose constant ends in a rank-two transpose offers
+consumer reads back only what the cone exposes, so the cut would leave that store naming nothing. Nor is a seam whose
+cut alone hands one piece the kernel itself: the cone computes every value the kernel stores, and its workspace is
+typed and laid out as the kernel's own outputs, so what is left only copies it out. A piece an output-owning cut left
+stands this way, its root handing one cone's results to the stores. Such a cut is no decision, and a stored decision
+whose piece is its parent would price itself without end, which the tune DB refuses to store. Where the workspace
+differs from the outputs (FP32 sums ahead of a BF16 output) the cone's kernel is another kernel and the seam stays
+offered. Once placement is consumed, a weight whose constant ends in a rank-two transpose offers
 its folded layout beside the source storage layout, with its loads addressed through the source shape. Weights with
 equal read expressions can choose the source layout together. The source arm forms a fresh kernel so its schedule row
 cannot be mistaken for the folded arm's row. Only after those choices does the pass offer the unsplit tree beside every

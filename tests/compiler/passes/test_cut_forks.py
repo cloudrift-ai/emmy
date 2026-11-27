@@ -3007,3 +3007,65 @@ def test_the_row_abstraction_keeps_a_float_offset() -> None:
     assert _affine_sum(parse("2 * a0 + 0.25")) != _affine_sum(parse("2 * a0 + 0.75"))
     assert _affine_sum(parse("2 * a0 + 0.25")) == _affine_sum(parse("0.25 + a0 * 2"))
     assert _affine_sum(parse("2 * a0 + 3")) == _affine_sum(parse("3 + a0 * 2"))
+
+
+def _piece_of_two_sums(dtype: str) -> tuple[Match, object, str]:
+    """A kernel as an output-owning cut leaves a piece: its root only hands one contraction's two sums to the stores,
+    in the stores' order (``_cut._region_term``). The outputs are ``dtype``; the sums are FP32. Returns the match, the
+    kernel's node and the kernel's exact identity."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline.passes.tile._cut import _region_term
+
+    body = """
+for a0 in 0..64:
+  in5 = load s[a0]
+  v2 = rsqrt(in5)
+  for a1 in 0..128:
+    for a2 in 0..256:
+      in0 = load x[a0, a2]
+      v3 = in0 * v2
+      in1 = load k[a1, a2]
+      in2 = load v[a1, a2]
+      v0 = in1 * v3
+      v1 = in2 * v3
+      acc0 <- add(acc0, v0) over a2
+      acc1 <- add(acc1, v1) over a2
+    out_k[a0, a1] = acc0
+    out_v[a0, a1] = acc1
+"""
+    graph = Graph()
+    for name, shape in (("s", (64,)), ("x", (64, 256)), ("k", (128, 256)), ("v", (128, 256))):
+        _input(graph, name, shape, "f32")
+    outputs = (Tensor("out_k", (64, 128), dtype), Tensor("out_v", (64, 128), dtype))
+    graph.add_node(LoopOp(body=parse_body(body)), ["s", "x", "k", "v"], outputs=outputs, node_id="out_k")
+    graph.inputs, graph.outputs = ["s", "x", "k", "v"], ["out_k", "out_v"]
+    lifted = Pipeline.build(["tile/lift"]).run(graph, ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    stores = tuple(reversed(root.op.output_specs))
+    root.op = replace(root.op, op=_region_term((root.op.op,), (), stores), output_specs=stores).with_io(lifted, root)
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    return match, root, root.op.identity_key(structural=False, with_io=True)
+
+
+def _piece_identities(fragment: Graph) -> list[str]:
+    pieces = [node.op.with_io(fragment, node) for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    return [piece.identity_key(structural=False, with_io=True) for piece in pieces]
+
+
+def test_no_cut_hands_the_kernel_back_as_one_of_its_pieces() -> None:
+    """A piece whose root only hands one cone's results to the stores has that cone as a seam. Cutting it there makes
+    the cone a kernel that writes a workspace typed and laid out as the piece's own outputs, which is the piece
+    again, and leaves a copy. A tune stored that as a decision whose piece is its parent, and every later compile
+    that priced the kernel ran without end. The cut is not offered. Where the outputs are BF16 the same seam is a
+    cut: the cone's kernel stores FP32 sums, another kernel, and what is left converts them."""
+    seam = {"PLACE@map.1/inner": "cut"}
+
+    match, root, whole = _piece_of_two_sums("f32")
+    cuts = [arm for arm in _CUT.rewrite(match, root) if "cut" in arm.knobs.values()]
+    assert cuts and seam not in [dict(arm.knobs) for arm in cuts]
+    assert all(whole not in _piece_identities(arm.materialize()) for arm in cuts)
+
+    match, root, whole = _piece_of_two_sums("bf16")
+    (kept,) = [arm for arm in _CUT.rewrite(match, root) if dict(arm.knobs) == seam]
+    pieces = _piece_identities(kept.materialize())
+    assert len(pieces) == 2 and whole not in pieces

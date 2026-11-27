@@ -2436,6 +2436,23 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     return _marked(fragment)
 
 
+def hands_the_kernel_back(match: Match, root: Node, seam: CutSite) -> bool:
+    """Whether cutting ``seam`` alone leaves one piece the kernel itself. That is so where the cone computes every
+    value the kernel stores and its workspace is typed and laid out as the kernel's own outputs: what is left only
+    copies the workspace out. A piece an output-owning cut made stands this way, its root handing one cone's
+    results to the stores. Such a cut is no decision: its price is the kernel's own plus a copy, and a stored
+    decision whose piece is its parent prices itself without end. A cone whose workspace differs from the outputs
+    (an FP32 accumulator stored ahead of a BF16 output) makes another kernel, and that cut is one."""
+    tile: TileOp = root.op
+    coordinates = {axis.name for axis in tile.axes}
+    if seam.owned is not None or not _stored_values(tile) - coordinates <= set(seam.node.exposes):
+        return False
+    whole = tile.with_io(match.graph, root).identity_key(structural=False, with_io=True)
+    fragment = realize(match, root, (seam,))
+    pieces = [node.op.with_io(fragment, node) for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    return any(piece.identity_key(structural=False, with_io=True) == whole for piece in pieces)
+
+
 def _marked(fragment: Graph) -> Graph:
     """``fragment`` with every kernel it holds marked a piece of a cut (:data:`PIECE`)."""
     for node in fragment.nodes.values():
@@ -2624,6 +2641,7 @@ __all__ = [
     "Frontier",
     "cuttable_seams",
     "full_projection_seams",
+    "hands_the_kernel_back",
     "join_pairs",
     "joined_halves",
     "joined_spelling",

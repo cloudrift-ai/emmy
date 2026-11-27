@@ -20,6 +20,7 @@ from emmy.compiler.pipeline.passes.tile._cut import (
     PIECE,
     cuttable_seams,
     full_projection_seams,
+    hands_the_kernel_back,
     join_pairs,
     joined_halves,
     joined_spelling,
@@ -238,7 +239,7 @@ def _composed_forks(root: Node, tile: TileOp, seams, ctx, mint) -> list[Deferred
 
 def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
     """Return the next stored-edge cut fork, or ``None`` when that domain is consumed."""
-    seams = cuttable_seams(tile)
+    seams = tuple(seam for seam in cuttable_seams(tile) if not hands_the_kernel_back(match, root, seam))
     if not seams:
         return None
 
