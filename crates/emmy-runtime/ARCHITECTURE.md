@@ -346,7 +346,9 @@ context. A window replays its own graph (`Executor` keeps one per environment), 
 attention program once per range of windows, each priced at one window of its range (the native export's
 `WINDOW_RANGES`), and each of their launches names its range (`size_range`, the size it reads and its first and last
 value): the executor skips a launch whose range misses the environment, so a window's graph holds its range's
-attention alone. The ranges' scratch shares one slab by liveness, since they run one after the other.
+attention alone. The ranges' scratch shares one slab by liveness, since they run one after the other, and a
+scratch buffer only one range's launches use is sized at that range's last window, not at the context
+(`Program::sizing_env`): a cut's scores between two attention pieces need room only for the windows it runs at.
 Nothing the device runs is hand-written. Its explicit `ignore_eos` control permits fixed-output serving benchmarks to
 continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete prompt/decode loop
 and stops at EOS or the requested output count, and returns each token with the time since the request started at
