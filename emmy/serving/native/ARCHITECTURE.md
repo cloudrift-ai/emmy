@@ -117,9 +117,15 @@ paged (below). A MoE layer's section of the step is four programs in sequence, e
    fails there, as greedy selection fails any nonfinite step.
 3. The fixed-slot program of the vLLM plugin (`ExpertFFN.slots`) gathers each row's `k` experts from the stacked
    weights by its picks and writes their outputs (`layer{i}.partials`, `rows × k × hidden`; one row's are
-   `k × hidden`). A decode step runs the plugin's own one-row program, one of its twins. A prefill chunk runs the same
-   form over all its rows at once, the products batched over the rows as well as the picks, so a chunk's experts are
-   one program, not one per row.
+   `k × hidden`). A decode step runs the plugin's own one-row program, one of its twins. A narrow prefill chunk runs
+   the same form over all its rows at once, the products batched over the rows as well as the picks, so a chunk's
+   experts are one program, not one per row. That form reads one expert's weights per pick, rows × `k` of them. A
+   chunk wide enough that its picks outnumber the blocks below runs the grouped form instead, which reads each expert
+   it reaches once: a `group` program sorts the picks into blocks of one expert each (a block holds twice the mean
+   picks per expert; each expert takes as many blocks as its picks fill, `owner` names each block's expert and `place`
+   each pick's slot), and the grouped expert program runs every block over its expert's weights, writing one output
+   per place. On Qwen3.6 that is 64, 256 and 1,024 rows. The combine reads each pick's output by its place: in one
+   program, fusion would compose the place gather with the block reads and fold the blocks back into reads per pick.
 4. The combine multiplies each row's scores by its partials and adds the result to the residual, in the model dtype,
    as the plugin's fixed-slot combine does, and writes the layer's output.
 
@@ -148,7 +154,11 @@ declares both to the pager with the page count, page size, slots and resident co
 both programs as they load (runtime `ARCHITECTURE.md`, "Cached generation"). The host therefore holds only the experts
 off the device, once, and the device holds the resident experts and the slots once; the trunk, the KV cache and the
 Gated DeltaNet state stay where they are. A prefill chunk lists more experts than the slots hold, and reads the misses
-past them in place over the link. The budget is fixed at preparation: a reused pack keeps the slots and resident experts
+past them in place over the link. That read is the cost of a wide chunk: a 1,024-row Qwen3.6 chunk reaches nearly
+every expert, and its expert programs take about 17 ms a layer on the RTX 5090, against 1.8 ms on resident pages.
+A golden's traced program does not keep the paging, and a paged operand takes no TMA schedule, so a tune or record of
+a paged expert twin names its four inputs (`emmy run --golden ... --paged w_gate_up --paged w_down --paged
+w_gate_up_scale --paged w_down_scale`); rows timed without it are schedules the export never offers. The budget is fixed at preparation: a reused pack keeps the slots and resident experts
 it was prepared with. A layer's expert buffers share one page list, and its two expert launches read one selection,
 so the layer takes one paging run for both: an inspector per launch, 12 launches of decisions and state update, then
 a page table update and a copy per buffer (3 each). A paged layer adds 20 launches per step with 16-bit experts and 26
@@ -390,8 +400,10 @@ emmy generate Qwen/Qwen3-0.6B --revision REVISION --native-pack /tmp/qwen-native
 ```
 
 `generate --export-native` and native serving preparation accept `--prefill-size N`; one selects sequential prefill.
-A width above the plugin's chunk keeps that chunk as a tail width, and a recipe's serving config names it
-(`SERVE_NATIVE_PREFILL`), so the golden holds the trunk's twins and native's own programs at it.
+A width above the plugin's chunk keeps that chunk as a tail width, and each quarter of the width that stays above
+the plugin's chunk too (1,024 keeps 256 and 64): carried Gated DeltaNet state forbids padding a chunk past the prompt,
+so the tail runs narrower. A recipe's serving config names the width (`SERVE_NATIVE_PREFILL`), so the golden holds
+the trunk's twins and native's own programs at every width it keeps.
 The width is capped at the context capacity and stored in the artifact; it cannot change when loading an existing pack.
 Use the same checkpoint/tokenizer revision for preparation and text generation. The runtime artifact accepts and returns
 token IDs. Native serving preparation additionally bundles the same
