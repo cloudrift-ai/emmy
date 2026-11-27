@@ -1108,7 +1108,7 @@ impl Executor {
                 continue;
             }
             let placement = self.placement(&buffer.name)?;
-            let need = buffer.byte_len(&merged)?;
+            let need = buffer.byte_len(&self.program.sizing_env(&buffer.name, &merged))?;
             ensure!(
                 need <= placement.bytes,
                 "buffer {} resolves to {need} bytes past its capacity of {}",

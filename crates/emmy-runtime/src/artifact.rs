@@ -8,6 +8,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -411,6 +412,9 @@ pub struct Program {
     /// Each buffer's index in `buffers`, by name: a plan holds a hundred thousand buffers and more,
     /// and every lookup by name would otherwise scan them.
     positions: HashMap<String, usize>,
+    /// Each scratch buffer whose every launch runs in a range of one symbolic size: that size and
+    /// the last value any of them runs at.
+    ranged: HashMap<String, (String, i64)>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -657,10 +661,12 @@ impl Program {
             hints: symbols.hints,
             caps: symbols.caps,
             positions: HashMap::new(),
+            ranged: HashMap::new(),
         };
         program.positions = (program.buffers.iter().enumerate())
             .map(|(index, buffer)| (buffer.name.clone(), index))
             .collect();
+        program.ranged = program.ranged_scratch();
         program.validate()?;
         Ok(program)
     }
@@ -860,6 +866,47 @@ impl Program {
         Ok(())
     }
 
+    /// The environment scratch buffer `name` is sized at: `env`, its launches' sized axis held to
+    /// the last value they run at. No launch uses the buffer past it: an attention program's
+    /// scores, which runs in its range of windows, need no room for the whole context.
+    pub fn sizing_env<'a>(&self, name: &str, env: &'a Env) -> Cow<'a, Env> {
+        match self.ranged.get(name) {
+            Some((axis, last)) if env.get(axis).is_some_and(|size| size > last) => {
+                let mut held = env.clone();
+                held.insert(axis.clone(), *last);
+                Cow::Owned(held)
+            }
+            _ => Cow::Borrowed(env),
+        }
+    }
+
+    fn ranged_scratch(&self) -> HashMap<String, (String, i64)> {
+        let mut seen: HashMap<&str, Option<(&str, i64)>> = HashMap::new();
+        for launch in &self.launches {
+            let range = (launch.size_range.as_ref()).map(|(axis, _, last)| (axis.as_str(), *last));
+            let writes = if launch.writes.is_empty() {
+                std::slice::from_ref(&launch.node_id)
+            } else {
+                launch.writes.as_slice()
+            };
+            let touched = (launch.args.iter().chain(writes))
+                .chain(launch.zero_outputs.iter().chain(&launch.zero_prologues))
+                .map(String::as_str)
+                .chain(launch.tma.iter().map(|t| t.src_buf.as_str()));
+            for name in touched {
+                let entry = seen.entry(name).or_insert(range);
+                *entry = match (*entry, range) {
+                    (Some((a, x)), Some((b, y))) if a == b => Some((a, x.max(y))),
+                    _ => None,
+                };
+            }
+        }
+        (seen.into_iter())
+            .filter(|(name, _)| self.buffer(name).is_ok_and(|b| b.role == "scratch"))
+            .filter_map(|(name, range)| range.map(|(axis, last)| (name.to_owned(), (axis.to_owned(), last))))
+            .collect()
+    }
+
     /// The environment a program runs at when nothing binds its axes: every hint.
     pub fn default_env(&self) -> Env {
         self.hints.clone()
@@ -962,21 +1009,21 @@ impl Program {
             let group = grouped.entry(root.to_owned()).or_insert((first, free));
             *group = (group.0.min(first), group.1.max(free));
             let size = sizes.entry(root).or_insert(0);
-            *size = (*size).max(self.buffer(name)?.byte_len(env)?);
+            *size = (*size).max(self.buffer(name)?.byte_len(&self.sizing_env(name, env))?);
         }
         let (offsets, total) = plan_offsets(&grouped, &sizes);
         layout
             .regions
             .insert(SCRATCH_REGION.to_owned(), total.max(1));
         for name in &members {
-            let buffer = self.buffer(name)?;
+            let (buffer, env) = (self.buffer(name)?, self.sizing_env(name, env));
             layout.buffers.insert(
                 (*name).to_owned(),
                 Placement {
                     region: SCRATCH_REGION.to_owned(),
                     offset: offsets[roots[name]],
-                    bytes: buffer.byte_len(env)?,
-                    shape: buffer.resolve_shape(env)?,
+                    bytes: buffer.byte_len(&env)?,
+                    shape: buffer.resolve_shape(&env)?,
                 },
             );
         }
@@ -1281,6 +1328,37 @@ mod tests {
         let mut unknown = example();
         unknown["launches"][0]["unrecognized_abi"] = json!(true);
         assert!(Program::parse(&unknown.to_string()).is_err());
+    }
+
+    #[test]
+    fn scratch_only_ranged_launches_use_is_sized_at_their_last_size() {
+        // Two attention programs over the window `n`, sized at the whole context: the short one's
+        // scores need room only for the windows it runs at.
+        let launch = |id: &str, args: [&str; 2], last: i64| {
+            json!({"node_id": id, "kernel": "k", "args": args, "grid": [[1], [1], [1]],
+                "block": [[32], [1], [1]], "size_range": ["n", 1, last], "cuda": {"tma": []}})
+        };
+        let plan = json!({
+            "format": 1, "backend": "cuda", "inputs": ["q"], "outputs": ["y"],
+            "buffers": [
+                {"name": "q", "shape": [4], "dtype": "f32", "role": "input"},
+                {"name": "y", "shape": [4], "dtype": "f32", "role": "output"},
+                {"name": "s", "shape": [2, "n"], "dtype": "f32", "role": "scratch"}
+            ],
+            "kernels": {"k": {"binary_key": "ab"}},
+            "symbols": {"bindings": {}, "hints": {"n": 1024}, "caps": {}},
+            "launches": [launch("s", ["q", "s"], 64), launch("y", ["s", "y"], 64)]
+        });
+        let program = Program::parse(&plan.to_string()).unwrap();
+        let layout = program.layout(&program.default_env()).unwrap();
+        assert_eq!(layout.regions[SCRATCH_REGION], 2 * 64 * 4);
+        assert_eq!(layout.buffers["s"].shape, [2, 64]);
+        // A launch that runs at every size sizes it at the env again.
+        let mut open = plan.clone();
+        open["launches"][1].as_object_mut().unwrap().remove("size_range");
+        let program = Program::parse(&open.to_string()).unwrap();
+        let layout = program.layout(&program.default_env()).unwrap();
+        assert_eq!(layout.regions[SCRATCH_REGION], 2 * 1024 * 4);
     }
 
     /// `y = x * w` on the CPU, split over a runtime-sized axis.
