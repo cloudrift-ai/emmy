@@ -710,7 +710,7 @@ What the session changes for the milestones:
     launches use is now sized at their last window. The strict pack exports, the audit deploys 102 of 102 twins
     from the golden alone, and the recipe serves 1,024-row chunks. Strict pack against main's 64-row pack, same
     card: first token 1.84 -> 0.72 s at 256 tokens (bar 0.58), 52.9 -> 12.8 s at 7,680 (bar 4.4); TPOT 8.42 ->
-    9.04 ms at 256 (bar 13.2), 7.86 -> 8.56 at 7,680. Card 23.5 -> 31.4 GB of 32.6 at rest, host 19 GB. The
+    9.04 ms at 256 (bar 13.2), 7.86 -> 8.56 at 7,680. Card 23.0 -> 30.7 GiB of 31.8 at rest, host 19 GB. The
     strict pack is slower than the non-strict one above (0.40 s, 7.31 s): ~0.7 s more per 1,024-row chunk, far
     more than all its attention (~7 ms). Not profiled; first step of the next card run. Tokens: real text agrees
     on 3 of 7 prompts' first words and parts after 0 to ~15 tokens on 4; not shown to be rounding.

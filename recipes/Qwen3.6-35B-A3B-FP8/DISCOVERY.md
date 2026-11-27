@@ -20,7 +20,7 @@ of 256 tokens, 5 of 7,680. Medians:
 | first token, 7,680 tokens | 52.9 s | 12.8 s | 4.4 s |
 | TPOT, 256 tokens | 8.42 ms | 9.04 ms | 13.2 ms |
 | TPOT, 7,680 tokens | 7.86 ms | 8.56 ms | |
-| card memory at rest | 23.5 GB | 31.4 GB | 32.6 GB on the card |
+| card memory at rest | 23.0 GiB | 30.7 GiB | 31.8 GiB on the card |
 
 Host memory is 19 GB for both. The first-token bars are missed. A non-strict export of the same golden on another
 card (#1480) took 0.40 s and 7.31 s: the strict pack spends about 0.7 s more per 1,024-row chunk, far more than all its
