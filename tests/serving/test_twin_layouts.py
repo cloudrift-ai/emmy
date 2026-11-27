@@ -348,3 +348,20 @@ def test_the_audit_reads_a_rows_lane_from_the_regime_its_pins_spell():
     assert _lane(spelled) == _lane(umbrella)
     assert _lane({"FAST_MATH": True}) != _lane(umbrella)
     assert _lane({"FAST_MATH": True, "FAST_EXP": True, "F16_MMA_F32_ACC": True, "FP8_MMA": True}) == _lane({"FAST_MATH": True})
+
+
+def test_appended_serving_twins_join_a_working_golden_and_keep_its_rows(tmp_path):
+    """``trace --serving-twins --append`` adds twins to an existing working golden: its rows stay as they were, a
+    kernel it already holds is kept once, and only the new twin's kernels are added."""
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from emmy.compiler.pipeline.search.golden.working import write_trace_inventories
+
+    path, ctx = tmp_path / "twins.json", Context.from_target((8, 9))
+    write_trace_inventories({"gdn1": _linear(1)}, path, ctx=ctx)
+    before = GoldenFile.load(path)
+    with pytest.raises(FileExistsError):
+        write_trace_inventories({"gdn16": _linear(16)}, path, ctx=ctx)
+    added = write_trace_inventories({"gdn1": _linear(1), "gdn16": _linear(16)}, path, ctx=ctx, append=True).target_count
+    after = GoldenFile.load(path)
+    assert after.rows[: len(before.rows)] == before.rows
+    assert added and len(after.kernels) == len(before.kernels) + added

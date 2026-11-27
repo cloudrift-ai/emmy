@@ -109,11 +109,12 @@ def handle_trace(args):
         graphs = capture_serving_twins(args.input, serving)
         source_name = args.input.rstrip("/").rsplit("/", 1)[-1].partition("@")[0]
         destination = args.output or f"{source_name}.serving-twins.golden.json"
-        try:
-            preflight_trace_inventory(destination)
-        except FileExistsError as e:
-            logger.error(str(e))
-            sys.exit(2)
+        if not args.append:
+            try:
+                preflight_trace_inventory(destination)
+            except FileExistsError as e:
+                logger.error(str(e))
+                sys.exit(2)
         if args.model_provenance and args.model_provenance != serving.model_provenance:
             logger.error("--model-provenance must match the serving config (%s)", serving.model_provenance)
             sys.exit(2)
@@ -124,6 +125,7 @@ def handle_trace(args):
             destination,
             model=serving.model_provenance,
             realizations={name: [row.to_golden() for row in twin_realizations(serving, name)] for name in graphs},
+            append=args.append,
         )
         logger.info(
             "Saved serving-twin golden file: %s (%d graph(s), %d distinct kernel(s))",

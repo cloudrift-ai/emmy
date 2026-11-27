@@ -694,6 +694,18 @@ What the session changes for the milestones:
     50); first token at 7,680 <= 4.4 s (2x stock); the captured chunk's split between page copies and compute
     written beside the kept width (15's reference); activation memory on the card and the 23 GB host checked at
     every kept width. Needs 11, 13.
+    *Measured 2026-11-26 (PR #1480, one RTX 5090, H2D 57.0 GB/s), gate missed.* The plugin's fixed-slot form reads
+    one expert per pick, so width alone does not pay; the PR adds a grouped prefill expert program (each reached
+    expert read once) and tail widths 1,024 + 256 (+ 64 + 4). Against main on the same card: first token 2.63 ->
+    0.40 s at 256 tokens, 83.1 -> 7.31 s at 7,680 (prefill ~1,050 tokens a second; bar 4.4 s); TPOT 8.56 -> 8.23 /
+    7.77 -> 7.60 ms. Card 23.5 -> 30.5 GB of 32, host 19 GB. The 1,024-row chunk is 802 ms: expert programs 676,
+    page copies 6, Gated DeltaNet 90, the rest 30. The expert programs time 1.8 ms a layer on resident pages, so
+    ~15 ms a layer is in-place reads of the non-resident half of the experts over the link: that is the copy term
+    15 must hide, and it is not width-free, since each chunk reads it again. Open: the strict export refuses the
+    1,024-row attention's cut fork (`k_d548a0221877`) though both its twins compile strictly from the golden; the
+    long-window twin's cut arm hangs and is recorded uncut. The numbers above come from a non-strict export.
+    The recipe's serving config keeps native's 64-row chunk until the strict export passes at 1,024 rows
+    (`SERVE_NATIVE_PREFILL=1024`); the golden already holds the wide twins.
 
 15. **Qwen3.6: the chunk's copies overlap its compute.** Prefill knows each layer's picks after its router, one
     layer ahead of the expert launches; a second stream listing the next layer's pages (the two-slot form the

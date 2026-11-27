@@ -233,6 +233,61 @@ def test_a_chunk_runs_every_rows_experts_in_one_program():
     torch.testing.assert_close(combined, torch.stack([residual[r] + scores[r] @ expected[r] for r in range(3)]))
 
 
+def test_a_wide_native_chunk_keeps_its_quarters_above_the_plugins_chunk():
+    """Each quarter of native's chunk that stays wider than the plugin's is a tail width; without a plugin chunk
+    (zero, or the runner's -1 default) the chunk stands alone."""
+    from emmy.serving.release import native_prefill_widths
+
+    assert native_prefill_widths(1024, 64) == (1024, 256)
+    assert native_prefill_widths(256, 64) == (256,)
+    assert native_prefill_widths(2, -1) == native_prefill_widths(2, 0) == (2,)
+
+
+def test_a_wide_chunk_runs_its_experts_in_blocks_of_one_expert():
+    """A chunk whose picks outnumber the blocks they fill runs its experts in blocks, each reading one expert's
+    weights once, and gives each pick the fixed-slot program's partial, eager and through the traced graphs: picks
+    crowded onto one expert past a block, and every other expert picked once or not at all. A narrow chunk keeps the
+    fixed-slot form, which reads fewer weights there."""
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.huggingface import build_moe_slots_wrapper, build_moe_split_wrapper, moe_block_parts
+    from emmy.compiler.trace.torch import trace_module_with_constants
+    from emmy.serving.native.prepare import combine_module, expert_blocks, group_module, grouped_module
+
+    layer = qwen3_5_moe_model().model.layers[1]
+    gate, stacked = moe_block_parts(layer.mlp)
+    expert = build_moe_split_wrapper(layer, float32_residual=True)[2]
+    weights = (stacked.gate_up_proj.detach(), stacked.down_proj.detach())
+    experts, k, rows = gate.num_experts, gate.top_k, 16
+    assert expert_blocks(experts, 2, k) is None
+    block, blocks = expert_blocks(experts, rows, k)
+    sel = torch.stack([torch.tensor([3, r % experts]) if r % experts != 3 else torch.tensor([3, 5]) for r in range(rows)])
+    assert (sel == 3).sum() > block
+    x = torch.randn(rows, 64)
+    with torch.no_grad():
+        expected = build_moe_slots_wrapper(expert)(x, sel, *weights)
+    owner, place = (torch.from_numpy(t) for t in _eager_and_traced(group_module(experts, rows, k, block, blocks), (sel,)))
+    grouped = grouped_module(expert, rows, k, block, blocks)
+    examples = (x, place, owner, *weights)
+    with torch.no_grad():
+        outputs = grouped(*examples)
+        torch.testing.assert_close(outputs.index_select(0, place.reshape(-1)).view(rows, k, -1), expected)
+    graph = trace_module_with_constants(grouped, examples)[0]
+    feed = dict(zip(graph.inputs, (t.numpy() for t in examples), strict=True))
+    result, _ = NumpyBackend().run(graph, input_data=feed)
+    np.testing.assert_allclose(result.outputs[graph.outputs[0]], outputs.numpy(), rtol=1e-4, atol=1e-5)
+    # The combine reads each pick's partial from its place, as the fixed-slot combine reads it from the pick.
+    residual, scores = torch.randn(rows, 64), torch.rand(rows, k)
+    combine, examples = combine_module(grouped=True), (residual, scores, outputs, place)
+    graph = trace_module_with_constants(combine, examples)[0]
+    feed = dict(zip(graph.inputs, (t.numpy() for t in examples), strict=True))
+    combined = NumpyBackend().run(graph, input_data=feed)[0].outputs[graph.outputs[0]]
+    with torch.no_grad():
+        np.testing.assert_allclose(combined, combine(*examples).numpy(), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(combined, combine_module()(residual, scores, expected).numpy(), rtol=1e-5, atol=1e-5)
+
+
 @pytest.mark.parametrize("model", [qwen3_5_model, qwen3_5_moe_model])
 def test_native_trunk_programs_are_the_plugins_serving_twins(model, tmp_path):
     """Native's trunk is the plugin's programs, so the recipe golden's rows are its rows: every program an export
@@ -443,10 +498,12 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     verify = ["router", "experts", "combine", "rope", "attend", "unfold", "norm", "head", "greedy", "carry", "accept", "pick", "prologue"]
     chunk = ["router", "experts", "combine", "rope", "attend", "norm", "pick", "next", "prologue"]
     expected = [f"{k}1-native" for k in (*decode, "prologue")] + [f"{k}3-native" for k in verify]
-    assert sorted(drafted) == sorted([*expected, *(f"{k}{rows}-native" for rows in (8, 4) for k in chunk), "embed-sym-native"])
+    # A chunk whose picks outnumber its expert blocks sorts them first (``group``): 8 rows here, not 4.
+    grouped = [f"group{rows}-native" for rows in (16, 8)]
+    assert sorted(drafted) == sorted([*expected, *(f"{k}{rows}-native" for rows in (8, 4) for k in chunk), grouped[1], "embed-sym-native"])
     # A chunk wider than the plugin's keeps the plugin's chunk too, between it and the decode width.
     wide = trace_programs(model, prefill_size=16, prefill_bucket=8, decode_width=4, drafter=drafter)
-    assert sorted(wide) == sorted([*expected, *(f"{k}{rows}-native" for rows in (16, 8, 4) for k in chunk), "embed-sym-native"])
+    assert sorted(wide) == sorted([*expected, *(f"{k}{rows}-native" for rows in (16, 8, 4) for k in chunk), *grouped, "embed-sym-native"])
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16
     # Tracing binds no weights: a traced step never calls for a buffer's host values.
@@ -536,6 +593,9 @@ def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_pat
     twins.capture_serving_twins("org/model", wide)
     assert (seen["prefill_size"], seen["prefill_bucket"], wide.static_widths) == (256, 64, (4, 64, 256))
     assert [row.name for row in wide.realizations if not row.bindings] == [row.name for row in serving.realizations if not row.bindings]
+    # A chunk four times wider than the plugin's takes its quarter as a tail width too, for the trunk and native alike.
+    env.write_text(env.read_text().replace("SERVE_NATIVE_PREFILL=256", "SERVE_NATIVE_PREFILL=1024"))
+    assert load_serving_config(env).static_widths == (4, 64, 256, 1024)
     assert config.gen_experts_gpu() == 7 and config.gen_embed_slots(1000) is None, "the budgets are the config's for the trace alone"
 
 

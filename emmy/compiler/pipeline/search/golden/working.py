@@ -74,21 +74,36 @@ def append_trace_inventory(graph, path, *, model=None, ctx=None, model_quant_dig
     return TraceInventoryResult(path=Path(path), target_count=added)
 
 
-def write_trace_inventories(graphs: dict[str, object], path, *, model=None, ctx=None, realizations=None, model_quant_digest=None):
+def write_trace_inventories(
+    graphs: dict[str, object], path, *, model=None, ctx=None, realizations=None, model_quant_digest=None, append=False
+):
     """Combine named traces into one inventory: serving capture emits many independent pre/post/expert graphs, and a
     directory of one-file-per-graph inventories is easy to promote only partially. Identical kernels are recorded
     once. ``realizations`` is the row template every kernel takes, or a mapping from graph name to the rows that
-    graph's kernels take — a static twin its own width's, a symbolic twin the dynamic ones."""
-    destination = preflight_trace_inventory(path)
+    graph's kernels take — a static twin its own width's, a symbolic twin the dynamic ones. With ``append``, an
+    existing working golden at ``path`` takes the traces beside its own programs and rows."""
     if not graphs:
         raise ValueError("cannot write an empty trace inventory")
+    if append and Path(path).exists():
+        ctx = ctx or Context.probe()
+        with GoldenFile.edit(path) as document:
+            validate_working_gpu(document, ctx)
+            added = _append_all(graphs, document, ctx, realizations)
+            document.dump(path, overwrite=True)
+        return TraceInventoryResult(path=Path(path), target_count=added)
+    destination = preflight_trace_inventory(path)
     document, ctx = _empty_inventory(ctx, model=model, model_quant_digest=model_quant_digest)
+    added = _append_all(graphs, document, ctx, realizations)
+    document.dump(destination)
+    return TraceInventoryResult(path=destination, target_count=added)
+
+
+def _append_all(graphs, document, ctx, realizations):
     added = 0
     for name in sorted(graphs):
         rows = realizations.get(name) if isinstance(realizations, Mapping) else realizations
         added += _append(graphs[name], ctx=ctx, document=document, name_prefix=name, realizations=rows)
-    document.dump(destination)
-    return TraceInventoryResult(path=destination, target_count=added)
+    return added
 
 
 def _empty_inventory(ctx, *, model, model_quant_digest) -> tuple[GoldenFile, object]:

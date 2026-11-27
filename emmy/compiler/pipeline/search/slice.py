@@ -102,4 +102,8 @@ def single_node_graph(graph: Graph, node_id: str) -> Graph:
     # Every buffer of the sliced node is a slice output (a non-primary buffer
     # with no in-slice consumer must plan as an output, not dead scratch).
     sub.outputs.extend(graph.nodes[node_id].buffer_names())
+    # A paged buffer the slice reads stays paged: the paging decides which schedules the kernel can take.
+    names = {getattr(node.op, "name", None) for node in sub.nodes.values()}
+    if paged := tuple(e for e in graph.hints.get("cuda.paged_buffers", ()) if sub.buffer(e[0]) is not None or e[0] in names):
+        sub.hints.set("cuda.paged_buffers", paged)
     return sub

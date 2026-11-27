@@ -14,7 +14,7 @@ from emmy.compiler.backend.pack import save_executable
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, plan_from_graph, splice
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.dtype import F32, I64, get
-from emmy.serving.release import DTYPES, KV_CACHE_DTYPES
+from emmy.serving.release import DTYPES, KV_CACHE_DTYPES, native_prefill_widths
 from emmy.serving.twins import LayoutScope, plan_layouts
 
 #: The longest context native serves: the window of the checkpoints it has served.
@@ -466,11 +466,74 @@ def router_module(gate, rows):
     return Router()
 
 
-def combine_module():
+def expert_blocks(experts, rows, k):
+    """The ``(block, blocks)`` a chunk of ``rows`` rows runs its routed experts in, or ``None`` where the fixed-slot
+    form reads fewer expert weights. Each block holds up to ``block`` of one expert's picks, twice the picks an expert
+    takes on average, and reads that expert's weights once; ``blocks`` is the most any routing fills: every expert
+    with a pick takes a block more than its picks alone fill. The fixed-slot form reads one expert's weights per pick."""
+    picks = rows * k
+    block = max(1, 2 * picks // experts)
+    blocks = -(-picks // block) + min(experts, picks)
+    return (block, blocks) if rows > 1 and blocks < picks else None
+
+
+def group_module(experts, rows, k, block, blocks):
+    """The blocks of :func:`expert_blocks` a chunk's ``[rows, k]`` picks fill: each block's expert (``[blocks]``) and
+    the place of its ``blocks * block`` each pick landed in (``[rows, k]``). An expert's picks fill its blocks in row
+    order, its blocks follow the lower experts'; a block past the last one runs expert zero, which nothing reads
+    back."""
+    import torch
+
+    picks = rows * k
+
+    class Group(torch.nn.Module):
+        def forward(self, sel):
+            expert = sel.reshape(-1)
+            ids = torch.arange(picks)
+            # [pick, other]: the other pick routes to the same expert and comes first.
+            before = (expert.unsqueeze(0) == expert.unsqueeze(1)) & (ids.unsqueeze(0) < ids.unsqueeze(1))
+            rank = before.long().sum(dim=1)
+            count = (expert.unsqueeze(0) == torch.arange(experts).unsqueeze(1)).long().sum(dim=1)
+            filled = (count + block - 1) // block
+            first = filled.cumsum(0) - filled
+            place = (first[expert] + rank // block) * block + rank % block
+            owner = (filled.cumsum(0).unsqueeze(0) <= torch.arange(blocks).unsqueeze(1)).long().sum(dim=1)
+            owner = torch.where(owner < experts, owner, 0)
+            return owner, place.view(rows, k)
+
+    return Group()
+
+
+def grouped_module(expert, rows, k, block, blocks):
+    """The routed experts of a chunk in blocks (:func:`group_module`): each place's row, scattered from the places the
+    picks landed in (a place no pick lands in reads row zero), the rows gathered, and the expert form's grouped
+    product (``blocks``) over them, one ``[blocks * block, hidden]`` output a place. The combine reads each pick's
+    output from its place: in one program the compiler would read it back through the gathers, and each pick would
+    read its expert's weights again. The scatter stays inside the program: the compiler writes a scatter in place over
+    its base, so a scatter that wrote a step buffer would leave the places no pick lands in unwritten."""
+    import torch
+
+    class Grouped(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.expert = expert
+            self._emmy_output_float32 = getattr(expert, "_emmy_output_float32", False)
+
+        def forward(self, x, place, owner, w_gate_up, w_down):
+            row = torch.arange(rows * k) // k
+            reads = torch.zeros(blocks * block, dtype=torch.int64).index_copy(0, place.reshape(-1), row)
+            out = self.expert.blocks(x.index_select(0, reads).view(blocks, block, -1), owner, w_gate_up, w_down)
+            return out.reshape(blocks * block, -1)
+
+    return Grouped()
+
+
+def combine_module(grouped=False):
     """The routed experts' weighted sum added to the mixer's residual: each row's ``[1, k]`` scores
     times its ``[k, hidden]`` partials, then the residual add, all in the model dtype, as the plugin's
     fixed-slot combine computes them. One row's partials come as ``[k, hidden]``, a chunk's as
-    ``[rows, k, hidden]``."""
+    ``[rows, k, hidden]``; ``grouped``, as the outputs of the places each pick landed in (:func:`grouped_module`),
+    with the ``[rows, k]`` places."""
     import torch
 
     class Combine(torch.nn.Module):
@@ -478,7 +541,12 @@ def combine_module():
             operands = scores.unsqueeze(1), partials[0] if partials[0].dim() == 3 else torch.stack(partials)
             return residual + torch.matmul(*operands).squeeze(1)
 
-    return Combine()
+    class Grouped(torch.nn.Module):
+        def forward(self, residual, scores, outputs, place):
+            partials = outputs.index_select(0, place.reshape(-1)).view(*place.shape, -1)
+            return residual + torch.matmul(scores.unsqueeze(1), partials).squeeze(1)
+
+    return Grouped() if grouped else Combine()
 
 
 def greedy_module(vocab):
@@ -907,7 +975,8 @@ def _program(
         step.buffer(name, (1,), I64, "output")
 
     # Example inputs are distinct tensors: the tracer folds two arguments that share one into a
-    # single aliased input. A windowed one's leading axis is the window, traced at its hint and priced at its range's.
+    # single aliased input. A windowed one's leading axis is the window, traced at its hint, or the step's rows where
+    # those are more, and priced at its range's.
     def scalar():
         return torch.zeros(1, dtype=torch.int64)
 
@@ -915,7 +984,7 @@ def _program(
         return torch.zeros(n, heads * d, dtype=td)
 
     def windowed():
-        return torch.zeros(DEFAULT_SEQ_HINT, kv, d, dtype=kv_dtype)
+        return torch.zeros(max(DEFAULT_SEQ_HINT, rows), kv, d, dtype=kv_dtype)
 
     def mixer_outputs(label, out, routed, n):
         # A MoE layer's mixer leaves its residual and the normalized rows its routed experts read; the
@@ -983,17 +1052,31 @@ def _program(
             weights=weights and weights("router"),
             rows=n,
         )
-        partials = step.buffer(f"{label}.partials", (*picks, h))
         # The trace sees the weights' values, whatever stores them: the model dtype at the codes' shape.
         values = (torch.zeros(tensors[name].shape, dtype=td) for name in ("w_gate_up", "w_down"))
-        examples = (torch.zeros(n, h, dtype=td), torch.zeros(picks, dtype=torch.int64), *values)
         declared = tuple((name, 0, 1, paging[0]) for name in names) if paged else ()
-        wrapper = build_moe_slots_wrapper(expert)
+        index = partial(torch.zeros, dtype=torch.int64)
+        grouping = expert_blocks(gate.num_experts, n, k) if hasattr(expert, "blocks") else None
+        if grouping is None:
+            # Each pick's partial, which the combine weighs by its score.
+            produced = (*picks, h)
+            wrapper, routing, places = build_moe_slots_wrapper(expert), [sel], []
+            examples = (torch.zeros(n, h, dtype=td), index(picks), *values)
+        else:
+            # Each block's experts over its places, which the combine reads each pick's partial from.
+            block, blocks = grouping
+            produced = (blocks * block, h)
+            owner, places = step.buffer(f"{label}.owner", (blocks,), I64), [step.buffer(f"{label}.place", picks, I64)]
+            group = group_module(gate.num_experts, n, k, block, blocks)
+            step.compiled(prefix("group"), group, (index(picks),), [sel], [owner, *places], cache, rows=n)
+            wrapper, routing = grouped_module(expert, n, k, block, blocks), [*places, owner]
+            examples = (torch.zeros(n, h, dtype=td), index(picks), index(blocks), *values)
+        partials = step.buffer(f"{label}.partials", produced)
         step.compiled(
             prefix("experts"),
             wrapper,
             examples,
-            [normed, sel, *inputs],
+            [normed, *routing, *inputs],
             [partials],
             cache,
             paged=declared,
@@ -1003,8 +1086,14 @@ def _program(
             rows=n,
         )
         output = step.buffer(out, (width, h))
-        examples = (torch.zeros(n, h, dtype=td), torch.zeros(n, k, dtype=td), torch.zeros(*picks, h, dtype=td))
-        step.compiled(prefix("combine"), combine_module(), examples, [mixed, scores, partials], [output], cache, rows=n)
+        examples = (
+            torch.zeros(n, h, dtype=td),
+            torch.zeros(n, k, dtype=td),
+            torch.zeros(produced, dtype=td),
+            *map(index, [picks] * len(places)),
+        )
+        combine = combine_module(grouped=bool(places))
+        step.compiled(prefix("combine"), combine, examples, [mixed, scores, partials, *places], [output], cache, rows=n)
         return output
 
     # The token-embedding table: a constant, or below the plugin's page budget (``EMMY_GEN_EMBED_GPU``) a buffer the
@@ -1482,11 +1571,12 @@ def _steps(
     # Decode first: the plugin builds a wrapper's twins narrowest first, and the first to decide a weight's layout
     # settles it for the rest; it builds the programs that keep a verify step's states last.
     programs = {"decode": program("decode", 1, decode_width)}
-    # The chunk widths, widest first: the prefill chunk, then the plugin's chunk and the decode width below it, so the
-    # tail of a prompt that no longer fills a chunk is taken at the next narrower one before the runtime's chunk rule
-    # runs it a token at a time (a prompt of 255 tokens with carried state and 64-row chunks alone ran its last 63
-    # tokens as 63 steps). The narrower widths are the plugin's, so their trunk programs are its recorded twins.
-    prefill_sizes = sorted({n for n in (prefill_size, prefill_bucket, decode_width) if 1 < n <= prefill_size}, reverse=True)
+    # The chunk widths, widest first: the prefill chunk and its quarters above the plugin's chunk, then the plugin's
+    # chunk and the decode width below it, so the tail of a prompt that no longer fills a chunk is taken at the next
+    # narrower one before the runtime's chunk rule runs it a token at a time (a prompt of 255 tokens with carried state
+    # and 64-row chunks alone ran its last 63 tokens as 63 steps). The plugin's widths are its recorded twins.
+    widths = (*native_prefill_widths(prefill_size, prefill_bucket), prefill_bucket, decode_width)
+    prefill_sizes = sorted({n for n in widths if 1 < n <= prefill_size}, reverse=True)
     for n in prefill_sizes:
         programs[f"prefill{n}"] = program("prefill", n, n)
     if drafter is not None:
