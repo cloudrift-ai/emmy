@@ -903,7 +903,9 @@ impl Program {
         }
         (seen.into_iter())
             .filter(|(name, _)| self.buffer(name).is_ok_and(|b| b.role == "scratch"))
-            .filter_map(|(name, range)| range.map(|(axis, last)| (name.to_owned(), (axis.to_owned(), last))))
+            .filter_map(|(name, range)| {
+                range.map(|(axis, last)| (name.to_owned(), (axis.to_owned(), last)))
+            })
             .collect()
     }
 
@@ -1355,7 +1357,10 @@ mod tests {
         assert_eq!(layout.buffers["s"].shape, [2, 64]);
         // A launch that runs at every size sizes it at the env again.
         let mut open = plan.clone();
-        open["launches"][1].as_object_mut().unwrap().remove("size_range");
+        open["launches"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("size_range");
         let program = Program::parse(&open.to_string()).unwrap();
         let layout = program.layout(&program.default_env()).unwrap();
         assert_eq!(layout.regions[SCRATCH_REGION], 2 * 1024 * 4);
