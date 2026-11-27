@@ -1040,6 +1040,12 @@ Perf ideas:
 
 Open items:
 
+- (2026-11-27) Qwen3.6's long-window 1,024-row attention (131,072 cached tokens) is recorded uncut at 15.0 ms. Its
+  greedy cut arm is no hang: neither piece has a row, so both take the plain scalar schedule, and the 16,384-block
+  piece walks 131,072 positions per thread, far past the 2 s bench limit. The 7.9 ms "alone" time was taken while
+  replays still rehinted only a kernel's buffers, not its loops (fixed in #1484), so it may have run at a smaller
+  window; not checked. Ruled out: sanitizer errors. Next: tune the cut's two pieces at 131,072 on the card;
+  until they have rows the cut arm cannot be priced and the uncut row decides.
 - (2026-11-25) The 27B's verify-step attention may hold the program #1451 replaced, as Qwen3.6's did: `emmy golden
   check` cannot see it. Compare a fresh `emmy trace --serving-twins` with the golden's programs before its next gate.
 - (2026-11-25) `emmy compile --help` still names `dolfstp`; with no stamp pass the string is read as one unknown
