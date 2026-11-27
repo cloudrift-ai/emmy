@@ -75,7 +75,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
 from emmy.compiler.structural import digest
-from emmy.compiler.wire import Wire
+from emmy.compiler.wire import Wire, name_of
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -438,9 +438,12 @@ class SearchDB:
         """Store what one decision on one parent minted, one row per piece, under the ``source`` that stores it; a
         later splice of the same decision (a compiler that now mints other pieces) replaces them. A decision a bench
         here recorded stays ``measured`` whatever imports it again, so no import's :meth:`forget` lets it go. The
-        parent and the pieces must be kernel rows already."""
+        parent and the pieces must be kernel rows already, and the parent is none of its pieces: a decision is priced
+        as the sum of its pieces (:meth:`priced_arms`), so one that names its parent would price itself without end."""
         if not row.arm or not all(is_placement_knob(k, v) for k, v in row.arm.items()):
             raise ValueError(f"a routing row's arm holds placement knobs only, got {row.arm!r}")
+        if row.parent in row.children:
+            raise ValueError(f"a routing row's pieces include its parent {name_of(row.parent)} under {row.arm!r}: that cut is no decision")
         arm = row_text(row.arm)
         held = self._conn.execute("SELECT source FROM routing WHERE parent = ? AND arm = ? LIMIT 1", (row.parent, arm)).fetchone()
         if held is not None and held[0] == "measured":

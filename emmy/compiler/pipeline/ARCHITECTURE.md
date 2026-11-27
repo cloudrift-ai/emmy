@@ -605,7 +605,9 @@ At a **kernel-set fork** (the cut pass's placement fork and its cross-CTA split 
 first — over one more kind of evidence. A kernel-set decision is a `routing` row on the exact kernel — a golden's cut
 or split, imported as one — and its price on this card is the sum of its pieces' fastest rows, each piece at its own
 projection of the fork's bindings, all-or-nothing (`SearchDB.priced_arms`); a decision no piece's row prices is off
-the measured ballot, which is what a golden's cross-CTA split timed as a whole is until its pieces are benched. An
+the measured ballot, which is what a golden's cross-CTA split timed as a whole is until its pieces are benched. A
+decision's pieces never include its parent, whose price would then read itself: the DB refuses to store such a row
+(`SearchDB.record_routing`), and the cut pass offers no cut that hands the kernel back. An
 offered split or cut that no routing row names is priced the same way, from its own pieces' rows, so a bench that
 measured a split's partial and finalize (and wrote no routing row) still puts that split on the ballot. Pricing an
 arm from its pieces builds them, so the pick asks the DB whether the regime holds any clean row before it prices the
