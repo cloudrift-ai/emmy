@@ -15,7 +15,7 @@ use emmy_ir::body::Body;
 use emmy_ir::elementwise::Operation;
 use emmy_ir::expr::{Expr, ExprClass, Expression, SimplifyCtx};
 use emmy_ir::normalize::ties::unranked;
-use emmy_ir::normalize::{affine_sum, affine_terms};
+use emmy_ir::normalize::{affine_sum, affine_terms, extend_simplify_ctx};
 use emmy_ir::statement::Statement;
 use emmy_ir::{Error, Name, Result};
 
@@ -226,8 +226,13 @@ impl Fold {
                 window: slot.window.clone(),
             });
         }
+        // A read below folds under the block's own length: a chunk index such as `(length * block + axis) / chunk`
+        // is one value along a block that lies inside a chunk, so what is computed per chunk is computed once.
         let reads = TermRewrite {
             sigma: HashMap::from([(axis, walk.read())]),
+            folding: Some(table.iter().fold(SimplifyCtx::empty(), |ctx, known| {
+                extend_simplify_ctx(&ctx, known)
+            })),
             ..TermRewrite::default()
         };
         // An operand that does not read the axis is the term it was, and one reached twice is rewritten once:

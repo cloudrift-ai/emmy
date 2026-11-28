@@ -64,7 +64,9 @@ and a view are values: they compare by what they hold.
   the least of its ends. A block of a split (an axis whose window is a partition) leaves from the start some end
   lies a fixed way past: the axis takes that distance as its trips, every read of it is `start + axis`, the term
   keeps what its own bounds leave of the block as its range, and a read below the term clamps onto the last
-  position of a symbolic stream, whose last block may run past it. Any other term is the term it was.
+  position of a symbolic stream, whose last block may run past it. A read below folds under the bounds of the axis
+  table: `(length * block + axis) / chunk` is `block / (chunk / length)` along a block inside a chunk, the operand
+  that read it no longer moves with the axis, and a tier computes it once a block. Any other term is the term it was.
   `Fold::block_start` names the start a block leaves from, the one place that says which coordinate moves a block.
 
 ## Memos
