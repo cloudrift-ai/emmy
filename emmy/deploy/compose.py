@@ -10,6 +10,7 @@ from emmy.recipe.engines import build_engine_args
 from emmy.recipe.types import Recipe
 
 AUTOHEAL_IMAGE = "willfarrell/autoheal:1.2.0"
+LOAD_BALANCER_PORT = 8080
 
 
 def _env_items(extra_env) -> list[tuple[str, str]]:
@@ -54,7 +55,12 @@ def replica_services(recipe: Recipe, gpu_device_ids: list[int] | None = None) ->
     return [Service(recipe, list(range(i * per_instance, (i + 1) * per_instance)), 8000 + i) for i in range(count)], True
 
 
-def generate_compose(services: list[Service], model_dir, hf_token, load_balancer=False, baked_images=frozenset(), proxy=None):
+def serving_port(load_balancer: bool, services: list[Service]) -> int:
+    """Host port the model answers on: the load balancer's when there are replicas."""
+    return LOAD_BALANCER_PORT if load_balancer else services[0].port
+
+
+def generate_compose(services: list[Service], model_dir, hf_token, load_balancer=False, baked_images=frozenset(), proxy=None, api_key=None):
     """Build docker-compose.yaml string from the services of one deployment.
 
     One engine service per entry, named ``{engine}_{i}``, pinned to its device ids (``count: all``
@@ -72,9 +78,16 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
 
     ``proxy``: an HTTP proxy URL; every engine service gets it in its environment, in both spellings, so
     the weight download inside the container goes through it. nginx only talks to the services.
+
+    ``api_key``: the deployment serves the public behind this key, unattended (``deploy boot-script``). vLLM's own
+    ``VLLM_API_KEY`` check covers only ``/v1/*``, so it is set on every engine service but no engine port is
+    published: nginx, on ``serving_port``, is the only way in, and ``generate_nginx_conf(api_key=...)`` checks the
+    key. autoheal gets no restart policy, so after a reboot only the boot script starts it, once the engines are
+    healthy again.
     """
     compose = "services:\n"
     proxy_lines = "".join(f"\n      - {name}={value}" for name, value in proxy_env(proxy).items()) if proxy else ""
+    api_key_line = f"\n      - VLLM_API_KEY={api_key}" if api_key else ""
 
     for index, service in enumerate(services):
         recipe = service.recipe
@@ -108,6 +121,7 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
             )
 
         name = service_name(index, service)
+        ports_section = "" if api_key else f'    ports:\n      - "{service.port}:8000"\n'
         compose += f"""
   {name}:
     image: {llm.image}
@@ -116,10 +130,8 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
     volumes:
       - {model_dir}:{model_dir}
     environment:
-      - HUGGING_FACE_HUB_TOKEN={hf_token}{hf_home_line}{extra_env_lines}{proxy_lines}
-    ports:
-      - "{service.port}:8000"
-    shm_size: '16gb'
+      - HUGGING_FACE_HUB_TOKEN={hf_token}{hf_home_line}{extra_env_lines}{proxy_lines}{api_key_line}
+{ports_section}    shm_size: '16gb'
     ipc: host
     restart: unless-stopped
     labels:
@@ -134,13 +146,13 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
       start_period: 1200s
 """
 
-    if load_balancer:
-        compose += """
+    if load_balancer or api_key:
+        compose += f"""
   nginx:
     image: nginx:alpine
     container_name: nginx_lb
     ports:
-      - "8080:8080"
+      - "{serving_port(load_balancer, services)}:{LOAD_BALANCER_PORT}"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     restart: unless-stopped
@@ -158,14 +170,23 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
       - AUTOHEAL_CONTAINER_LABEL=autoheal
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
+    restart: {'"no"' if api_key else "unless-stopped"}
 """
 
     return compose
 
 
-def generate_nginx_conf(names: list[str]):
-    """Generate nginx config with a least_conn upstream over the named services."""
+def generate_nginx_conf(names: list[str], api_key: str | None = None):
+    """Generate nginx config with a least_conn upstream over the named services.
+
+    With ``api_key`` it is the public gateway of an unattended deployment (see ``generate_compose``): ``GET /health``
+    passes without the key, ``/v1/`` needs ``Authorization: Bearer <api_key>``, and every other path is a 404, since
+    vLLM leaves its routes outside ``/v1/`` open. The map lookup ignores case; the engine's own exact ``VLLM_API_KEY``
+    check behind it does not. The engines are resolved again while nginx runs, since a restarted container can come
+    back on another address.
+    """
+    if api_key:
+        return _gateway_nginx_conf(names, api_key)
     upstream_servers = "\n".join(f"        server {name}:8000;" for name in names)
 
     return f"""worker_processes auto;
@@ -197,6 +218,69 @@ http {{
             proxy_read_timeout 600s;
 
             proxy_buffering off;
+        }}
+    }}
+}}
+"""
+
+
+def _gateway_nginx_conf(names: list[str], api_key: str) -> str:
+    upstream_servers = "\n".join(f"        server {name}:8000 resolve;" for name in names)
+
+    return f"""worker_processes auto;
+
+events {{
+    worker_connections 4096;
+}}
+
+http {{
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    map_hash_bucket_size 256;
+
+    map $http_authorization $authorized {{
+        default 0;
+        "Bearer {api_key}" 1;
+    }}
+
+    upstream llm_backend {{
+        zone llm_backend 64k;
+        least_conn;
+{upstream_servers}
+    }}
+
+    server {{
+        listen {LOAD_BALANCER_PORT};
+        client_max_body_size 100m;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout 600s;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
+
+        proxy_buffering off;
+
+        location = /health {{
+            limit_except GET {{
+                deny all;
+            }}
+            proxy_pass http://llm_backend;
+        }}
+
+        location /v1/ {{
+            if ($authorized = 0) {{
+                return 401;
+            }}
+            proxy_pass http://llm_backend;
+        }}
+
+        location / {{
+            return 404;
         }}
     }}
 }}
