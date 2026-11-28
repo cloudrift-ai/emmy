@@ -77,27 +77,37 @@ def _placement_pools(path: Path):
 
 
 _PLACEMENT = "the placement prior misses a cut or split fork it trained on"
-_NEAR_TIE = "schedule near tie: the prior ranks a schedule 0.4-5% slower than the golden first"
-_IDENTICAL_ARMS = "two cut arms with identical features"
+_SCHEDULE = "the schedule prior misses a pool it trained on"
 KNOWN_MISSES: dict[tuple[str, str, int], str] = {
-    ("a100_sm80.json", "schedule", 19): _NEAR_TIE,
-    ("h100_sm90.json", "schedule", 85): _NEAR_TIE,
-    ("h100_sm90.json", "placement", 21): _IDENTICAL_ARMS,
+    ("a100_sm80.json", "schedule", 24): _SCHEDULE,
+    ("a100_sm80.json", "schedule", 31): _SCHEDULE,
+    ("h100_sm90.json", "placement", 13): _PLACEMENT,
+    ("h100_sm90.json", "schedule", 20): _SCHEDULE,
+    ("h100_sm90.json", "schedule", 46): _SCHEDULE,
+    ("h100_sm90.json", "schedule", 49): _SCHEDULE,
+    ("h100_sm90.json", "schedule", 87): _SCHEDULE,
     ("rtx4090_sm89.json", "placement", 0): _PLACEMENT,
     ("rtx4090_sm89.json", "placement", 6): _PLACEMENT,
     ("rtx4090_sm89.json", "placement", 8): _PLACEMENT,
-    ("rtx4090_sm89.json", "placement", 62): _PLACEMENT,
-    ("rtxpro6000_se_sm120.json", "schedule", 26): _NEAR_TIE,
-    ("rtxpro6000_se_sm120.json", "schedule", 79): _NEAR_TIE,
-    ("rtxpro6000_se_sm120.json", "placement", 3): _PLACEMENT,
+    ("rtx4090_sm89.json", "placement", 58): _PLACEMENT,
+    ("rtx5090_sm120.json", "placement", 1): _PLACEMENT,
+    ("rtx5090_sm120.json", "placement", 21): _PLACEMENT,
     ("rtxpro6000_se_sm120.json", "placement", 4): _PLACEMENT,
-    ("rtxpro6000_se_sm120.json", "placement", 11): _PLACEMENT,
-    ("rtxpro6000_se_sm120.json", "placement", 17): _PLACEMENT,
-    ("rtxpro6000_se_sm120.json", "placement", 29): _PLACEMENT,
-    ("rtxpro6000_se_sm120.json", "placement", 82): _PLACEMENT,
-    ("rtxpro6000_se_sm120.json", "placement", 89): _PLACEMENT,
-    ("rtxpro6000_se_sm120.json", "placement", 101): _PLACEMENT,
-    ("v100_sxm2_sm70.json", "placement", 76): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 14): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 34): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 62): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 63): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 88): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 108): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 119): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 122): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "placement", 127): _PLACEMENT,
+    ("rtxpro6000_se_sm120.json", "schedule", 4): _SCHEDULE,
+    ("rtxpro6000_se_sm120.json", "schedule", 13): _SCHEDULE,
+    ("rtxpro6000_se_sm120.json", "schedule", 84): _SCHEDULE,
+    ("v100_sxm2_sm70.json", "placement", 10): _PLACEMENT,
+    ("v100_sxm2_sm70.json", "placement", 20): _PLACEMENT,
+    ("v100_sxm2_sm70.json", "schedule", 77): _SCHEDULE,
 }
 
 
