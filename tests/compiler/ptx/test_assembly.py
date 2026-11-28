@@ -1,4 +1,4 @@
-"""A kernel's PTX is assembled by ptxas into the cubin cache, with no card."""
+"""A kernel's PTX is assembled by ptxas into the cubin cache, with no card; the same kernel is LLVM IR for an AMD one."""
 
 from __future__ import annotations
 
@@ -54,3 +54,13 @@ def test_a_refused_text_raises_with_ptxas_own_message(monkeypatch, tmp_path):
     with pytest.raises(subprocess.CalledProcessError) as refused:
         ptxas.compile_to_cubin(ptx.replace("ld.global", "ld.nowhere", 1), "k", arch="sm_120")
     assert any("ptxas" in note and "error" in note for note in refused.value.__notes__)
+
+
+def test_the_same_kernel_is_llvm_ir_for_an_amd_card():
+    interface = Interface((Param("a", "input", F32, "a"), Param("o", "output", F32, "o")), {}, 0)
+    ir, waits = compile_ptx("k", parse_body(BODY), interface, gfx=942)
+    assert ir.startswith('target triple = "amdgcn-amd-amdhsa"') and '"target-cpu"="gfx942"' in ir
+    assert "define protected amdgpu_kernel void @k(" in ir and not waits
+    for cards in ({}, {"sm": 120, "gfx": 942}):
+        with pytest.raises(ValueError, match="name one card"):
+            compile_ptx("k", parse_body(BODY), interface, **cards)

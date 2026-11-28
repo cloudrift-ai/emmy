@@ -175,14 +175,14 @@ impl Lowerer {
             (VTy::F32, _) | (_, Opcode::Selp | Opcode::Mov) => true,
             (VTy::F16, Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Fma) => true,
             (VTy::F16, Opcode::Neg | Opcode::Abs) => true,
-            (VTy::F16, Opcode::Min | Opcode::Max) => self.target.sm >= SM_AMPERE,
+            (VTy::F16, Opcode::Min | Opcode::Max) => self.target.sm() >= SM_AMPERE,
             _ => false,
         };
         if native {
             Ok(())
         } else {
-            let (ty, sm) = (ty.text(), self.target.sm);
-            Err(self.no_rule(format_args!("{opcode:?} at {ty} on sm_{sm}")))
+            let (ty, target) = (ty.text(), self.target);
+            Err(self.no_rule(format_args!("{opcode:?} at {ty} on {target}")))
         }
     }
 
@@ -337,7 +337,7 @@ impl Lowerer {
         match op {
             O::Add | O::Subtract | O::Multiply | O::Fma | O::Square | O::Negative => true,
             O::Abs | O::Absolute | O::Fabs | O::Where | O::Copy | O::Positive => true,
-            O::Maximum | O::Fmax | O::Minimum | O::Fmin | O::Relu => self.target.sm >= SM_AMPERE,
+            O::Maximum | O::Fmax | O::Minimum | O::Fmin | O::Relu => self.target.sm() >= SM_AMPERE,
             op => comparison(op).is_some(),
         }
     }
@@ -934,7 +934,7 @@ impl Lowerer {
     /// A float rounded to nearest into an 8-bit float, saturating at the largest finite value, as CUDA's 8-bit
     /// float constructors do: the hardware's conversion of two f32 into two 8-bit floats, the value the low one.
     fn narrowed_to_f8(&mut self, value: Val, to: VTy) -> Result<Val> {
-        if self.target.sm < SM_ADA {
+        if self.target.sm() < SM_ADA {
             return Ok(self.f8_by_bits(value, to));
         }
         self.requires(&super::fragment::F8_CONVERSION)?;

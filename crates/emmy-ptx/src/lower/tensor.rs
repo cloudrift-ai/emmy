@@ -454,7 +454,7 @@ impl Lowerer {
         // A card with the block-scaled product runs the 8-bit one through it, every scale one: the same sum, bit
         // for bit, at twice the rate of the plain form (measured on an RTX 5090).
         let unit_scaled =
-            shape == MmaShape::M16n8k32 && MMA_BYTES_SCALED.sm.contains(&self.target.sm);
+            shape == MmaShape::M16n8k32 && MMA_BYTES_SCALED.sm.contains(&self.target.sm());
         self.requires(if unit_scaled {
             &MMA_BYTES_SCALED
         } else {

@@ -1,4 +1,5 @@
-//! `compile_ptx`: a kernel body and its interface, as the Python side computes it, to PTX text.
+//! `compile_ptx`: a kernel body and its interface, as the Python side computes it, to the code of its card: PTX
+//! text for an NVIDIA one, LLVM IR for an AMD one.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -43,22 +44,30 @@ fn param(value: &Bound<'_, PyAny>) -> PyResult<Param> {
     })
 }
 
-/// The PTX text of the kernel `name`: its `body`, its `interface` (the `Interface` of `ir/kernel/interface.py`), the
-/// compute capability `sm` (`120` for `sm_120`) and the kernel's two precision decisions; and whether the kernel waits
-/// on the grid launched ahead of it, so it may be launched as a programmatic dependent launch. The text's `.target`
-/// names the instruction set it needs. A statement or an operation with no rule raises `NotImplementedError`; every other refusal
-/// is a `ValueError` that names what is wrong with the kernel.
+/// The code of the kernel `name`: its `body`, its `interface` (the `Interface` of `ir/kernel/interface.py`), the card
+/// and the kernel's two precision decisions; and whether the kernel waits on the grid launched ahead of it, so it may
+/// be launched as a programmatic dependent launch. The card is an NVIDIA one by compute capability (`sm=120` for
+/// `sm_120`), whose code is PTX text with the instruction set it needs as its `.target`, or an AMD one by processor
+/// (`gfx=942` for `gfx942`), whose code is LLVM IR. A statement, an operation or an instruction with no rule for the
+/// card raises `NotImplementedError`; every other refusal is a `ValueError` that names what is wrong with the kernel.
 #[pyfunction]
-#[pyo3(signature = (name, body, interface, *, sm, fuse = false, ftz = false, single_wave = false))]
+#[pyo3(signature = (name, body, interface, *, sm = None, gfx = None, fuse = false, ftz = false, single_wave = false))]
+#[allow(clippy::too_many_arguments)]
 pub fn compile_ptx(
     name: &str,
     body: &Bound<'_, PyAny>,
     interface: &Bound<'_, PyAny>,
-    sm: u32,
+    sm: Option<u32>,
+    gfx: Option<u32>,
     fuse: bool,
     ftz: bool,
     single_wave: bool,
 ) -> PyResult<(String, bool)> {
+    let target = match (sm, gfx) {
+        (Some(sm), None) => Target::Sm(sm),
+        (None, Some(gfx)) => Target::Gfx(gfx),
+        _ => return Err(PyValueError::new_err("name one card: sm or gfx")),
+    };
     let body = PyBody::from_iterable(body)?;
     let params: PyResult<Vec<Param>> = interface
         .getattr("params")?
@@ -85,8 +94,8 @@ pub fn compile_ptx(
         body: &body,
         interface: &interface,
     };
-    let ptx = emmy_ptx::compile(&kernel, Target { sm }, Precision { fuse, ftz }).py()?;
-    Ok((ptx.text, ptx.waits_on_grid))
+    let code = emmy_ptx::compile(&kernel, target, Precision { fuse, ftz }).py()?;
+    Ok((code.text, code.waits_on_grid))
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

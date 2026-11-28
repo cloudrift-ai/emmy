@@ -265,7 +265,7 @@ impl Lowerer {
             let bits = self.word_of(Opcode::Shl, Ty::B32, byte, 8);
             return Ok(self.low_half(bits));
         }
-        if self.target.sm >= SM_ADA {
+        if self.target.sm() >= SM_ADA {
             self.requires(&F8_CONVERSION)?;
             let pair = self.low_half(byte);
             let convert = Inst::new(
@@ -462,7 +462,8 @@ impl Lowerer {
             }
             let packed =
                 source == DType::F8E4M3 && matches!(dtype, DType::F16 | DType::BF16) && bytes == 2;
-            if shared.is_none() && packed && self.target.sm >= SM_ADA && self.aligned(&address, 2) {
+            if shared.is_none() && packed && self.target.sm() >= SM_ADA && self.aligned(&address, 2)
+            {
                 self.requires(&F8_CONVERSION)?;
                 let pair = self.b.reg(Bank::B16);
                 let load = Inst::new(buffer.load(), Ty::B16, vec![pair], vec![address]);

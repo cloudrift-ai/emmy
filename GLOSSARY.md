@@ -233,10 +233,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Thread** — One GPU worker executing a kernel. Threads are organized into blocks.
 - **Block / cooperative thread array (CTA)** — A group of GPU threads that can cooperate using fast shared memory
   and synchronization.
-- **Warp** — A small group of GPU threads — 32 on current NVIDIA hardware — that execute instructions together.
+- **Warp** — A small group of GPU threads — 32 on current NVIDIA hardware — that execute instructions together. An
+  AMD card calls it a wave, of 64 threads on the Instinct cards.
 - **Grid** — All thread blocks launched for one kernel call.
 - **Shared memory** — Fast memory shared by threads in one block. It is limited in size and must be managed
-  explicitly.
+  explicitly. An AMD card calls it local memory.
 - **Global memory** — The GPU's large main memory. It has much higher capacity than shared memory but is generally
   slower to access.
 - **Register** — Very fast storage private to one GPU thread.

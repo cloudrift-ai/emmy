@@ -291,5 +291,6 @@ full compile — a stale pack costs a recompile, never a wrong result. The servi
   `forward`. It doesn't know about dialects — it just dispatches
   through `Op.forward`.
 - A new backend (ROCm, SYCL, Metal) reuses `ir/` and
-  `pipeline/passes/lowering/` wholesale; only its own executor
-  (the equivalent of the Rust runtime behind `cuda/program.py`) needs to be written.
+  `pipeline/passes/lowering/` wholesale; it needs its own code for a kernel, its assembler wrapper and its
+  executor (the equivalent of the Rust runtime behind `cuda/program.py`). For an AMD card the first exists: the
+  PTX compiler writes a kernel as LLVM IR (`crates/emmy-ptx/ARCHITECTURE.md`).

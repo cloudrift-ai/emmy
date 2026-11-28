@@ -103,14 +103,14 @@ fn a_module_states_its_target_its_thread_bound_and_its_parameters() {
         ..module.clone()
     };
     assert!(print(&one_wave).contains(".maxntid 256, 1, 1\n.minnctapersm 1\n{"));
-    let older = lowered(&body, params, Target { sm: 80 }, EXACT).unwrap();
+    let older = lowered(&body, params, Target::Sm(80), EXACT).unwrap();
     assert_eq!((older.version, older.target.as_str()), ((7, 8), "sm_80"));
     // A kernel waits for the grid launched ahead of it, first of all, on the targets that have the instruction.
     let waits = |module: &Module| {
         let first = module.instructions().next().unwrap();
         first.opcode == Opcode::GridWait
     };
-    let hopper = lowered(&body, params, Target { sm: 90 }, EXACT).unwrap();
+    let hopper = lowered(&body, params, Target::Sm(90), EXACT).unwrap();
     assert!(waits(&module) && waits(&hopper) && !waits(&older));
     assert!(text.contains("\tgriddepcontrol.wait;\n\tld.param.u64 %rd0, [k_param_0];\n"));
 }
@@ -1471,7 +1471,7 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
     }
     // A half maximum before `sm_80`, which has no half instruction for it, computes in f32 and rounds once.
     let half = "    f16 h = (f16)x\n    f16 m = maximum(h, h)";
-    let module = lowered(&under(half), A_O, Target { sm: 75 }, EXACT).unwrap();
+    let module = lowered(&under(half), A_O, Target::Sm(75), EXACT).unwrap();
     let lines = super::common::listing(&module);
     assert!(
         lines.iter().any(|line| line.starts_with("max.f32")),

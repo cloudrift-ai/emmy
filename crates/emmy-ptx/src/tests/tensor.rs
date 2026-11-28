@@ -29,7 +29,7 @@ fn interface() -> Interface {
 /// assembled for its target.
 fn warp(statements: &str, sm: u32) -> emmy_ir::Result<Module> {
     let body = format!("{GRID}\n{}", super::common::indented(statements));
-    lowered_in(&body, &interface(), Target { sm }, EXACT)
+    lowered_in(&body, &interface(), Target::Sm(sm), EXACT)
 }
 
 /// The same kernel lowered and not assembled: for a target the installed ptxas does not take.
@@ -41,7 +41,7 @@ fn warp_unassembled(statements: &str, sm: u32) -> Module {
         body: &body,
         interface: &interface,
     };
-    lower(&kernel, Target { sm }, EXACT).unwrap()
+    lower(&kernel, Target::Sm(sm), EXACT).unwrap()
 }
 
 /// The code of such a kernel after the decode of `r` and `t`, which are `%r0` and `%r1`.
@@ -903,7 +903,7 @@ fn warp_refusal_unassembled(statements: &str, sm: u32) -> String {
         body: &body,
         interface: &interface,
     };
-    lower(&kernel, Target { sm }, EXACT)
+    lower(&kernel, Target::Sm(sm), EXACT)
         .unwrap_err()
         .to_string()
 }
