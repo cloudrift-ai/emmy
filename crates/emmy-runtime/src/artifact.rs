@@ -902,7 +902,16 @@ impl Program {
             }
         }
         (seen.into_iter())
-            .filter(|(name, _)| self.buffer(name).is_ok_and(|b| b.role == "scratch"))
+            .filter(|(name, _)| {
+                // Holding an axis at its range's last size bounds the shape only where each extent is a literal
+                // or a plain axis; an expression over the axis (`n % 64 + 1`) may peak below that size.
+                self.buffer(name).is_ok_and(|b| {
+                    b.role == "scratch"
+                        && b.shape
+                            .iter()
+                            .all(|d| matches!(d, Expr::Int(_) | Expr::Var(_)))
+                })
+            })
             .filter_map(|(name, range)| {
                 range.map(|(axis, last)| (name.to_owned(), (axis.to_owned(), last)))
             })
@@ -1364,6 +1373,17 @@ mod tests {
         let program = Program::parse(&open.to_string()).unwrap();
         let layout = program.layout(&program.default_env()).unwrap();
         assert_eq!(layout.regions[SCRATCH_REGION], 2 * 1024 * 4);
+        // So do launches ranged over two axes.
+        let mut two = plan.clone();
+        two["launches"][1]["size_range"] = json!(["m", 1, 64]);
+        let program = Program::parse(&two.to_string()).unwrap();
+        let layout = program.layout(&program.default_env()).unwrap();
+        assert_eq!(layout.regions[SCRATCH_REGION], 2 * 1024 * 4);
+        // And an extent that is an expression over the axis, which may peak below the range's last size.
+        let mut wrapped = plan.clone();
+        wrapped["buffers"][2]["shape"] = json!([2, ["+", ["%", "n", 64], 1]]);
+        let program = Program::parse(&wrapped.to_string()).unwrap();
+        assert_eq!(program.sizing_env("s", &program.default_env())["n"], 1024);
     }
 
     /// `y = x * w` on the CPU, split over a runtime-sized axis.

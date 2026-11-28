@@ -936,7 +936,8 @@ impl Executor {
         Ok(BufferView {
             ptr: self.address(name)?,
             bytes: placement.bytes,
-            shape: self.program.buffer(name)?.resolve_shape(&self.env)?,
+            shape: (self.program.buffer(name)?)
+                .resolve_shape(&self.program.sizing_env(name, &self.env))?,
         })
     }
 

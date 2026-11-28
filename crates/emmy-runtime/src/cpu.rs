@@ -477,7 +477,8 @@ impl Executor {
         Ok(BufferView {
             ptr: self.address(name)? as u64,
             bytes: placement.bytes,
-            shape: self.program.buffer(name)?.resolve_shape(&self.env)?,
+            shape: (self.program.buffer(name)?)
+                .resolve_shape(&self.program.sizing_env(name, &self.env))?,
         })
     }
 
@@ -559,7 +560,7 @@ impl Executor {
         let mut merged = self.env.clone();
         merged.extend(env);
         for buffer in &self.program.buffers {
-            let need = buffer.byte_len(&merged)?;
+            let need = buffer.byte_len(&self.program.sizing_env(&buffer.name, &merged))?;
             let have = self.placement(&buffer.name)?.bytes;
             ensure!(
                 need <= have,

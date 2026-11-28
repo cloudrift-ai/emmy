@@ -83,6 +83,20 @@ def test_rehint_program_rehints_the_loops_of_a_loop_ir_body():
     assert [loop.axis.extent.hint for loop in rehinted.nodes["y"].op.body.loops] == [100]
 
 
+def test_rehint_program_rehints_the_parent_of_a_loop_window():
+    """A window's parent takes the sizes too: a loop whose own extent and hint stay put still changes when only its
+    window's parent is rehinted."""
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    body = Body(parse_body("for i in 0..8 window(parent=j in 0..keys~64):\n  v = load x[i]\n  y[i] = v"))
+    graph.add_node(LoopOp(body=body), ["x"], Tensor("y", (8,)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+
+    rehinted = rehint_program(graph, {"keys": 100})
+
+    assert [loop.axis.window.parent.extent.hint for loop in rehinted.nodes["y"].op.body.loops] == [100]
+
+
 def test_specialize_program_rejects_invalid_binding_values():
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (Dim("num_tokens"),)), node_id="x")
