@@ -1,5 +1,33 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## Native prefill in 1,024-row chunks, strictly (2026-11-27)
+
+Milestone 14 of the native parity plan. One RTX 5090 rented for about four hours, on a host whose pinned-memory-to-card
+link copies 56.8 GB/s. Main at 544e899df was exported strictly at native's 64-row chunk, the branch of #1484 strictly
+at 1,024 rows (tails 256, 64 and 4), drafter on, with the recipe's flags and fast math off. The strict audit deploys
+all 102 twins from the golden alone.
+
+The 1,024-row short-window attention stores its scores between the cut's two pieces. Scratch was sized at the whole
+context, 16 GB for that buffer, and the pack ran out of card memory at startup. Scratch that only ranged launches use
+is now sized at the last window they run at, 16,383 cached tokens.
+
+Each pack served random prompts with 256 new tokens, one at a time, greedy, through vLLM 0.25.1's client: 10 prompts
+of 256 tokens, 5 of 7,680. Medians:
+
+| | main, 64 rows | branch, 1,024 rows | bar |
+| --- | --- | --- | --- |
+| first token, 256 tokens | 1.84 s | 0.72 s | 0.58 s |
+| first token, 7,680 tokens | 52.9 s | 12.8 s | 4.4 s |
+| TPOT, 256 tokens | 8.42 ms | 9.04 ms | 13.2 ms |
+| TPOT, 7,680 tokens | 7.86 ms | 8.56 ms | |
+| card memory at rest | 23.0 GiB | 30.7 GiB | 31.8 GiB on the card |
+
+Host memory is 19 GB for both. The first-token bars are missed. A non-strict export of the same golden on another
+card (#1480) took 0.40 s and 7.31 s: the strict pack spends about 0.7 s more per 1,024-row chunk, far more than all its
+attention takes (about 7 ms). Its steps were not profiled. On random-token prompts the two packs' outputs part early,
+as before. On real text they agree on the first words of 3 of 7 prompts and part after 0 to about 15 tokens on 4;
+that this is rounding is not shown.
+
 ## The expert slots hold a verify step's picks (2026-11-25)
 
 Milestone 12 of the native parity plan. One RTX 5090 rented for about an hour, on a host whose pinned-memory-to-card

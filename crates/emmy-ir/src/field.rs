@@ -453,8 +453,10 @@ impl Field for AxisRef {
             self.clone()
         }
     }
+    /// Axis equality leaves out the hint and the window, which a rebuild may change alone (a program rehinted at
+    /// the sizes a row ran at): equal axes are the same only when those agree too, through every window parent.
     fn same(&self, other: &Self) -> bool {
-        self == other
+        Arc::ptr_eq(self, other) || self.exact_eq(other)
     }
     fn spell(&self, out: &mut String) -> Result<()> {
         out.push_str(&spell_axis(self, None)?);
