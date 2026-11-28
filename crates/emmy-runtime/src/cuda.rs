@@ -936,7 +936,8 @@ impl Executor {
         Ok(BufferView {
             ptr: self.address(name)?,
             bytes: placement.bytes,
-            shape: self.program.buffer(name)?.resolve_shape(&self.env)?,
+            shape: (self.program.buffer(name)?)
+                .resolve_shape(&self.program.sizing_env(name, &self.env))?,
         })
     }
 
@@ -1108,7 +1109,7 @@ impl Executor {
                 continue;
             }
             let placement = self.placement(&buffer.name)?;
-            let need = buffer.byte_len(&merged)?;
+            let need = buffer.byte_len(&self.program.sizing_env(&buffer.name, &merged))?;
             ensure!(
                 need <= placement.bytes,
                 "buffer {} resolves to {need} bytes past its capacity of {}",

@@ -5,6 +5,8 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expression import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
+from emmy.compiler.ir.loop.ir import LoopOp
+from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 from emmy.compiler.specialize import rehint_program, specialize_program
 
@@ -66,25 +68,33 @@ def test_rehint_program_keeps_the_hint_of_a_dim_over_no_measured_name():
     assert rehint_program(graph, {"keys": 100}).nodes["x"].outputs[0].shape[0].hint == 4
 
 
-def test_rehint_program_rehints_the_loops_of_a_stored_body():
-    """A stored kernel replayed at a second size is its Loop IR rehinted. The loops take the size too: a cut builds
-    its pieces' buffers from the kernel's axes, and a piece whose first buffer is one of those was benched, filed and
-    priced at the size the kernel was stored with, whatever size the program ran at."""
-    from emmy.compiler.ir.loop import LoopOp
-    from emmy.compiler.ir.stmt import parse_body
-
-    keys = Dim("keys", hint=4096)
+def test_rehint_program_rehints_the_loops_of_a_loop_ir_body():
+    """A stored kernel's loops take the sizes too, not only its buffers: a loop keeping the hint its program was
+    stored at gives a cut's intermediate that hint, and a piece's row is filed at sizes it never ran at."""
+    keys = Dim("keys", hint=64)
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (keys, 8)), node_id="x")
-    body = parse_body("for a0 in 0..keys~4096:\n  for a1 in 0..8:\n    v = load x[a0, a1]\n    y[a0, a1] = v\n")
-    graph.add_node(LoopOp(body=body), ["x"], Tensor("y", (keys, 8)), node_id="y")
+    graph.add_node(InputOp(), [], Tensor("x", (keys,)), node_id="x")
+    body = Body(parse_body("for a0 in 0..keys~64:\n  in0 = load x[a0]\n  y[a0] = in0"))
+    graph.add_node(LoopOp(body=body), ["x"], Tensor("y", (keys,)), node_id="y")
     graph.inputs, graph.outputs = ["x"], ["y"]
 
-    rehinted = rehint_program(graph, {"keys": 131072})
+    rehinted = rehint_program(graph, {"keys": 100})
 
-    assert rehinted.nodes["y"].outputs[0].shape[0].hint == 131072
-    assert [loop.axis.extent.hint for loop in rehinted.nodes["y"].op.body.loops if not loop.axis.extent.is_static] == [131072]
-    assert [loop.axis.extent.hint for loop in graph.nodes["y"].op.body.loops if not loop.axis.extent.is_static] == [4096]
+    assert [loop.axis.extent.hint for loop in rehinted.nodes["y"].op.body.loops] == [100]
+
+
+def test_rehint_program_rehints_the_parent_of_a_loop_window():
+    """A window's parent takes the sizes too: a loop whose own extent and hint stay put still changes when only its
+    window's parent is rehinted."""
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    body = Body(parse_body("for i in 0..8 window(parent=j in 0..keys~64):\n  v = load x[i]\n  y[i] = v"))
+    graph.add_node(LoopOp(body=body), ["x"], Tensor("y", (8,)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+
+    rehinted = rehint_program(graph, {"keys": 100})
+
+    assert [loop.axis.window.parent.extent.hint for loop in rehinted.nodes["y"].op.body.loops] == [100]
 
 
 def test_specialize_program_rejects_invalid_binding_values():
