@@ -922,18 +922,30 @@ def _report(
 def _record_golden_latency(args, results: dict, golden_benches) -> None:
     """Write this card's emmy / torch.compile timings back into the benched working golden.
 
-    The emmy number is the PINNED row's when one was measured, not the greedy pick's: a corpus
-    case names a schedule, and recording whatever the prior happened to choose would store a
-    timing for a different kernel than the one the file describes.
+    The emmy number is the PINNED row's when one of the target's root was measured, not the greedy
+    pick's: a corpus case names a schedule, and recording whatever the prior happened to choose would
+    store a timing for a different kernel than the one the file describes. A piece's row benches
+    under the decisions that mint its kernel, with its schedule replayed on every kernel of the
+    target: a kernel set no deploy builds, so it times nothing the target deploys, and the greedy
+    pick's whole time is recorded instead.
     """
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import record_latency  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import record_latency, regime_live  # noqa: PLC0415
 
     # Only a row of the NAMED realization can carry that realization's latency. A piece's row
     # of the same target is benched beside it and holds ONE kernel of the program, so neither its
     # timing nor its schedule knobs describe the row this writes — narrowing by them selects
-    # nothing and the write is refused.
-    measured = [gb for gb in golden_benches or [] if gb.status == "ok" and gb.bench is not None and gb.sample.name == args.realization]
+    # nothing and the write is refused. A name recorded in several regimes benches a row of each,
+    # but the run deploys the live regime, so only a row of it carries the latency.
+    measured = [
+        gb
+        for gb in golden_benches or []
+        if gb.status == "ok"
+        and gb.bench is not None
+        and gb.sample.name == args.realization
+        and regime_live(gb.sample.pins)
+        and set(gb.sample.route) <= {"PLACE"}  # a row of the root: its route names no decision
+    ]
     # Several measured schedules of one target in one regime: the evidence pick deploys the fastest, so its row
     # carries the target's latency.
     measured = sorted(measured, key=lambda gb: gb.bench.total_us or float("inf"))[:1]

@@ -934,6 +934,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::axis::Dim;
     use crate::expr::parse::parse;
     use crate::field::{Exprs, FieldType, Names, NumOr};
     use crate::identity::canonicalize_identity;
@@ -1512,5 +1513,36 @@ mod tests {
             };
             assert_eq!(moved.inner.as_ref().map(|(_, scale)| *scale), Some(32));
         }
+    }
+
+    #[test]
+    fn a_rewrite_that_only_sets_an_axis_hint_changes_the_loop() {
+        // A hint is no part of an axis's equality. A rewrite that kept every statement equal to its old self as it
+        // was left a stored kernel's loops at the size it was stored with, whatever size its program was rehinted to.
+        let nest = statement(
+            "for a0 in 0..2:\n  for a1 in 0..n:\n    v = load x[a0, a1]\n    y[a0, a1] = v",
+        );
+        let hinted = |axis: &AxisRef| match axis.extent.is_static() {
+            true => axis.clone(),
+            false => Axis::new(
+                &axis.name,
+                Dim::new(axis.extent.expression.clone(), Some(131072)),
+                axis.window.clone(),
+            ),
+        };
+        let rewrite = Rewrite {
+            rename: &|_, _| None,
+            sigma: &HashMap::new(),
+            axis_fn: Some(&hinted),
+        };
+        let moved = Statement::rewrite(&nest, &rewrite);
+        let hints: Vec<i64> = moved
+            .bound_axes()
+            .iter()
+            .chain(moved.nested()[0].stmts()[0].bound_axes().iter())
+            .map(|axis| axis.hint_extent())
+            .collect();
+        assert_eq!(hints, [2, 131072]);
+        assert!(*moved == *nest);
     }
 }

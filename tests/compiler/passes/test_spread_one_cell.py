@@ -23,10 +23,13 @@ def _inputs():
 
 
 def _compiled():
+    """The module as a single cell: no work axis and a serial reduce, pinned. Which schedule a card's own pick takes
+    is not the question here, and an A100's pick hands the sweep to the grid, where nothing is left to spread."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.compiler.trace.torch import trace_module
 
-    with config.strict_evidence_override(False):
+    with config.strict_evidence_override(False), pinned_knobs({"WORK": "", "REDUCE": ""}):
         return CudaBackend().compile(trace_module(_CountThenSweep(), _inputs()))
 
 

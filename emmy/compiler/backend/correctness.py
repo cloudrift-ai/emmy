@@ -302,7 +302,8 @@ def strict_correctness_proof(
             structural = True
             break
         if _nonfinite_mismatch(actual, expected):
-            failure = f"output {name!r} has non-finite values the {reference} output does not"
+            ours, theirs = (int((~np.isfinite(side)).sum()) for side in (actual, expected))
+            failure = f"output {name!r} differs from the {reference} one in non-finite values (Emmy's {ours}, the {reference} one {theirs})"
             structural = True
             break
         finite = np.isfinite(expected)

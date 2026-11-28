@@ -408,32 +408,50 @@ class GoldenFile(Wire):
         computed = {buffer for origin in origins for buffer in program.nodes[origin].buffer_names()}
         reads = set(CompilerDump.frontend_reproducer_from_origins(program, origins).inputs)
         bound = {node_id for node_id, node in body.nodes.items() if isinstance(node.op, InputOp)}
-        # The kernel may read a buffer bound from a constant (a weight the lowering transposed); it may not read an
-        # activation the twin computes inside or never sees.
-        activations = {buffer for node in program.nodes.values() if not isinstance(node.op, ConstantOp) for buffer in node.buffer_names()}
+        # The kernel may read a constant, or a buffer computed from constants alone (a weight the trace transposed, an
+        # ``arange``); it may not read an activation the twin computes inside or never sees.
+        constants: set[str] = set()
+        for node_id in program.topological_order():
+            node = program.nodes[node_id]
+            if not isinstance(node.op, InputOp) and all(name in constants for name in node.inputs):
+                constants.update(node.buffer_names())
+        activations = {buffer for node in program.nodes.values() for buffer in node.buffer_names()} - constants
         if not (set(body.outputs) <= computed and reads <= bound and not (bound - reads) & activations):
             return None
         graph = specialize_program(CompilerDump.frontend_reproducer_from_origins(program, origins), kernel.bindings)
         graph.outputs = list(body.outputs)
+        # A computed constant is bound only where the twin's lowering folds it into a constant (:meth:`executable`); one
+        # it computes in a kernel of its own would leave the kernel reading random data beside the twin's.
+        stored = {buffer for node in program.nodes.values() if isinstance(node.op, ConstantOp) for buffer in node.buffer_names()}
+        derived = (bound - reads) & (constants - stored)
+        if derived and not derived <= self._twin_constants(graph).keys():
+            return None
         return graph
+
+    def _twin_constants(self, twin: Graph) -> dict:
+        """The constants the twin's lowering produces, by the buffer each is bound to."""
+        from emmy.compiler import pipeline  # noqa: PLC0415
+        from emmy.compiler.context import Context  # noqa: PLC0415
+        from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+        from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+
+        ctx = Context.from_target(tuple(self.compute_cap), gpu_name=self.gpu_name)
+        lowered = Pipeline.build(pipeline.LOOP_PASSES).run(twin.copy(), ctx=ctx, db=None)
+        return {node_id: node.op for node_id, node in lowered.nodes.items() if isinstance(node.op, ConstantOp)}
 
     def executable(self, kernel: Kernel, bindings: Mapping[str, int]) -> Graph:
         """``kernel`` as the program a compile or a bench starts from: its standalone body hinted at ``bindings``, with
         every input its twin's lowering produces from a constant bound the same way — a weight the kernel reads is the
         checkpoint's, beside the twin's, not a random input."""
-        from emmy.compiler import pipeline  # noqa: PLC0415
-        from emmy.compiler.context import Context  # noqa: PLC0415
-        from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
-        from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+        from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
 
         graph = kernel.program(bindings)
         if (twin := self.reference_program(kernel)) is None:
             return graph
-        ctx = Context.from_target(tuple(self.compute_cap), gpu_name=self.gpu_name)
-        for node_id, node in Pipeline.build(pipeline.LOOP_PASSES).run(twin, ctx=ctx, db=None).nodes.items():
+        for node_id, op in self._twin_constants(twin).items():
             bound = graph.nodes.get(node_id)
-            if isinstance(node.op, ConstantOp) and bound is not None and isinstance(bound.op, InputOp):
-                bound.op = node.op
+            if bound is not None and isinstance(bound.op, InputOp):
+                bound.op = op
                 graph.inputs = [name for name in graph.inputs if name != node_id]
         return graph
 
@@ -479,6 +497,45 @@ class GoldenFile(Wire):
         kernel = kernel.with_ref(max((stored.ref for stored in self.kernels), default=-1) + 1)
         self.kernels.append(kernel)
         return kernel
+
+    def drop_program(self, traced: int) -> None:
+        """Remove traced program ``traced`` and what only it reaches: its targets, every kernel the file's decisions
+        reach from them, the decisions on those kernels and their rows. A kernel that another kernel of the file
+        reaches too stays with its rows, as a piece when the program was its own. A latency that timed a kernel now
+        gone goes with it, and the programs after ``traced`` move up one."""
+        pieces: dict[int, list[int]] = {}
+        for route in self.routing:
+            pieces.setdefault(route.parent, []).extend(route.children)
+
+        def reached(roots: Iterable[int]) -> set[int]:
+            out, pending = set(), list(roots)
+            while pending:
+                ref = pending.pop()
+                if ref not in out:
+                    out.add(ref)
+                    pending.extend(pieces.get(ref, ()))
+            return out
+
+        mine = reached(kernel.ref for kernel in self.kernels if kernel.traced == traced)
+        gone = mine - reached(kernel.ref for kernel in self.kernels if kernel.ref not in mine or kernel.traced not in (None, traced))
+
+        def placed(kernel: Kernel) -> Kernel:
+            if kernel.traced is None or kernel.traced < traced:
+                return kernel
+            provenance = {"traced": kernel.traced - 1} if kernel.traced > traced else {"traced": None, "origins": (), "bindings": {}}
+            moved = replace(kernel, **provenance)
+            return moved.keyed(kernel.__dict__["exact_identity"]) if "exact_identity" in kernel.__dict__ else moved
+
+        self.kernels[:] = [placed(kernel) for kernel in self.kernels if kernel.ref not in gone]
+        self.routing[:] = [route for route in self.routing if route.parent not in gone]
+        kept = []
+        for row in self.rows:
+            if row.kernel in gone:
+                continue
+            timed = {card: latency for card, latency in (row.latency or {}).items() if gone.isdisjoint(latency.kernels)}
+            kept.append(row if len(timed) == len(row.latency or {}) else replace(row, latency=timed or None))
+        self.rows[:] = kept
+        del self.programs[traced]
 
     def add_routing(self, route: RoutingRow) -> None:
         """Store one decision on one parent, the kernels named by their ``ref``; a later record of the same decision

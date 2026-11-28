@@ -99,6 +99,54 @@ def test_a_native_chunk_is_benched_last_in_the_window_it_is_priced_at():
     assert _chunk_position(trace_module(torch.nn.ReLU(), (torch.zeros(4),)), static) is None
 
 
+def test_a_piece_that_holds_the_causal_range_is_benched_at_its_programs_position():
+    """A cut gives the scores to one kernel and the masked softmax to another, which reads ``position`` and not the
+    cache. A tune benches that piece as a program of its own: it takes the position its program's bench takes, read
+    off the range the position ends. At a random position it folds a few keys, and its rows price the cut far below
+    what the two kernels take in their program. The same holds for a piece that reads the position from buffers
+    another piece wrote, and for a step of one row, whose range adds a row index a leaf binds to zero."""
+    from emmy.compiler.backend.cuda.compare import _chunk_position, _range_end_inputs
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.golden.repository import evidence_scope
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.slice import single_node_graph
+    from emmy.compiler.specialize import specialize_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.serving.native.prepare import attend_module
+
+    window = torch.export.Dim("cache_tokens", min=64, max=1 << 20)
+    sized = {"keys": {0: window}, "values": {0: window}}
+
+    def holder(rows: int, pins: dict):
+        """The kernel that holds the range, as a program of its own, of those a pinned compile of the step builds:
+        the one that reads the values. The prior decides the forks the pins leave open, so how many kernels the
+        others make is not this test's question."""
+        examples = (torch.zeros(rows, 32), torch.zeros(512, 2, 8), torch.zeros(512, 2, 8), torch.zeros(1, dtype=torch.int64))
+        traced = trace_module(attend_module(4, 2, 8, rows, grouped=True), examples, dynamic_shapes=sized)
+        program = specialize_program(traced, {"cache_tokens": 4096})
+        with pinned_knobs(pins), evidence_scope([]):
+            lowered = Pipeline.build(CUDA_PASSES).run(program, ctx=Context.from_target((12, 0)), db=None)
+        alone = [single_node_graph(lowered, nid) for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)]
+        assert len(alone) >= 2
+        (found,) = [kernel for kernel in alone if "values" in kernel.nodes]
+        return found
+
+    piece = holder(3, {"PLACE@map.1/twist.1/inner": "cut"})
+    assert "keys" not in piece.nodes and _chunk_position(piece, lambda shape: tuple(dim.as_static() for dim in shape)) is None
+    assert _range_end_inputs(piece, {}) == {"position": 4096 - 3}
+    # A key split walks the keys in blocks, each from zero: the value is where the last block's last row ends.
+    assert _range_end_inputs(holder(3, {"REDUCE@map.1/twist": "g4k"}), {}) == {"position": 4096 - 3}
+    assert _range_end_inputs(holder(1, {"PLACE@map.1/twist.1/inner": "cut"}), {}) == {"position": 4096 - 1}
+    # A cut of the position's own load leaves it and the rows' indices in two buffers of one boundary. The range
+    # ends at their sum, so one takes the value and the other is zero.
+    fed = holder(3, {"PLACE@map.1/twist.2/map": "cut"})
+    ends = _range_end_inputs(fed, {})
+    assert "position" not in fed.nodes and len(ends) == 2 and sorted(ends.values()) == [0, 4096 - 1]
+    assert all(fed.buffer(name) is not None for name in ends)
+
+
 def test_random_input_values_use_adapter_scale_and_binary_selection():
     import numpy as np
 
@@ -203,6 +251,32 @@ def test_scatter_row_inputs_are_drawn_distinct():
     assert sorted(rows[:33]) == list(range(33))
     assert (rows[33:] == 32).all()
     assert len(set(_distinct_rows(np.random.default_rng(7), 8, 33))) == 8
+
+
+def test_a_kernels_scatter_rows_are_read_off_its_stores():
+    """A stored kernel benched with no Torch twin to run (a paging program's table update) holds no scatter node: its
+    rows are the inputs a store's index loads, and they are drawn distinct like a traced scatter's."""
+    from emmy.compiler.backend.cuda.compare import _scatter_index_inputs
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import parse_body
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.tensor import Tensor
+
+    body = """
+for a0 in 0..65:
+  row = load slot[a0]
+  v = load value[a0]
+  if row < 33:
+    out[row] = v
+"""
+    graph = Graph()
+    for name, shape in (("table", (33,)), ("slot", (65,)), ("value", (65,))):
+        graph.add_node(InputOp(), [], Tensor(name, shape, "i64"), node_id=name)
+    graph.add_node(LoopOp(body=parse_body(body)), ["table", "slot", "value"], Tensor("out", (33,), "i64", alias="table"), node_id="out")
+    graph.inputs, graph.outputs = ["table", "slot", "value"], ["out"]
+    assert _scatter_index_inputs([Pipeline.build(["tile/lift"]).run(graph)]) == {"slot": [33]}
 
 
 def test_run_no_code_errors(run_cli):
@@ -856,6 +930,39 @@ def test_random_block_fp8_scales_match_the_synthesized_weights():
 
 
 @requires_cuda
+def test_a_capture_outlives_garbage_whose_finalizer_cuda_refuses_while_capturing():
+    """Inductor's autotune leaves the kernels it dropped dead in reference cycles, and a kernel's finalizer unloads
+    its CUDA module, a call CUDA refuses while a stream captures. A garbage collection that runs inside the capture
+    of any backend's closure then invalidates it, and the whole table falls back to uncaptured timing. The capture
+    collects what is dead before it begins."""
+    import gc
+
+    from emmy.compiler.backend.cuda.compare import _capture_torch_fn
+
+    class Dropped:
+        """Stands for a dropped kernel: dead in a cycle, with a finalizer a capturing stream refuses."""
+
+        def __init__(self):
+            self.cycle = self
+
+        def __del__(self):
+            torch.cuda.synchronize()
+
+    x, out = torch.ones(8, device="cuda"), torch.zeros(8, device="cuda")
+
+    def forward():
+        if torch.cuda.is_current_stream_capturing():
+            gc.collect()  # a forward that allocates enough starts a collection inside the capture
+        out.copy_(x * 2)
+
+    Dropped()
+    replay = _capture_torch_fn(forward)
+    out.zero_()
+    replay()
+    assert out.tolist() == [2.0] * 8
+
+
+@requires_cuda
 def test_bf16_bits_bind_by_reinterpretation_for_the_eager_reference():
     """A folded BF16 table evaluates to its bits on a ``uint16`` carrier; converting them would read each bit pattern
     as a number, and the eager reference would disagree with every NVFP4 kernel by orders of magnitude."""
@@ -907,6 +1014,9 @@ def test_strict_correctness_proof_accepts_a_mask_that_matches_its_reference():
     assert strict_correctness_proof({"o": np.array([0.0005, -np.inf], dtype=np.float32)}, mask)["status"] == "pass"
     for wrong in ([0.0, np.inf], [-np.inf, 0.0], [0.0, np.nan]):
         assert strict_correctness_proof({"o": np.array(wrong, dtype=np.float32)}, mask)["status"] == "fail"
+    # The verdict says which side holds them: a NaN the reference alone computes is the reference's fault to find.
+    theirs = strict_correctness_proof({"o": np.array([0.0, 1.0], dtype=np.float32)}, {"o": np.array([0.0, np.nan], dtype=np.float32)})
+    assert theirs["status"] == "fail" and "Emmy's 0, the eager one 1" in theirs["error"]
 
 
 def test_strict_correctness_proof_weighs_a_rounding_flip_against_fp64():

@@ -150,8 +150,9 @@ def test_a_compile_without_a_db_picks_from_an_instance_holding_its_scope() -> No
 def test_the_rtx_5090_hardware_golden_deploys_from_the_db() -> None:
     """The card's repository golden, imported into a fresh DB, is what a compile of each of its targets deploys from:
     with that DB as the only evidence, every target whose kernel has a measured row in the standard regime deploys a
-    measured row of its kernel — the recorded variant, or a faster one the same file holds. A split winner is a
-    routing row until its pieces are benched, so its target stays with the prior."""
+    measured row of its kernel — the recorded variant, or a faster one the same file holds — or a cut or split whose
+    every piece deploys a measured row of its own. A split winner is a routing row until its pieces are benched, so
+    its target stays with the prior."""
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -176,9 +177,9 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db() -> None:
                 if target.exact_identity not in measured:
                     continue
                 graph = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=ctx, db=db)
-                [op] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
-                picked = {k: str(v) for k, v in dict(schedule_match_key(dict(op.knobs or {}))).items()}
-                assert picked in measured[kernel_tile(op).identity_key(structural=False, with_io=True)], target.name
+                for op in (node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)):
+                    picked = {k: str(v) for k, v in dict(schedule_match_key(dict(op.knobs or {}))).items()}
+                    assert picked in measured.get(kernel_tile(op).identity_key(structural=False, with_io=True), []), target.name
 
 
 def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> None:

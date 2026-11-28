@@ -48,9 +48,11 @@ def test_f16_to_bf16_intermediate_rounds_before_multiply():
 @pytest.mark.parametrize(("length", "width"), [(8194, 2), (4096, 4)])
 def test_bf16_runs_load_and_store_as_one_access(length, width):
     """A bf16 pointwise kernel reads and writes each lane's run as one vector access, as an f16 one does, and computes
-    what the numpy backend does."""
+    what the numpy backend does. The run's width is pinned: which width a card's pick takes is not this test's
+    question, and an A100 takes runs of two where an RTX 5090 takes four."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (length,), dt.BF16), node_id="x")
@@ -60,7 +62,7 @@ def test_bf16_runs_load_and_store_as_one_access(length, width):
     expected, _ = NumpyBackend().run(graph, input_data=feed)
 
     backend = CudaBackend()
-    with recording_kernels() as kernels_of:
+    with pinned_knobs({"TILE": f"f{width}"}), recording_kernels() as kernels_of:
         compiled = backend.compile(graph)
     kernels = kernels_of(compiled)
     assert any(load.input == "x" and load.width > 1 for load in statements(kernels, Load)), "one vector read per run"

@@ -276,6 +276,18 @@ def test_a_routing_row_holds_one_piece_per_position_and_a_later_splice_replaces_
         db.record_routing(RoutingRow(parent="p", arm={"PLACE": "cut"}, children=("ghost",)))
 
 
+def test_a_routing_row_whose_piece_is_its_parent_is_refused() -> None:
+    """A decision is priced as the sum of its pieces' prices. One that names its parent among them prices the parent
+    through itself: a tune stored such a row, and every compile that priced the kernel after it ran without end. The
+    DB refuses the row, and the prices it holds stay what they were."""
+    db, ctx = _db("p", "c1"), _ctx(_5090)
+    _record(db, ctx, "p", 100.0)
+    with pytest.raises(ValueError, match="pieces include its parent"):
+        db.record_routing(RoutingRow(parent="p", arm={"PLACE@map.1/inner": "cut"}, children=("p", "c1")))
+    assert list(db.iter_routing()) == []
+    assert db.best_per_op_time(ctx, "p", bindings={}) == 100.0
+
+
 def test_best_per_op_time_prices_a_leaf_or_the_sum_of_its_pieces() -> None:
     """A kernel's best time is its fastest ok row, or — when a decision cut it — the sum of its pieces'
     fastest rows, each piece at its own projection of the parent's bindings, all-or-nothing."""
