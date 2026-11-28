@@ -120,15 +120,16 @@ def test_a_piece_that_holds_the_causal_range_is_benched_at_its_programs_position
     sized = {"keys": {0: window}, "values": {0: window}}
 
     def holder(rows: int, pins: dict):
-        """The kernel that holds the range, as a program of its own, of the two a pinned compile of the step builds:
-        the one that reads the values."""
+        """The kernel that holds the range, as a program of its own, of those a pinned compile of the step builds:
+        the one that reads the values. The prior decides the forks the pins leave open, so how many kernels the
+        others make is not this test's question."""
         examples = (torch.zeros(rows, 32), torch.zeros(512, 2, 8), torch.zeros(512, 2, 8), torch.zeros(1, dtype=torch.int64))
         traced = trace_module(attend_module(4, 2, 8, rows, grouped=True), examples, dynamic_shapes=sized)
         program = specialize_program(traced, {"cache_tokens": 4096})
         with pinned_knobs(pins), evidence_scope([]):
             lowered = Pipeline.build(CUDA_PASSES).run(program, ctx=Context.from_target((12, 0)), db=None)
         alone = [single_node_graph(lowered, nid) for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)]
-        assert len(alone) == 2
+        assert len(alone) >= 2
         (found,) = [kernel for kernel in alone if "values" in kernel.nodes]
         return found
 
