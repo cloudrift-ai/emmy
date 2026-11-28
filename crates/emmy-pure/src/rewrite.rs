@@ -15,7 +15,7 @@ use crate::lambda::Lambda;
 
 /// What a rewrite does to a term: every SSA name through `names` (a name it does not hold stays), every expression
 /// through `sigma`, folded under `folding` once the substitution has landed when one is given, and every axis a
-/// statement binds through the `axes` pairs.
+/// statement binds through the `axes` pairs. A coordinate the fold takes out of a term's body leaves its params.
 #[derive(Default)]
 pub struct TermRewrite {
     pub names: HashMap<Name, Name>,
@@ -136,13 +136,16 @@ impl TermRewrite {
                 .iter()
                 .map(|p| self.coordinate(sigma, *p)),
         );
+        let body = self.body(sigma, lift.body())?;
+        // Folding can take the coordinate out of the expression again: `(length * block + k) / chunk` is one value
+        // along a block inside a chunk. The term then no longer varies with it, and says so.
+        let folded_away = |p: &Name| self.folding.is_some() && !body.free().contains(p);
         params.extend(
             trailing
                 .iter()
-                .filter(|p| !substituted.contains(p) || needed.contains(p))
+                .filter(|p| !substituted.contains(p) || (needed.contains(p) && !folded_away(p)))
                 .map(|p| self.coordinate(sigma, *p)),
         );
-        let body = self.body(sigma, lift.body())?;
         let results: Vec<Name> = lift.results().iter().map(|r| self.name(*r)).collect();
         // Only an expression substitution can bring in a coordinate the tail did not hold.
         let lift = if substituted.is_empty() {
